@@ -630,6 +630,27 @@ func TestImageUploadJSONAlwaysUsesResourcesArray(t *testing.T) {
 	require.Equal(t, "{\"schema_version\":1,\"resources\":[{\"id\":\"id\",\"url\":\"https://example.test/images/id\",\"expires_at\":null,\"permanent\":true}]}\n", stdout.String())
 }
 
+func TestCreatePrintsCapabilityBeforeReturningUncertainError(t *testing.T) {
+	dir := t.TempDir()
+	fixture := writeFixture(t, dir, "board.md", "# board")
+	contextFixture := writeFixture(t, dir, "context.md", "creator context")
+	client := mocks.NewMockClient(t)
+	created := resource("abc", "/whiteboards/markdown/abc", nil)
+	uncertain := common.NewError(common.CodeStorageUnavailable, "storage unavailable", errors.New("private rollback detail"))
+	client.EXPECT().CreateMarkdown(mock.Anything, mock.Anything, mock.Anything, (*int64)(nil)).Return(created, uncertain).Once()
+	client.EXPECT().PublicURL(created.Path).Return("https://example.test/whiteboards/markdown/abc", nil).Once()
+	var stdout bytes.Buffer
+	root := mustRoot(t, client, nil, &stdout, io.Discard)
+	root.SetArgs([]string{"--json", "create", "markdown", fixture, "--context", contextFixture})
+
+	err := root.ExecuteContext(context.Background())
+
+	require.Error(t, err)
+	require.True(t, common.HasCode(err, common.CodeStorageUnavailable), "error: %v", err)
+	require.NotContains(t, err.Error(), "private rollback detail")
+	require.Equal(t, "{\"schema_version\":1,\"resource\":{\"id\":\"abc\",\"url\":\"https://example.test/whiteboards/markdown/abc\",\"expires_at\":null,\"permanent\":true}}\n", stdout.String())
+}
+
 func mustRoot(t *testing.T, client Client, getenv func(string) string, stdout, stderr io.Writer) interfaceRoot {
 	t.Helper()
 	if getenv == nil {

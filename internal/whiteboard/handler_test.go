@@ -143,6 +143,36 @@ func TestHandlerCreateReturnsResourceAndPassesExactContext(t *testing.T) {
 	}
 }
 
+func TestHandlerCreateReturnsCapabilityWithUncertainStorageError(t *testing.T) {
+	createdAt := time.Date(2026, time.July, 17, 3, 4, 5, 0, time.UTC)
+	operations := mocks.NewMockOperations(t)
+	result := whiteboard.Result{
+		ID: testWhiteboardID, Kind: whiteboard.KindMarkdown, CreatedAt: createdAt, UpdatedAt: createdAt,
+	}
+	operations.EXPECT().CreateMarkdown(mock.Anything, mock.Anything).Return(
+		result,
+		common.NewError(common.CodeStorageUnavailable, "storage unavailable", errors.New("rollback durability uncertain")),
+	).Once()
+	handler := newHandler(t, operations, defaultMaxBytes)
+	body, contentType := multipartRequestBody(t,
+		multipartField{name: "file", filename: "board.md", value: "# source"},
+		multipartField{name: "context", filename: "context.md", value: "creator context"},
+	)
+	req := httptest.NewRequest(http.MethodPost, httpx.APIWhiteboardMarkdown, bytes.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	rr := httptest.NewRecorder()
+
+	handlerMux(t, handler).ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	response := decodeErrorBody(t, rr)
+	require.Equal(t, httpx.ErrorBody{Code: common.CodeStorageUnavailable, Message: "storage unavailable"}, response.Error)
+	require.NotNil(t, response.Resource)
+	require.Equal(t, testWhiteboardID, response.Resource.ID)
+	require.Equal(t, httpx.PublicMarkdown+testWhiteboardID, response.Resource.Path)
+	require.NotContains(t, rr.Body.String(), "rollback durability uncertain")
+}
+
 func TestHandlerUpdateReturnsResourceAndPassesExactContext(t *testing.T) {
 	createdAt := time.Date(2026, time.July, 16, 3, 4, 5, 0, time.UTC)
 	updatedAt := createdAt.Add(time.Hour)

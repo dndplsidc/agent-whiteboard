@@ -738,6 +738,34 @@ func TestClientRejectsMalformedAndOversizedResponses(t *testing.T) {
 	}
 }
 
+func TestClientReturnsCapabilityWithUncertainCreateError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		httpx.WriteJSON(w, http.StatusServiceUnavailable, httpx.ErrorResponse{
+			Error: httpx.ErrorBody{Code: common.CodeStorageUnavailable, Message: "storage unavailable"},
+			Resource: &httpx.Resource{
+				ID: clientTestID, Path: httpx.PublicMarkdown + clientTestID, Permanent: true,
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	client := newTestClient(t, server.URL, server.Client())
+
+	resource, err := client.CreateMarkdown(context.Background(),
+		httpx.File{Name: "board.md", Reader: strings.NewReader("# board")},
+		httpx.File{Name: "context.md", Reader: strings.NewReader("creator context")},
+		nil,
+	)
+
+	require.Equal(t, clientTestID, resource.ID)
+	require.Equal(t, httpx.PublicMarkdown+clientTestID, resource.Path)
+	var protocolErr *common.Error
+	require.ErrorAs(t, err, &protocolErr)
+	require.Equal(t, common.CodeStorageUnavailable, protocolErr.Code)
+}
+
 func TestClientAcceptsResponseAtOneMiBLimit(t *testing.T) {
 	t.Parallel()
 

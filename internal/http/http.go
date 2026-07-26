@@ -34,7 +34,8 @@ type ErrorBody struct {
 }
 
 type ErrorResponse struct {
-	Error ErrorBody `json:"error"`
+	Error    ErrorBody `json:"error"`
+	Resource *Resource `json:"resource,omitempty"`
 }
 
 type Resource struct {
@@ -122,6 +123,11 @@ func RegisterHealth(mux *standardhttp.ServeMux, readiness Readiness) {
 func WriteError(w standardhttp.ResponseWriter, err error) {
 	status, body := publicError(err)
 	WriteJSON(w, status, ErrorResponse{Error: body})
+}
+
+func WriteErrorWithResource(w standardhttp.ResponseWriter, err error, resource Resource) {
+	status, body := publicError(err)
+	WriteJSON(w, status, ErrorResponse{Error: body, Resource: &resource})
 }
 
 func SetPublicHeaders(w standardhttp.ResponseWriter, image bool) {

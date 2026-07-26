@@ -153,6 +153,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, kind Kind) {
 		result, err = h.operations.CreateHTML(r.Context(), input)
 	}
 	if err != nil {
+		if result.ID != "" {
+			httpx.WriteErrorWithResource(w, err, resourceFromResult(result, kind))
+			return
+		}
 		httpx.WriteError(w, err)
 		return
 	}

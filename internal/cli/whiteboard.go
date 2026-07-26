@@ -39,10 +39,7 @@ func (factory commandFactory) newCreateMarkdownCommand() *cobra.Command {
 		}
 		defer cancel()
 		created, err := client.CreateMarkdown(ctx, source, creatorContext, expiration)
-		if err != nil {
-			return stableCommandError(err)
-		}
-		return stableCommandError(writeResource(factory.deps.Stdout, factory.root.json, client, created))
+		return factory.finishCreate(client, created, err)
 	}
 	return command
 }
@@ -67,10 +64,7 @@ func (factory commandFactory) newCreateWhiteboardCommand(name string, kind http.
 		}
 		defer cancel()
 		created, err := client.CreateWhiteboard(ctx, kind, file, expiration)
-		if err != nil {
-			return stableCommandError(err)
-		}
-		return stableCommandError(writeResource(factory.deps.Stdout, factory.root.json, client, created))
+		return factory.finishCreate(client, created, err)
 	}
 	return command
 }
@@ -190,6 +184,15 @@ func (factory commandFactory) newDeleteWhiteboardCommand(name string, kind http.
 			return writeDeleteSuccess(factory.deps.Stdout, factory.root.json)
 		},
 	}
+}
+
+func (factory commandFactory) finishCreate(client Client, created http.Resource, createErr error) error {
+	if createErr == nil || created.ID != "" {
+		if err := writeResource(factory.deps.Stdout, factory.root.json, client, created); err != nil {
+			return stableCommandError(err)
+		}
+	}
+	return stableCommandError(createErr)
 }
 
 func contextFlag(command *cobra.Command) *string {

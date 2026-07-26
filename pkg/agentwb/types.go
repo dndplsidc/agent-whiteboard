@@ -12,6 +12,11 @@ type CreateWhiteboardInput = whiteboard.CreateInput
 type UpdateWhiteboardInput = whiteboard.UpdateInput
 type WhiteboardResult = whiteboard.Result
 
+// UncertainCreateError reports that a failed create may still have committed.
+// Create methods return the generated WhiteboardResult alongside this error so
+// callers retain the capability ID and can check or remove the resource.
+type UncertainCreateError = whiteboard.UncertainCreateError
+
 const (
 	KindMarkdown = whiteboard.KindMarkdown
 	KindHTML     = whiteboard.KindHTML

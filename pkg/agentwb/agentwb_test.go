@@ -37,12 +37,18 @@ type recordingWhiteboardStore struct {
 	deletedID string
 	get       Whiteboard
 	close     int
+	createErr error
 }
 
 func (store *recordingWhiteboardStore) Create(ctx context.Context, value Whiteboard) error {
 	store.ctx, store.created = ctx, value
-	return nil
+	return store.createErr
 }
+
+type facadeUncertainCreateError struct{ error }
+
+func (facadeUncertainCreateError) ResourceMayExist() bool { return true }
+
 func (store *recordingWhiteboardStore) Get(ctx context.Context, id string) (Whiteboard, error) {
 	store.ctx, store.gotID = ctx, id
 	return store.get, nil
@@ -266,6 +272,27 @@ func TestServiceForwardsExactContextsAndValues(t *testing.T) {
 	require.NoError(t, service.DeleteImage(ctx, facadeTestID))
 	require.Same(t, ctx, images.ctx)
 	require.Equal(t, facadeTestID, images.deletedID)
+}
+
+func TestPublicCreateReturnsCapabilityWithUncertainCreateError(t *testing.T) {
+	uncertain := facadeUncertainCreateError{error: errors.New("rollback durability uncertain")}
+	whiteboards := &recordingWhiteboardStore{createErr: uncertain}
+	service, err := New(Config{WhiteboardStore: whiteboards, ImageStore: &recordingImageStore{}},
+		WithClock(testClock{now: time.Unix(10, 0)}),
+		WithIDGenerator(testIDs{id: facadeTestID}),
+		WithViewerAssets([]byte("body{}"), []byte("void 0")),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	result, err := service.CreateMarkdown(context.Background(), CreateWhiteboardInput{
+		Source: []byte("# source"), Context: []byte("creator context"),
+	})
+
+	require.Equal(t, facadeTestID, result.ID)
+	var uncertainCreate UncertainCreateError
+	require.ErrorAs(t, err, &uncertainCreate)
+	require.True(t, uncertainCreate.ResourceMayExist())
 }
 
 func TestNewInjectsEachCustomStoreOnlyIntoItsDomain(t *testing.T) {

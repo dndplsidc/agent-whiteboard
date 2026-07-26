@@ -99,13 +99,13 @@ func (c *Client) createWhiteboard(
 ) (Resource, error) {
 	var response ResourceResponse
 	err := c.doMultipart(ctx, standardhttp.MethodPost, endpoint, files, expiresInSeconds, standardhttp.StatusCreated, &response)
-	if err != nil {
+	if err != nil && response.Resource.ID == "" {
 		return Resource{}, err
 	}
-	if err := c.validateResource(response.Resource, ""); err != nil {
-		return Resource{}, err
+	if validationErr := c.validateResource(response.Resource, ""); validationErr != nil {
+		return Resource{}, validationErr
 	}
-	return response.Resource, nil
+	return response.Resource, err
 }
 
 func (c *Client) UpdateWhiteboard(
@@ -409,7 +409,16 @@ func (c *Client) execute(request *standardhttp.Request, wantStatus int, result a
 		return contextError(request.Context(), err)
 	}
 	if response.StatusCode != wantStatus {
-		return decodeClientError(body)
+		decoded, protocolErr := decodeClientErrorResponse(body)
+		if protocolErr != nil {
+			return protocolErr
+		}
+		if decoded.Resource != nil {
+			if resourceResponse, ok := result.(*ResourceResponse); ok {
+				resourceResponse.Resource = *decoded.Resource
+			}
+		}
+		return common.NewError(decoded.Error.Code, decoded.Error.Message, nil)
 	}
 	if result == nil {
 		if len(strings.TrimSpace(string(body))) != 0 {
@@ -440,12 +449,12 @@ func readClientResponse(reader io.Reader) ([]byte, error) {
 	return body, nil
 }
 
-func decodeClientError(body []byte) error {
+func decodeClientErrorResponse(body []byte) (ErrorResponse, error) {
 	var response ErrorResponse
 	if err := json.Unmarshal(body, &response); err != nil || !knownClientErrorCode(response.Error.Code) || response.Error.Message == "" {
-		return clientInvalidResponse("server returned an invalid error response")
+		return ErrorResponse{}, clientInvalidResponse("server returned an invalid error response")
 	}
-	return common.NewError(response.Error.Code, response.Error.Message, nil)
+	return response, nil
 }
 
 func knownClientErrorCode(code common.ErrorCode) bool {
