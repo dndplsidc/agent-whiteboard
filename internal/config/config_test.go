@@ -36,6 +36,29 @@ func TestLoadExplicitMissingPathErrors(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnsafeConfigurationFiles(t *testing.T) {
+	directory := t.TempDir()
+	regular := filepath.Join(directory, "regular.yaml")
+	writeConfig(t, regular, "version: 1\n")
+
+	symlink := filepath.Join(directory, "symlink.yaml")
+	require.NoError(t, os.Symlink(regular, symlink))
+	_, err := config.Load(symlink)
+	require.ErrorContains(t, err, "regular file")
+
+	worldWritable := filepath.Join(directory, "world-writable.yaml")
+	writeConfig(t, worldWritable, "version: 1\n")
+	require.NoError(t, os.Chmod(worldWritable, 0o666))
+	_, err = config.Load(worldWritable)
+	require.ErrorContains(t, err, "must not be writable by group or others")
+
+	sharedReadOnly := filepath.Join(directory, "shared-read-only.yaml")
+	writeConfig(t, sharedReadOnly, "version: 1\n")
+	require.NoError(t, os.Chmod(sharedReadOnly, 0o644))
+	_, err = config.Load(sharedReadOnly)
+	require.NoError(t, err)
+}
+
 func TestLoadMinimalVersionedConfiguration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeConfig(t, path, "version: 1\n")

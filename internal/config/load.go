@@ -24,7 +24,7 @@ func Load(selectedPath string) (Config, error) {
 		return Config{}, fmt.Errorf("resolve configuration path: %w", err)
 	}
 
-	file, err := os.Open(path)
+	file, err := openConfiguration(path)
 	if err != nil {
 		if !explicit && errors.Is(err, os.ErrNotExist) {
 			return Config{path: path, version: Version1}, nil
@@ -38,6 +38,44 @@ func Load(selectedPath string) (Config, error) {
 		return Config{}, err
 	}
 	return loaded, nil
+}
+
+func openConfiguration(path string) (*os.File, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateConfigurationInfo(info); err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !os.SameFile(info, openedInfo) {
+		_ = file.Close()
+		return nil, errors.New("configuration must be an unchanged regular file")
+	}
+	if err := validateConfigurationInfo(openedInfo); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func validateConfigurationInfo(info os.FileInfo) error {
+	if info == nil || !info.Mode().IsRegular() {
+		return errors.New("configuration must be a regular file")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return errors.New("configuration must not be writable by group or others")
+	}
+	return nil
 }
 
 func decodeDocument(reader io.Reader) (*yaml.Node, error) {

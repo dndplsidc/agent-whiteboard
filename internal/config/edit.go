@@ -55,8 +55,8 @@ func ListTrustedOrigins(selectedPath string) ([]string, error) {
 		}
 		return nil, fmt.Errorf("inspect configuration %q: %w", path, err)
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("configuration %q must be a regular file", path)
+	if err := validateConfigurationInfo(info); err != nil {
+		return nil, fmt.Errorf("configuration %q: %w", path, err)
 	}
 	file, err := openRegularNoFollow(path)
 	if err != nil {
@@ -67,8 +67,11 @@ func ListTrustedOrigins(selectedPath string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect open configuration %q: %w", path, err)
 	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+	if !os.SameFile(info, openedInfo) {
 		return nil, fmt.Errorf("configuration %q must be an unchanged regular file", path)
+	}
+	if err := validateConfigurationInfo(openedInfo); err != nil {
+		return nil, fmt.Errorf("configuration %q: %w", path, err)
 	}
 	_, loaded, err := parseConfigFile(file, path)
 	if err != nil {
@@ -187,8 +190,8 @@ func readConfigForEdit(path string, explicit bool) (*yaml.Node, Config, os.FileI
 		}}
 		return root, Config{path: path, version: Version1}, nil, nil
 	}
-	if !info.Mode().IsRegular() {
-		return nil, Config{}, nil, fmt.Errorf("configuration %q must be a regular file", path)
+	if err := validateConfigurationInfo(info); err != nil {
+		return nil, Config{}, nil, fmt.Errorf("configuration %q: %w", path, err)
 	}
 	file, err := openRegularNoFollow(path)
 	if err != nil {
@@ -199,8 +202,11 @@ func readConfigForEdit(path string, explicit bool) (*yaml.Node, Config, os.FileI
 	if err != nil {
 		return nil, Config{}, nil, fmt.Errorf("inspect open configuration %q: %w", path, err)
 	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+	if !os.SameFile(info, openedInfo) {
 		return nil, Config{}, nil, fmt.Errorf("configuration %q must be an unchanged regular file", path)
+	}
+	if err := validateConfigurationInfo(openedInfo); err != nil {
+		return nil, Config{}, nil, fmt.Errorf("configuration %q: %w", path, err)
 	}
 	root, loaded, err := parseConfigFile(file, path)
 	if err != nil {

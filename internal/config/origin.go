@@ -23,11 +23,12 @@ func CanonicalOrigin(value string) (string, error) {
 		return "", errors.New("trusted origin must be an exact HTTPS origin")
 	}
 
+	bracketed := strings.HasPrefix(parsed.Host, "[")
 	host, portText, err := splitOriginHost(parsed.Host)
 	if err != nil || host == "" || strings.ContainsAny(host, "*%") {
 		return "", errors.New("trusted origin must be an exact HTTPS origin")
 	}
-	canonicalHost, ipv6, err := canonicalOriginHost(host)
+	canonicalHost, ipv6, err := canonicalOriginHost(host, bracketed)
 	if err != nil {
 		return "", errors.New("trusted origin must be an exact HTTPS origin")
 	}
@@ -80,9 +81,15 @@ func splitOriginHost(hostport string) (host, port string, err error) {
 	return hostport, "", nil
 }
 
-func canonicalOriginHost(host string) (canonical string, ipv6 bool, err error) {
+func canonicalOriginHost(host string, bracketed bool) (canonical string, ipv6 bool, err error) {
 	if address, parseErr := netip.ParseAddr(host); parseErr == nil {
+		if bracketed && !address.Is6() {
+			return "", false, errors.New("bracketed origin host must be IPv6")
+		}
 		return strings.ToLower(address.String()), address.Is6(), nil
+	}
+	if bracketed {
+		return "", false, errors.New("bracketed origin host must be IPv6")
 	}
 	ascii, err := idna.Lookup.ToASCII(host)
 	if err != nil {

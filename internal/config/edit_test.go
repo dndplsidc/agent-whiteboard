@@ -103,6 +103,9 @@ func TestTrustedOriginOperationsRejectUnsafeTargetsAndInvalidInputs(t *testing.T
 	invalidPath := filepath.Join(dir, "invalid.yaml")
 	invalid := []byte("version: 1\nunknown: true\n")
 	require.NoError(t, os.WriteFile(invalidPath, invalid, 0o600))
+	worldWritablePath := filepath.Join(dir, "world-writable.yaml")
+	require.NoError(t, os.WriteFile(worldWritablePath, []byte("version: 1\n"), 0o600))
+	require.NoError(t, os.Chmod(worldWritablePath, 0o666))
 
 	for _, path := range []string{symlinkPath, directoryPath} {
 		for _, operation := range []func(string) error{
@@ -111,6 +114,13 @@ func TestTrustedOriginOperationsRejectUnsafeTargetsAndInvalidInputs(t *testing.T
 		} {
 			require.ErrorContains(t, operation(path), "regular file")
 		}
+	}
+
+	for _, operation := range []func() error{
+		func() error { return AddTrustedOrigin(worldWritablePath, "https://example.test") },
+		func() error { _, err := ListTrustedOrigins(worldWritablePath); return err },
+	} {
+		require.ErrorContains(t, operation(), "must not be writable by group or others")
 	}
 
 	require.Error(t, AddTrustedOrigin(realPath, "http://example.test"))

@@ -44,6 +44,8 @@ func TestCanonicalOriginRejectsNonExactHTTPSOrigins(t *testing.T) {
 		"https://whiteboard.example:8443:9443",
 		"https://whiteboard.example%2eevil.test",
 		"https://[fe80::1%25lo0]",
+		"https://[example.com]",
+		"https://[127.0.0.1]",
 		" https://whiteboard.example",
 		"https://whiteboard.example ",
 		"null",
