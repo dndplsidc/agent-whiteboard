@@ -496,12 +496,17 @@ export const test = base.extend({
 
   publish: async ({ server }, use) => {
     let sequence = 0;
-    await use(async (markdown) => {
-      const fixturePath = path.join(server.root, `fixture-${sequence++}.md`);
-      await fs.writeFile(fixturePath, markdown, { mode: 0o600 });
+    await use(async (markdown, creatorContext = "# Browser test context\n\nHermetic rendering fixture.\n") => {
+      const fixtureNumber = sequence++;
+      const fixturePath = path.join(server.root, `fixture-${fixtureNumber}.md`);
+      const contextPath = path.join(server.root, `fixture-${fixtureNumber}-context.md`);
+      await Promise.all([
+        fs.writeFile(fixturePath, markdown, { mode: 0o600 }),
+        fs.writeFile(contextPath, creatorContext, { mode: 0o600 }),
+      ]);
       const { stdout, stderr } = await runProcess(
         server.binary,
-        ["--server", server.url, "--json", "create", "markdown", "--expires-in", "0", fixturePath],
+        ["--server", server.url, "--json", "create", "markdown", "--context", contextPath, "--expires-in", "0", fixturePath],
         { env: server.env, timeout: processTimeout },
       );
       if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);
