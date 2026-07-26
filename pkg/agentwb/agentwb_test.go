@@ -279,8 +279,10 @@ func TestDefaultFilesystemCompositionPersistsBothDomainsAndHandlerRoutes(t *test
 
 	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# stored"), Context: []byte("creator context")})
 	require.NoError(t, err)
-	_, err = service.GetWhiteboard(context.Background(), facadeTestID)
+	stored, err := service.GetWhiteboard(context.Background(), facadeTestID)
 	require.NoError(t, err)
+	require.Equal(t, []byte("# stored"), stored.Source)
+	require.Equal(t, []byte("creator context"), stored.Context)
 	_, err = service.CreateImages(context.Background(), CreateImagesInput{Images: []ImageUpload{{Content: validPNG(t)}}})
 	require.NoError(t, err)
 	_, err = service.GetImage(context.Background(), "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
