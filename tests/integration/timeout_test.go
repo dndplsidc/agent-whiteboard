@@ -37,11 +37,12 @@ func TestClientTimeoutHumanAndJSON(t *testing.T) {
 			t.Cleanup(delayed.Close)
 			t.Cleanup(func() { close(releaseHandler) })
 			file := writeFixture(t, "timeout.md", []byte("# timeout\n"))
+			creatorContext := writeContextFixture(t, "# Timeout context\n")
 			args := []string{"--server", delayed.URL, "--timeout", "20ms"}
 			if test.json {
 				args = append(args, "--json")
 			}
-			args = append(args, "create", "markdown", file)
+			args = append(args, "create", "markdown", "--context", creatorContext, file)
 
 			ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 			defer cancel()

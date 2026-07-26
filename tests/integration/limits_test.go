@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -21,32 +22,60 @@ type multipartFile struct {
 	content     []byte
 }
 
-func TestLimitsWhiteboardBelowAtAndAbove(t *testing.T) {
-	const contentBoundary = 32
-	atContent := bytes.Repeat([]byte("m"), contentBoundary)
-	atBody, _ := deterministicMultipart(t, []multipartFile{{field: "file", name: "whiteboard.md", content: atContent}})
-	server := startServer(t, "--max-whiteboard-bytes", strconv.Itoa(len(atBody)))
+func TestLimitsMarkdownPairIndependentPartsAndMultipartOverhead(t *testing.T) {
+	const sourceLimit = 32
+	const contextLimit = 24
+	server := startServer(t,
+		"--max-whiteboard-bytes", strconv.Itoa(sourceLimit),
+		"--max-context-bytes", strconv.Itoa(contextLimit),
+	)
 
 	for _, test := range []struct {
-		name string
-		size int
+		name        string
+		sourceSize  int
+		contextSize int
 	}{
-		{name: "below", size: contentBoundary - 1},
-		{name: "at", size: contentBoundary},
+		{name: "below both limits", sourceSize: sourceLimit - 1, contextSize: contextLimit - 1},
+		{name: "at both limits", sourceSize: sourceLimit, contextSize: contextLimit},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			path := writeFixture(t, "whiteboard.md", bytes.Repeat([]byte("m"), test.size))
-			created := runCLIResource(t, server, "--json", "create", "markdown", path)
-			runCLISuccess(t, server, "--json", "delete", "markdown", "--", created.Resource.ID)
+			source := writeFixture(t, "whiteboard.md", bytes.Repeat([]byte("m"), test.sourceSize))
+			creatorContext := writeContextFixture(t, string(bytes.Repeat([]byte("c"), test.contextSize)))
+			created := runCLIResource(t, server, "--json", "create", "markdown", "--context", creatorContext, source)
+			runCLIDelete(t, server, "--json", "delete", "markdown", "--", created.Resource.ID)
 			requireCategoryEmpty(t, server.Root, "whiteboards")
 		})
 	}
 
-	above := bytes.Repeat([]byte("m"), contentBoundary+1)
-	abovePath := writeFixture(t, "whiteboard.md", above)
-	requireCLIToolarge(t, server, "create", "markdown", abovePath)
-	assertDirectTooLarge(t, server.URL+"/api/v1/whiteboards/markdown", []multipartFile{{field: "file", name: "whiteboard.md", content: above}})
-	requireCategoryEmpty(t, server.Root, "whiteboards")
+	validSource := bytes.Repeat([]byte("m"), sourceLimit)
+	validContext := bytes.Repeat([]byte("c"), contextLimit)
+	for _, test := range []struct {
+		name           string
+		source         []byte
+		creatorContext []byte
+	}{
+		{name: "source above independent limit", source: append(bytes.Clone(validSource), 'm'), creatorContext: validContext},
+		{name: "context above independent limit", source: validSource, creatorContext: append(bytes.Clone(validContext), 'c')},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := writeFixture(t, "whiteboard.md", test.source)
+			creatorContext := writeContextFixture(t, string(test.creatorContext))
+			requireCLIToolarge(t, server, "create", "markdown", "--context", creatorContext, source)
+			assertDirectTooLarge(t, server.URL+"/api/v1/whiteboards/markdown", []multipartFile{
+				{field: "file", name: "whiteboard.md", content: test.source},
+				{field: "context", name: "context.md", content: test.creatorContext},
+			})
+			requireCategoryEmpty(t, server.Root, "whiteboards")
+		})
+	}
+
+	t.Run("multipart overhead above allowance", func(t *testing.T) {
+		assertDirectTooLarge(t, server.URL+"/api/v1/whiteboards/markdown", []multipartFile{
+			{field: "file", name: strings.Repeat("s", 64<<10) + ".md", content: validSource},
+			{field: "context", name: "context.md", content: validContext},
+		})
+		requireCategoryEmpty(t, server.Root, "whiteboards")
+	})
 }
 
 func TestLimitsPerImageBelowAtAndAbove(t *testing.T) {
