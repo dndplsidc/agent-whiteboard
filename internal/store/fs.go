@@ -21,17 +21,20 @@ import (
 )
 
 const (
-	metadataSchemaVersion = 1
-	metadataFilename      = "metadata.json"
-	directoryPermissions  = 0o700
-	filePermissions       = 0o600
-	randomNameAttempts    = 10
+	legacyMetadataSchemaVersion   = 1
+	markdownMetadataSchemaVersion = 2
+	metadataFilename              = "metadata.json"
+	directoryPermissions          = 0o700
+	filePermissions               = 0o600
+	randomNameAttempts            = 10
 )
 
 var (
 	whiteboardGenerationPattern = regexp.MustCompile(`^source-[a-f0-9]{32}\.(md|html)$`)
+	markdownSourcePattern       = regexp.MustCompile(`^source-([a-f0-9]{32})\.md$`)
+	markdownContextPattern      = regexp.MustCompile(`^context-([a-f0-9]{32})\.md$`)
 	imageGenerationPattern      = regexp.MustCompile(`^content-[a-f0-9]{32}$`)
-	temporaryArtifactPattern    = regexp.MustCompile(`^\.(content|metadata)-temp-[a-f0-9]{32}$`)
+	temporaryArtifactPattern    = regexp.MustCompile(`^\.(content|context|metadata)-temp-[a-f0-9]{32}$`)
 )
 
 type Config struct {
@@ -42,15 +45,18 @@ type Config struct {
 }
 
 type FS struct {
-	rootPath      string
-	rootHandle    *os.Root
-	categories    map[string]*os.Root
-	clock         common.Clock
-	ctx           context.Context
-	cancel        context.CancelFunc
-	interval      time.Duration
-	locks         lockSet
-	directorySync func(*os.Root) error
+	rootPath        string
+	rootHandle      *os.Root
+	categories      map[string]*os.Root
+	clock           common.Clock
+	ctx             context.Context
+	cancel          context.CancelFunc
+	interval        time.Duration
+	locks           lockSet
+	directorySync   func(*os.Root) error
+	publishArtifact func(*os.Root, string, string) error
+	renameArtifact  func(*os.Root, string, string) error
+	removeArtifact  func(*os.Root, string) error
 
 	lifecycleMu sync.Mutex
 	closing     bool
@@ -88,6 +94,7 @@ type metadata struct {
 	UpdatedAt       storedTime  `json:"updated_at"`
 	ExpiresAt       *storedTime `json:"expires_at"`
 	ContentFilename string      `json:"content_filename"`
+	ContextFilename string      `json:"context_filename,omitempty"`
 	Extension       string      `json:"extension"`
 	MediaType       string      `json:"media_type"`
 }
@@ -130,7 +137,9 @@ func NewFS(config Config) (*FS, error) {
 	fs := &FS{
 		rootPath: absoluteRoot, rootHandle: rootHandle, categories: make(map[string]*os.Root, 3),
 		clock: config.Clock, ctx: ctx, cancel: cancel, interval: config.CleanupInterval,
-		locks: lockSet{entries: make(map[string]*lockEntry)}, directorySync: syncDirectory, closeDone: make(chan struct{}),
+		locks: lockSet{entries: make(map[string]*lockEntry)}, directorySync: syncDirectory,
+		publishArtifact: publishGeneration, renameArtifact: renameArtifact, removeArtifact: removeArtifact,
+		closeDone: make(chan struct{}),
 	}
 	for _, name := range []string{"whiteboards", "images", ".readiness"} {
 		if err := ctx.Err(); err != nil {
@@ -167,7 +176,7 @@ func (view *whiteboardView) Create(ctx context.Context, record whiteboardDomain.
 	if err := validateWhiteboardRecord(record); err != nil {
 		return err
 	}
-	return view.fs.create(ctx, "whiteboards", record.ID, record.Source, whiteboardMetadata(record))
+	return view.fs.create(ctx, "whiteboards", record.ID, record.Source, record.Context, whiteboardMetadata(record))
 }
 
 func (view *whiteboardView) Get(ctx context.Context, id string) (whiteboardDomain.Whiteboard, error) {
@@ -178,12 +187,12 @@ func (view *whiteboardView) Get(ctx context.Context, id string) (whiteboardDomai
 	if err := common.ValidateID(id); err != nil {
 		return whiteboardDomain.Whiteboard{}, err
 	}
-	content, stored, err := view.fs.get(ctx, "whiteboards", id, "whiteboard")
+	content, creatorContext, stored, err := view.fs.get(ctx, "whiteboards", id, "whiteboard")
 	if err != nil {
 		return whiteboardDomain.Whiteboard{}, err
 	}
 	return whiteboardDomain.Whiteboard{
-		ID: id, Kind: whiteboardDomain.Kind(stored.Kind), Source: content,
+		ID: id, Kind: whiteboardDomain.Kind(stored.Kind), Source: content, Context: creatorContext,
 		CreatedAt: stored.CreatedAt.time(), UpdatedAt: stored.UpdatedAt.time(), ExpiresAt: stored.ExpiresAt.timePtr(),
 	}, nil
 }
@@ -196,7 +205,7 @@ func (view *whiteboardView) Replace(ctx context.Context, record whiteboardDomain
 	if err := validateWhiteboardRecord(record); err != nil {
 		return err
 	}
-	return view.fs.replace(ctx, "whiteboards", record.ID, record.Source, whiteboardMetadata(record), "whiteboard")
+	return view.fs.replace(ctx, "whiteboards", record.ID, record.Source, record.Context, whiteboardMetadata(record), "whiteboard")
 }
 
 func (view *whiteboardView) Delete(ctx context.Context, id string) error {
@@ -221,7 +230,7 @@ func (view *imageView) Create(ctx context.Context, record imageDomain.Image) err
 	if err := validateImageRecord(record); err != nil {
 		return err
 	}
-	return view.fs.create(ctx, "images", record.ID, record.Content, imageMetadata(record))
+	return view.fs.create(ctx, "images", record.ID, record.Content, nil, imageMetadata(record))
 }
 
 func (view *imageView) Get(ctx context.Context, id string) (imageDomain.Image, error) {
@@ -232,7 +241,7 @@ func (view *imageView) Get(ctx context.Context, id string) (imageDomain.Image, e
 	if err := common.ValidateID(id); err != nil {
 		return imageDomain.Image{}, err
 	}
-	content, stored, err := view.fs.get(ctx, "images", id, "image")
+	content, _, stored, err := view.fs.get(ctx, "images", id, "image")
 	if err != nil {
 		return imageDomain.Image{}, err
 	}
@@ -250,7 +259,7 @@ func (view *imageView) Replace(ctx context.Context, record imageDomain.Image) er
 	if err := validateImageRecord(record); err != nil {
 		return err
 	}
-	return view.fs.replace(ctx, "images", record.ID, record.Content, imageMetadata(record), "image")
+	return view.fs.replace(ctx, "images", record.ID, record.Content, nil, imageMetadata(record), "image")
 }
 
 func (view *imageView) Delete(ctx context.Context, id string) error {
@@ -267,7 +276,7 @@ func (view *imageView) Delete(ctx context.Context, id string) error {
 func (view *imageView) Ready(ctx context.Context) error { return view.fs.Ready(ctx) }
 func (view *imageView) Close() error                    { return view.fs.Close() }
 
-func (fs *FS) create(ctx context.Context, namespace, id string, content []byte, stored metadata) error {
+func (fs *FS) create(ctx context.Context, namespace, id string, content, creatorContext []byte, stored metadata) error {
 	release, err := fs.locks.lock(ctx, resourceLockKey(namespace, id))
 	if err != nil {
 		return err
@@ -315,7 +324,7 @@ func (fs *FS) create(ctx context.Context, namespace, id string, content []byte, 
 	if err := ctxErr(ctx, fs.ctx); err != nil {
 		return err
 	}
-	published, err := fs.commit(ctx, resource, content, &stored, "")
+	published, err := fs.commit(ctx, resource, content, creatorContext, &stored, nil)
 	metadataPublished = published
 	if err != nil {
 		return err
@@ -323,90 +332,100 @@ func (fs *FS) create(ctx context.Context, namespace, id string, content []byte, 
 	return nil
 }
 
-func (fs *FS) get(ctx context.Context, namespace, id, expectedKind string) ([]byte, metadata, error) {
+func (fs *FS) get(ctx context.Context, namespace, id, expectedKind string) ([]byte, []byte, metadata, error) {
 	key := resourceLockKey(namespace, id)
 	release, err := fs.locks.rlock(ctx, key)
 	if err != nil {
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
 	resource, err := fs.openResource(namespace, id)
 	if err != nil {
 		release()
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
 	stored, err := fs.loadMetadata(ctx, resource, expectedKind)
 	if err != nil {
 		_ = resource.Close()
 		release()
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
 	if fs.isExpired(stored) {
 		_ = resource.Close()
 		release()
 		return fs.getAfterExpiration(ctx, namespace, id, expectedKind, key)
 	}
-	content, err := fs.readStoredContent(namespace, id, resource, stored)
+	content, creatorContext, err := fs.readStoredContent(namespace, id, resource, stored)
 	closeErr := resource.Close()
 	release()
 	if err != nil {
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
 	if closeErr != nil {
-		return nil, metadata{}, storageUnavailable(closeErr)
+		return nil, nil, metadata{}, storageUnavailable(closeErr)
 	}
 	if err := ctxErr(ctx, fs.ctx); err != nil {
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
-	return content, stored, nil
+	return content, creatorContext, stored, nil
 }
 
-func (fs *FS) getAfterExpiration(ctx context.Context, namespace, id, expectedKind, key string) ([]byte, metadata, error) {
+func (fs *FS) getAfterExpiration(ctx context.Context, namespace, id, expectedKind, key string) ([]byte, []byte, metadata, error) {
 	release, err := fs.locks.lock(ctx, key)
 	if err != nil {
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
 	defer release()
 	resource, err := fs.openResource(namespace, id)
 	if err != nil {
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
 	stored, err := fs.loadMetadata(ctx, resource, expectedKind)
 	if err != nil {
 		_ = resource.Close()
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
 	if fs.isExpired(stored) {
 		if err := fs.removeOpenedResource(ctx, namespace, id, resource); err != nil {
-			return nil, metadata{}, err
+			return nil, nil, metadata{}, err
 		}
-		return nil, metadata{}, notFound()
+		return nil, nil, metadata{}, notFound()
 	}
-	content, err := fs.readStoredContent(namespace, id, resource, stored)
+	content, creatorContext, err := fs.readStoredContent(namespace, id, resource, stored)
 	closeErr := resource.Close()
 	if err != nil {
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
 	if closeErr != nil {
-		return nil, metadata{}, storageUnavailable(closeErr)
+		return nil, nil, metadata{}, storageUnavailable(closeErr)
 	}
 	if err := ctxErr(ctx, fs.ctx); err != nil {
-		return nil, metadata{}, err
+		return nil, nil, metadata{}, err
 	}
-	return content, stored, nil
+	return content, creatorContext, stored, nil
 }
 
-func (fs *FS) readStoredContent(namespace, id string, resource *os.Root, stored metadata) ([]byte, error) {
+func (fs *FS) readStoredContent(namespace, id string, resource *os.Root, stored metadata) ([]byte, []byte, error) {
 	if err := fs.validateResourceFilename(namespace, id, stored.ContentFilename); err != nil {
-		return nil, storageUnavailable(err)
+		return nil, nil, storageUnavailable(err)
 	}
 	content, err := readVerifiedFile(resource, stored.ContentFilename)
 	if err != nil {
-		return nil, storageUnavailable(err)
+		return nil, nil, storageUnavailable(err)
 	}
-	return content, nil
+	if stored.ContextFilename == "" {
+		return content, nil, nil
+	}
+	if err := fs.validateResourceFilename(namespace, id, stored.ContextFilename); err != nil {
+		return nil, nil, storageUnavailable(err)
+	}
+	creatorContext, err := readVerifiedFile(resource, stored.ContextFilename)
+	if err != nil {
+		return nil, nil, storageUnavailable(err)
+	}
+	return content, creatorContext, nil
 }
 
-func (fs *FS) replace(ctx context.Context, namespace, id string, content []byte, stored metadata, expectedKind string) error {
+func (fs *FS) replace(ctx context.Context, namespace, id string, content, creatorContext []byte, stored metadata, expectedKind string) error {
 	release, err := fs.locks.lock(ctx, resourceLockKey(namespace, id))
 	if err != nil {
 		return err
@@ -428,18 +447,20 @@ func (fs *FS) replace(ctx context.Context, namespace, id string, content []byte,
 		return notFound()
 	}
 	defer resource.Close()
-	if err := fs.validateResourceFilename(namespace, id, old.ContentFilename); err != nil {
-		return storageUnavailable(err)
-	}
-	oldFile, err := openVerifiedRegular(resource, old.ContentFilename)
-	if err != nil {
-		return storageUnavailable(err)
-	}
-	if err := oldFile.Close(); err != nil {
-		return storageUnavailable(err)
+	for _, name := range referencedArtifacts(old) {
+		if err := fs.validateResourceFilename(namespace, id, name); err != nil {
+			return storageUnavailable(err)
+		}
+		oldFile, err := openVerifiedRegular(resource, name)
+		if err != nil {
+			return storageUnavailable(err)
+		}
+		if err := oldFile.Close(); err != nil {
+			return storageUnavailable(err)
+		}
 	}
 	stored.CreatedAt = old.CreatedAt
-	_, err = fs.commit(ctx, resource, content, &stored, old.ContentFilename)
+	_, err = fs.commit(ctx, resource, content, creatorContext, &stored, referencedArtifacts(old))
 	return err
 }
 
@@ -542,7 +563,14 @@ func (fs *FS) Close() error {
 	return closeErr
 }
 
-func (fs *FS) commit(ctx context.Context, resource *os.Root, content []byte, stored *metadata, oldGeneration string) (bool, error) {
+func (fs *FS) commit(ctx context.Context, resource *os.Root, content, creatorContext []byte, stored *metadata, oldArtifacts []string) (bool, error) {
+	if stored.SchemaVersion == markdownMetadataSchemaVersion {
+		return fs.commitMarkdown(ctx, resource, content, creatorContext, stored, oldArtifacts)
+	}
+	return fs.commitSingle(ctx, resource, content, stored, oldArtifacts)
+}
+
+func (fs *FS) commitSingle(ctx context.Context, resource *os.Root, content []byte, stored *metadata, oldArtifacts []string) (bool, error) {
 	if err := ctxErr(ctx, fs.ctx); err != nil {
 		return false, err
 	}
@@ -656,12 +684,196 @@ func (fs *FS) commit(ctx context.Context, resource *os.Root, content []byte, sto
 	if err := fs.directorySync(resource); err != nil {
 		return true, storageUnavailable(err)
 	}
-	if oldGeneration != "" && oldGeneration != publishedGeneration {
-		if err := resource.Remove(oldGeneration); err == nil {
-			_ = fs.directorySync(resource)
+	removedOld := false
+	for _, oldGeneration := range oldArtifacts {
+		if oldGeneration != "" && oldGeneration != publishedGeneration {
+			if err := resource.Remove(oldGeneration); err == nil {
+				removedOld = true
+			}
 		}
 	}
+	if removedOld {
+		_ = fs.directorySync(resource)
+	}
 	return true, nil
+}
+
+func (fs *FS) commitMarkdown(ctx context.Context, resource *os.Root, source, creatorContext []byte, stored *metadata, oldArtifacts []string) (bool, error) {
+	if err := ctxErr(ctx, fs.ctx); err != nil {
+		return false, err
+	}
+	sourceTempName, sourceTemp, err := createExclusiveTemp(resource, ".content-temp-")
+	if err != nil {
+		return false, storageUnavailable(err)
+	}
+	contextTempName := ""
+	var contextTemp *os.File
+	metadataTempName := ""
+	publishedSource := ""
+	publishedContext := ""
+	metadataPublished := false
+	defer func() {
+		_ = sourceTemp.Close()
+		if contextTemp != nil {
+			_ = contextTemp.Close()
+		}
+		if sourceTempName != "" {
+			_ = resource.Remove(sourceTempName)
+		}
+		if contextTempName != "" {
+			_ = resource.Remove(contextTempName)
+		}
+		if metadataTempName != "" {
+			_ = resource.Remove(metadataTempName)
+		}
+		removedPublished := false
+		if !metadataPublished && publishedSource != "" {
+			removedPublished = resource.Remove(publishedSource) == nil || removedPublished
+		}
+		if !metadataPublished && publishedContext != "" {
+			removedPublished = resource.Remove(publishedContext) == nil || removedPublished
+		}
+		if removedPublished {
+			_ = fs.directorySync(resource)
+		}
+	}()
+	if err := sourceTemp.Chmod(filePermissions); err != nil {
+		return false, storageUnavailable(err)
+	}
+	if err := writeSyncedArtifact(ctx, fs.ctx, sourceTemp, source); err != nil {
+		return false, err
+	}
+
+	contextTempName, contextTemp, err = createExclusiveTemp(resource, ".context-temp-")
+	if err != nil {
+		return false, storageUnavailable(err)
+	}
+	if err := contextTemp.Chmod(filePermissions); err != nil {
+		return false, storageUnavailable(err)
+	}
+	if err := writeSyncedArtifact(ctx, fs.ctx, contextTemp, creatorContext); err != nil {
+		return false, err
+	}
+
+	generation, err := randomHex(16)
+	if err != nil {
+		return false, storageUnavailable(err)
+	}
+	publishedSource = "source-" + generation + ".md"
+	publishedContext = "context-" + generation + ".md"
+	if err := ctxErr(ctx, fs.ctx); err != nil {
+		return false, err
+	}
+	if err := fs.publishArtifact(resource, sourceTempName, publishedSource); err != nil {
+		publishedSource = ""
+		return false, storageUnavailable(err)
+	}
+	sourceTempName = ""
+	if err := ctxErr(ctx, fs.ctx); err != nil {
+		return false, err
+	}
+	if err := fs.publishArtifact(resource, contextTempName, publishedContext); err != nil {
+		publishedContext = ""
+		return false, storageUnavailable(err)
+	}
+	contextTempName = ""
+	if err := fs.directorySync(resource); err != nil {
+		return false, storageUnavailable(err)
+	}
+
+	stored.ContentFilename = publishedSource
+	stored.ContextFilename = publishedContext
+	if err := ctxErr(ctx, fs.ctx); err != nil {
+		return false, err
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		return false, storageUnavailable(err)
+	}
+	metadataTempName, metadataTemp, err := createExclusiveTemp(resource, ".metadata-temp-")
+	if err != nil {
+		return false, storageUnavailable(err)
+	}
+	defer metadataTemp.Close()
+	if err := metadataTemp.Chmod(filePermissions); err != nil {
+		return false, storageUnavailable(err)
+	}
+	if err := writeSyncedArtifact(ctx, fs.ctx, metadataTemp, encoded); err != nil {
+		return false, err
+	}
+	if err := ctxErr(ctx, fs.ctx); err != nil {
+		return false, err
+	}
+	if err := fs.renameArtifact(resource, metadataTempName, metadataFilename); err != nil {
+		return false, storageUnavailable(err)
+	}
+	metadataTempName = ""
+	metadataPublished = true
+	if err := fs.directorySync(resource); err != nil {
+		return true, storageUnavailable(err)
+	}
+	if err := fs.removeOldArtifacts(resource, oldArtifacts, publishedSource, publishedContext); err != nil {
+		return true, storageUnavailable(err)
+	}
+	return true, nil
+}
+
+func writeSyncedArtifact(request, lifecycle context.Context, file *os.File, content []byte) error {
+	if err := ctxErr(request, lifecycle); err != nil {
+		return err
+	}
+	if err := writeAll(file, content); err != nil {
+		return storageUnavailable(err)
+	}
+	if err := ctxErr(request, lifecycle); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return storageUnavailable(err)
+	}
+	if err := ctxErr(request, lifecycle); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return storageUnavailable(err)
+	}
+	return nil
+}
+
+func (fs *FS) removeOldArtifacts(resource *os.Root, oldArtifacts []string, current ...string) error {
+	currentSet := make(map[string]struct{}, len(current))
+	for _, name := range current {
+		currentSet[name] = struct{}{}
+	}
+	removed := false
+	var cleanupErrors []error
+	for _, name := range oldArtifacts {
+		if name == "" {
+			continue
+		}
+		if _, keep := currentSet[name]; keep {
+			continue
+		}
+		if err := fs.removeArtifact(resource, name); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+			continue
+		}
+		removed = true
+	}
+	if removed {
+		if err := fs.directorySync(resource); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func renameArtifact(root *os.Root, oldName, newName string) error {
+	return root.Rename(oldName, newName)
+}
+
+func removeArtifact(root *os.Root, name string) error {
+	return root.Remove(name)
 }
 
 func publishGeneration(root *os.Root, temp, final string) error {
@@ -1051,17 +1263,20 @@ func (fs *FS) cleanupResource(ctx context.Context, namespace, id, expectedKind s
 		return fs.removeOpenedResource(ctx, namespace, id, resource)
 	}
 	defer resource.Close()
-	if err := fs.validateResourceFilename(namespace, id, stored.ContentFilename); err != nil {
-		return storageUnavailable(err)
+	referenced := referencedArtifacts(stored)
+	for _, name := range referenced {
+		if err := fs.validateResourceFilename(namespace, id, name); err != nil {
+			return storageUnavailable(err)
+		}
+		file, err := openVerifiedRegular(resource, name)
+		if err != nil {
+			return storageUnavailable(err)
+		}
+		if err := file.Close(); err != nil {
+			return storageUnavailable(err)
+		}
 	}
-	referenced, err := openVerifiedRegular(resource, stored.ContentFilename)
-	if err != nil {
-		return storageUnavailable(err)
-	}
-	if err := referenced.Close(); err != nil {
-		return storageUnavailable(err)
-	}
-	return fs.removeOrphanArtifacts(resource, namespace, stored.ContentFilename)
+	return fs.removeOrphanArtifacts(resource, namespace, referenced...)
 }
 
 func (fs *FS) cleanupIncompleteResource(ctx context.Context, namespace, id string, resource *os.Root) error {
@@ -1108,14 +1323,19 @@ func (fs *FS) cleanupIncompleteResource(ctx context.Context, namespace, id strin
 	return fs.removeOpenedResourceDirectory(category, id, resource)
 }
 
-func (fs *FS) removeOrphanArtifacts(resource *os.Root, namespace, referenced string) error {
+func (fs *FS) removeOrphanArtifacts(resource *os.Root, namespace string, referenced ...string) error {
 	names, err := rootNames(resource)
 	if err != nil {
 		return storageUnavailable(err)
 	}
+	preserved := make(map[string]struct{}, len(referenced)+1)
+	preserved[metadataFilename] = struct{}{}
+	for _, name := range referenced {
+		preserved[name] = struct{}{}
+	}
 	removed := false
 	for _, name := range names {
-		if name == metadataFilename || name == referenced || !cleanupArtifact(namespace, name) {
+		if _, keep := preserved[name]; keep || !cleanupArtifact(namespace, name) {
 			continue
 		}
 		file, err := openVerifiedRegular(resource, name)
@@ -1159,7 +1379,7 @@ func cleanupArtifact(namespace, name string) bool {
 		return true
 	}
 	if namespace == "whiteboards" {
-		return whiteboardGenerationPattern.MatchString(name)
+		return whiteboardGenerationPattern.MatchString(name) || markdownContextPattern.MatchString(name)
 	}
 	if namespace == "images" {
 		return imageGenerationPattern.MatchString(name)
@@ -1323,25 +1543,31 @@ func validateImageRecord(record imageDomain.Image) error {
 }
 
 func validateMetadata(stored metadata, expectedKind string) error {
-	if stored.SchemaVersion != metadataSchemaVersion {
-		return errors.New("invalid metadata schema or kind")
-	}
 	if !stored.CreatedAt.valid() || !stored.UpdatedAt.valid() || (stored.ExpiresAt != nil && !stored.ExpiresAt.valid()) {
 		return errors.New("invalid metadata timestamp")
 	}
 	switch expectedKind {
 	case "whiteboard":
-		if stored.Kind != string(whiteboardDomain.KindMarkdown) && stored.Kind != string(whiteboardDomain.KindHTML) {
-			return errors.New("invalid whiteboard kind")
-		}
-		if !whiteboardGenerationPattern.MatchString(stored.ContentFilename) || stored.Extension != "" || stored.MediaType != "" {
+		if stored.Extension != "" || stored.MediaType != "" {
 			return errors.New("invalid whiteboard metadata")
 		}
-		if strings.HasSuffix(stored.ContentFilename, ".md") != (stored.Kind == string(whiteboardDomain.KindMarkdown)) {
-			return errors.New("invalid whiteboard generation")
+		switch stored.SchemaVersion {
+		case legacyMetadataSchemaVersion:
+			if stored.ContextFilename != "" || (stored.Kind != string(whiteboardDomain.KindMarkdown) && stored.Kind != string(whiteboardDomain.KindHTML)) {
+				return errors.New("invalid legacy whiteboard metadata")
+			}
+			if !whiteboardGenerationPattern.MatchString(stored.ContentFilename) || strings.HasSuffix(stored.ContentFilename, ".md") != (stored.Kind == string(whiteboardDomain.KindMarkdown)) {
+				return errors.New("invalid legacy whiteboard generation")
+			}
+		case markdownMetadataSchemaVersion:
+			if stored.Kind != string(whiteboardDomain.KindMarkdown) || !matchingMarkdownGeneration(stored.ContentFilename, stored.ContextFilename) {
+				return errors.New("invalid paired Markdown metadata")
+			}
+		default:
+			return errors.New("invalid whiteboard metadata schema")
 		}
 	case "image":
-		if stored.Kind != "image" || !imageGenerationPattern.MatchString(stored.ContentFilename) || !validImageFormat(stored.Extension, stored.MediaType) {
+		if stored.SchemaVersion != legacyMetadataSchemaVersion || stored.ContextFilename != "" || stored.Kind != "image" || !imageGenerationPattern.MatchString(stored.ContentFilename) || !validImageFormat(stored.Extension, stored.MediaType) {
 			return errors.New("invalid image metadata")
 		}
 	default:
@@ -1350,16 +1576,33 @@ func validateMetadata(stored metadata, expectedKind string) error {
 	return nil
 }
 
+func matchingMarkdownGeneration(sourceName, contextName string) bool {
+	source := markdownSourcePattern.FindStringSubmatch(sourceName)
+	creatorContext := markdownContextPattern.FindStringSubmatch(contextName)
+	return len(source) == 2 && len(creatorContext) == 2 && source[1] == creatorContext[1]
+}
+
+func referencedArtifacts(stored metadata) []string {
+	if stored.ContextFilename == "" {
+		return []string{stored.ContentFilename}
+	}
+	return []string{stored.ContentFilename, stored.ContextFilename}
+}
+
 func whiteboardMetadata(record whiteboardDomain.Whiteboard) metadata {
+	schemaVersion := legacyMetadataSchemaVersion
+	if record.Kind == whiteboardDomain.KindMarkdown {
+		schemaVersion = markdownMetadataSchemaVersion
+	}
 	return metadata{
-		SchemaVersion: metadataSchemaVersion, Kind: string(record.Kind),
+		SchemaVersion: schemaVersion, Kind: string(record.Kind),
 		CreatedAt: fromTime(record.CreatedAt), UpdatedAt: fromTime(record.UpdatedAt), ExpiresAt: fromTimePtr(record.ExpiresAt),
 	}
 }
 
 func imageMetadata(record imageDomain.Image) metadata {
 	return metadata{
-		SchemaVersion: metadataSchemaVersion, Kind: "image",
+		SchemaVersion: legacyMetadataSchemaVersion, Kind: "image",
 		CreatedAt: fromTime(record.CreatedAt), UpdatedAt: fromTime(record.UpdatedAt), ExpiresAt: fromTimePtr(record.ExpiresAt),
 		Extension: record.Extension, MediaType: record.MediaType,
 	}

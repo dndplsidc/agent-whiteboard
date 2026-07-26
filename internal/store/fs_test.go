@@ -89,7 +89,7 @@ func TestFSCreateInitializesLayoutAndRoundTripsWhiteboard(t *testing.T) {
 	updated := time.Unix(1_700_000_001, 987_654_321).UTC()
 	expires := time.Unix(1_800_000_000, 222_333_444).UTC()
 	record := whiteboardDomain.Whiteboard{
-		ID: testID, Kind: whiteboardDomain.KindMarkdown, Source: []byte("# exact\x00bytes\n"),
+		ID: testID, Kind: whiteboardDomain.KindMarkdown, Source: []byte("# exact\x00bytes\n"), Context: []byte("exact context\x00bytes\n"),
 		CreatedAt: created, UpdatedAt: updated, ExpiresAt: &expires,
 	}
 
@@ -104,22 +104,22 @@ func TestFSCreateInitializesLayoutAndRoundTripsWhiteboard(t *testing.T) {
 	resourceDir := filepath.Join(root, "whiteboards", testID)
 	entries, err := os.ReadDir(resourceDir)
 	require.NoError(t, err)
-	require.Len(t, entries, 2)
-	var generation string
+	require.Len(t, entries, 3)
 	for _, entry := range entries {
 		assertPermissions(t, filepath.Join(resourceDir, entry.Name()), 0o600)
-		if entry.Name() != "metadata.json" {
-			generation = entry.Name()
-		}
 	}
-	require.Regexp(t, regexp.MustCompile(`^source-[a-f0-9]{32}\.md$`), generation)
-	require.Equal(t, record.Source, readFile(t, filepath.Join(resourceDir, generation)))
 
 	var metadata map[string]any
 	require.NoError(t, json.Unmarshal(readFile(t, filepath.Join(resourceDir, "metadata.json")), &metadata))
-	require.Equal(t, float64(1), metadata["schema_version"])
+	require.Equal(t, float64(2), metadata["schema_version"])
 	require.Equal(t, "markdown", metadata["kind"])
-	require.Equal(t, generation, metadata["content_filename"])
+	sourceGeneration := metadata["content_filename"].(string)
+	contextGeneration := metadata["context_filename"].(string)
+	require.Regexp(t, regexp.MustCompile(`^source-[a-f0-9]{32}\.md$`), sourceGeneration)
+	require.Regexp(t, regexp.MustCompile(`^context-[a-f0-9]{32}\.md$`), contextGeneration)
+	require.Equal(t, generationToken(t, sourceGeneration, "source-"), generationToken(t, contextGeneration, "context-"))
+	require.Equal(t, record.Source, readFile(t, filepath.Join(resourceDir, sourceGeneration)))
+	require.Equal(t, record.Context, readFile(t, filepath.Join(resourceDir, contextGeneration)))
 	assertJSONTime(t, metadata["created_at"], created)
 	assertJSONTime(t, metadata["updated_at"], updated)
 	assertJSONTime(t, metadata["expires_at"], expires)
@@ -230,7 +230,7 @@ func TestFSGetValidatesMetadataAndCommittedFilename(t *testing.T) {
 		name   string
 		mutate func(map[string]any)
 	}{
-		{name: "schema", mutate: func(m map[string]any) { m["schema_version"] = 2 }},
+		{name: "schema", mutate: func(m map[string]any) { m["schema_version"] = 99 }},
 		{name: "kind", mutate: func(m map[string]any) { m["kind"] = "image" }},
 		{name: "timestamp nanoseconds", mutate: func(m map[string]any) { m["created_at"] = map[string]any{"seconds": 1, "nanoseconds": 1_000_000_000} }},
 		{name: "filename traversal", mutate: func(m map[string]any) { m["content_filename"] = "../../outside.md" }},
