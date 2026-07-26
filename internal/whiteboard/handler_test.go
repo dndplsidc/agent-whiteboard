@@ -301,6 +301,7 @@ func TestHandlerGetMarkdownReturnsExactPublicResourceMarkdownAndContext(t *testi
 
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.Equal(t, "no-store", rr.Header().Get("Cache-Control"))
 	require.Equal(t, fmt.Sprintf("{\"resource\":{\"id\":%q,\"type\":\"markdown\",\"path\":%q,\"created_at\":\"2026-07-17T03:04:05Z\",\"updated_at\":\"2026-07-17T04:04:05Z\",\"expires_at\":1784264645,\"permanent\":false},\"markdown\":\"# Exact markdown\\n\",\"context\":\"## Exact creator context\\n\"}\n", testWhiteboardID, httpx.PublicMarkdown+testWhiteboardID), rr.Body.String())
 	for _, privateName := range []string{"source_path", "context_path", "schema", "generation"} {
 		require.NotContains(t, rr.Body.String(), privateName)

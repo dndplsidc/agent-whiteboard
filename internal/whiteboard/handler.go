@@ -67,6 +67,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 }
 
 func (h *Handler) getMarkdown(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	id := r.PathValue("id")
 	if err := common.ValidateID(id); err != nil {
 		httpx.WriteError(w, notFound())

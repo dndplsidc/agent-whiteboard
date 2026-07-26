@@ -3,9 +3,10 @@ package config
 import "time"
 
 const (
-	Version1               = 1
-	AccessContentOnly      = "content-only"
-	DefaultMaxContextBytes = 1 << 20
+	Version1                  = 1
+	AccessContentOnly         = "content-only"
+	DefaultMaxWhiteboardBytes = 10 << 20
+	DefaultMaxContextBytes    = 1 << 20
 )
 
 type optional[T any] struct {

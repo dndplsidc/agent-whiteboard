@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,15 @@ import (
 	"strings"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
 )
 
-const maxClientResponseBytes int64 = 1 << 20
+const (
+	maxClientResponseBytes int64 = 1 << 20
+	// Bound a default-size Markdown pair after worst-case JSON string escaping,
+	// with space for the public resource envelope.
+	maxMarkdownResponseBytes int64 = 6*(generalconfig.DefaultMaxWhiteboardBytes+generalconfig.DefaultMaxContextBytes) + MultipartOverheadBytes
+)
 
 type ClientConfig struct {
 	Server     string
@@ -165,14 +172,45 @@ func (c *Client) GetMarkdown(ctx context.Context, id string) (MarkdownResponse, 
 		return MarkdownResponse{}, err
 	}
 
-	var response MarkdownResponse
-	if err := c.do(ctx, standardhttp.MethodGet, APIWhiteboardMarkdown+"/"+url.PathEscape(id), nil, "", standardhttp.StatusOK, &response); err != nil {
+	var encoded markdownResponseEnvelope
+	if err := c.doWithResponseLimit(ctx, standardhttp.MethodGet, APIWhiteboardMarkdown+"/"+url.PathEscape(id), nil, "", standardhttp.StatusOK, &encoded, maxMarkdownResponseBytes); err != nil {
 		return MarkdownResponse{}, err
 	}
-	if err := c.validateResource(response.Resource, id); err != nil {
+	if encoded.Markdown == nil || *encoded.Markdown == "" || encoded.Context == nil {
+		return MarkdownResponse{}, clientInvalidResponse("server returned an invalid response")
+	}
+	if err := c.validateResource(encoded.Resource, id); err != nil {
 		return MarkdownResponse{}, err
 	}
-	return response, nil
+	if encoded.Resource.Type != string(WhiteboardMarkdown) || encoded.Resource.Path != PublicMarkdown+id {
+		return MarkdownResponse{}, clientInvalidResponse("server returned an invalid response")
+	}
+	return MarkdownResponse{Resource: encoded.Resource, Markdown: *encoded.Markdown, Context: *encoded.Context}, nil
+}
+
+type markdownResponseEnvelope struct {
+	Resource Resource
+	Markdown *string
+	Context  *string
+}
+
+func (response *markdownResponseEnvelope) UnmarshalJSON(encoded []byte) error {
+	type wireResponse struct {
+		Resource Resource `json:"resource"`
+		Markdown *string  `json:"markdown"`
+		Context  *string  `json:"context"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var wire wireResponse
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("invalid trailing JSON value")
+	}
+	*response = markdownResponseEnvelope(wire)
+	return nil
 }
 
 func (c *Client) DeleteWhiteboard(ctx context.Context, kind WhiteboardKind, id string) error {
@@ -313,7 +351,7 @@ func (c *Client) doMultipart(
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 
 	go writeMultipart(writer, multipartWriter, files, expiresInSeconds)
-	err = c.execute(request, wantStatus, result)
+	err = c.execute(request, wantStatus, result, maxClientResponseBytes)
 	_ = reader.CloseWithError(err)
 	return contextError(ctx, err)
 }
@@ -371,6 +409,19 @@ func (c *Client) do(
 	wantStatus int,
 	result any,
 ) error {
+	return c.doWithResponseLimit(ctx, method, endpoint, body, contentType, wantStatus, result, maxClientResponseBytes)
+}
+
+func (c *Client) doWithResponseLimit(
+	ctx context.Context,
+	method string,
+	endpoint string,
+	body io.Reader,
+	contentType string,
+	wantStatus int,
+	result any,
+	successResponseLimit int64,
+) error {
 	request, err := c.newRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return err
@@ -378,7 +429,7 @@ func (c *Client) do(
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
-	return contextError(ctx, c.execute(request, wantStatus, result))
+	return contextError(ctx, c.execute(request, wantStatus, result, successResponseLimit))
 }
 
 func (c *Client) newRequest(ctx context.Context, method string, endpoint string, body io.Reader) (*standardhttp.Request, error) {
@@ -392,7 +443,7 @@ func (c *Client) newRequest(ctx context.Context, method string, endpoint string,
 	return request, nil
 }
 
-func (c *Client) execute(request *standardhttp.Request, wantStatus int, result any) error {
+func (c *Client) execute(request *standardhttp.Request, wantStatus int, result any, successResponseLimit int64) error {
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		err = contextError(request.Context(), err)
@@ -404,7 +455,11 @@ func (c *Client) execute(request *standardhttp.Request, wantStatus int, result a
 	}
 	defer response.Body.Close()
 
-	body, err := readClientResponse(response.Body)
+	responseLimit := maxClientResponseBytes
+	if response.StatusCode == wantStatus {
+		responseLimit = successResponseLimit
+	}
+	body, err := readClientResponse(response.Body, responseLimit)
 	if err != nil {
 		return contextError(request.Context(), err)
 	}
@@ -432,8 +487,8 @@ func (c *Client) execute(request *standardhttp.Request, wantStatus int, result a
 	return nil
 }
 
-func readClientResponse(reader io.Reader) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, maxClientResponseBytes+1))
+func readClientResponse(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, context.Canceled
@@ -443,7 +498,7 @@ func readClientResponse(reader io.Reader) ([]byte, error) {
 		}
 		return nil, clientInvalidResponse("could not read server response")
 	}
-	if int64(len(body)) > maxClientResponseBytes {
+	if int64(len(body)) > limit {
 		return nil, clientInvalidResponse("server response is too large")
 	}
 	return body, nil

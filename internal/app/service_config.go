@@ -22,7 +22,7 @@ const (
 	defaultHost                       = "127.0.0.1"
 	defaultPort                       = 8567
 	defaultShutdownTimeout            = 10 * time.Second
-	defaultMaxWhiteboardBytes   int64 = 10 << 20
+	defaultMaxWhiteboardBytes   int64 = generalconfig.DefaultMaxWhiteboardBytes
 	defaultMaxContextBytes      int64 = generalconfig.DefaultMaxContextBytes
 	defaultMaxImageBytes        int64 = 25 << 20
 	defaultMaxImageRequestBytes int64 = 100 << 20

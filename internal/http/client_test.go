@@ -627,6 +627,30 @@ func TestClientGetsMarkdownUsingBoundedSafeJSON(t *testing.T) {
 	}, got)
 }
 
+func TestClientGetsMarkdownAcrossDefaultWriteLimits(t *testing.T) {
+	t.Parallel()
+
+	markdown := strings.Repeat("m", 10<<20)
+	creatorContext := strings.Repeat("c", 1<<20)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, httpx.MarkdownResponse{
+			Resource: httpx.Resource{
+				ID: clientTestID, Type: "markdown", Path: httpx.PublicMarkdown + clientTestID, Permanent: true,
+			},
+			Markdown: markdown,
+			Context:  creatorContext,
+		})
+	}))
+	t.Cleanup(server.Close)
+	client := newTestClient(t, server.URL, server.Client())
+
+	got, err := client.GetMarkdown(context.Background(), clientTestID)
+
+	require.NoError(t, err)
+	require.Equal(t, markdown, got.Markdown)
+	require.Equal(t, creatorContext, got.Context)
+}
+
 func TestClientMarkdownGetRejectsErrorsAndUnsafeResponsesWithoutLeakingBodies(t *testing.T) {
 	t.Parallel()
 
@@ -655,12 +679,42 @@ func TestClientMarkdownGetRejectsErrorsAndUnsafeResponsesWithoutLeakingBodies(t 
 		},
 		{
 			name: "invalid resource", status: http.StatusOK,
-			body:     `{"resource":{"id":"` + clientSecondTestID + `","path":"/whiteboards/markdown/` + clientSecondTestID + `","permanent":true},"markdown":"private source","context":"private context"}`,
+			body:     `{"resource":{"id":"` + clientSecondTestID + `","type":"markdown","path":"/whiteboards/markdown/` + clientSecondTestID + `","permanent":true},"markdown":"private source","context":"private context"}`,
+			wantCode: common.CodeInternal, wantMsg: "server returned an invalid response", hidden: "private",
+		},
+		{
+			name: "missing markdown", status: http.StatusOK,
+			body:     `{"resource":{"id":"` + clientTestID + `","type":"markdown","path":"/whiteboards/markdown/` + clientTestID + `","permanent":true},"context":"private context"}`,
+			wantCode: common.CodeInternal, wantMsg: "server returned an invalid response", hidden: "private",
+		},
+		{
+			name: "empty markdown", status: http.StatusOK,
+			body:     `{"resource":{"id":"` + clientTestID + `","type":"markdown","path":"/whiteboards/markdown/` + clientTestID + `","permanent":true},"markdown":"","context":"private context"}`,
+			wantCode: common.CodeInternal, wantMsg: "server returned an invalid response", hidden: "private",
+		},
+		{
+			name: "missing context", status: http.StatusOK,
+			body:     `{"resource":{"id":"` + clientTestID + `","type":"markdown","path":"/whiteboards/markdown/` + clientTestID + `","permanent":true},"markdown":"private source"}`,
+			wantCode: common.CodeInternal, wantMsg: "server returned an invalid response", hidden: "private",
+		},
+		{
+			name: "wrong resource type", status: http.StatusOK,
+			body:     `{"resource":{"id":"` + clientTestID + `","type":"html","path":"/whiteboards/markdown/` + clientTestID + `","permanent":true},"markdown":"private source","context":"private context"}`,
+			wantCode: common.CodeInternal, wantMsg: "server returned an invalid response", hidden: "private",
+		},
+		{
+			name: "wrong resource path", status: http.StatusOK,
+			body:     `{"resource":{"id":"` + clientTestID + `","type":"markdown","path":"/images/` + clientTestID + `","permanent":true},"markdown":"private source","context":"private context"}`,
+			wantCode: common.CodeInternal, wantMsg: "server returned an invalid response", hidden: "private",
+		},
+		{
+			name: "unknown response field", status: http.StatusOK,
+			body:     `{"resource":{"id":"` + clientTestID + `","type":"markdown","path":"/whiteboards/markdown/` + clientTestID + `","permanent":true},"markdown":"private source","context":"private context","storage_path":"private"}`,
 			wantCode: common.CodeInternal, wantMsg: "server returned an invalid response", hidden: "private",
 		},
 		{
 			name: "oversized success", status: http.StatusOK,
-			body: strings.Repeat("private", (1<<20)/len("private")+1), wantCode: common.CodeInternal,
+			body: strings.Repeat("private", (67<<20)/len("private")+1), wantCode: common.CodeInternal,
 			wantMsg: "server response is too large", hidden: "private",
 		},
 	}

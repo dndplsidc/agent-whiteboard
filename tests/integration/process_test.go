@@ -30,12 +30,12 @@ func TestProcessClientConfigurationPrecedence(t *testing.T) {
 		{
 			name: "environment overrides YAML",
 			env:  append(append([]string{}, server.env...), "AGENT_WHITEBOARD_SERVER="+server.URL),
-			args: []string{"--config", configPath, "--json", "get", "markdown", created.Resource.ID},
+			args: []string{"--config", configPath, "--json", "get", "markdown", "--", created.Resource.ID},
 		},
 		{
 			name: "flag overrides environment and YAML",
 			env:  append(append([]string{}, server.env...), "AGENT_WHITEBOARD_SERVER=http://127.0.0.1:2"),
-			args: []string{"--config", configPath, "--server", server.URL, "--json", "get", "markdown", created.Resource.ID},
+			args: []string{"--config", configPath, "--server", server.URL, "--json", "get", "markdown", "--", created.Resource.ID},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
