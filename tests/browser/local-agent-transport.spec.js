@@ -111,8 +111,9 @@ test("requires exact-origin Local Network Access permission before loopback stat
   const denied = await fetchStatus(page, broker.origin);
   expect(denied.ok).toBe(false);
   expect(denied.error).toContain("Failed to fetch");
+  await expect(readWebSocketStream(page, broker.origin)).rejects.toThrow("WebSocket handshake failed");
   await new Promise((resolve) => setTimeout(resolve, 200));
-  expect(broker.requests, "loopback requests before LNA permission").toEqual([]);
+  expect(broker.requests, "loopback HTTP or WebSocket requests before LNA permission").toEqual([]);
 
   await grantLocalNetworkAccess(context, source.origin);
   const permission = await page.evaluate(async () =>

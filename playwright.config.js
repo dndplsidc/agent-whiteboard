@@ -11,10 +11,7 @@ export default defineConfig({
       use: {
         ...devices["Desktop Chrome"],
         launchOptions: {
-          args: [
-            "--enable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets",
-            "--ip-address-space-overrides=[::1]:0=public,127.0.0.0/8=local",
-          ],
+          args: ["--ip-address-space-overrides=[::1]:0=public,127.0.0.0/8=local"],
         },
       },
     },

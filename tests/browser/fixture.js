@@ -289,8 +289,9 @@ function requestRecord(request) {
   };
 }
 
-function createLoopbackBroker(allowedOrigin) {
+function createLoopbackBroker(initialAllowedOrigin) {
   const requests = [];
+  let allowedOrigin = initialAllowedOrigin;
   let forceWebSocketFailure = false;
 
   const send = (response, record, status, headers = {}, body = "") => {
@@ -408,6 +409,9 @@ function createLoopbackBroker(allowedOrigin) {
     setWebSocketFailure: (value) => {
       forceWebSocketFailure = value;
     },
+    setAllowedOrigin: (origin) => {
+      allowedOrigin = origin;
+    },
   };
 }
 
@@ -454,15 +458,16 @@ export const test = base.extend({
       const credentials = await createTestCertificate(server.root);
       const source = createHTTPSSource(credentials, server.url);
       const sourceSockets = trackConnections(source.server);
-      const sourcePort = await listen(source.server, "::1");
-      const sourceOrigin = `https://[::1]:${sourcePort}`;
-      const broker = createLoopbackBroker(sourceOrigin);
+      const broker = createLoopbackBroker("");
       const brokerSockets = trackConnections(broker.server);
-      const brokerPort = await listen(broker.server, "127.0.0.1");
       const stub = createLoopbackStub();
       const stubSockets = trackConnections(stub.server);
-      const stubPort = await listen(stub.server, "127.0.0.1");
       try {
+        const sourcePort = await listen(source.server, "::1");
+        const sourceOrigin = `https://[::1]:${sourcePort}`;
+        broker.setAllowedOrigin(sourceOrigin);
+        const brokerPort = await listen(broker.server, "127.0.0.1");
+        const stubPort = await listen(stub.server, "127.0.0.1");
         await use({
           source: {
             origin: sourceOrigin,
