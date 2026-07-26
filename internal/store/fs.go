@@ -45,18 +45,20 @@ type Config struct {
 }
 
 type FS struct {
-	rootPath        string
-	rootHandle      *os.Root
-	categories      map[string]*os.Root
-	clock           common.Clock
-	ctx             context.Context
-	cancel          context.CancelFunc
-	interval        time.Duration
-	locks           lockSet
-	directorySync   func(*os.Root) error
-	publishArtifact func(*os.Root, string, string) error
-	renameArtifact  func(*os.Root, string, string) error
-	removeArtifact  func(*os.Root, string) error
+	rootPath                   string
+	rootHandle                 *os.Root
+	categories                 map[string]*os.Root
+	clock                      common.Clock
+	ctx                        context.Context
+	cancel                     context.CancelFunc
+	interval                   time.Duration
+	locks                      lockSet
+	directorySync              func(*os.Root) error
+	publishArtifact            func(*os.Root, string, string) error
+	renameArtifact             func(*os.Root, string, string) error
+	removeArtifact             func(*os.Root, string) error
+	removeResource             func(*os.Root, string) error
+	inspectMetadataPublication func(*os.Root, []byte) publicationState
 
 	lifecycleMu sync.Mutex
 	closing     bool
@@ -139,7 +141,9 @@ func NewFS(config Config) (*FS, error) {
 		clock: config.Clock, ctx: ctx, cancel: cancel, interval: config.CleanupInterval,
 		locks: lockSet{entries: make(map[string]*lockEntry)}, directorySync: syncDirectory,
 		publishArtifact: publishGeneration, renameArtifact: renameArtifact, removeArtifact: removeArtifact,
-		closeDone: make(chan struct{}),
+		removeResource:             func(root *os.Root, name string) error { return root.RemoveAll(name) },
+		inspectMetadataPublication: inspectMetadataPublication,
+		closeDone:                  make(chan struct{}),
 	}
 	for _, name := range []string{"whiteboards", "images", ".readiness"} {
 		if err := ctx.Err(); err != nil {
@@ -276,7 +280,7 @@ func (view *imageView) Delete(ctx context.Context, id string) error {
 func (view *imageView) Ready(ctx context.Context) error { return view.fs.Ready(ctx) }
 func (view *imageView) Close() error                    { return view.fs.Close() }
 
-func (fs *FS) create(ctx context.Context, namespace, id string, content, creatorContext []byte, stored metadata) error {
+func (fs *FS) create(ctx context.Context, namespace, id string, content, creatorContext []byte, stored metadata) (resultErr error) {
 	release, err := fs.locks.lock(ctx, resourceLockKey(namespace, id))
 	if err != nil {
 		return err
@@ -299,38 +303,57 @@ func (fs *FS) create(ctx context.Context, namespace, id string, content, creator
 		}
 		return storageUnavailable(err)
 	}
-	if err := fs.directorySync(category); err != nil {
-		_ = category.RemoveAll(id)
-		_ = fs.directorySync(category)
-		return storageUnavailable(err)
-	}
-	resource, err := openVerifiedNestedRoot(category, id)
-	if err != nil {
-		_ = category.RemoveAll(id)
-		_ = fs.directorySync(category)
-		return storageUnavailable(err)
-	}
-	metadataPublished := false
+
+	var resource *os.Root
 	defer func() {
-		_ = resource.Close()
-		if !metadataPublished {
-			_ = category.RemoveAll(id)
-			_ = fs.directorySync(category)
+		if resource != nil {
+			_ = resource.Close()
+		}
+		if resultErr == nil {
+			return
+		}
+		if rollbackErr := fs.rollbackCreatedResource(category, id); rollbackErr != nil {
+			resultErr = &uncertainCreateError{operation: resultErr, rollback: rollbackErr}
 		}
 	}()
+
+	if err := fs.directorySync(category); err != nil {
+		return storageUnavailable(err)
+	}
+	resource, err = openVerifiedNestedRoot(category, id)
+	if err != nil {
+		return storageUnavailable(err)
+	}
 	if err := chmodRootDirectory(resource); err != nil {
 		return storageUnavailable(err)
 	}
 	if err := ctxErr(ctx, fs.ctx); err != nil {
 		return err
 	}
-	published, err := fs.commit(ctx, resource, content, creatorContext, &stored, nil)
-	metadataPublished = published
-	if err != nil {
-		return err
-	}
-	return nil
+	_, err = fs.commit(ctx, resource, content, creatorContext, &stored, nil)
+	return err
 }
+
+func (fs *FS) rollbackCreatedResource(category *os.Root, id string) error {
+	removeErr := fs.removeResource(category, id)
+	_, statErr := category.Lstat(id)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return fs.directorySync(category)
+	}
+	if statErr == nil {
+		statErr = errors.New("created resource remains after rollback")
+	}
+	return errors.Join(removeErr, statErr)
+}
+
+type uncertainCreateError struct {
+	operation error
+	rollback  error
+}
+
+func (err *uncertainCreateError) Error() string          { return err.operation.Error() }
+func (err *uncertainCreateError) Unwrap() []error        { return []error{err.operation, err.rollback} }
+func (err *uncertainCreateError) ResourceMayExist() bool { return true }
 
 func (fs *FS) get(ctx context.Context, namespace, id, expectedKind string) ([]byte, []byte, metadata, error) {
 	key := resourceLockKey(namespace, id)
@@ -581,6 +604,7 @@ func (fs *FS) commitSingle(ctx context.Context, resource *os.Root, content []byt
 	publishedGeneration := ""
 	metadataTempName := ""
 	metadataPublished := false
+	preservePublishedGeneration := false
 	defer func() {
 		_ = contentTemp.Close()
 		if contentTempName != "" {
@@ -589,7 +613,7 @@ func (fs *FS) commitSingle(ctx context.Context, resource *os.Root, content []byt
 		if metadataTempName != "" {
 			_ = resource.Remove(metadataTempName)
 		}
-		if publishedGeneration != "" && !metadataPublished {
+		if publishedGeneration != "" && !metadataPublished && !preservePublishedGeneration {
 			_ = resource.Remove(publishedGeneration)
 		}
 	}()
@@ -676,8 +700,18 @@ func (fs *FS) commitSingle(ctx context.Context, resource *os.Root, content []byt
 	if err := ctxErr(ctx, fs.ctx); err != nil {
 		return false, err
 	}
-	if err := resource.Rename(metadataTempName, metadataFilename); err != nil {
-		return false, storageUnavailable(err)
+	if err := fs.renameArtifact(resource, metadataTempName, metadataFilename); err != nil {
+		switch fs.inspectMetadataPublication(resource, encoded) {
+		case publicationApplied:
+			metadataTempName = ""
+			metadataPublished = true
+			return true, storageUnavailable(err)
+		case publicationUncertain:
+			preservePublishedGeneration = true
+			return true, storageUnavailable(err)
+		default:
+			return false, storageUnavailable(err)
+		}
 	}
 	metadataTempName = ""
 	metadataPublished = true
@@ -711,7 +745,10 @@ func (fs *FS) commitMarkdown(ctx context.Context, resource *os.Root, source, cre
 	metadataTempName := ""
 	publishedSource := ""
 	publishedContext := ""
+	sourcePublicationApplied := false
+	contextPublicationApplied := false
 	metadataPublished := false
+	preservePublishedArtifacts := false
 	defer func() {
 		_ = sourceTemp.Close()
 		if contextTemp != nil {
@@ -727,10 +764,10 @@ func (fs *FS) commitMarkdown(ctx context.Context, resource *os.Root, source, cre
 			_ = resource.Remove(metadataTempName)
 		}
 		removedPublished := false
-		if !metadataPublished && publishedSource != "" {
+		if !metadataPublished && !preservePublishedArtifacts && sourcePublicationApplied {
 			removedPublished = resource.Remove(publishedSource) == nil || removedPublished
 		}
-		if !metadataPublished && publishedContext != "" {
+		if !metadataPublished && !preservePublishedArtifacts && contextPublicationApplied {
 			removedPublished = resource.Remove(publishedContext) == nil || removedPublished
 		}
 		if removedPublished {
@@ -765,17 +802,29 @@ func (fs *FS) commitMarkdown(ctx context.Context, resource *os.Root, source, cre
 		return false, err
 	}
 	if err := fs.publishArtifact(resource, sourceTempName, publishedSource); err != nil {
-		publishedSource = ""
+		switch inspectArtifactPublication(resource, sourceTempName, publishedSource) {
+		case publicationApplied:
+			sourcePublicationApplied = true
+		case publicationUncertain:
+			preservePublishedArtifacts = true
+		}
 		return false, storageUnavailable(err)
 	}
+	sourcePublicationApplied = true
 	sourceTempName = ""
 	if err := ctxErr(ctx, fs.ctx); err != nil {
 		return false, err
 	}
 	if err := fs.publishArtifact(resource, contextTempName, publishedContext); err != nil {
-		publishedContext = ""
+		switch inspectArtifactPublication(resource, contextTempName, publishedContext) {
+		case publicationApplied:
+			contextPublicationApplied = true
+		case publicationUncertain:
+			preservePublishedArtifacts = true
+		}
 		return false, storageUnavailable(err)
 	}
+	contextPublicationApplied = true
 	contextTempName = ""
 	if err := fs.directorySync(resource); err != nil {
 		return false, storageUnavailable(err)
@@ -805,7 +854,17 @@ func (fs *FS) commitMarkdown(ctx context.Context, resource *os.Root, source, cre
 		return false, err
 	}
 	if err := fs.renameArtifact(resource, metadataTempName, metadataFilename); err != nil {
-		return false, storageUnavailable(err)
+		switch fs.inspectMetadataPublication(resource, encoded) {
+		case publicationApplied:
+			metadataTempName = ""
+			metadataPublished = true
+			return true, storageUnavailable(err)
+		case publicationUncertain:
+			preservePublishedArtifacts = true
+			return true, storageUnavailable(err)
+		default:
+			return false, storageUnavailable(err)
+		}
 	}
 	metadataTempName = ""
 	metadataPublished = true
@@ -874,6 +933,45 @@ func renameArtifact(root *os.Root, oldName, newName string) error {
 
 func removeArtifact(root *os.Root, name string) error {
 	return root.Remove(name)
+}
+
+type publicationState int
+
+const (
+	publicationNotApplied publicationState = iota
+	publicationApplied
+	publicationUncertain
+)
+
+func inspectArtifactPublication(root *os.Root, temp, final string) publicationState {
+	finalInfo, finalErr := root.Lstat(final)
+	tempInfo, tempErr := root.Lstat(temp)
+	switch {
+	case finalErr == nil && errors.Is(tempErr, os.ErrNotExist):
+		return publicationApplied
+	case finalErr == nil && tempErr == nil && os.SameFile(finalInfo, tempInfo):
+		return publicationApplied
+	case errors.Is(finalErr, os.ErrNotExist):
+		return publicationNotApplied
+	case finalErr == nil && tempErr == nil:
+		return publicationNotApplied
+	default:
+		return publicationUncertain
+	}
+}
+
+func inspectMetadataPublication(root *os.Root, expected []byte) publicationState {
+	actual, err := readVerifiedFile(root, metadataFilename)
+	if err == nil {
+		if bytes.Equal(actual, expected) {
+			return publicationApplied
+		}
+		return publicationNotApplied
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return publicationNotApplied
+	}
+	return publicationUncertain
 }
 
 func publishGeneration(root *os.Root, temp, final string) error {

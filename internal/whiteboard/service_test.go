@@ -240,6 +240,23 @@ func TestCreateRetriesOnlyIDCollisions(t *testing.T) {
 		require.Equal(t, testID2, result.ID)
 	})
 
+	t.Run("uncertain create returns generated resource identity", func(t *testing.T) {
+		service, store, clock, ids := newTestService(t, 0)
+		ctx := context.Background()
+		now := time.Unix(1_700_000_000, 0).UTC()
+		storeErr := uncertainCreateTestError{cause: errors.New("rollback could not be verified")}
+
+		clock.EXPECT().Now().Return(now).Once()
+		ids.EXPECT().NewID().Return(testID, nil).Once()
+		store.EXPECT().Create(sameContext(ctx), mock.Anything).Return(storeErr).Once()
+
+		result, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: []byte("valid"), Context: []byte("valid context")})
+		require.ErrorIs(t, err, storeErr.cause)
+		require.Equal(t, testID, result.ID)
+		require.Equal(t, whiteboard.KindMarkdown, result.Kind)
+		require.Equal(t, now, result.CreatedAt)
+	})
+
 	t.Run("non-collision returns immediately", func(t *testing.T) {
 		service, store, clock, ids := newTestService(t, 0)
 		ctx := context.Background()
@@ -254,6 +271,12 @@ func TestCreateRetriesOnlyIDCollisions(t *testing.T) {
 		require.ErrorIs(t, err, storeErr)
 	})
 }
+
+type uncertainCreateTestError struct{ cause error }
+
+func (err uncertainCreateTestError) Error() string          { return err.cause.Error() }
+func (err uncertainCreateTestError) Unwrap() error          { return err.cause }
+func (err uncertainCreateTestError) ResourceMayExist() bool { return true }
 
 func TestCreateStopsAfterThreeIDCollisions(t *testing.T) {
 	service, store, clock, ids := newTestService(t, 0)

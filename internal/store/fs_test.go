@@ -354,72 +354,142 @@ func TestFSDirectoryEntriesAreSyncedInCrashConsistentOrder(t *testing.T) {
 	require.Equal(t, []string{"resource-directory-removed"}, events)
 }
 
-func TestFSMetadataDirectorySyncFailurePreservesPublishedRecord(t *testing.T) {
-	tests := []struct {
-		name      string
-		prepare   func(*testing.T, *FS)
-		operation func(*FS) error
-		want      []byte
-	}{
-		{
-			name:    "create",
-			prepare: func(*testing.T, *FS) {},
-			operation: func(fs *FS) error {
-				return fs.Whiteboards().Create(context.Background(), whiteboardDomain.Whiteboard{
-					ID: testID, Kind: whiteboardDomain.KindMarkdown, Source: []byte("created"),
-					CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
-				})
-			},
-			want: []byte("created"),
-		},
-		{
-			name: "replace",
-			prepare: func(t *testing.T, fs *FS) {
-				require.NoError(t, fs.Whiteboards().Create(context.Background(), whiteboardDomain.Whiteboard{
-					ID: testID, Kind: whiteboardDomain.KindMarkdown, Source: []byte("old"),
-					CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
-				}))
-			},
-			operation: func(fs *FS) error {
-				return fs.Whiteboards().Replace(context.Background(), whiteboardDomain.Whiteboard{
-					ID: testID, Kind: whiteboardDomain.KindHTML, Source: []byte("replaced"),
-					CreatedAt: time.Unix(2, 0), UpdatedAt: time.Unix(2, 0),
-				})
-			},
-			want: []byte("replaced"),
-		},
+func TestFSReplaceMetadataDirectorySyncFailurePreservesPublishedRecord(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	require.NoError(t, fs.Whiteboards().Create(context.Background(), whiteboardDomain.Whiteboard{
+		ID: testID, Kind: whiteboardDomain.KindMarkdown, Source: []byte("old"),
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+	}))
+	syncFailure := errors.New("injected metadata directory sync failure")
+	resourceSyncs := 0
+	fs.directorySync = func(directory *os.Root) error {
+		if directory == fs.categories["whiteboards"] {
+			return nil
+		}
+		resourceSyncs++
+		if resourceSyncs == 2 {
+			return syncFailure
+		}
+		return nil
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
-			fs := newTestFS(t, root)
-			tt.prepare(t, fs)
-			syncFailure := errors.New("injected metadata directory sync failure")
-			resourceSyncs := 0
-			fs.directorySync = func(directory *os.Root) error {
-				if directory == fs.categories["whiteboards"] {
-					return nil
-				}
-				resourceSyncs++
-				if resourceSyncs == 2 {
-					return syncFailure
-				}
-				return nil
+	err := fs.Whiteboards().Replace(context.Background(), whiteboardDomain.Whiteboard{
+		ID: testID, Kind: whiteboardDomain.KindHTML, Source: []byte("replaced"),
+		CreatedAt: time.Unix(2, 0), UpdatedAt: time.Unix(2, 0),
+	})
+	assertCodeWithoutRoot(t, err, common.CodeStorageUnavailable, root)
+	require.ErrorIs(t, err, syncFailure)
+	fs.directorySync = func(*os.Root) error { return nil }
+
+	got, err := fs.Whiteboards().Get(context.Background(), testID)
+	require.NoError(t, err)
+	require.Equal(t, []byte("replaced"), got.Source)
+	stored := decodeMetadata(t, filepath.Join(root, "whiteboards", testID, metadataFilename))
+	require.FileExists(t, filepath.Join(root, "whiteboards", testID, stored["content_filename"].(string)))
+}
+
+func TestFSSingleArtifactAppliedMetadataRenameErrorKeepsReplacementReadable(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	original := imageDomain.Image{
+		ID: testID, Extension: ".png", MediaType: "image/png", Content: []byte("old"),
+		CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0),
+	}
+	require.NoError(t, fs.Images().Create(context.Background(), original))
+	injected := errors.New("injected applied metadata rename failure")
+	fs.renameArtifact = func(root *os.Root, oldName, newName string) error {
+		if err := renameArtifact(root, oldName, newName); err != nil {
+			return err
+		}
+		return injected
+	}
+	replacement := imageDomain.Image{
+		ID: testID, Extension: ".jpg", MediaType: "image/jpeg", Content: []byte("new"),
+		CreatedAt: time.Unix(2, 0), UpdatedAt: time.Unix(2, 0),
+	}
+
+	err := fs.Images().Replace(context.Background(), replacement)
+	require.ErrorIs(t, err, injected)
+	fs.renameArtifact = renameArtifact
+	got, getErr := fs.Images().Get(context.Background(), testID)
+	require.NoError(t, getErr)
+	require.Equal(t, replacement.Content, got.Content)
+	require.Equal(t, replacement.Extension, got.Extension)
+	require.Equal(t, replacement.MediaType, got.MediaType)
+}
+
+func TestFSCreatePostCommitErrorRollsBackVerifiedResource(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	injected := errors.New("injected post-commit directory sync failure")
+	resourceSyncs := 0
+	fs.directorySync = func(directory *os.Root) error {
+		if directory != fs.categories["whiteboards"] {
+			resourceSyncs++
+			if resourceSyncs == 2 {
+				return injected
 			}
-
-			err := tt.operation(fs)
-			assertCodeWithoutRoot(t, err, common.CodeStorageUnavailable, root)
-			require.ErrorIs(t, err, syncFailure)
-			fs.directorySync = func(*os.Root) error { return nil }
-
-			got, err := fs.Whiteboards().Get(context.Background(), testID)
-			require.NoError(t, err)
-			require.Equal(t, tt.want, got.Source)
-			stored := decodeMetadata(t, filepath.Join(root, "whiteboards", testID, metadataFilename))
-			require.FileExists(t, filepath.Join(root, "whiteboards", testID, stored["content_filename"].(string)))
-		})
+		}
+		return syncDirectory(directory)
 	}
+
+	err := fs.Whiteboards().Create(context.Background(), markdownRecord([]byte("source"), []byte("context")))
+	require.ErrorIs(t, err, injected)
+	var uncertain whiteboardDomain.UncertainCreateError
+	require.False(t, errors.As(err, &uncertain))
+	_, statErr := os.Stat(filepath.Join(root, "whiteboards", testID))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestFSCreateAppliedMetadataRenameErrorRollsBackVerifiedResource(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	injected := errors.New("injected applied metadata rename failure")
+	fs.renameArtifact = func(root *os.Root, oldName, newName string) error {
+		if err := renameArtifact(root, oldName, newName); err != nil {
+			return err
+		}
+		return injected
+	}
+
+	err := fs.Whiteboards().Create(context.Background(), markdownRecord([]byte("source"), []byte("context")))
+	require.ErrorIs(t, err, injected)
+	var uncertain whiteboardDomain.UncertainCreateError
+	require.False(t, errors.As(err, &uncertain))
+	_, statErr := os.Stat(filepath.Join(root, "whiteboards", testID))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestFSCreateRollbackFailureReportsPossiblyLiveResource(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	commitFailure := errors.New("injected post-commit directory sync failure")
+	rollbackFailure := errors.New("injected rollback failure")
+	resourceSyncs := 0
+	fs.directorySync = func(directory *os.Root) error {
+		if directory != fs.categories["whiteboards"] {
+			resourceSyncs++
+			if resourceSyncs == 2 {
+				return commitFailure
+			}
+		}
+		return syncDirectory(directory)
+	}
+	fs.removeResource = func(*os.Root, string) error { return rollbackFailure }
+	record := markdownRecord([]byte("source"), []byte("context"))
+
+	err := fs.Whiteboards().Create(context.Background(), record)
+	require.ErrorIs(t, err, commitFailure)
+	require.ErrorIs(t, err, rollbackFailure)
+	var uncertain whiteboardDomain.UncertainCreateError
+	require.ErrorAs(t, err, &uncertain)
+	require.True(t, uncertain.ResourceMayExist())
+
+	fs.directorySync = syncDirectory
+	got, getErr := fs.Whiteboards().Get(context.Background(), testID)
+	require.NoError(t, getErr)
+	require.Equal(t, record, got)
 }
 
 func TestImageServiceRollsBackUncertainFSCreate(t *testing.T) {

@@ -250,6 +250,130 @@ func TestFSMarkdownPairFailuresBeforeMetadataPublicationPreserveOldPair(t *testi
 	}
 }
 
+func TestFSMarkdownAppliedPublicationErrorsDoNotLeakGenerations(t *testing.T) {
+	for _, failedCall := range []int{1, 2} {
+		name := "source"
+		if failedCall == 2 {
+			name = "context"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			fs := newTestFS(t, root)
+			original := markdownRecord([]byte("old source"), []byte("old context"))
+			require.NoError(t, fs.Whiteboards().Create(context.Background(), original))
+			resourceDir := filepath.Join(root, "whiteboards", testID)
+			beforeNames := readDirNames(t, resourceDir)
+			injected := errors.New("injected applied publication failure")
+			calls := 0
+			fs.publishArtifact = func(root *os.Root, temp, final string) error {
+				calls++
+				if err := publishGeneration(root, temp, final); err != nil {
+					return err
+				}
+				if calls == failedCall {
+					return injected
+				}
+				return nil
+			}
+
+			err := fs.Whiteboards().Replace(context.Background(), markdownRecord([]byte("new source"), []byte("new context")))
+			require.ErrorIs(t, err, injected)
+			fs.publishArtifact = publishGeneration
+			got, getErr := fs.Whiteboards().Get(context.Background(), testID)
+			require.NoError(t, getErr)
+			require.Equal(t, original.Source, got.Source)
+			require.Equal(t, original.Context, got.Context)
+			require.ElementsMatch(t, beforeNames, readDirNames(t, resourceDir))
+		})
+	}
+}
+
+func TestFSMarkdownAppliedMetadataRenameErrorKeepsPublishedPairReadable(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	original := markdownRecord([]byte("old source"), []byte("old context"))
+	require.NoError(t, fs.Whiteboards().Create(context.Background(), original))
+	injected := errors.New("injected applied metadata rename failure")
+	fs.renameArtifact = func(root *os.Root, oldName, newName string) error {
+		if err := renameArtifact(root, oldName, newName); err != nil {
+			return err
+		}
+		return injected
+	}
+	replacement := markdownRecord([]byte("new source"), []byte("new context"))
+
+	err := fs.Whiteboards().Replace(context.Background(), replacement)
+	require.ErrorIs(t, err, injected)
+	fs.renameArtifact = renameArtifact
+	got, getErr := fs.Whiteboards().Get(context.Background(), testID)
+	require.NoError(t, getErr)
+	require.Equal(t, replacement.Source, got.Source)
+	require.Equal(t, replacement.Context, got.Context)
+	resourceDir := filepath.Join(root, "whiteboards", testID)
+	stored := decodeMetadata(t, filepath.Join(resourceDir, metadataFilename))
+	require.FileExists(t, filepath.Join(resourceDir, stored["content_filename"].(string)))
+	require.FileExists(t, filepath.Join(resourceDir, stored["context_filename"].(string)))
+
+	fs.sweep(fs.ctx)
+	require.ElementsMatch(t, []string{
+		metadataFilename,
+		stored["content_filename"].(string),
+		stored["context_filename"].(string),
+	}, readDirNames(t, resourceDir))
+}
+
+func TestFSMarkdownUncertainMetadataRenamePreservesThenCleansOrphans(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	original := markdownRecord([]byte("old source"), []byte("old context"))
+	require.NoError(t, fs.Whiteboards().Create(context.Background(), original))
+	resourceDir := filepath.Join(root, "whiteboards", testID)
+	beforeNames := readDirNames(t, resourceDir)
+	injected := errors.New("injected uncertain metadata rename failure")
+	fs.renameArtifact = func(*os.Root, string, string) error { return injected }
+	fs.inspectMetadataPublication = func(*os.Root, []byte) publicationState { return publicationUncertain }
+
+	err := fs.Whiteboards().Replace(context.Background(), markdownRecord([]byte("new source"), []byte("new context")))
+	require.ErrorIs(t, err, injected)
+	got, getErr := fs.Whiteboards().Get(context.Background(), testID)
+	require.NoError(t, getErr)
+	require.Equal(t, original.Source, got.Source)
+	require.Equal(t, original.Context, got.Context)
+	require.Len(t, readDirNames(t, resourceDir), len(beforeNames)+2)
+
+	fs.renameArtifact = renameArtifact
+	fs.inspectMetadataPublication = inspectMetadataPublication
+	fs.sweep(fs.ctx)
+	require.ElementsMatch(t, beforeNames, readDirNames(t, resourceDir))
+}
+
+func TestFSMarkdownLinkedPublicationErrorIsCleaned(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	original := markdownRecord([]byte("old source"), []byte("old context"))
+	require.NoError(t, fs.Whiteboards().Create(context.Background(), original))
+	resourceDir := filepath.Join(root, "whiteboards", testID)
+	beforeNames := readDirNames(t, resourceDir)
+	injected := errors.New("injected uncertain publication failure")
+	fs.publishArtifact = func(root *os.Root, temp, final string) error {
+		if err := root.Link(temp, final); err != nil {
+			return err
+		}
+		return injected
+	}
+
+	err := fs.Whiteboards().Replace(context.Background(), markdownRecord([]byte("new source"), []byte("new context")))
+	require.ErrorIs(t, err, injected)
+	fs.publishArtifact = publishGeneration
+	got, getErr := fs.Whiteboards().Get(context.Background(), testID)
+	require.NoError(t, getErr)
+	require.Equal(t, original.Source, got.Source)
+	require.Equal(t, original.Context, got.Context)
+
+	fs.sweep(fs.ctx)
+	require.ElementsMatch(t, beforeNames, readDirNames(t, resourceDir))
+}
+
 func TestFSMarkdownPairPostCommitFailuresNeverRollBack(t *testing.T) {
 	tests := []struct {
 		name   string

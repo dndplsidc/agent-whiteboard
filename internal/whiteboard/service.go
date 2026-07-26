@@ -74,6 +74,9 @@ func (s *Service) create(ctx context.Context, kind Kind, input CreateInput) (Res
 		if err == nil {
 			return resultFrom(record), nil
 		}
+		if createMayHaveCommitted(err) {
+			return resultFrom(record), err
+		}
 		if !errors.Is(err, common.ErrIDCollision) {
 			return Result{}, err
 		}
