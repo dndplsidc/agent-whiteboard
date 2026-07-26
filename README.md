@@ -60,6 +60,18 @@ agent-whiteboard --server https://whiteboard.example --timeout 20s --json create
 
 Omitting `--expires-in` uses the server default. `--expires-in 0` makes a resource permanent. Expiration is recalculated from update time when the flag is supplied; omission on update retains the current expiration.
 
+## Trusted agent origins
+
+Manage exact HTTPS origins in `~/.agent-whiteboard/config.yaml`:
+
+```sh
+agent-whiteboard agent trust add https://whiteboard.example
+agent-whiteboard agent trust list
+agent-whiteboard agent trust remove https://whiteboard.example
+```
+
+Use the global `--config PATH` flag before or after subcommands to select another configuration file. Explicitly selected files must already exist; adding to a missing default configuration creates its parent and file with owner-only permissions. Add and remove are idempotent, and human list output contains one canonical origin per line.
+
 ## Defaults
 
 | Setting | Default |

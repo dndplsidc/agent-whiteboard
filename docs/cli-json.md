@@ -14,7 +14,13 @@ Image upload always uses the plural envelope, even for one image, and preserves 
 {"schema_version":1,"resources":[{"id":"CAPABILITY_ID","url":"https://whiteboard.example/images/CAPABILITY_ID","expires_at":null,"permanent":true}]}
 ```
 
-Delete success is `{"schema_version":1}`. Error output is stable:
+Delete and trusted-origin add/remove success is `{"schema_version":1}`. Trusted-origin list preserves insertion order:
+
+```json
+{"schema_version":1,"origins":["https://whiteboard.example"]}
+```
+
+Error output is stable:
 
 ```json
 {"schema_version":1,"error":{"code":"not_found","message":"resource not found"}}

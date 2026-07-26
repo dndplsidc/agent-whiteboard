@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,13 +33,9 @@ func Load(selectedPath string) (Config, error) {
 	}
 	defer file.Close()
 
-	root, err := decodeDocument(file)
+	_, loaded, err := parseConfigFile(file, path)
 	if err != nil {
-		return Config{}, fmt.Errorf("parse configuration %q: %w", path, err)
-	}
-	loaded := Config{path: path, exists: true, version: Version1}
-	if err := parseConfig(root, filepath.Dir(path), &loaded); err != nil {
-		return Config{}, fmt.Errorf("parse configuration %q: %w", path, err)
+		return Config{}, err
 	}
 	return loaded, nil
 }

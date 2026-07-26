@@ -48,9 +48,10 @@ type Dependencies struct {
 }
 
 type rootOptions struct {
-	server  string
-	timeout string
-	json    bool
+	server     string
+	timeout    string
+	configPath string
+	json       bool
 }
 
 type clientSettings struct {
@@ -116,10 +117,11 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.PersistentFlags().StringVar(&options.server, "server", "", "server origin")
 	root.PersistentFlags().StringVar(&options.timeout, "timeout", "", "client timeout")
+	root.PersistentFlags().StringVar(&options.configPath, "config", "", "configuration file")
 	root.PersistentFlags().BoolVar(&options.json, "json", false, "write versioned JSON output")
 
 	factory := commandFactory{deps: deps, root: options}
-	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newDeleteCommand(), factory.newImageCommand())
+	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newDeleteCommand(), factory.newImageCommand(), factory.newAgentCommand())
 	return root, nil
 }
 

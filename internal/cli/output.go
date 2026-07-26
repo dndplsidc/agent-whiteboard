@@ -35,6 +35,11 @@ type deleteOutput struct {
 	SchemaVersion int `json:"schema_version"`
 }
 
+type trustedOriginsOutput struct {
+	SchemaVersion int      `json:"schema_version"`
+	Origins       []string `json:"origins"`
+}
+
 type jsonErrorBody struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -102,6 +107,21 @@ func writeDeleteSuccess(writer io.Writer, jsonMode bool) error {
 		return nil
 	}
 	return json.NewEncoder(writer).Encode(deleteOutput{SchemaVersion: 1})
+}
+
+func writeTrustedOrigins(writer io.Writer, jsonMode bool, origins []string) error {
+	if jsonMode {
+		if origins == nil {
+			origins = []string{}
+		}
+		return json.NewEncoder(writer).Encode(trustedOriginsOutput{SchemaVersion: 1, Origins: origins})
+	}
+	for _, origin := range origins {
+		if _, err := fmt.Fprintln(writer, origin); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeCommandError(stdout, stderr io.Writer, jsonMode bool, err error) {
