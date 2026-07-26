@@ -1,6 +1,9 @@
 import { expect, test as base } from "@playwright/test";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -164,6 +167,260 @@ async function stopServer(child) {
   if (!(await waitForExit(child, 5_000))) throw new Error("server process did not exit after SIGKILL");
 }
 
+function listen(server, host) {
+  return new Promise((resolve, reject) => {
+    const fail = (error) => reject(error);
+    server.once("error", fail);
+    server.listen(0, host, () => {
+      server.off("error", fail);
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("test server did not expose a TCP address"));
+        return;
+      }
+      resolve(address.port);
+    });
+  });
+}
+
+function trackConnections(server) {
+  const sockets = new Set();
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  return sockets;
+}
+
+async function closeNodeServer(server, sockets) {
+  if (!server.listening) return;
+  const closed = new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  server.closeIdleConnections?.();
+  const graceful = await Promise.race([
+    closed.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 2_000)),
+  ]);
+  if (graceful) return;
+  for (const socket of sockets) socket.destroy();
+  server.closeAllConnections?.();
+  await closed;
+}
+
+async function createTestCertificate(root) {
+  const config = path.join(root, "https-certificate.cnf");
+  const key = path.join(root, "https-key.pem");
+  const certificate = path.join(root, "https-certificate.pem");
+  await fs.writeFile(
+    config,
+    [
+      "[req]",
+      "distinguished_name = subject",
+      "x509_extensions = extensions",
+      "prompt = no",
+      "[subject]",
+      "CN = agent-whiteboard-browser-test",
+      "[extensions]",
+      "subjectAltName = @names",
+      "basicConstraints = critical,CA:FALSE",
+      "keyUsage = critical,digitalSignature,keyEncipherment",
+      "extendedKeyUsage = serverAuth",
+      "[names]",
+      "IP.1 = ::1",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  await runProcess(
+    "openssl",
+    ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config", config, "-keyout", key, "-out", certificate],
+    { timeout: processTimeout },
+  );
+  return { key: await fs.readFile(key), cert: await fs.readFile(certificate) };
+}
+
+function createHTTPSSource(credentials, upstreamURL) {
+  const upstream = new URL(upstreamURL);
+  const requests = [];
+  const server = https.createServer(credentials, (request, response) => {
+    requests.push({ method: request.method, url: request.url, headers: { ...request.headers } });
+    if (request.url === "/__local-agent-transport") {
+      response.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      response.end("<!doctype html><meta charset=utf-8><title>Local agent transport proof</title>");
+      return;
+    }
+    const proxyRequest = http.request(
+      {
+        hostname: upstream.hostname,
+        port: upstream.port,
+        method: request.method,
+        path: request.url,
+        headers: { ...request.headers, host: upstream.host },
+      },
+      (proxyResponse) => {
+        response.writeHead(proxyResponse.statusCode ?? 502, proxyResponse.headers);
+        proxyResponse.pipe(response);
+      },
+    );
+    proxyRequest.once("error", (error) => {
+      if (!response.headersSent) response.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+      response.end(`HTTPS test proxy failed: ${error.message}`);
+    });
+    request.pipe(proxyRequest);
+  });
+  return { server, requests };
+}
+
+function webSocketFrame(payload) {
+  const body = Buffer.from(payload);
+  if (body.length >= 126) throw new Error("test WebSocket payload is unexpectedly large");
+  return Buffer.concat([Buffer.from([0x81, body.length]), body]);
+}
+
+function requestRecord(request) {
+  return {
+    method: request.method,
+    url: request.url,
+    headers: { ...request.headers },
+    responseHeaders: {},
+    status: undefined,
+  };
+}
+
+function createLoopbackBroker(allowedOrigin) {
+  const requests = [];
+  let forceWebSocketFailure = false;
+
+  const send = (response, record, status, headers = {}, body = "") => {
+    record.status = status;
+    record.responseHeaders = { ...headers };
+    response.writeHead(status, headers);
+    response.end(body);
+  };
+  const corsHeaders = () => ({
+    "Access-Control-Allow-Origin": allowedOrigin,
+    Vary: "Origin",
+  });
+  const originAllowed = (request) => request.headers.origin === allowedOrigin;
+
+  const server = http.createServer((request, response) => {
+    const record = requestRecord(request);
+    requests.push(record);
+    if (!originAllowed(request)) {
+      send(response, record, 403, { "Content-Type": "application/json" }, '{"error":"origin denied"}');
+      return;
+    }
+    if (request.method === "OPTIONS") {
+      const requestedMethod = request.headers["access-control-request-method"];
+      const requestedHeaders = request.headers["access-control-request-headers"];
+      if (
+        !["GET", "POST"].includes(requestedMethod) ||
+        (requestedHeaders && !requestedHeaders.toLowerCase().includes("x-agent-whiteboard-api-version"))
+      ) {
+        send(response, record, 400, corsHeaders());
+        return;
+      }
+      const headers = {
+        ...corsHeaders(),
+        "Access-Control-Allow-Methods": requestedMethod,
+        "Access-Control-Allow-Headers": "content-type, x-agent-whiteboard-api-version",
+      };
+      if (request.headers["access-control-request-private-network"] === "true") {
+        headers["Access-Control-Allow-Private-Network"] = "true";
+      }
+      send(response, record, 204, headers);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/api/v1/agent/status") {
+      send(
+        response,
+        record,
+        200,
+        { ...corsHeaders(), "Content-Type": "application/json", "Cache-Control": "no-store" },
+        '{"available":true,"api_version":"1"}',
+      );
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/v1/agent/connect") {
+      if (request.headers["x-agent-whiteboard-api-version"] !== "1") {
+        send(response, record, 400, corsHeaders(), '{"error":"unsupported API version"}');
+        return;
+      }
+      record.status = 200;
+      record.responseHeaders = {
+        ...corsHeaders(),
+        "Content-Type": "application/x-ndjson",
+        "Cache-Control": "no-store",
+      };
+      response.writeHead(200, record.responseHeaders);
+      response.write('{"type":"ready","transport":"http"}\n');
+      setTimeout(() => response.end('{"type":"delta","text":"fallback stream"}\n'), 25);
+      return;
+    }
+    send(response, record, 404, corsHeaders());
+  });
+
+  server.on("upgrade", (request, socket) => {
+    const record = requestRecord(request);
+    requests.push(record);
+    if (!originAllowed(request) || request.url !== "/api/v1/agent/connect") {
+      record.status = 403;
+      socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    if (forceWebSocketFailure) {
+      record.status = 503;
+      socket.end("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    const key = request.headers["sec-websocket-key"];
+    if (typeof key !== "string") {
+      record.status = 400;
+      socket.destroy();
+      return;
+    }
+    const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+    record.status = 101;
+    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept };
+    socket.write(
+      [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Accept: ${accept}`,
+        "",
+        "",
+      ].join("\r\n"),
+    );
+    socket.write(webSocketFrame('{"type":"ready","transport":"websocket"}'));
+    setTimeout(() => socket.end(webSocketFrame('{"type":"delta","text":"websocket stream"}')), 25);
+  });
+
+  return {
+    server,
+    requests,
+    reset: () => {
+      requests.splice(0);
+      forceWebSocketFailure = false;
+    },
+    setWebSocketFailure: (value) => {
+      forceWebSocketFailure = value;
+    },
+  };
+}
+
+function createLoopbackStub() {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push(requestRecord(request));
+    response.writeHead(204, { "Cache-Control": "no-store" });
+    response.end();
+  });
+  return { server, requests };
+}
+
 export const test = base.extend({
   server: [
     async ({}, use) => {
@@ -192,6 +449,46 @@ export const test = base.extend({
     { scope: "worker" },
   ],
 
+  localAgentTransport: [
+    async ({ server }, use) => {
+      const credentials = await createTestCertificate(server.root);
+      const source = createHTTPSSource(credentials, server.url);
+      const sourceSockets = trackConnections(source.server);
+      const sourcePort = await listen(source.server, "::1");
+      const sourceOrigin = `https://[::1]:${sourcePort}`;
+      const broker = createLoopbackBroker(sourceOrigin);
+      const brokerSockets = trackConnections(broker.server);
+      const brokerPort = await listen(broker.server, "127.0.0.1");
+      const stub = createLoopbackStub();
+      const stubSockets = trackConnections(stub.server);
+      const stubPort = await listen(stub.server, "127.0.0.1");
+      try {
+        await use({
+          source: {
+            origin: sourceOrigin,
+            url: `${sourceOrigin}/__local-agent-transport`,
+            proxyURL: sourceOrigin,
+            requests: source.requests,
+          },
+          broker: {
+            origin: `http://127.0.0.1:${brokerPort}`,
+            requests: broker.requests,
+            reset: broker.reset,
+            setWebSocketFailure: broker.setWebSocketFailure,
+          },
+          stub: { origin: `http://127.0.0.1:${stubPort}`, requests: stub.requests },
+        });
+      } finally {
+        await Promise.all([
+          closeNodeServer(stub.server, stubSockets),
+          closeNodeServer(broker.server, brokerSockets),
+          closeNodeServer(source.server, sourceSockets),
+        ]);
+      }
+    },
+    { scope: "worker" },
+  ],
+
   publish: async ({ server }, use) => {
     let sequence = 0;
     await use(async (markdown) => {
@@ -211,22 +508,26 @@ export const test = base.extend({
     });
   },
 
+  browserRequestInterception: [true, { option: true }],
+
   networkRequests: [
-    async ({ page, server }, use) => {
+    async ({ page, server, browserRequestInterception }, use) => {
       const all = [];
       const external = [];
-      await page.route("**/*", async (route) => {
-        const requestURL = route.request().url();
-        all.push(requestURL);
-        if (new URL(requestURL).origin !== new URL(server.url).origin) {
-          external.push(requestURL);
-          await route.abort("blockedbyclient");
-          return;
-        }
-        await route.continue();
-      });
+      if (browserRequestInterception) {
+        await page.route("**/*", async (route) => {
+          const requestURL = route.request().url();
+          all.push(requestURL);
+          if (new URL(requestURL).origin !== new URL(server.url).origin) {
+            external.push(requestURL);
+            await route.abort("blockedbyclient");
+            return;
+          }
+          await route.continue();
+        });
+      }
       await use({ all, external });
-      expect(external, "external browser requests").toEqual([]);
+      if (browserRequestInterception) expect(external, "external browser requests").toEqual([]);
     },
     { auto: true },
   ],
