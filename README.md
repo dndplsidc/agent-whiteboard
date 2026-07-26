@@ -1,6 +1,6 @@
 # agent-whiteboard
 
-`agent-whiteboard` is a small Go server and CLI for publishing Markdown, trusted standalone HTML, and raster images at capability URLs. It is designed for agents that need to return a viewable result without opening a browser or depending on a CDN.
+`agent-whiteboard` is a small Go server and CLI for publishing Markdown with creator context, trusted standalone HTML, and raster images at capability URLs. It is designed for agents that need to return a viewable result without opening a browser or depending on a CDN.
 
 ## Install and build
 
@@ -26,12 +26,25 @@ Start the server in one terminal:
 agent-whiteboard serve --storage "$HOME/.agent-whiteboard"
 ```
 
-Publish the executable examples in another terminal. Each create/update command prints a public URL; it never opens it.
+Markdown create and update require a second, non-empty UTF-8 Markdown file containing creator context. Create it in a temporary directory and remove it when finished:
 
 ```sh
-agent-whiteboard create markdown --expires-in 3600 docs/examples/diagram.md
+context_dir="$(mktemp -d)"
+trap 'rm -rf "$context_dir"' EXIT
+context_file="$context_dir/context.md"
+cat >"$context_file" <<'EOF'
+# Creator context
+
+- Goal: demonstrate Markdown, Mermaid, and syntax highlighting.
+- Assumptions: the bundled viewer assets are available.
+- Open questions: none.
+EOF
+
+agent-whiteboard create markdown --context "$context_file" --expires-in 3600 docs/examples/diagram.md
 agent-whiteboard create html --expires-in 3600 docs/examples/standalone.html
 ```
+
+Creator context should summarize goals, decisions, assumptions, and open questions. Do not put hidden reasoning, credentials, sensitive data, unrelated personal data, private source, or raw tool output in it. The context shares the board's bearer capability and lifecycle and is returned by machine retrieval.
 
 Markdown is rendered in the browser by bundled markdown-it, DOMPurify, highlight.js, and Mermaid assets. Add diagrams with ordinary fenced `mermaid` blocks. Standalone HTML is served unchanged and must be treated as trusted active content.
 
@@ -41,28 +54,33 @@ Images are validated from their bytes. PNG, JPEG, GIF, and WebP are supported; S
 agent-whiteboard image upload --expires-in 3600 chart.png photo.webp
 ```
 
-Use the returned capability ID to replace or delete a resource:
+Use the returned capability ID to replace, retrieve, or delete a resource. Markdown updates replace source and context together; neither half can be updated independently.
 
 ```sh
-agent-whiteboard update markdown --expires-in 7200 CAPABILITY_ID docs/examples/diagram.md
-agent-whiteboard update html --expires-in 7200 CAPABILITY_ID docs/examples/standalone.html
-agent-whiteboard delete markdown CAPABILITY_ID
-agent-whiteboard delete html CAPABILITY_ID
-agent-whiteboard image update --expires-in 7200 CAPABILITY_ID chart.png
-agent-whiteboard image delete CAPABILITY_ID
+agent-whiteboard update markdown --context "$context_file" --expires-in 7200 -- CAPABILITY_ID docs/examples/diagram.md
+agent-whiteboard --json get markdown -- CAPABILITY_ID
+agent-whiteboard update html --expires-in 7200 -- CAPABILITY_ID docs/examples/standalone.html
+agent-whiteboard delete markdown -- CAPABILITY_ID
+agent-whiteboard delete html -- CAPABILITY_ID
+agent-whiteboard image update --expires-in 7200 -- CAPABILITY_ID chart.png
+agent-whiteboard image delete -- CAPABILITY_ID
 ```
 
-For a remote server, put global flags before the command (or set `AGENT_WHITEBOARD_SERVER`):
+`get markdown` requires `--json` and returns the exact Markdown and creator context. For a remote server, put global flags before the command (or set `AGENT_WHITEBOARD_SERVER`):
 
 ```sh
-agent-whiteboard --server https://whiteboard.example --timeout 20s --json create markdown --expires-in 3600 docs/examples/diagram.md
+agent-whiteboard --server https://whiteboard.example --timeout 20s --json create markdown --context "$context_file" --expires-in 3600 docs/examples/diagram.md
 ```
 
 Omitting `--expires-in` uses the server default. `--expires-in 0` makes a resource permanent. Expiration is recalculated from update time when the flag is supplied; omission on update retains the current expiration.
 
-## Trusted agent origins
+## Configuration and trusted origins
 
-Manage exact HTTPS origins in `~/.agent-whiteboard/config.yaml`:
+Configuration defaults to `~/.agent-whiteboard/config.yaml`. Global `--config PATH` selects another existing file. The YAML is versioned and strict: unknown fields, duplicate keys, aliases, merge keys, invalid types, and unsupported versions are rejected. Settings resolve as explicit flags, then non-empty environment variables, then YAML, then built-ins. A relative YAML storage path is resolved from the configuration file's directory.
+
+See [configuration](docs/configuration.md) for the complete client, server, viewer, and agent schema, environment mapping, validation, path, permission, and symlink policies.
+
+Manage the configured exact HTTPS origin list with:
 
 ```sh
 agent-whiteboard agent trust add https://whiteboard.example
@@ -70,7 +88,7 @@ agent-whiteboard agent trust list
 agent-whiteboard agent trust remove https://whiteboard.example
 ```
 
-Use the global `--config PATH` flag before or after subcommands to select another configuration file. Explicitly selected files must already exist; adding to a missing default configuration creates its parent and file with owner-only permissions. Add and remove are idempotent, and human list output contains one canonical origin per line.
+Add and remove are idempotent; human list output contains one canonical origin per line, and `--json` uses schema version 1. These trust operations are supported only on macOS and Linux. The current release edits the allowlist configuration but does not provide a local agent broker, sidebar, or daemon commands.
 
 ## Defaults
 
@@ -82,16 +100,18 @@ Use the global `--config PATH` flag before or after subcommands to select anothe
 | Resource expiration | `86400` seconds |
 | Cleanup interval | `15m` |
 | Shutdown timeout | `10s` |
-| Whiteboard limit | 10 MiB |
+| Whiteboard source limit | 10 MiB |
+| Markdown context limit | 1 MiB |
 | Image limit | 25 MiB each |
 | Image request limit | 100 MiB |
 
-Flag values override `AGENT_WHITEBOARD_*` environment variables, which override defaults. Run `agent-whiteboard serve --help` for the complete flag list.
+Run `agent-whiteboard serve --help` for the complete server flag list.
 
 ## Security and detailed contracts
 
-Capability URLs are public but marked non-indexable. Non-indexing is not access control: do not publish credentials, tokens, private source, personal data, or sensitive information. See [security](docs/security.md).
+Capability URLs are public but marked non-indexable. Non-indexing is not access control: do not publish credentials, tokens, private source, personal data, or sensitive information in source or creator context. Anyone with a Markdown capability ID can retrieve both through the machine API. See [security](docs/security.md).
 
+- [configuration](docs/configuration.md)
 - [HTTP API](docs/http-api.md)
 - [Go API and dependency injection](docs/go-api.md)
 - [filesystem storage](docs/storage.md)

@@ -4,10 +4,30 @@ Resource IDs are bearer capabilities and are embedded in public URLs. Anyone who
 
 Resources are public but non-indexed. `X-Robots-Tag` and Markdown robots meta ask cooperative crawlers not to index or archive content. This is not authentication, authorization, revocation distribution, or a confidentiality boundary. Never publish credentials, API tokens, cookies, private source, personal data, regulated data, or other sensitive material.
 
+## Markdown and creator context
+
+Every new or updated Markdown resource contains two artifacts: rendered source and creator context. The context is intended to summarize goals, decisions, assumptions, and open questions. It must not contain hidden reasoning, credentials, unrelated personal data, sensitive data, private source, or raw tool output.
+
+The current browser viewer renders only the Markdown source, but `GET /api/v1/whiteboards/markdown/{id}` and `agent-whiteboard --json get markdown ID` return both exact strings. Anyone holding the public URL can recover its ID and use that retrieval route. Context therefore has exactly the same bearer-capability exposure and expiration/deletion lifecycle as source; it is not private merely because it is absent from the rendered page.
+
 Markdown is rendered client-side by bundled JavaScript. Raw Markdown HTML is disabled, links and generated SVG are sanitized with DOMPurify, Mermaid uses strict security settings, and no CDN is needed. The JSON source envelope escapes script-closing sequences. These controls reduce injection risk but do not make publication of secrets safe.
+
+## Standalone HTML and images
 
 Standalone HTML is deliberately served byte-for-byte as trusted active content on the same origin. It may run scripts, make requests, and access origin-scoped browser state. Deploy the whiteboard origin without authentication cookies, credentials, privileged service workers, or other sensitive same-origin state. Only publish standalone HTML you trust.
 
 Image uploads accept PNG, JPEG, GIF, and WebP only after signature detection and format-specific configuration validation. SVG is rejected because it can contain active content. Responses use `nosniff`, a detected media type, inline filename, no-store caching, and `noimageindex`.
 
-The service validates multipart fields, exact size limits, capability IDs, filesystem containment, regular files, and symlink safety. Logs avoid request bodies and full capability IDs. Operational logs and metrics should keep the same rule. Use TLS and appropriate network access controls when serving beyond localhost.
+## Configuration and origin allowlist
+
+Trusted origins must be exact HTTPS origins. The CLI rejects paths, queries, fragments, user information, wildcards, and HTTP. Exact origin configuration does not add authentication to whiteboard resources, and the current release does not provide the local broker or browser sidebar that consumes this allowlist.
+
+Configuration files must be regular non-symlinks and must not be writable by group or others. On macOS and Linux, trust operations additionally require the immediate parent to be a non-symlink directory that is not writable by group or others; edits are locked, written to `0600` temporary files, synced, and atomically renamed. See [configuration](configuration.md) for the complete permission and platform contract.
+
+## Non-leakage and filesystem boundary
+
+The service validates multipart fields, independent exact size limits, capability IDs, filesystem containment, regular files, and symlink safety. Logs avoid request bodies, Markdown, creator context, and full capability IDs. Operational logs and metrics should keep the same rule. Stable HTTP/CLI errors sanitize internal causes and do not echo source, context, raw multipart data, or filesystem paths.
+
+A failed create can exceptionally return a resource capability alongside a sanitized error when rollback cannot prove absence. Preserve and explicitly check/delete that ID rather than logging it broadly. Ordinary failed creates expose no generated capability.
+
+Use TLS and appropriate network access controls when serving beyond localhost. TLS protects capabilities in transit but does not turn a shared capability URL into identity-based authorization.

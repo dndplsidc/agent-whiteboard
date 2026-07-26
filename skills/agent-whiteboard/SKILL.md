@@ -1,6 +1,6 @@
 ---
 name: agent-whiteboard
-description: Use when an agent needs to publish Markdown, Mermaid diagrams, trusted standalone HTML, or images as shareable agent-whiteboard URLs, or update and delete previously published resources.
+description: Use when an agent needs to publish Markdown, Mermaid diagrams, trusted standalone HTML, or images as shareable agent-whiteboard URLs, or update, retrieve, and delete previously published resources.
 ---
 
 # Agent Whiteboard
@@ -13,9 +13,35 @@ Publish through the CLI whenever shell execution is available. Use direct HTTP o
 - Choose standalone HTML only for trusted active documents. Treat it as same-origin active content, not sanitized Markdown.
 - Choose images for PNG, JPEG, GIF, or WebP binary visuals. Never upload SVG.
 
-Respect the configured limits; defaults are 10 MiB per whiteboard, 25 MiB per image, and 100 MiB for the complete image request.
+Respect the configured limits; defaults are 10 MiB per whiteboard source, 1 MiB per Markdown creator context, 25 MiB per image, and 100 MiB for the complete image request.
 
 When Markdown uses local images, publish every image first, capture each returned absolute URL, and insert those URLs into the Markdown before publishing it. The service does not bundle local dependencies.
+
+## Create the Markdown context artifact
+
+Every Markdown create and update requires a separate, non-empty UTF-8 Markdown context file. Always create it in a temporary directory and pass it with `--context`; never omit it or reuse stale context accidentally.
+
+```sh
+context_dir="$(mktemp -d)"
+trap 'rm -rf "$context_dir"' EXIT
+context_file="$context_dir/context.md"
+cat >"$context_file" <<'EOF'
+# Creator context
+
+- Goal: explain what the published board is intended to communicate.
+- Decisions: record relevant presentation and scope choices.
+- Assumptions: list facts a reader or local agent may rely on.
+- Open questions: list unresolved items, or state that there are none.
+EOF
+
+agent-whiteboard create markdown --context "$context_file" board.md
+```
+
+Write concise goals, decisions, assumptions, and open questions. Context is machine-retrievable by anyone with the capability ID and is not a hidden or private channel. Never include hidden reasoning, credentials, tokens, personal or sensitive data, private source, unrelated information, or raw tool output. Update the context file whenever the Markdown changes, then replace both artifacts together:
+
+```sh
+agent-whiteboard update markdown --context "$context_file" -- CAPABILITY_ID board.md
+```
 
 ## Author and verify rendered content
 
@@ -23,26 +49,32 @@ Before creating standalone HTML, check for installed UI/UX or frontend-design sk
 
 After publishing Markdown, Mermaid, or standalone HTML, check for available headless-browser or browser-automation skills and tools. When available, use them to open the returned URL and verify that the content is readable, correctly laid out, and functioning as intended.
 
-If verification finds an issue, update the source, republish it, and verify again. Do not return the final URL until verification succeeds.
+If verification finds an issue, update the source, update the Markdown context when applicable, republish it, and verify again. Do not return the final URL until verification succeeds.
 
 ## Publish safely
 
-1. Inspect the content and remove credentials, tokens, personal or sensitive data, and private source. Never publish any of them.
-2. Select `--server`, `--timeout`, `--json`, and `--expires-in` deliberately. Omit `--expires-in` for the server default; use `--expires-in 0` for a permanent resource. There is no `--permanent` flag.
-3. Publish with an approved command:
+1. Inspect source and Markdown context. Remove credentials, tokens, personal or sensitive data, private source, hidden reasoning, and raw tool output. Never publish any of them.
+2. Select `--server`, `--timeout`, `--json`, `--config`, and `--expires-in` deliberately. Omit `--expires-in` for the server default; use `--expires-in 0` for a permanent resource. There is no `--permanent` flag.
+3. For Markdown, create the temporary context artifact above and pass `--context "$context_file"` on every create or update.
+4. Publish with an approved command:
    - `agent-whiteboard serve`
-   - `agent-whiteboard create markdown`
-   - `agent-whiteboard create html`
-   - `agent-whiteboard update markdown`
-   - `agent-whiteboard update html`
-   - `agent-whiteboard delete markdown`
-   - `agent-whiteboard delete html`
-   - `agent-whiteboard image upload`
-   - `agent-whiteboard image update`
-   - `agent-whiteboard image delete`
-4. Read stdout or the JSON result and capture the public URL and capability ID. Complete any available rendering verification before returning the final URL.
-5. Use the capability ID to update or delete. There is no separate edit token.
+   - `agent-whiteboard create markdown --context "$context_file" FILE`
+   - `agent-whiteboard create html FILE`
+   - `agent-whiteboard update markdown --context "$context_file" -- ID FILE`
+   - `agent-whiteboard update html -- ID FILE`
+   - `agent-whiteboard --json get markdown -- ID`
+   - `agent-whiteboard delete markdown -- ID`
+   - `agent-whiteboard delete html -- ID`
+   - `agent-whiteboard image upload FILE...`
+   - `agent-whiteboard image update -- ID FILE`
+   - `agent-whiteboard image delete -- ID`
+5. Read stdout or the JSON result and capture the public URL and capability ID. Complete any available rendering verification before returning the final URL.
+6. Use the capability ID to retrieve, update, or delete. There is no separate edit token.
 
-Public URLs are bearer capabilities: anyone with one can read it and derive the ID used for mutation. `noindex` limits discovery but is not authorization. Do not assume authentication, secrecy, or revocation beyond deletion.
+Public URLs are bearer capabilities: anyone with one can read the resource, derive the ID used for mutation, and retrieve both Markdown and context. `noindex` limits discovery but is not authorization. Do not assume authentication, secrecy, or revocation beyond deletion.
+
+A failed create can still print a generated resource before returning an error when persistence is uncertain. Preserve the ID, check or delete the possibly live resource, and do not publish or log the full ID unnecessarily.
+
+The current CLI supports trust-list configuration but no local broker, sidebar, agent serve, or daemon commands. Do not invent those commands.
 
 Read [CLI commands](references/cli.md) for exact syntax and output, [Mermaid guidance](references/mermaid.md) when authoring diagrams, and [security guidance](references/security.md) before publishing HTML or non-public material.
