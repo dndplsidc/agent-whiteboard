@@ -145,7 +145,7 @@ func (s *m1ModelServer) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"error":{"message":"scripted model error","type":"invalid_request_error","code":"scripted"}}`)
 	case m1AttemptToolCall:
-		s.streamToolAttempt(r.Context(), w)
+		s.streamToolAttempt(w)
 	default:
 		s.recordError(fmt.Errorf("unknown model script kind %d", script.kind))
 		http.Error(w, "unknown script", http.StatusInternalServerError)
@@ -167,7 +167,7 @@ func (s *m1ModelServer) streamText(w http.ResponseWriter, chunks []string) {
 	s.finishStream(w, "stop")
 }
 
-func (s *m1ModelServer) streamToolAttempt(ctx context.Context, w http.ResponseWriter) {
+func (s *m1ModelServer) streamToolAttempt(w http.ResponseWriter) {
 	s.startStream(w)
 	s.writeChunk(w, map[string]any{
 		"id": "chatcmpl-tool", "object": "chat.completion.chunk", "created": 1, "model": m1ModelID,
@@ -183,12 +183,7 @@ func (s *m1ModelServer) streamToolAttempt(ctx context.Context, w http.ResponseWr
 			"finish_reason": nil,
 		}},
 	})
-	select {
-	case <-ctx.Done():
-		s.aborts <- struct{}{}
-	case <-time.After(processTimeout):
-		s.recordError(errors.New("malicious tool stream was not interrupted"))
-	}
+	s.finishStream(w, "tool_calls")
 }
 
 func (s *m1ModelServer) startStream(w http.ResponseWriter) {
@@ -681,7 +676,9 @@ func requireM1ContentOnlyRequest(t *testing.T, environment *m1PiEnvironment, req
 	require.JSONEq(t, `"agent-whiteboard-m1"`, string(request.Fields["model"]))
 	require.JSONEq(t, `true`, string(request.Fields["stream"]))
 	require.NotEmpty(t, request.Fields["messages"])
-	require.NotContains(t, request.Fields, "tools", "tools field must be absent, not merely empty: %s", request.Body)
+	if tools, present := request.Fields["tools"]; present {
+		require.JSONEq(t, `[]`, string(tools), "model request must not expose any callable tool definitions: %s", request.Body)
+	}
 	require.NotContains(t, string(request.Body), environment.configDir)
 	require.NotContains(t, string(request.Body), environment.sessionDir)
 	require.NotContains(t, string(request.Body), "pi-coding-agent")
@@ -778,27 +775,44 @@ func TestM1PiMaliciousToolAttemptHasNoAuthorityOrSideEffect(t *testing.T) {
 	model := newM1ModelServer(t)
 	environment := newM1PiEnvironment(t, model.URL())
 	model.enqueue(m1ModelScript{kind: m1AttemptToolCall})
+	model.enqueue(m1ModelScript{kind: m1StreamText, chunks: []string{"continued without tool authority"}})
 	process := startM1Pi(t, environment, "")
 
-	process.send(t, map[string]any{"id": "m1-tool-attempt", "type": "prompt", "message": "attempt a malicious tool"})
-	firstRequest := model.waitRequest(t)
-	requireM1ContentOnlyRequest(t, environment, firstRequest)
-	toolDelta := process.waitRecord(t, func(record m1RPCRecord) bool {
-		if record["type"] != "message_update" {
-			return false
+	result := process.prompt(t, "m1-tool-attempt", "attempt a malicious tool")
+	require.Equal(t, "continued without tool authority", result.text)
+
+	var completedCall, rejectedTool m1RPCRecord
+	for _, record := range result.records {
+		if record["type"] == "message_update" {
+			update, _ := record["assistantMessageEvent"].(map[string]any)
+			if update["type"] == "toolcall_end" {
+				completedCall = record
+			}
 		}
-		update, _ := record["assistantMessageEvent"].(map[string]any)
-		return update["type"] == "toolcall_delta"
-	})
-	encodedDelta, err := json.Marshal(toolDelta)
-	require.NoError(t, err)
-	require.Contains(t, string(encodedDelta), "M1_MALICIOUS_SIDE_EFFECT")
-	process.abortAndWaitSettled(t, "m1-tool-abort")
-	model.waitAbort(t)
-	model.requireNoRequest(t, 500*time.Millisecond)
-	for _, request := range model.capturedRequests() {
-		requireM1ContentOnlyRequest(t, environment, request)
+		if record["type"] == "tool_execution_end" && record["toolCallId"] == "call_malicious" {
+			rejectedTool = record
+		}
 	}
+	encodedCall, err := json.Marshal(completedCall)
+	require.NoError(t, err)
+	require.Contains(t, string(encodedCall), "call_malicious")
+	require.Contains(t, string(encodedCall), "M1_MALICIOUS_SIDE_EFFECT")
+	require.NotNil(t, rejectedTool, "completed tool call did not reach Pi's rejection boundary")
+	require.Equal(t, "bash", rejectedTool["toolName"])
+	require.Equal(t, true, rejectedTool["isError"])
+	encodedRejection, err := json.Marshal(rejectedTool)
+	require.NoError(t, err)
+	require.Contains(t, string(encodedRejection), "Tool bash not found")
+
+	firstRequest := model.waitRequest(t)
+	continuationRequest := model.waitRequest(t)
+	requireM1ContentOnlyRequest(t, environment, firstRequest)
+	require.NotContains(t, firstRequest.Fields, "tools", "initial model request must omit the tools field")
+	requireM1ContentOnlyRequest(t, environment, continuationRequest)
+	require.JSONEq(t, `[]`, string(continuationRequest.Fields["tools"]), "tool-rejection continuation must expose no callable tools")
+	require.Contains(t, string(continuationRequest.Body), "Tool bash not found")
+	require.Contains(t, string(continuationRequest.Body), "M1_MALICIOUS_SIDE_EFFECT")
+	model.requireNoRequest(t, 500*time.Millisecond)
 	require.NoFileExists(t, filepath.Join(environment.workspace, "M1_MALICIOUS_SIDE_EFFECT"))
 	require.NoFileExists(t, filepath.Join(environment.workspace, "M1_EXTENSION_SIDE_EFFECT"))
 	process.stop(t)
