@@ -1,14 +1,19 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	httpx "github.com/edocsss/agent-whiteboard/internal/http"
 	"github.com/edocsss/agent-whiteboard/internal/image"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/require"
@@ -45,6 +50,51 @@ func TestResolveServiceConfigHonorsExplicitZerosAndJSONLogging(t *testing.T) {
 	require.EqualValues(t, 2, resolved.maxContextBytes)
 	require.True(t, resolved.viewerLocalAgentEnabled)
 	require.IsType(t, &slog.JSONHandler{}, resolved.logger.Handler())
+}
+
+func TestNewServicePassesIndependentWhiteboardAndContextLimitsToHTTPHandler(t *testing.T) {
+	tests := []struct {
+		name       string
+		source     string
+		context    string
+		wantStatus int
+	}{
+		{name: "at both limits", source: "abc", context: "12345", wantStatus: http.StatusCreated},
+		{name: "source over limit", source: "abcd", context: "12345", wantStatus: http.StatusRequestEntityTooLarge},
+		{name: "context over limit", source: "abc", context: "123456", wantStatus: http.StatusRequestEntityTooLarge},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, err := NewService(ServiceConfig{
+				WhiteboardStore:    &serviceConfigWhiteboardStore{},
+				ImageStore:         &serviceConfigImageStore{},
+				MaxWhiteboardBytes: 3,
+				MaxContextBytes:    5,
+			}, WithViewerAssets([]byte("body{}"), []byte("void 0")))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			file, err := writer.CreateFormFile("file", "board.md")
+			require.NoError(t, err)
+			_, err = file.Write([]byte(tt.source))
+			require.NoError(t, err)
+			creatorContext, err := writer.CreateFormFile("context", "context.md")
+			require.NoError(t, err)
+			_, err = creatorContext.Write([]byte(tt.context))
+			require.NoError(t, err)
+			require.NoError(t, writer.Close())
+			request := httptest.NewRequest(http.MethodPost, httpx.APIWhiteboardMarkdown, &body)
+			request.Header.Set("Content-Type", writer.FormDataContentType())
+			response := httptest.NewRecorder()
+
+			service.Handler().ServeHTTP(response, request)
+
+			require.Equal(t, tt.wantStatus, response.Code)
+		})
+	}
 }
 
 func TestNewServiceResolvesHomeOnlyWhenFilesystemStorageIsNeeded(t *testing.T) {

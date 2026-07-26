@@ -77,7 +77,8 @@ func NewService(config ServiceConfig, options ...Option) (*Service, error) {
 		return fail(err)
 	}
 	whiteboardHandler, err := whiteboard.NewHandler(whiteboardService, viewer, whiteboard.HandlerConfig{
-		MaxBytes: resolved.maxWhiteboardBytes,
+		MaxWhiteboardBytes: resolved.maxWhiteboardBytes,
+		MaxContextBytes:    resolved.maxContextBytes,
 	})
 	if err != nil {
 		return fail(err)

@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	testWhiteboardID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	defaultMaxBytes  = int64(1 << 20)
+	testWhiteboardID       = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	defaultMaxBytes        = int64(1 << 20)
+	defaultMaxContextBytes = int64(1 << 19)
 )
 
 type handlerContextKey struct{}
@@ -46,20 +47,26 @@ func TestHandlerConstructorRejectsInvalidDependenciesAndLimits(t *testing.T) {
 	var typedNil *mocks.MockOperations
 
 	tests := []struct {
-		name       string
-		operations whiteboard.Operations
-		viewer     *whiteboard.Viewer
-		maxBytes   int64
+		name            string
+		operations      whiteboard.Operations
+		viewer          *whiteboard.Viewer
+		maxBytes        int64
+		maxContextBytes int64
 	}{
 		{name: "nil operations", viewer: viewer},
 		{name: "typed nil operations", operations: typedNil, viewer: viewer},
 		{name: "nil viewer", operations: mocks.NewMockOperations(t)},
 		{name: "negative max bytes", operations: mocks.NewMockOperations(t), viewer: viewer, maxBytes: -1},
+		{name: "negative max context bytes", operations: mocks.NewMockOperations(t), viewer: viewer, maxContextBytes: -1},
+		{name: "aggregate limit overflow", operations: mocks.NewMockOperations(t), viewer: viewer, maxBytes: int64(^uint64(0) >> 1), maxContextBytes: 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handler, err := whiteboard.NewHandler(tt.operations, tt.viewer, whiteboard.HandlerConfig{MaxBytes: tt.maxBytes})
+			handler, err := whiteboard.NewHandler(tt.operations, tt.viewer, whiteboard.HandlerConfig{
+				MaxWhiteboardBytes: tt.maxBytes,
+				MaxContextBytes:    tt.maxContextBytes,
+			})
 
 			require.Nil(t, handler)
 			require.Error(t, err)
@@ -95,7 +102,11 @@ func TestHandlerCreateReturnsResourceAndPassesExactContext(t *testing.T) {
 				return got == ctx && got.Value(handlerContextKey{}) == "sentinel"
 			})
 			expectedInput := mock.MatchedBy(func(got whiteboard.CreateInput) bool {
-				return bytes.Equal(got.Source, []byte("source body")) &&
+				wantContext := []byte(nil)
+				if route.kind == whiteboard.KindMarkdown {
+					wantContext = []byte("creator context")
+				}
+				return bytes.Equal(got.Source, []byte("source body")) && bytes.Equal(got.Context, wantContext) &&
 					got.ExpiresInSeconds != nil && *got.ExpiresInSeconds == expiresIn
 			})
 			if route.kind == whiteboard.KindMarkdown {
@@ -104,10 +115,12 @@ func TestHandlerCreateReturnsResourceAndPassesExactContext(t *testing.T) {
 				operations.EXPECT().CreateHTML(expectedContext, expectedInput).Return(result, nil).Once()
 			}
 			handler := newHandler(t, operations, defaultMaxBytes)
-			body, contentType := multipartRequestBody(t,
-				multipartField{name: "file", filename: "board.txt", value: "source body"},
-				multipartField{name: "expires_in_seconds", value: fmt.Sprint(expiresIn)},
-			)
+			fields := []multipartField{{name: "file", filename: "board.txt", value: "source body"}}
+			if route.kind == whiteboard.KindMarkdown {
+				fields = append(fields, multipartField{name: "context", filename: "context.md", value: "creator context"})
+			}
+			fields = append(fields, multipartField{name: "expires_in_seconds", value: fmt.Sprint(expiresIn)})
+			body, contentType := multipartRequestBody(t, fields...)
 			req := httptest.NewRequest(http.MethodPost, route.apiPath, bytes.NewReader(body)).WithContext(ctx)
 			req.Header.Set("Content-Type", contentType)
 			rr := httptest.NewRecorder()
@@ -143,8 +156,13 @@ func TestHandlerUpdateReturnsResourceAndPassesExactContext(t *testing.T) {
 					return got == ctx && got.Value(handlerContextKey{}) == "sentinel"
 				}),
 				mock.MatchedBy(func(got whiteboard.UpdateInput) bool {
+					wantContext := []byte(nil)
+					if route.kind == whiteboard.KindMarkdown {
+						wantContext = []byte("replacement context")
+					}
 					return got.ID == testWhiteboardID && got.Kind == route.kind &&
-						bytes.Equal(got.Source, []byte("replacement")) && got.ExpiresInSeconds == nil
+						bytes.Equal(got.Source, []byte("replacement")) && bytes.Equal(got.Context, wantContext) &&
+						got.ExpiresInSeconds == nil
 				}),
 			).Return(whiteboard.Result{
 				ID:        testWhiteboardID,
@@ -153,9 +171,11 @@ func TestHandlerUpdateReturnsResourceAndPassesExactContext(t *testing.T) {
 				UpdatedAt: updatedAt,
 			}, nil).Once()
 			handler := newHandler(t, operations, defaultMaxBytes)
-			body, contentType := multipartRequestBody(t,
-				multipartField{name: "file", filename: "board.txt", value: "replacement"},
-			)
+			fields := []multipartField{{name: "file", filename: "board.txt", value: "replacement"}}
+			if route.kind == whiteboard.KindMarkdown {
+				fields = append([]multipartField{{name: "context", filename: "context.md", value: "replacement context"}}, fields...)
+			}
+			body, contentType := multipartRequestBody(t, fields...)
 			req := httptest.NewRequest(http.MethodPut, route.apiPath+"/"+testWhiteboardID, bytes.NewReader(body)).WithContext(ctx)
 			req.Header.Set("Content-Type", contentType)
 			rr := httptest.NewRecorder()
@@ -224,6 +244,115 @@ func TestHandlerViewMarkdownRendersShellWithExactContextAndPublicHeaders(t *test
 	require.Contains(t, rr.Body.String(), testViewerJS)
 	require.Contains(t, rr.Body.String(), `{"markdown":"# Public whiteboard"}`)
 	assertPublicWhiteboardHeaders(t, rr)
+}
+
+func TestHandlerGetMarkdownReturnsExactPublicResourceMarkdownAndContext(t *testing.T) {
+	createdAt := time.Date(2026, time.July, 17, 3, 4, 5, 0, time.UTC)
+	updatedAt := createdAt.Add(time.Hour)
+	expiresAt := updatedAt.Add(time.Hour)
+	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
+	operations := mocks.NewMockOperations(t)
+	operations.EXPECT().Get(
+		mock.MatchedBy(func(got context.Context) bool { return got == ctx }),
+		testWhiteboardID,
+	).Return(whiteboard.Whiteboard{
+		ID:        testWhiteboardID,
+		Kind:      whiteboard.KindMarkdown,
+		Source:    []byte("# Exact markdown\n"),
+		Context:   []byte("## Exact creator context\n"),
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
+		ExpiresAt: &expiresAt,
+	}, nil).Once()
+	req := httptest.NewRequest(http.MethodGet, httpx.APIWhiteboardMarkdownResource+testWhiteboardID, nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.Equal(t, fmt.Sprintf("{\"resource\":{\"id\":%q,\"type\":\"markdown\",\"path\":%q,\"created_at\":\"2026-07-17T03:04:05Z\",\"updated_at\":\"2026-07-17T04:04:05Z\",\"expires_at\":1784264645,\"permanent\":false},\"markdown\":\"# Exact markdown\\n\",\"context\":\"## Exact creator context\\n\"}\n", testWhiteboardID, httpx.PublicMarkdown+testWhiteboardID), rr.Body.String())
+	for _, privateName := range []string{"source_path", "context_path", "schema", "generation"} {
+		require.NotContains(t, rr.Body.String(), privateName)
+	}
+}
+
+func TestHandlerGetMarkdownReturnsEmptyContextForLegacyResource(t *testing.T) {
+	operations := mocks.NewMockOperations(t)
+	operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
+		ID:        testWhiteboardID,
+		Kind:      whiteboard.KindMarkdown,
+		Source:    []byte("legacy markdown"),
+		Context:   nil,
+		CreatedAt: time.Date(2026, time.July, 17, 3, 4, 5, 0, time.UTC),
+		UpdatedAt: time.Date(2026, time.July, 17, 3, 4, 5, 0, time.UTC),
+	}, nil).Once()
+	rr := httptest.NewRecorder()
+
+	handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr,
+		httptest.NewRequest(http.MethodGet, httpx.APIWhiteboardMarkdownResource+testWhiteboardID, nil))
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	require.Equal(t, "legacy markdown", response["markdown"])
+	require.Equal(t, "", response["context"])
+	require.Len(t, response, 3)
+}
+
+func TestHandlerGetMarkdownHidesMalformedMissingExpiredAndWrongKindAsSameNotFound(t *testing.T) {
+	wantBody := "{\"error\":{\"code\":\"not_found\",\"message\":\"resource not found\"}}\n"
+	tests := []struct {
+		name       string
+		id         string
+		operations func(*testing.T) *mocks.MockOperations
+	}{
+		{
+			name: "malformed", id: "malformed",
+			operations: func(t *testing.T) *mocks.MockOperations { return mocks.NewMockOperations(t) },
+		},
+		{
+			name: "missing", id: testWhiteboardID,
+			operations: func(t *testing.T) *mocks.MockOperations {
+				operations := mocks.NewMockOperations(t)
+				operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{},
+					common.NewError(common.CodeNotFound, "resource not found", errors.New("private missing path"))).Once()
+				return operations
+			},
+		},
+		{
+			name: "expired", id: testWhiteboardID,
+			operations: func(t *testing.T) *mocks.MockOperations {
+				operations := mocks.NewMockOperations(t)
+				operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{},
+					common.NewError(common.CodeNotFound, "resource not found", errors.New("private expired generation"))).Once()
+				return operations
+			},
+		},
+		{
+			name: "wrong kind", id: testWhiteboardID,
+			operations: func(t *testing.T) *mocks.MockOperations {
+				operations := mocks.NewMockOperations(t)
+				operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
+					ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: []byte("private html"),
+				}, nil).Once()
+				return operations
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			handlerMux(t, newHandler(t, tt.operations(t), defaultMaxBytes)).ServeHTTP(rr,
+				httptest.NewRequest(http.MethodGet, httpx.APIWhiteboardMarkdownResource+tt.id, nil))
+
+			require.Equal(t, http.StatusNotFound, rr.Code)
+			require.Equal(t, wantBody, rr.Body.String())
+			require.NotContains(t, rr.Body.String(), "private")
+			require.NotContains(t, rr.Body.String(), "generation")
+		})
+	}
 }
 
 func TestHandlerViewHTMLServesStoredDocumentBytesUnchanged(t *testing.T) {
@@ -330,6 +459,162 @@ func TestHandlerPublicViewsHideMalformedMissingExpiredAndWrongKindAsSameNotFound
 	}
 }
 
+func TestHandlerMarkdownWritesRejectInvalidPairsBeforeServiceCalls(t *testing.T) {
+	tests := []struct {
+		name            string
+		fields          []multipartField
+		maxBytes        int64
+		maxContextBytes int64
+		wantStatus      int
+		wantBody        string
+	}{
+		{
+			name:     "missing file",
+			fields:   []multipartField{{name: "context", filename: "context.md", value: "context"}},
+			maxBytes: 16, maxContextBytes: 16, wantStatus: http.StatusBadRequest,
+			wantBody: "{\"error\":{\"code\":\"invalid_request\",\"message\":\"exactly one file and context are required\"}}\n",
+		},
+		{
+			name:     "missing context",
+			fields:   []multipartField{{name: "file", filename: "board.md", value: "source"}},
+			maxBytes: 16, maxContextBytes: 16, wantStatus: http.StatusBadRequest,
+			wantBody: "{\"error\":{\"code\":\"invalid_request\",\"message\":\"exactly one file and context are required\"}}\n",
+		},
+		{
+			name: "duplicate file",
+			fields: []multipartField{
+				{name: "file", filename: "one.md", value: "one"},
+				{name: "context", filename: "context.md", value: "context"},
+				{name: "file", filename: "two.md", value: "two"},
+			},
+			maxBytes: 16, maxContextBytes: 16, wantStatus: http.StatusBadRequest,
+			wantBody: "{\"error\":{\"code\":\"invalid_request\",\"message\":\"exactly one file and context are required\"}}\n",
+		},
+		{
+			name: "duplicate context",
+			fields: []multipartField{
+				{name: "file", filename: "board.md", value: "source"},
+				{name: "context", filename: "one.md", value: "one"},
+				{name: "context", filename: "two.md", value: "two"},
+			},
+			maxBytes: 16, maxContextBytes: 16, wantStatus: http.StatusBadRequest,
+			wantBody: "{\"error\":{\"code\":\"invalid_request\",\"message\":\"exactly one file and context are required\"}}\n",
+		},
+		{
+			name: "unknown field",
+			fields: []multipartField{
+				{name: "file", filename: "board.md", value: "source"},
+				{name: "context", filename: "context.md", value: "context"},
+				{name: "private", filename: "private.md", value: "secret"},
+			},
+			maxBytes: 16, maxContextBytes: 16, wantStatus: http.StatusBadRequest,
+			wantBody: "{\"error\":{\"code\":\"invalid_request\",\"message\":\"unexpected multipart field\"}}\n",
+		},
+		{
+			name: "context is not a file",
+			fields: []multipartField{
+				{name: "file", filename: "board.md", value: "source"},
+				{name: "context", value: "context"},
+			},
+			maxBytes: 16, maxContextBytes: 16, wantStatus: http.StatusBadRequest,
+			wantBody: "{\"error\":{\"code\":\"invalid_request\",\"message\":\"unexpected multipart field\"}}\n",
+		},
+		{
+			name: "empty file",
+			fields: []multipartField{
+				{name: "file", filename: "board.md", value: ""},
+				{name: "context", filename: "context.md", value: "context"},
+			},
+			maxBytes: 16, maxContextBytes: 16, wantStatus: http.StatusBadRequest,
+			wantBody: "{\"error\":{\"code\":\"invalid_request\",\"message\":\"file and context must not be empty\"}}\n",
+		},
+		{
+			name: "empty context",
+			fields: []multipartField{
+				{name: "file", filename: "board.md", value: "source"},
+				{name: "context", filename: "context.md", value: ""},
+			},
+			maxBytes: 16, maxContextBytes: 16, wantStatus: http.StatusBadRequest,
+			wantBody: "{\"error\":{\"code\":\"invalid_request\",\"message\":\"file and context must not be empty\"}}\n",
+		},
+		{
+			name: "file over independent limit",
+			fields: []multipartField{
+				{name: "file", filename: "board.md", value: "four"},
+				{name: "context", filename: "context.md", value: "context"},
+			},
+			maxBytes: 3, maxContextBytes: 16, wantStatus: http.StatusRequestEntityTooLarge,
+			wantBody: "{\"error\":{\"code\":\"content_too_large\",\"message\":\"content too large\"}}\n",
+		},
+		{
+			name: "context over independent limit",
+			fields: []multipartField{
+				{name: "file", filename: "board.md", value: "source"},
+				{name: "context", filename: "context.md", value: "four"},
+			},
+			maxBytes: 16, maxContextBytes: 3, wantStatus: http.StatusRequestEntityTooLarge,
+			wantBody: "{\"error\":{\"code\":\"content_too_large\",\"message\":\"content too large\"}}\n",
+		},
+	}
+
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		t.Run(method, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					operations := mocks.NewMockOperations(t)
+					handler := newHandlerWithLimits(t, operations, tt.maxBytes, tt.maxContextBytes)
+					body, contentType := multipartRequestBody(t, tt.fields...)
+					path := httpx.APIWhiteboardMarkdown
+					if method == http.MethodPut {
+						path += "/" + testWhiteboardID
+					}
+					req := httptest.NewRequest(method, path, bytes.NewReader(body))
+					req.Header.Set("Content-Type", contentType)
+					rr := httptest.NewRecorder()
+
+					handlerMux(t, handler).ServeHTTP(rr, req)
+
+					require.Equal(t, tt.wantStatus, rr.Code)
+					require.Equal(t, tt.wantBody, rr.Body.String())
+				})
+			}
+		})
+	}
+}
+
+func TestHandlerMarkdownMultipartAggregateAllowsConfiguredPayloadAndBoundsOverhead(t *testing.T) {
+	operations := mocks.NewMockOperations(t)
+	operations.EXPECT().CreateMarkdown(mock.Anything, mock.MatchedBy(func(input whiteboard.CreateInput) bool {
+		return len(input.Source) == 64 && len(input.Context) == 32
+	})).Return(whiteboard.Result{ID: testWhiteboardID, Kind: whiteboard.KindMarkdown}, nil).Once()
+	handler := newHandlerWithLimits(t, operations, 64, 32)
+	body, contentType := multipartRequestBody(t,
+		multipartField{name: "file", filename: "board.md", value: strings.Repeat("s", 64)},
+		multipartField{name: "context", filename: "context.md", value: strings.Repeat("c", 32)},
+	)
+	req := httptest.NewRequest(http.MethodPost, httpx.APIWhiteboardMarkdown, bytes.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	rr := httptest.NewRecorder()
+
+	handlerMux(t, handler).ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	hugeFilename := strings.Repeat("x", int(httpx.MultipartOverheadBytes)+1) + ".md"
+	body, contentType = multipartRequestBody(t,
+		multipartField{name: "file", filename: hugeFilename, value: "s"},
+		multipartField{name: "context", filename: "context.md", value: "c"},
+	)
+	req = httptest.NewRequest(http.MethodPost, httpx.APIWhiteboardMarkdown, bytes.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	rr = httptest.NewRecorder()
+
+	handlerMux(t, newHandlerWithLimits(t, mocks.NewMockOperations(t), 1, 1)).ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+	require.Equal(t, "{\"error\":{\"code\":\"content_too_large\",\"message\":\"content too large\"}}\n", rr.Body.String())
+}
+
 func TestHandlerRejectsInvalidFormsBeforeServiceCalls(t *testing.T) {
 	for _, route := range whiteboardRoutes {
 		t.Run(route.name, func(t *testing.T) {
@@ -423,9 +708,11 @@ func TestHandlerMapsWrongKindServiceErrorsToNotFound(t *testing.T) {
 				return got.ID == testWhiteboardID && got.Kind == route.kind
 			})).Return(whiteboard.Result{}, common.NewError(common.CodeNotFound, "resource not found", errors.New("wrong kind"))).Once()
 			handler := newHandler(t, operations, defaultMaxBytes)
-			body, contentType := multipartRequestBody(t,
-				multipartField{name: "file", filename: "board.txt", value: "replacement"},
-			)
+			fields := []multipartField{{name: "file", filename: "board.txt", value: "replacement"}}
+			if route.kind == whiteboard.KindMarkdown {
+				fields = append(fields, multipartField{name: "context", filename: "context.md", value: "replacement context"})
+			}
+			body, contentType := multipartRequestBody(t, fields...)
 			req := httptest.NewRequest(http.MethodPut, route.apiPath+"/"+testWhiteboardID, bytes.NewReader(body))
 			req.Header.Set("Content-Type", contentType)
 			rr := httptest.NewRecorder()
@@ -493,6 +780,7 @@ func TestHandlerDoesNotLogRequestBodiesOrCapabilityIDs(t *testing.T) {
 	bodySecret := "private-whiteboard-source"
 	body, contentType := multipartRequestBody(t,
 		multipartField{name: "file", filename: "board.txt", value: bodySecret},
+		multipartField{name: "context", filename: "context.md", value: "private creator context"},
 	)
 	req := httptest.NewRequest(http.MethodPut, httpx.APIWhiteboardMarkdown+"/"+testWhiteboardID, bytes.NewReader(body))
 	req.Header.Set("Content-Type", contentType)
@@ -536,8 +824,16 @@ func multipartRequestBody(t *testing.T, fields ...multipartField) ([]byte, strin
 
 func newHandler(t *testing.T, operations whiteboard.Operations, maxBytes int64) *whiteboard.Handler {
 	t.Helper()
+	return newHandlerWithLimits(t, operations, maxBytes, defaultMaxContextBytes)
+}
 
-	handler, err := whiteboard.NewHandler(operations, newViewer(t), whiteboard.HandlerConfig{MaxBytes: maxBytes})
+func newHandlerWithLimits(t *testing.T, operations whiteboard.Operations, maxBytes, maxContextBytes int64) *whiteboard.Handler {
+	t.Helper()
+
+	handler, err := whiteboard.NewHandler(operations, newViewer(t), whiteboard.HandlerConfig{
+		MaxWhiteboardBytes: maxBytes,
+		MaxContextBytes:    maxContextBytes,
+	})
 	require.NoError(t, err)
 	return handler
 }

@@ -17,13 +17,16 @@ type Operations interface {
 }
 
 type HandlerConfig struct {
-	MaxBytes int64
+	MaxWhiteboardBytes int64
+	MaxContextBytes    int64
 }
 
 type Handler struct {
-	operations Operations
-	viewer     *Viewer
-	maxBytes   int64
+	operations              Operations
+	viewer                  *Viewer
+	maxWhiteboardBytes      int64
+	maxContextBytes         int64
+	maxMarkdownRequestBytes int64
 }
 
 func NewHandler(operations Operations, viewer *Viewer, config HandlerConfig) (*Handler, error) {
@@ -32,26 +35,62 @@ func NewHandler(operations Operations, viewer *Viewer, config HandlerConfig) (*H
 		return nil, common.NewError(common.CodeInvalidRequest, "operations are required", nil)
 	case viewer == nil:
 		return nil, common.NewError(common.CodeInvalidRequest, "viewer is required", nil)
-	case config.MaxBytes < 0:
-		return nil, common.NewError(common.CodeInvalidRequest, "max bytes must not be negative", nil)
+	case config.MaxWhiteboardBytes < 0:
+		return nil, common.NewError(common.CodeInvalidRequest, "max whiteboard bytes must not be negative", nil)
+	case config.MaxContextBytes < 0:
+		return nil, common.NewError(common.CodeInvalidRequest, "max context bytes must not be negative", nil)
 	}
 
+	maxMarkdownRequestBytes, err := httpx.MultipartRequestLimit(config.MaxWhiteboardBytes, config.MaxContextBytes)
+	if err != nil {
+		return nil, err
+	}
 	return &Handler{
-		operations: operations,
-		viewer:     viewer,
-		maxBytes:   config.MaxBytes,
+		operations:              operations,
+		viewer:                  viewer,
+		maxWhiteboardBytes:      config.MaxWhiteboardBytes,
+		maxContextBytes:         config.MaxContextBytes,
+		maxMarkdownRequestBytes: maxMarkdownRequestBytes,
 	}, nil
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+httpx.APIWhiteboardMarkdown, h.createMarkdown)
-	mux.HandleFunc("PUT "+httpx.APIWhiteboardMarkdown+"/{id}", h.updateMarkdown)
+	mux.HandleFunc("GET "+httpx.APIWhiteboardMarkdownResource+"{id}", h.getMarkdown)
+	mux.HandleFunc("PUT "+httpx.APIWhiteboardMarkdownResource+"{id}", h.updateMarkdown)
 	mux.HandleFunc("DELETE "+httpx.APIWhiteboardMarkdown+"/{id}", h.deleteMarkdown)
 	mux.HandleFunc("POST "+httpx.APIWhiteboardHTML, h.createHTML)
 	mux.HandleFunc("PUT "+httpx.APIWhiteboardHTML+"/{id}", h.updateHTML)
 	mux.HandleFunc("DELETE "+httpx.APIWhiteboardHTML+"/{id}", h.deleteHTML)
 	mux.HandleFunc("GET "+httpx.PublicMarkdown+"{id}", h.viewMarkdown)
 	mux.HandleFunc("GET "+httpx.PublicHTML+"{id}", h.viewHTML)
+}
+
+func (h *Handler) getMarkdown(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := common.ValidateID(id); err != nil {
+		httpx.WriteError(w, notFound())
+		return
+	}
+
+	board, err := h.operations.Get(r.Context(), id)
+	if err != nil {
+		if common.HasCode(err, common.CodeNotFound) {
+			err = notFound()
+		}
+		httpx.WriteError(w, err)
+		return
+	}
+	if board.Kind != KindMarkdown {
+		httpx.WriteError(w, notFound())
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, httpx.MarkdownResponse{
+		Resource: resourceFromWhiteboard(board),
+		Markdown: string(board.Source),
+		Context:  string(board.Context),
+	})
 }
 
 func (h *Handler) viewMarkdown(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +140,7 @@ func (h *Handler) createHTML(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request, kind Kind) {
-	input, err := h.readCreateInput(w, r)
+	input, err := h.readCreateInput(w, r, kind)
 	if err != nil {
 		httpx.WriteError(w, err)
 		return
@@ -138,17 +177,12 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request, kind Kind) {
 		return
 	}
 
-	form, err := h.readSingleFile(w, r)
+	input, err := h.readUpdateInput(w, r, id, kind)
 	if err != nil {
 		httpx.WriteError(w, err)
 		return
 	}
-	result, err := h.operations.Update(r.Context(), UpdateInput{
-		ID:               id,
-		Kind:             kind,
-		Source:           form.Files[0].Content,
-		ExpiresInSeconds: form.ExpiresInSeconds,
-	})
+	result, err := h.operations.Update(r.Context(), input)
 	if err != nil {
 		httpx.WriteError(w, err)
 		return
@@ -181,19 +215,74 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request, kind Kind) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Handler) readCreateInput(w http.ResponseWriter, r *http.Request) (CreateInput, error) {
+func (h *Handler) readCreateInput(w http.ResponseWriter, r *http.Request, kind Kind) (CreateInput, error) {
+	if kind == KindMarkdown {
+		source, creatorContext, expiresInSeconds, err := h.readMarkdownPair(w, r)
+		if err != nil {
+			return CreateInput{}, err
+		}
+		return CreateInput{Source: source, Context: creatorContext, ExpiresInSeconds: expiresInSeconds}, nil
+	}
+
 	form, err := h.readSingleFile(w, r)
 	if err != nil {
 		return CreateInput{}, err
 	}
-	return CreateInput{
-		Source:           form.Files[0].Content,
-		ExpiresInSeconds: form.ExpiresInSeconds,
+	return CreateInput{Source: form.Files[0].Content, ExpiresInSeconds: form.ExpiresInSeconds}, nil
+}
+
+func (h *Handler) readUpdateInput(w http.ResponseWriter, r *http.Request, id string, kind Kind) (UpdateInput, error) {
+	if kind == KindMarkdown {
+		source, creatorContext, expiresInSeconds, err := h.readMarkdownPair(w, r)
+		if err != nil {
+			return UpdateInput{}, err
+		}
+		return UpdateInput{
+			ID: id, Kind: kind, Source: source, Context: creatorContext, ExpiresInSeconds: expiresInSeconds,
+		}, nil
+	}
+
+	form, err := h.readSingleFile(w, r)
+	if err != nil {
+		return UpdateInput{}, err
+	}
+	return UpdateInput{
+		ID: id, Kind: kind, Source: form.Files[0].Content, ExpiresInSeconds: form.ExpiresInSeconds,
 	}, nil
 }
 
+func (h *Handler) readMarkdownPair(w http.ResponseWriter, r *http.Request) ([]byte, []byte, *int64, error) {
+	form, err := httpx.ReadMultipartFields(w, r, h.maxMarkdownRequestBytes,
+		httpx.MultipartFileLimit{FieldName: "file", MaxBytes: h.maxWhiteboardBytes},
+		httpx.MultipartFileLimit{FieldName: "context", MaxBytes: h.maxContextBytes},
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var source, creatorContext []byte
+	fileCount, contextCount := 0, 0
+	for _, file := range form.Files {
+		switch file.FieldName {
+		case "file":
+			fileCount++
+			source = file.Content
+		case "context":
+			contextCount++
+			creatorContext = file.Content
+		}
+	}
+	if fileCount != 1 || contextCount != 1 {
+		return nil, nil, nil, common.NewError(common.CodeInvalidRequest, "exactly one file and context are required", nil)
+	}
+	if len(source) == 0 || len(creatorContext) == 0 {
+		return nil, nil, nil, common.NewError(common.CodeInvalidRequest, "file and context must not be empty", nil)
+	}
+	return source, creatorContext, form.ExpiresInSeconds, nil
+}
+
 func (h *Handler) readSingleFile(w http.ResponseWriter, r *http.Request) (httpx.MultipartForm, error) {
-	form, err := httpx.ReadMultipart(w, r, h.maxBytes, h.maxBytes, "file")
+	form, err := httpx.ReadMultipart(w, r, h.maxWhiteboardBytes, h.maxWhiteboardBytes, "file")
 	if err != nil {
 		return httpx.MultipartForm{}, err
 	}
@@ -201,6 +290,16 @@ func (h *Handler) readSingleFile(w http.ResponseWriter, r *http.Request) (httpx.
 		return httpx.MultipartForm{}, common.NewError(common.CodeInvalidRequest, "exactly one file is required", nil)
 	}
 	return form, nil
+}
+
+func resourceFromWhiteboard(board Whiteboard) httpx.Resource {
+	return resourceFromResult(Result{
+		ID:        board.ID,
+		Kind:      board.Kind,
+		CreatedAt: board.CreatedAt,
+		UpdatedAt: board.UpdatedAt,
+		ExpiresAt: board.ExpiresAt,
+	}, board.Kind)
 }
 
 func resourceFromResult(result Result, kind Kind) httpx.Resource {
