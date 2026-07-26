@@ -2,7 +2,7 @@
 
 ## Outcome
 
-A self-hosted agent-whiteboard server can opt Markdown viewers into a right-side drawer where readers discuss the current page and its creator-supplied context with their own locally installed Pi or Codex agent. The browser talks directly to an origin-authorizing broker bound only to `127.0.0.1`; the publishing server never receives reader conversations or provider credentials.
+A self-hosted agent-whiteboard server can opt Markdown viewers into a right-side drawer where readers discuss the current page and its creator-supplied context with their own locally installed Pi agent. The browser talks directly to an origin-authorizing broker bound only to `127.0.0.1`; the publishing server never receives reader conversations or provider credentials.
 
 This release also closes the same-origin active-content path that would otherwise let standalone HTML reach the broker: all existing and new HTML boards move behind an application-controlled wrapper and an opaque-origin sandbox.
 
@@ -22,7 +22,7 @@ This release also closes the same-origin active-content path that would otherwis
 - When disabled, the viewer has no drawer and makes no localhost request.
 - Enabled pages make one minimal broker status request on page load. They do not retry in the background after failure.
 - The foreground broker works on macOS and Linux. Managed daemon installation is macOS-only.
-- The supported providers are Pi RPC and Codex app-server. No remote relay or browser extension is introduced.
+- The supported provider is Pi RPC. Codex is deferred until its app-server can enforce the required workspace-only content boundary. No remote relay or browser extension is introduced.
 
 ### R2 — General configuration and CLI
 
@@ -117,8 +117,8 @@ This release also closes the same-origin active-content path that would otherwis
 - HTTP-streaming fallback provides equivalent versioned connect, message, event, and interrupt operations.
 - Status accepts a syntactically valid browser HTTPS Origin and reveals only broker availability, local API version, and whether that exact Origin is trusted. Missing and `null` origins are rejected.
 - Every non-status operation requires an exact allowlist match, validates Host and Origin on every request or handshake, and never treats Referer as authorization.
-- CORS echoes one allowed origin, never `*`; HTTP mutations require JSON and a custom API-version header. Chrome Private Network Access preflights are handled explicitly.
-- Raw Pi/Codex requests, payloads, credentials, paths, IDs, and internal protocol errors are never exposed to the browser.
+- CORS echoes one allowed origin, never `*`; HTTP mutations require JSON and a custom API-version header. Current Chrome Local Network Access permission is part of the reader flow, and legacy Private Network Access preflights are handled explicitly for compatibility.
+- Raw Pi requests, payloads, credentials, paths, IDs, and internal protocol errors are never exposed to the browser.
 - The WebSocket and fallback transports carry the same schema-validated commands and normalized events with bounded message/event sizes.
 - Opening the drawer sends no page content. Connect establishes or resumes a conversation. The first reader message transmits page context.
 
@@ -126,19 +126,18 @@ This release also closes the same-origin active-content path that would otherwis
 
 - Authentication is exclusively provider-native. Agent-whiteboard never captures or persists credentials.
 - Readiness distinguishes missing executable, authentication required, startup failure, no usable model, and unavailable content-only enforcement. The drawer provides provider-specific instructions and Try again without broker restart.
-- New conversations use each provider's native configured default model. The resolved model is shown read-only; model changes affect only new conversations.
+- New conversations use Pi's native configured default model. The resolved model is shown read-only; model changes affect only new conversations.
 - There is no installed-version allow/deny range. Adapters tolerate unknown non-critical events, fail closed on unknown approval/permission kinds, and surface required-protocol incompatibility.
 - Pi runs in RPC mode with built-in tools, extensions, skills, prompt templates, and project context/resources disabled. Each active Pi conversation owns one RPC process and resumes from its broker-managed session path.
-- Codex uses one shared app-server process and multiplexed thread IDs. It receives a stable private workspace with filesystem denied except read access to that workspace, writes denied, network denied, and escalation denied.
 - Unexpected tool or permission requests are rejected and rendered as blocked security events.
-- A bounded implementation spike must prove Pi and Codex effective content-only policy against the real provider interfaces before the UI labels either provider content-only. Failure to prove a provider boundary stops that provider implementation and requires a revised approved design.
+- A bounded implementation spike must prove Pi's effective content-only policy against the real provider interface before the UI labels it content-only. Failure to prove the boundary stops provider implementation and requires a revised approved design.
 
 ### R7 — Conversation identity and persistence
 
 - A conversation key derives from exact origin, resource kind, capability ID, and provider. The browser never receives native session IDs.
-- One current conversation exists per board/provider; Pi and Codex conversations are separate.
+- One current Pi conversation exists per board.
 - Mapping files under `~/.agent-whiteboard/state/conversations/` contain bookkeeping only: board/provider identity, current broker ID, native session reference, timestamps, content digest, and archived references.
-- Transcripts remain in Pi/Codex. Mapping files do not duplicate transcripts, page source, creator context, credentials, or model output.
+- Transcripts remain in Pi. Mapping files do not duplicate transcripts, page source, creator context, credentials, or model output.
 - Stable private workspaces live under `~/.agent-whiteboard/state/workspaces/` and share conversation retention.
 - Directories and files are owner-only and updates are atomic.
 - New conversation archives the current native session and creates a fresh current session.
@@ -159,24 +158,24 @@ This release also closes the same-origin active-content path that would otherwis
 ### R9 — Sidebar and normalized chat experience
 
 - The drawer is collapsed initially, opens from an accessible top-right control, uses an overlay on narrow screens, and stores open/collapsed state in `localStorage`.
-- `localStorage` contains only drawer state, localhost port, and last provider preference—never capabilities, native IDs, messages, context, or credentials.
-- With no provider preference, a sole available provider is selected; if both are available the reader chooses; if neither is available installation guidance appears.
+- `localStorage` contains only drawer state and localhost port—never capabilities, native IDs, messages, context, or credentials.
+- Pi is selected automatically when available; otherwise installation or authentication guidance appears.
 - The Connect panel explains provider, content-only access, shared Markdown/context, and whether a persistent conversation will resume.
 - A collapsed context card exposes read-only Page Markdown and Creator summary tabs, current digest, and revision replacement status before or after connection.
 - Primary timeline entries are user/assistant messages. Supporting normalized events include status, visible reasoning summaries, context updates, retry/compaction, blocked capability requests, errors, completion, and interruption.
 - Routine activity is collapsed by default; errors and blocked requests stay expanded. Hidden chain-of-thought is never requested or rendered.
 - Messages submitted during an active response enter one visible shared follow-up queue. They can be edited or removed before delivery.
 - Stop interrupts only the active turn and preserves queued follow-ups.
-- Multiple tabs attached to the same board/provider share history, stream, queue, and lifecycle actions. Stable IDs deduplicate reconnect replay.
+- Multiple tabs attached to the same board share history, stream, queue, and lifecycle actions. Stable IDs deduplicate reconnect replay.
 
 ### R10 — Provider process lifecycle and recovery
 
-- Providers start lazily: one Pi RPC process per used Pi conversation and one Codex app-server for the first Codex connection.
+- Providers start lazily: one Pi RPC process per used Pi conversation.
 - There is no application-level active-conversation cap.
 - A process becomes idle only when it has no connected tab, active turn, or queued turn. The default idle timeout is 60 minutes.
 - If all tabs disconnect, the active turn and all already-submitted queued follow-ups finish and persist before the idle timer starts.
 - Shutdown requests native cancellation/shutdown, waits the configured 10-second default, terminates the child process group, and force-kills only if graceful termination fails.
-- Daemon stop always triggers provider shutdown. Deleting a Pi conversation shuts down its dedicated process before deleting the session. Deleting a Codex conversation interrupts and deletes only that thread; the shared Codex app-server remains available for other conversations and follows its global idle policy.
+- Daemon stop always triggers provider shutdown. Deleting a Pi conversation shuts down its dedicated process before deleting the session.
 - Unexpected provider exit receives one automatic restart/resume attempt. The active turn is marked interrupted and is never replayed automatically; the reader may deliberately Retry.
 
 ### R11 — Failure behavior
@@ -188,9 +187,8 @@ This release also closes the same-origin active-content path that would otherwis
 ### R12 — Testing and documentation
 
 - Behavioral changes receive unit tests and applicable real-component integration and Chrome E2E coverage.
-- Mandatory provider E2E runs pinned real Pi and Codex CLIs against an isolated deterministic local model server; it requires no account, credential, public network, or model spending.
+- Mandatory provider E2E runs a pinned real Pi CLI against an isolated deterministic local model server; it requires no account, credential, public network, or model spending.
 - Pi's isolated test HOME defines a local OpenAI-compatible model in `models.json` and selects it through native default settings with a dummy placeholder key.
-- Codex's isolated `CODEX_HOME` defines a local Responses provider with `requires_openai_auth = false` and selects it as the native default.
 - Fake provider executables are reserved for malformed protocol, startup death, ignored shutdown, and other fault injection not practical through real CLIs.
 - Hosted-provider smoke tests are optional and never a CI requirement.
 - Documentation covers setup, security boundary, migration, configuration, CLI/API contracts, reader workflow, failure recovery, and provider-native login.
@@ -204,7 +202,7 @@ The feature separates four authorities:
 1. The publishing server stores and serves capability-protected page artifacts but never participates in reader chat.
 2. The application-controlled Markdown viewer obtains explicit reader consent and presents normalized events.
 3. The loopback broker authorizes exact web origins, owns local mappings and process lifecycle, and mediates a narrow content-only protocol.
-4. Pi/Codex retain native authentication, models, transcripts, and session semantics.
+4. Pi retains native authentication, models, transcripts, and session semantics.
 
 Standalone HTML becomes opaque-origin active content so trusting a publishing origin cannot accidentally trust arbitrary uploaded JavaScript at that origin.
 
@@ -224,11 +222,11 @@ The Markdown shell embeds separate source/context data and optional drawer asset
 
 #### Local broker
 
-Owns the loopback listener, status disclosure boundary, Origin/Host/CORS/PNA checks, WebSocket and fallback transports, connection registry, shared queues, conversation mappings, event replay, and process supervisor.
+Owns the loopback listener, status disclosure boundary, Origin/Host/CORS/LNA checks and legacy PNA compatibility, WebSocket and fallback transports, connection registry, shared queues, conversation mappings, event replay, and process supervisor.
 
 #### Provider adapters
 
-Translate the broker contract to Pi JSONL RPC and Codex app-server JSON-RPC, including native history, lifecycle, event normalization, error classification, permission denial, and redaction.
+Translate the broker contract to Pi JSONL RPC, including native history, lifecycle, event normalization, error classification, permission denial, and redaction.
 
 #### Browser drawer
 
@@ -236,7 +234,7 @@ Owns status discovery, consent, provider/port preferences, reconnect, shared nor
 
 #### Test model server and browser harness
 
-The model server implements deterministic local OpenAI Chat Completions and Responses streaming endpoints. The Playwright worker runs a real publishing process, HTTPS origin proxy, real loopback broker, real pinned Pi/Codex processes with isolated homes, Chromium, and complete process/state cleanup.
+The model server implements a deterministic local OpenAI Chat Completions streaming endpoint. The Playwright worker runs a real publishing process, HTTPS origin proxy, real loopback broker, a real pinned Pi process with an isolated home, Chromium, and complete process/state cleanup.
 
 ### Flow
 
@@ -245,7 +243,7 @@ sequenceDiagram
     participant S as Whiteboard server
     participant B as Chrome viewer
     participant L as Local broker
-    participant P as Pi/Codex
+    participant P as Pi
     participant M as Native provider storage
 
     B->>S: GET Markdown capability URL
@@ -307,30 +305,29 @@ The execution controller may refine package placement after repository inspectio
 
 **Deliverable**
 
-Executable evidence that supported Chrome can perform status discovery plus both WebSocket and HTTP-streaming communication from an HTTPS origin classified as public to loopback, that Pi and Codex content-only controls can be enforced, and that real pinned Pi/Codex CLIs can run credential-free against a local deterministic model server.
+Executable evidence that supported Chrome can perform status discovery plus both WebSocket and HTTP-streaming communication from an HTTPS origin classified as public to loopback after explicit Local Network Access permission, that legacy PNA preflights remain compatible, and that a real pinned Pi CLI can enforce content-only operation credential-free against a local deterministic model server.
 
 **Implementation**
 
-1. Extend the Playwright worker architecture with isolated HOME/CODEX_HOME, coordinated process cleanup, an HTTPS whiteboard proxy, and a loopback process slot while preserving current real-server/CLI publication coverage.
-2. Add a deterministic test model server supporting the minimal streaming Chat Completions and Responses contracts needed by Pi and Codex, plus scripted delay, interruption, error, and tool-request responses.
-3. Pin Pi and Codex as test-only dependencies and configure their isolated native defaults to the local model server. Do not read host credentials or sessions.
+1. Extend the Playwright worker architecture with an isolated HOME, coordinated process cleanup, an HTTPS whiteboard proxy, and a loopback process slot while preserving current real-server/CLI publication coverage.
+2. Add a deterministic test model server supporting the minimal streaming Chat Completions contract needed by Pi, plus scripted delay, interruption, error, and tool-request responses.
+3. Pin Pi as a test-only dependency and configure its isolated native default to the local model server. Do not read host credentials or sessions.
 4. Prove Pi RPC startup, prompt streaming, abort, session persistence/resume, and clean shutdown through the real CLI. Inspect the real model request to prove that no tools or project resources are exposed, and make a scripted tool attempt to prove it cannot execute.
-5. Prove Codex app-server initialization, thread start/read/resume/delete, turn streaming/interruption, and clean shutdown through the real CLI.
-6. Exercise Codex permission profiles and server-originated approval requests with observable read, write, network, and escalation attempts to establish that authority outside the controlled read-only workspace cannot be granted.
-7. Run Chrome from an HTTPS source classified as public and prove the page-load status request, WebSocket connection, and forced-WebSocket-failure HTTP streaming fallback to `127.0.0.1`, including the genuine PNA preflight. Use a hermetic Chromium address-space override or isolated network topology rather than request interception or synthetic headers.
+5. Run Chrome from an HTTPS source classified as public and prove denial before Local Network Access permission, followed by the page-load status request, WebSocket connection, and forced-WebSocket-failure HTTP streaming fallback to `127.0.0.1` after permission is granted. Use a hermetic Chromium address-space override or isolated network topology rather than request interception or synthetic headers.
+6. Exercise an ordinary CORS preflight in the browser proof and retain exact legacy PNA preflight integration coverage for compatible broker behavior.
 
 **Validation**
 
-- Focused integration tests run both real CLIs against the local model server with temporary state and assert their observed tool/permission surfaces.
-- Focused Playwright tests prove status, WebSocket, and HTTP fallback from a source Chrome classifies as public to loopback without interception masking browser policy.
-- Exact PNA preflight integration tests complement—but do not substitute for—the browser proof.
+- Focused integration tests run the real Pi CLI against the local model server with temporary state and assert its observed tool and resource surface.
+- Focused Playwright tests prove Local Network Access denial, permission grant, status, WebSocket, HTTP fallback, and ordinary CORS preflight from a source Chrome classifies as public to loopback without interception masking browser policy.
+- Exact legacy PNA preflight integration tests verify compatibility but do not substitute for the current-Chrome browser proof.
 - Existing browser tests remain green.
 
 **Risk / stop conditions**
 
-- If either Pi or Codex content-only enforcement cannot be proved without exposing broader authority, stop that provider implementation and return for design revision.
-- If Chrome cannot complete status discovery, WebSocket transport, and HTTP fallback from a public HTTPS address space to loopback without local certificates, stop before M2 and return for transport redesign.
-- If a hermetic test cannot make Chrome classify the source as public and exercise genuine public-to-local PNA behavior, stop before M2 rather than substituting synthetic preflight coverage.
+- If Pi content-only enforcement cannot be proved without exposing broader authority, stop provider implementation and return for design revision.
+- If current Chrome cannot complete status discovery, WebSocket transport, and HTTP fallback from a public HTTPS address space to loopback after explicit Local Network Access permission without locally installed certificates, stop before M2 and return for transport redesign.
+- If a hermetic test cannot make Chrome classify the source as public and exercise genuine public-to-local Local Network Access denial and permission behavior, stop before M2 rather than substituting synthetic coverage.
 
 ### Milestone 2: General configuration and paired Markdown context
 
@@ -391,47 +388,46 @@ A loopback-only broker exposes the secure versioned browser protocol, maintains 
 **Implementation**
 
 1. Define provider-neutral conversation and event contracts, stable IDs, snapshots/replay, queue transitions, archive lifecycle, and typed errors.
-2. Implement the `127.0.0.1` listener with minimal status disclosure, Host/Origin/CORS/PNA enforcement, WebSocket transport, and equivalent HTTP-stream fallback.
+2. Implement the `127.0.0.1` listener with minimal status disclosure, Host/Origin/CORS enforcement, Local Network Access compatibility, legacy PNA preflight handling, WebSocket transport, and equivalent HTTP-stream fallback.
 3. Implement multi-tab attachment, ordered queued follow-ups, edit/remove before dispatch, interrupt, resync, and disconnected queue draining.
 4. Implement owner-only atomic mappings/workspaces keyed by origin/resource/provider, with current and archived native references but no transcript/context copies.
 5. Implement canonical length-prefixed context digesting and revision-pending state. Expose an atomic commit operation that adapters call only after native prompt/turn acceptance.
-6. Add provider supervisor abstractions for lazy start, active/idle accounting, 60-minute default idle timeout, 10-second graceful shutdown, process-group termination, and one restart attempt. Model dedicated Pi ownership separately from shared reference-counted Codex ownership.
+6. Add provider supervisor abstractions for lazy start, active/idle accounting, 60-minute default idle timeout, 10-second graceful shutdown, process-group termination, and one restart attempt with dedicated Pi process ownership.
 7. Add foreground agent serve and macOS LaunchAgent install/update/status/restart/stop/uninstall; Linux managed operations fail explicitly.
 8. Reload trusted origins for new requests/connections after atomic trust edits without disturbing accepted active connections.
 
 **Validation**
 
 - Unit tests cover origin disclosure, mapping keys, atomic state, archive transitions, queue ordering, tab fan-out, replay deduplication, digest state, idle accounting, and shutdown escalation.
-- HTTP integration tests use ephemeral listeners for trusted/untrusted/missing/null Origin, Host, CORS, PNA OPTIONS, WebSocket, fallback parity, schema/size rejection, and disconnect/reconnect.
+- HTTP integration tests use ephemeral listeners for trusted/untrusted/missing/null Origin, Host, CORS, legacy PNA OPTIONS, WebSocket, fallback parity, schema/size rejection, and disconnect/reconnect.
 - Process tests use injected/fake children for startup death, malformed messages, crash/restart, ignored shutdown, and process-group cleanup.
 - CLI tests validate LaunchAgent content and command semantics through an injected service manager without altering the test machine.
 
-### Milestone 5: Pi and Codex adapters
+### Milestone 5: Pi adapter
 
 **Covers:** R6, provider portions of R7–R11
 **Depends on:** M4
 
 **Deliverable**
 
-The broker can create, resume, stream, interrupt, archive/delete, recover, and shut down content-only Pi and Codex conversations while exposing only normalized redacted events.
+The broker can create, resume, stream, interrupt, archive/delete, recover, and shut down content-only Pi conversations while exposing only normalized redacted events.
 
 **Implementation**
 
 1. Implement correlation-safe Pi JSONL RPC, strict startup flags, state/message loading, broker-managed sessions, prompts, abort, and validated in-root session deletion.
-2. Implement Codex initialize/initialized sequencing, request correlation, notification routing, thread lifecycle, turn lifecycle, shared-process multiplexing, and explicit server-request handling.
-3. Apply the Pi and Codex content-only policies proven in M1 and reject all unexpected approval, tool, network, write, or escalation paths.
-4. Construct one canonical provider context envelope from exact Markdown, creator context, title, URL, resource metadata, untrusted-content labels, application instructions, and the reader message. Construct full-replacement envelopes with explicit supersession language. Commit the pending digest only after Pi accepts the prompt command or Codex accepts `turn/start`; rejection leaves the revision pending.
-5. Normalize provider messages, status, visible summaries, retries/compaction, blocked requests, errors, completion, and interruption while redacting native details.
-6. Classify readiness and runtime failures without hard version gating; resolve and expose native default model read-only.
-7. Implement effective-context sizing with safety margin and fail closed when the complete first input cannot be shown to fit.
-8. Integrate provider-native create/resume/delete with current/archive mappings and one-attempt crash recovery without automatic turn replay. Pi deletion stops its dedicated process and removes its validated in-root session; Codex deletion interrupts/deletes only the selected thread and cannot stop a shared app-server still serving another conversation.
+2. Apply the Pi content-only policy proven in M1 and reject all unexpected tool or permission paths.
+3. Construct one canonical provider context envelope from exact Markdown, creator context, title, URL, resource metadata, untrusted-content labels, application instructions, and the reader message. Construct full-replacement envelopes with explicit supersession language. Commit the pending digest only after Pi accepts the prompt command; rejection leaves the revision pending.
+4. Normalize provider messages, status, visible summaries, retries/compaction, blocked requests, errors, completion, and interruption while redacting native details.
+5. Classify readiness and runtime failures without hard version gating; resolve and expose the native default model read-only.
+6. Implement effective-context sizing with safety margin and fail closed when the complete first input cannot be shown to fit.
+7. Integrate provider-native create/resume/delete with current/archive mappings and one-attempt crash recovery without automatic turn replay. Pi deletion stops its dedicated process and removes its validated in-root session.
 
 **Validation**
 
 - Protocol fixture tests cover partial framing, out-of-order responses, unknown events, malformed required events, and unknown permissions.
-- Real-CLI integration tests from M1 cover successful Pi/Codex lifecycle, persistence, interruption, and content-only blocking through the common broker interface.
+- Real-CLI integration tests from M1 cover successful Pi lifecycle, persistence, interruption, and content-only blocking through the common broker interface.
 - Byte-level regression tests assert canonical digest inputs, exact initial/replacement envelope fields and delimiters, no digest advancement after native rejection, and one advancement after acceptance without duplicate reinjection.
-- Shared-Codex tests delete one active thread while another continues streaming; dedicated-Pi tests prove deletion stops only its owned process.
+- Dedicated-Pi tests prove deletion stops only its owned process.
 - Regression tests assert no browser-facing event contains native IDs, credentials, paths, raw payloads, or hidden reasoning.
 
 ### Milestone 6: Sidebar and normalized chat
@@ -441,23 +437,23 @@ The broker can create, resume, stream, interrupt, archive/delete, recover, and s
 
 **Deliverable**
 
-The opt-in Markdown viewer provides the complete accessible reader experience across status, consent, context, live chat, queues, reconnect, providers, archives, revisions, and actionable failures.
+The opt-in Markdown viewer provides the complete accessible reader experience across status, consent, context, live chat, queues, reconnect, archives, revisions, and actionable failures.
 
 **Implementation**
 
 1. Add the responsive accessible drawer, saved open state, page-load status indicator, manual retry, and validated port editor fixed to `127.0.0.1`.
-2. Add provider availability/selection, native login guidance, read-only model display, and explicit Connect consent.
+2. Add Pi availability, native login guidance, read-only model display, and explicit Connect consent.
 3. Implement WebSocket client with HTTP-stream fallback, version negotiation, reconnect/resync, stable event handling, and multi-tab synchronization through broker state.
 4. Render sanitized user/assistant Markdown and collapsible normalized activity with expanded blocked/error states and no hidden reasoning.
 5. Add shared editable/removable follow-up queue, Stop, Retry interrupted turn, and disconnected completion behavior.
 6. Add current-context inspection, digest/update notices, complete-replacement flow, and clear oversized/unknown-context-limit failure.
 7. Add New conversation and history list/restore/delete with synchronized tab updates and safe confirmation/error recovery.
-8. Preserve only drawer state, port, and provider preference in `localStorage`.
+8. Preserve only drawer state and port in `localStorage`.
 
 **Validation**
 
 - Browser-source tests cover state machines, schema rejection, sanitization, storage boundaries, queue rendering, and accessibility state.
-- Focused Playwright scenarios cover status/port/trust, no pre-first-message context, Pi/Codex streaming, queue/Stop, reload/resume, revision replacement, two-tab sharing, archive lifecycle, provider crash, HTTP fallback, and error instructions.
+- Focused Playwright scenarios cover status/port/trust, Local Network Access permission guidance, no pre-first-message context, Pi streaming, queue/Stop, reload/resume, revision replacement, two-tab sharing, archive lifecycle, provider crash, HTTP fallback, and error instructions.
 - Mobile viewport tests verify overlay behavior and keyboard/focus operation.
 
 ### Milestone 7: Integrated validation, documentation, and security review
@@ -471,12 +467,12 @@ The complete feature is documented, migration-ready, hermetically tested, and in
 
 **Implementation**
 
-1. Complete the Playwright matrix using the real publishing server, HTTPS proxy, loopback broker, pinned real Pi/Codex, deterministic local model server, isolated homes/state, and reliable cleanup.
+1. Complete the Playwright matrix using the real publishing server, HTTPS proxy, loopback broker, pinned real Pi, deterministic local model server, isolated home/state, and reliable cleanup.
 2. Ensure browser request auditing permits only the exact whiteboard and loopback origins and does not mask the security behavior being asserted.
 3. Add optional documented hosted-provider smoke procedures without introducing credentials or public-network dependencies into CI.
 4. Update README, CLI/HTTP/Go API/storage/security documents, exported comments, examples, migration guidance, and the agent skill.
 5. Regenerate bundled assets once integrated, then verify generated artifacts are committed.
-6. Perform a focused independent security review of origin authorization, sandbox escape paths, CORS/PNA, content-only enforcement, redaction, state permissions, process cleanup, and conversation deletion.
+6. Perform a focused independent security review of origin authorization, sandbox escape paths, CORS/LNA and legacy PNA compatibility, content-only enforcement, redaction, state permissions, process cleanup, and conversation deletion.
 7. Resolve all required findings and rerun affected validation.
 
 **Validation**
@@ -493,11 +489,11 @@ Run focused package tests for each changed domain and focused Playwright spec fi
 
 ### Milestone gates
 
-- M1: real Pi/Codex local-provider smoke plus HTTPS-to-loopback browser proof.
+- M1: real Pi local-provider smoke plus HTTPS-to-loopback Local Network Access browser proof.
 - M2: relevant Go package and `tests/integration` configuration/storage/API cases.
 - M3: whiteboard/assets tests, generated-asset check, and presentation security browser specs.
 - M4: broker/state/local-API/process/CLI tests including race-sensitive queue and fan-out cases.
-- M5: adapter protocol tests plus real Pi/Codex local-model integration.
+- M5: adapter protocol tests plus real Pi local-model integration.
 - M6: viewer unit tests, asset check, and focused sidebar Playwright matrix.
 - M7: complete repository gate and focused security review.
 
@@ -517,8 +513,7 @@ The browser job installs pinned dependencies and Chromium before running. CI con
 ## Assumptions and Risks
 
 - Supported publishing origins are HTTPS. The first-release browser contract does not rely on insecure remote HTTP origins.
-- Chrome's evolving local-network permission and PNA behavior is a release risk. M1 is a hard pre-implementation gate: it must prove status plus both transports from a source Chrome classifies as public, and synthetic preflight tests cannot replace that evidence.
-- Codex app-server permission semantics are experimental. Content-only proof is a hard gate, not a best-effort claim.
+- Chrome's evolving Local Network Access behavior is a release risk. M1 is a hard pre-implementation gate: it must prove denial plus permission-granted status and both transports from a source Chrome classifies as public, and synthetic requests cannot replace that evidence.
 - Provider protocol drift may break runtime use because no version range is enforced. Strict required-message handling and actionable errors limit failure impact; pinned real-CLI E2E establishes a known baseline.
 - Sandboxing all standalone HTML intentionally changes existing rendering authority. Stable capability URLs and migration documentation reduce disruption, but preserving unrestricted same-origin behavior is not compatible with the approved security boundary.
 - No concurrency cap may permit high local resource use after many explicit Connect actions. Per-process idle shutdown, bounded queues/messages, and explicit daemon controls are the approved safeguards.
@@ -536,4 +531,5 @@ The browser job installs pinned dependencies and Chromium before running. CI con
 - Browser pairing, username/password authentication, remote relay, or extension-based transport.
 - Cross-machine session synchronization.
 - User-configurable model selection through agent-whiteboard.
+- Codex support until app-server permissions can prove exact workspace-only read authority while denying outside reads, writes, network, and escalation.
 - Hosted-provider/account-backed tests as mandatory CI.
