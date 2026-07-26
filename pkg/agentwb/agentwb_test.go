@@ -113,6 +113,7 @@ func TestNewRejectsInvalidConfigurationAndTypedNilDependencies(t *testing.T) {
 		{name: "large port", config: Config{Port: 65536}},
 		{name: "negative shutdown", config: Config{ShutdownTimeout: -time.Second}},
 		{name: "negative whiteboard limit", config: Config{MaxWhiteboardBytes: -1}},
+		{name: "negative context limit", config: Config{MaxContextBytes: -1}},
 		{name: "negative image limit", config: Config{MaxImageBytes: -1}},
 		{name: "negative request limit", config: Config{MaxImageRequestBytes: -1}},
 		{name: "request below image limit", config: Config{MaxImageBytes: 2, MaxImageRequestBytes: 1}},
@@ -135,6 +136,21 @@ func TestNewRejectsInvalidConfigurationAndTypedNilDependencies(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestNewDoesNotReadGeneralConfigurationOrEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AGENT_WHITEBOARD_MAX_CONTEXT_BYTES", "invalid")
+	require.NoError(t, os.Mkdir(filepath.Join(home, ".agent-whiteboard"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".agent-whiteboard", "config.yaml"), []byte("invalid: true\n"), 0o600))
+
+	service, err := New(Config{
+		WhiteboardStore: &recordingWhiteboardStore{},
+		ImageStore:      &recordingImageStore{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, service.Close())
 }
 
 func TestNewPreflightsServerConfigurationBeforeTouchingStorage(t *testing.T) {

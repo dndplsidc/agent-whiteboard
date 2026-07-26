@@ -26,20 +26,24 @@ func TestResolveServiceConfigUsesExactDefaults(t *testing.T) {
 	require.Equal(t, 8567, resolved.port)
 	require.Equal(t, 10*time.Second, resolved.shutdownTimeout)
 	require.Equal(t, int64(10<<20), resolved.maxWhiteboardBytes)
+	require.Equal(t, int64(1<<20), resolved.maxContextBytes)
 	require.Equal(t, int64(25<<20), resolved.maxImageBytes)
 	require.Equal(t, int64(100<<20), resolved.maxImageRequestBytes)
+	require.False(t, resolved.viewerLocalAgentEnabled)
 	require.Equal(t, LogModeConsole, resolved.logMode)
 	require.IsType(t, &slog.TextHandler{}, resolved.logger.Handler())
 }
 
 func TestResolveServiceConfigHonorsExplicitZerosAndJSONLogging(t *testing.T) {
-	resolved, err := resolveServiceConfig(ServiceConfig{LogMode: LogModeJSON}, []Option{
+	resolved, err := resolveServiceConfig(ServiceConfig{LogMode: LogModeJSON, MaxContextBytes: 2, ViewerLocalAgentEnabled: true}, []Option{
 		WithPort(0),
 		WithDefaultExpiration(0),
 	})
 	require.NoError(t, err)
 	require.Zero(t, resolved.port)
 	require.Zero(t, resolved.defaultExpiration)
+	require.EqualValues(t, 2, resolved.maxContextBytes)
+	require.True(t, resolved.viewerLocalAgentEnabled)
 	require.IsType(t, &slog.JSONHandler{}, resolved.logger.Handler())
 }
 

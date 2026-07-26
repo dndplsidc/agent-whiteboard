@@ -22,7 +22,7 @@ func TestServeBuildsExactApplicationAndOwnsLifecycle(t *testing.T) {
 		host: "flag.host", port: 0, storage: storage,
 		cleanupInterval: 2 * time.Minute, defaultExpiration: 0,
 		shutdownTimeout: 3 * time.Second, logMode: "json",
-		maxWhiteboardBytes: 11, maxImageBytes: 12, maxImageRequestBytes: 13,
+		maxWhiteboardBytes: 11, maxContextBytes: 14, maxImageBytes: 12, maxImageRequestBytes: 13,
 	}
 	arguments := buildApplicationArguments(settings, io.Discard)
 	require.Equal(t, 0, arguments.port)
@@ -31,7 +31,7 @@ func TestServeBuildsExactApplicationAndOwnsLifecycle(t *testing.T) {
 	wantConfig := app.ServiceConfig{
 		RootDir: storage, CleanupInterval: 2 * time.Minute,
 		Host: "flag.host", ShutdownTimeout: 3 * time.Second,
-		MaxWhiteboardBytes: 11, MaxImageBytes: 12, MaxImageRequestBytes: 13,
+		MaxWhiteboardBytes: 11, MaxContextBytes: 14, MaxImageBytes: 12, MaxImageRequestBytes: 13,
 		LogMode: app.LogModeJSON,
 	}
 
@@ -56,7 +56,7 @@ func TestServeBuildsExactApplicationAndOwnsLifecycle(t *testing.T) {
 		"serve", "--host", "flag.host", "--port", "0", "--storage", storage,
 		"--cleanup-interval", "2m", "--default-expires-in", "0",
 		"--shutdown-timeout", "3s", "--log-mode", "json",
-		"--max-whiteboard-bytes", "11", "--max-image-bytes", "12", "--max-image-request-bytes", "13",
+		"--max-whiteboard-bytes", "11", "--max-context-bytes", "14", "--max-image-bytes", "12", "--max-image-request-bytes", "13",
 	})
 	require.NoError(t, root.ExecuteContext(ctx))
 	require.Equal(t, int32(1), application.closeCalls.Load())

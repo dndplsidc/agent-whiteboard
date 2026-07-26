@@ -68,7 +68,7 @@ func Builtins() (BuiltinValues, error) {
 			ShutdownTimeout:      10 * time.Second,
 			LogMode:              "console",
 			MaxWhiteboardBytes:   10 << 20,
-			MaxContextBytes:      1 << 20,
+			MaxContextBytes:      DefaultMaxContextBytes,
 			MaxImageBytes:        25 << 20,
 			MaxImageRequestBytes: 100 << 20,
 		},

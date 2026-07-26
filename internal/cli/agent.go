@@ -8,6 +8,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const handlesConfigurationAnnotation = "agent-whiteboard/handles-configuration"
+
 func (factory commandFactory) newAgentCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use:  "agent",
@@ -32,8 +34,9 @@ func (factory commandFactory) newTrustCommand() *cobra.Command {
 
 func (factory commandFactory) newTrustMutationCommand(name string, edit func(string, string) error) *cobra.Command {
 	return &cobra.Command{
-		Use:  name + " ORIGIN",
-		Args: usageArgs(cobra.ExactArgs(1)),
+		Use:         name + " ORIGIN",
+		Args:        usageArgs(cobra.ExactArgs(1)),
+		Annotations: map[string]string{handlesConfigurationAnnotation: "true"},
 		RunE: func(_ *cobra.Command, args []string) error {
 			canonical, err := config.CanonicalOrigin(args[0])
 			if err != nil {
@@ -49,8 +52,9 @@ func (factory commandFactory) newTrustMutationCommand(name string, edit func(str
 
 func (factory commandFactory) newTrustListCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:  "list",
-		Args: usageArgs(cobra.NoArgs),
+		Use:         "list",
+		Args:        usageArgs(cobra.NoArgs),
+		Annotations: map[string]string{handlesConfigurationAnnotation: "true"},
 		RunE: func(_ *cobra.Command, _ []string) error {
 			origins, err := config.ListTrustedOrigins(factory.root.configPath)
 			if err != nil {

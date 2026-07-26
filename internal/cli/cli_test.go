@@ -13,6 +13,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/app"
 	"github.com/edocsss/agent-whiteboard/internal/cli/mocks"
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
 	httpx "github.com/edocsss/agent-whiteboard/internal/http"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/mock"
@@ -20,6 +21,11 @@ import (
 )
 
 func TestClientSettingsPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "client.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("version: 1\nclient:\n  server: https://yaml.test\n  timeout: 11s\n"), 0o600))
+
 	tests := []struct {
 		name    string
 		env     map[string]string
@@ -27,9 +33,11 @@ func TestClientSettingsPrecedence(t *testing.T) {
 		server  string
 		timeout time.Duration
 	}{
-		{name: "defaults", server: "http://127.0.0.1:8567", timeout: 30 * time.Second},
-		{name: "environment", env: map[string]string{"AGENT_WHITEBOARD_SERVER": "https://env.test", "AGENT_WHITEBOARD_TIMEOUT": "9s"}, server: "https://env.test", timeout: 9 * time.Second},
-		{name: "flags", env: map[string]string{"AGENT_WHITEBOARD_SERVER": "https://env.test", "AGENT_WHITEBOARD_TIMEOUT": "9s"}, args: []string{"--server", "https://flag.test", "--timeout", "7s"}, server: "https://flag.test", timeout: 7 * time.Second},
+		{name: "built-ins", server: "http://127.0.0.1:8567", timeout: 30 * time.Second},
+		{name: "YAML", args: []string{"--config", configPath}, server: "https://yaml.test", timeout: 11 * time.Second},
+		{name: "empty environment preserves YAML", env: map[string]string{"AGENT_WHITEBOARD_SERVER": "", "AGENT_WHITEBOARD_TIMEOUT": ""}, args: []string{"--config", configPath}, server: "https://yaml.test", timeout: 11 * time.Second},
+		{name: "environment", env: map[string]string{"AGENT_WHITEBOARD_SERVER": "https://env.test", "AGENT_WHITEBOARD_TIMEOUT": "9s"}, args: []string{"--config", configPath}, server: "https://env.test", timeout: 9 * time.Second},
+		{name: "flags", env: map[string]string{"AGENT_WHITEBOARD_SERVER": "https://env.test", "AGENT_WHITEBOARD_TIMEOUT": "9s"}, args: []string{"--config", configPath, "--server", "https://flag.test", "--timeout", "7s"}, server: "https://flag.test", timeout: 7 * time.Second},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -42,7 +50,7 @@ func TestClientSettingsPrecedence(t *testing.T) {
 			})
 			require.NoError(t, err)
 			client.EXPECT().DeleteImage(mock.Anything, "abc").Return(nil).Once()
-			root.SetArgs(append(test.args, "image", "delete", "abc"))
+			root.SetArgs(append([]string{"image", "delete", "abc"}, test.args...))
 			require.NoError(t, root.ExecuteContext(context.Background()))
 			require.Equal(t, test.server, got.Server)
 			require.NotNil(t, got.HTTPClient)
@@ -52,23 +60,53 @@ func TestClientSettingsPrecedence(t *testing.T) {
 }
 
 func TestServerSettingsPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "server.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`version: 1
+server:
+  host: yaml.host
+  port: 9000
+  storage: yaml-storage
+  cleanup_interval: 30s
+  default_expires_in: 41
+  shutdown_timeout: 1s
+  log_mode: json
+  max_whiteboard_bytes: 1
+  max_context_bytes: 2
+  max_image_bytes: 3
+  max_image_request_bytes: 4
+viewer:
+  local_agent:
+    enabled: true
+`), 0o600))
+
 	defaults := resolvedServerSettings{
-		host: "127.0.0.1", port: 8567, storage: defaultStoragePath(),
+		host: "127.0.0.1", port: 8567, storage: filepath.Join(home, ".agent-whiteboard"),
 		cleanupInterval: 15 * time.Minute, defaultExpiration: 86400,
 		shutdownTimeout: 10 * time.Second, logMode: "console",
-		maxWhiteboardBytes: 10 << 20, maxImageBytes: 25 << 20, maxImageRequestBytes: 100 << 20,
+		maxWhiteboardBytes: 10 << 20, maxContextBytes: 1 << 20, maxImageBytes: 25 << 20, maxImageRequestBytes: 100 << 20,
+	}
+	yaml := resolvedServerSettings{
+		host: "yaml.host", port: 9000, storage: filepath.Join(home, "yaml-storage"),
+		cleanupInterval: 30 * time.Second, defaultExpiration: 41,
+		shutdownTimeout: time.Second, logMode: "json",
+		maxWhiteboardBytes: 1, maxContextBytes: 2, maxImageBytes: 3, maxImageRequestBytes: 4,
+		localAgentEnabled: true,
 	}
 	environment := resolvedServerSettings{
 		host: "env.host", port: 9001, storage: "/env/storage",
 		cleanupInterval: time.Minute, defaultExpiration: 42,
 		shutdownTimeout: 2 * time.Second, logMode: "json",
-		maxWhiteboardBytes: 11, maxImageBytes: 12, maxImageRequestBytes: 13,
+		maxWhiteboardBytes: 11, maxContextBytes: 14, maxImageBytes: 12, maxImageRequestBytes: 13,
+		localAgentEnabled: true,
 	}
 	flags := resolvedServerSettings{
 		host: "flag.host", port: 9002, storage: "/flag/storage",
 		cleanupInterval: 2 * time.Minute, defaultExpiration: 43,
 		shutdownTimeout: 3 * time.Second, logMode: "console",
-		maxWhiteboardBytes: 21, maxImageBytes: 22, maxImageRequestBytes: 23,
+		maxWhiteboardBytes: 21, maxContextBytes: 24, maxImageBytes: 22, maxImageRequestBytes: 23,
+		localAgentEnabled: true,
 	}
 	env := map[string]string{
 		"AGENT_WHITEBOARD_HOST":                    environment.host,
@@ -79,6 +117,7 @@ func TestServerSettingsPrecedence(t *testing.T) {
 		"AGENT_WHITEBOARD_SHUTDOWN_TIMEOUT":        "2s",
 		"AGENT_WHITEBOARD_LOG_MODE":                environment.logMode,
 		"AGENT_WHITEBOARD_MAX_WHITEBOARD_BYTES":    "11",
+		"AGENT_WHITEBOARD_MAX_CONTEXT_BYTES":       "14",
 		"AGENT_WHITEBOARD_MAX_IMAGE_BYTES":         "12",
 		"AGENT_WHITEBOARD_MAX_IMAGE_REQUEST_BYTES": "13",
 	}
@@ -86,7 +125,7 @@ func TestServerSettingsPrecedence(t *testing.T) {
 		"--host", flags.host, "--port", "9002", "--storage", flags.storage,
 		"--cleanup-interval", "2m", "--default-expires-in", "43",
 		"--shutdown-timeout", "3s", "--log-mode", flags.logMode,
-		"--max-whiteboard-bytes", "21", "--max-image-bytes", "22", "--max-image-request-bytes", "23",
+		"--max-whiteboard-bytes", "21", "--max-context-bytes", "24", "--max-image-bytes", "22", "--max-image-request-bytes", "23",
 	}
 
 	for _, test := range []struct {
@@ -95,9 +134,10 @@ func TestServerSettingsPrecedence(t *testing.T) {
 		args []string
 		want resolvedServerSettings
 	}{
-		{name: "defaults", want: defaults},
-		{name: "environment", env: env, want: environment},
-		{name: "flags", env: env, args: flagArgs, want: flags},
+		{name: "built-ins", want: defaults},
+		{name: "YAML", args: []string{"--config", configPath}, want: yaml},
+		{name: "environment", env: env, args: []string{"--config", configPath}, want: environment},
+		{name: "flags", env: env, args: append([]string{"--config", configPath}, flagArgs...), want: flags},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			wantConfig := buildApplicationArguments(test.want, io.Discard).config
@@ -116,6 +156,80 @@ func TestServerSettingsPrecedence(t *testing.T) {
 			require.NoError(t, root.ExecuteContext(context.Background()))
 		})
 	}
+}
+
+func TestGeneralConfigurationLoadsOncePerExecutionAndUsesSnapshot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: 1\nclient:\n  server: https://snapshot.test\n"), 0o600))
+
+	loads := 0
+	deps := validDependencies()
+	deps.LoadConfig = func(selected string) (generalconfig.Config, error) {
+		loads++
+		loaded, err := generalconfig.Load(selected)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, []byte("version: 1\nclient:\n  server: https://changed.test\n"), 0o600))
+		return loaded, nil
+	}
+	client := mocks.NewMockClient(t)
+	client.EXPECT().DeleteImage(mock.Anything, "abc").Return(nil).Once()
+	deps.NewClient = func(config httpx.ClientConfig) (Client, error) {
+		require.Equal(t, "https://snapshot.test", config.Server)
+		return client, nil
+	}
+	root, err := NewRoot(deps)
+	require.NoError(t, err)
+	root.SetArgs([]string{"image", "delete", "abc", "--config", path})
+	require.NoError(t, root.ExecuteContext(context.Background()))
+	require.Equal(t, 1, loads)
+}
+
+func TestGeneralConfigurationIsNotLoadedForHelpOrCompletion(t *testing.T) {
+	loads := 0
+	deps := validDependencies()
+	deps.LoadConfig = func(string) (generalconfig.Config, error) {
+		loads++
+		return generalconfig.Config{}, errors.New("must not load")
+	}
+	for _, args := range [][]string{{"--help"}, {"serve", "--help"}, {"completion"}, {"__complete", "serve"}} {
+		root, err := NewRoot(deps)
+		require.NoError(t, err)
+		root.SetArgs(args)
+		_ = root.ExecuteContext(context.Background())
+	}
+	require.Zero(t, loads)
+}
+
+func TestExplicitInvalidConfigurationFailsUnrelatedCommands(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	missing := filepath.Join(home, "missing.yaml")
+	invalid := filepath.Join(home, "invalid.yaml")
+	require.NoError(t, os.WriteFile(invalid, []byte("version: 1\nunknown: true\n"), 0o600))
+
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "missing client config after command", args: []string{"image", "delete", "abc", "--config", missing}},
+		{name: "invalid server config before command", args: []string{"--config", invalid, "serve"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), &stdout, &stderr, mapGetenv(nil), test.args, validDependencies())
+			require.Equal(t, exitUsage, code)
+			require.Empty(t, stdout.String())
+			require.NotEmpty(t, stderr.String())
+		})
+	}
+
+	client := mocks.NewMockClient(t)
+	client.EXPECT().DeleteImage(mock.Anything, "abc").Return(nil).Once()
+	root := mustRoot(t, client, nil, io.Discard, io.Discard)
+	root.SetArgs([]string{"image", "delete", "abc"})
+	require.NoError(t, root.ExecuteContext(context.Background()))
 }
 
 func TestApprovedClientCommands(t *testing.T) {
@@ -254,6 +368,8 @@ func TestInvalidServerSettings(t *testing.T) {
 		{name: "shutdown nonpositive", args: []string{"--shutdown-timeout", "0s"}},
 		{name: "whiteboard bytes integer", args: []string{"--max-whiteboard-bytes", "nope"}},
 		{name: "whiteboard bytes negative", args: []string{"--max-whiteboard-bytes", "-1"}},
+		{name: "context bytes integer", args: []string{"--max-context-bytes", "nope"}},
+		{name: "context bytes negative", args: []string{"--max-context-bytes", "-1"}},
 		{name: "image bytes integer", args: []string{"--max-image-bytes", "nope"}},
 		{name: "image bytes negative", args: []string{"--max-image-bytes", "-1"}},
 		{name: "request bytes integer", args: []string{"--max-image-request-bytes", "nope"}},
@@ -276,14 +392,24 @@ func TestInvalidServerSettings(t *testing.T) {
 }
 
 func TestZeroServerLimitsRemainExplicit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("version: 1\nserver:\n  max_context_bytes: 5\n  max_image_request_bytes: 52428800\n"), 0o600))
+
 	deps := validDependencies()
+	deps.Getenv = mapGetenv(map[string]string{
+		"AGENT_WHITEBOARD_MAX_CONTEXT_BYTES":       "6",
+		"AGENT_WHITEBOARD_MAX_IMAGE_REQUEST_BYTES": "62914560",
+	})
 	deps.NewApplication = func(config app.ServiceConfig, _ ...app.Option) (Application, error) {
+		require.Zero(t, config.MaxContextBytes)
 		require.Zero(t, config.MaxImageRequestBytes)
 		return &fakeApplication{}, nil
 	}
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
-	root.SetArgs([]string{"serve", "--max-image-request-bytes", "0"})
+	root.SetArgs([]string{"serve", "--config", path, "--max-context-bytes", "0", "--max-image-request-bytes", "0"})
 	require.NoError(t, root.ExecuteContext(context.Background()))
 }
 
