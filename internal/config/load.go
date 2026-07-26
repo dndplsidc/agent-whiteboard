@@ -41,6 +41,10 @@ func Load(selectedPath string) (Config, error) {
 }
 
 func openConfiguration(path string) (*os.File, error) {
+	return openConfigurationWithHook(path, nil)
+}
+
+func openConfigurationWithHook(path string, beforeOpen func()) (*os.File, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -48,7 +52,10 @@ func openConfiguration(path string) (*os.File, error) {
 	if err := validateConfigurationInfo(info); err != nil {
 		return nil, err
 	}
-	file, err := os.Open(path)
+	if beforeOpen != nil {
+		beforeOpen()
+	}
+	file, err := openRegularNoFollow(path)
 	if err != nil {
 		return nil, err
 	}

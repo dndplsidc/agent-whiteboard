@@ -22,16 +22,21 @@ func (err *CommitUncertainError) Error() string {
 func (err *CommitUncertainError) Unwrap() error { return err.Err }
 
 type editFileOps struct {
-	syncFile func(*os.File) error
-	rename   func(string, string) error
-	syncDir  func(*os.File) error
+	syncFile           func(*os.File) error
+	rename             func(*configDirectory, string, string) error
+	syncDir            func(*configDirectory) error
+	afterDirectoryOpen func()
+	beforeTargetOpen   func()
+	beforeTargetCheck  func()
 }
 
 func defaultEditFileOps() editFileOps {
 	return editFileOps{
 		syncFile: func(file *os.File) error { return file.Sync() },
-		rename:   os.Rename,
-		syncDir:  func(directory *os.File) error { return directory.Sync() },
+		rename: func(directory *configDirectory, oldName, newName string) error {
+			return directory.rename(oldName, newName)
+		},
+		syncDir: func(directory *configDirectory) error { return directory.sync() },
 	}
 }
 
@@ -44,35 +49,34 @@ func RemoveTrustedOrigin(selectedPath, origin string) error {
 }
 
 func ListTrustedOrigins(selectedPath string) ([]string, error) {
+	return listTrustedOrigins(selectedPath, defaultEditFileOps())
+}
+
+func listTrustedOrigins(selectedPath string, ops editFileOps) ([]string, error) {
 	path, explicit, err := trustedOriginPath(selectedPath)
 	if err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(path)
+	directory, err := openConfigDirectory(filepath.Dir(path))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) && !explicit {
 			return []string{}, nil
 		}
-		return nil, fmt.Errorf("inspect configuration %q: %w", path, err)
+		return nil, fmt.Errorf("open configuration directory %q: %w", filepath.Dir(path), err)
 	}
-	if err := validateConfigurationInfo(info); err != nil {
-		return nil, fmt.Errorf("configuration %q: %w", path, err)
+	defer directory.close()
+	if ops.afterDirectoryOpen != nil {
+		ops.afterDirectoryOpen()
 	}
-	file, err := openRegularNoFollow(path)
+
+	file, _, err := openConfigTarget(directory, filepath.Base(path), ops.beforeTargetOpen)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) && !explicit {
+			return []string{}, nil
+		}
 		return nil, fmt.Errorf("open configuration %q: %w", path, err)
 	}
 	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("inspect open configuration %q: %w", path, err)
-	}
-	if !os.SameFile(info, openedInfo) {
-		return nil, fmt.Errorf("configuration %q must be an unchanged regular file", path)
-	}
-	if err := validateConfigurationInfo(openedInfo); err != nil {
-		return nil, fmt.Errorf("configuration %q: %w", path, err)
-	}
 	_, loaded, err := parseConfigFile(file, path)
 	if err != nil {
 		return nil, err
@@ -93,24 +97,37 @@ func editTrustedOrigin(selectedPath, origin string, add bool, ops editFileOps) e
 	if err != nil {
 		return err
 	}
+	if !explicit {
+		if err := ensureDefaultConfigDirectory(filepath.Dir(path)); err != nil {
+			return err
+		}
+	}
+
+	directory, err := openConfigDirectory(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("open configuration directory %q: %w", filepath.Dir(path), err)
+	}
+	defer directory.close()
+	if ops.afterDirectoryOpen != nil {
+		ops.afterDirectoryOpen()
+	}
+
+	targetName := filepath.Base(path)
 	if explicit {
-		if _, err := os.Lstat(path); err != nil {
+		if _, err := directory.targetIdentity(targetName); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("configuration %q: %w", path, os.ErrNotExist)
 			}
 			return fmt.Errorf("inspect configuration %q: %w", path, err)
 		}
-	} else if err := ensureDefaultConfigDirectory(filepath.Dir(path)); err != nil {
-		return err
 	}
-
-	lock, err := acquireEditLock(path + ".lock")
+	lock, err := acquireEditLock(directory, targetName+".lock")
 	if err != nil {
 		return fmt.Errorf("lock configuration %q: %w", path, err)
 	}
 	defer lock.release()
 
-	root, loaded, originalInfo, err := readConfigForEdit(path, explicit)
+	root, loaded, originalIdentity, err := readConfigForEdit(directory, path, explicit, ops.beforeTargetOpen)
 	if err != nil {
 		return err
 	}
@@ -136,10 +153,7 @@ func editTrustedOrigin(selectedPath, origin string, add bool, ops editFileOps) e
 	if err := encoder.Close(); err != nil {
 		return fmt.Errorf("encode configuration: %w", err)
 	}
-	if err := commitConfig(path, serialized.Bytes(), originalInfo, ops); err != nil {
-		return err
-	}
-	return nil
+	return commitConfig(directory, path, serialized.Bytes(), originalIdentity, ops)
 }
 
 func ensureDefaultConfigDirectory(path string) error {
@@ -153,11 +167,8 @@ func ensureDefaultConfigDirectory(path string) error {
 	if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect default configuration directory: %w", err)
 	}
-	if err := os.Mkdir(path, 0o700); err != nil {
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("create default configuration directory: %w", err)
-	}
-	if err := os.Chmod(path, 0o700); err != nil {
-		return fmt.Errorf("secure default configuration directory: %w", err)
 	}
 	return nil
 }
@@ -175,11 +186,47 @@ func trustedOriginPath(selectedPath string) (path string, explicit bool, err err
 	return path, explicit, nil
 }
 
-func readConfigForEdit(path string, explicit bool) (*yaml.Node, Config, os.FileInfo, error) {
-	info, err := os.Lstat(path)
+func openConfigTarget(directory *configDirectory, name string, beforeOpen func()) (*os.File, fileIdentity, error) {
+	expected, err := directory.targetIdentity(name)
+	if err != nil {
+		return nil, fileIdentity{}, err
+	}
+	if beforeOpen != nil {
+		beforeOpen()
+	}
+	file, err := directory.openTarget(name)
+	if err != nil {
+		return nil, fileIdentity{}, err
+	}
+	failed := true
+	defer func() {
+		if failed {
+			_ = file.Close()
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fileIdentity{}, err
+	}
+	if err := validateConfigurationInfo(info); err != nil {
+		return nil, fileIdentity{}, err
+	}
+	opened, err := identityForFile(file)
+	if err != nil {
+		return nil, fileIdentity{}, err
+	}
+	if opened != expected {
+		return nil, fileIdentity{}, errors.New("configuration must be an unchanged regular file")
+	}
+	failed = false
+	return file, opened, nil
+}
+
+func readConfigForEdit(directory *configDirectory, path string, explicit bool, beforeOpen func()) (*yaml.Node, Config, *fileIdentity, error) {
+	file, identity, err := openConfigTarget(directory, filepath.Base(path), beforeOpen)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return nil, Config{}, nil, fmt.Errorf("inspect configuration %q: %w", path, err)
+			return nil, Config{}, nil, fmt.Errorf("open configuration %q: %w", path, err)
 		}
 		if explicit {
 			return nil, Config{}, nil, fmt.Errorf("configuration %q: %w", path, os.ErrNotExist)
@@ -190,29 +237,12 @@ func readConfigForEdit(path string, explicit bool) (*yaml.Node, Config, os.FileI
 		}}
 		return root, Config{path: path, version: Version1}, nil, nil
 	}
-	if err := validateConfigurationInfo(info); err != nil {
-		return nil, Config{}, nil, fmt.Errorf("configuration %q: %w", path, err)
-	}
-	file, err := openRegularNoFollow(path)
-	if err != nil {
-		return nil, Config{}, nil, fmt.Errorf("open configuration %q: %w", path, err)
-	}
 	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil {
-		return nil, Config{}, nil, fmt.Errorf("inspect open configuration %q: %w", path, err)
-	}
-	if !os.SameFile(info, openedInfo) {
-		return nil, Config{}, nil, fmt.Errorf("configuration %q must be an unchanged regular file", path)
-	}
-	if err := validateConfigurationInfo(openedInfo); err != nil {
-		return nil, Config{}, nil, fmt.Errorf("configuration %q: %w", path, err)
-	}
 	root, loaded, err := parseConfigFile(file, path)
 	if err != nil {
 		return nil, Config{}, nil, err
 	}
-	return root, loaded, openedInfo, nil
+	return root, loaded, &identity, nil
 }
 
 func parseConfigFile(reader io.Reader, path string) (*yaml.Node, Config, error) {
@@ -298,35 +328,19 @@ func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-func commitConfig(path string, contents []byte, originalInfo os.FileInfo, ops editFileOps) error {
-	directory, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("open configuration directory: %w", err)
-	}
-	defer directory.Close()
-	directoryInfo, err := directory.Stat()
-	if err != nil || !directoryInfo.IsDir() {
-		if err == nil {
-			err = errors.New("not a directory")
-		}
-		return fmt.Errorf("inspect configuration directory: %w", err)
-	}
-
-	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+func commitConfig(directory *configDirectory, path string, contents []byte, originalIdentity *fileIdentity, ops editFileOps) error {
+	targetName := filepath.Base(path)
+	temporary, temporaryName, err := directory.createTemporary(targetName)
 	if err != nil {
 		return fmt.Errorf("create temporary configuration: %w", err)
 	}
-	temporaryPath := temporary.Name()
 	committed := false
 	defer func() {
 		_ = temporary.Close()
 		if !committed {
-			_ = os.Remove(temporaryPath)
+			_ = directory.unlink(temporaryName)
 		}
 	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("secure temporary configuration: %w", err)
-	}
 	if _, err := temporary.Write(contents); err != nil {
 		return fmt.Errorf("write temporary configuration: %w", err)
 	}
@@ -336,10 +350,13 @@ func commitConfig(path string, contents []byte, originalInfo os.FileInfo, ops ed
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close temporary configuration: %w", err)
 	}
-	if err := verifyUnchangedTarget(path, originalInfo); err != nil {
+	if ops.beforeTargetCheck != nil {
+		ops.beforeTargetCheck()
+	}
+	if err := verifyUnchangedTarget(directory, path, originalIdentity); err != nil {
 		return err
 	}
-	if err := ops.rename(temporaryPath, path); err != nil {
+	if err := ops.rename(directory, temporaryName, targetName); err != nil {
 		return fmt.Errorf("commit configuration: %w", err)
 	}
 	committed = true
@@ -349,9 +366,9 @@ func commitConfig(path string, contents []byte, originalInfo os.FileInfo, ops ed
 	return nil
 }
 
-func verifyUnchangedTarget(path string, originalInfo os.FileInfo) error {
-	current, err := os.Lstat(path)
-	if originalInfo == nil {
+func verifyUnchangedTarget(directory *configDirectory, path string, originalIdentity *fileIdentity) error {
+	current, err := directory.targetIdentity(filepath.Base(path))
+	if originalIdentity == nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -360,11 +377,11 @@ func verifyUnchangedTarget(path string, originalInfo os.FileInfo) error {
 		}
 		return fmt.Errorf("configuration %q changed while editing", path)
 	}
-	if err != nil {
-		return fmt.Errorf("reinspect configuration %q: %w", path, err)
-	}
-	if !current.Mode().IsRegular() || !os.SameFile(originalInfo, current) {
+	if err != nil || current != *originalIdentity {
 		return fmt.Errorf("configuration %q changed while editing", path)
 	}
+	// The advisory lock coordinates cooperative editors. A same-user process that
+	// ignores the lock can still race this check and rename; cross-platform Unix
+	// APIs do not provide an atomic conditional replacement by inode.
 	return nil
 }

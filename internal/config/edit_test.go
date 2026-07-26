@@ -152,10 +152,9 @@ func TestTrustedOriginAtomicCommitFailureSemantics(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, old, 0o600))
 		injected := errors.New("injected rename failure")
 		ops := defaultEditFileOps()
-		ops.rename = func(oldPath, newPath string) error {
-			require.Equal(t, filepath.Dir(path), filepath.Dir(oldPath))
-			require.Equal(t, path, newPath)
-			assertPermissions(t, oldPath, 0o600)
+		ops.rename = func(_ *configDirectory, oldName, newName string) error {
+			require.Equal(t, filepath.Base(path), newName)
+			assertPermissions(t, filepath.Join(filepath.Dir(path), oldName), 0o600)
 			return injected
 		}
 
@@ -169,7 +168,7 @@ func TestTrustedOriginAtomicCommitFailureSemantics(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("version: 1\n"), 0o600))
 		injected := errors.New("injected directory sync failure")
 		ops := defaultEditFileOps()
-		ops.syncDir = func(*os.File) error { return injected }
+		ops.syncDir = func(*configDirectory) error { return injected }
 
 		err := editTrustedOrigin(path, "https://new.example", true, ops)
 		var uncertain *CommitUncertainError
