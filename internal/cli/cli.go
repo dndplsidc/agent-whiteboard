@@ -22,7 +22,10 @@ import (
 
 type Client interface {
 	CreateWhiteboard(context.Context, httpx.WhiteboardKind, httpx.File, *int64) (httpx.Resource, error)
+	CreateMarkdown(context.Context, httpx.File, httpx.File, *int64) (httpx.Resource, error)
 	UpdateWhiteboard(context.Context, httpx.WhiteboardKind, string, httpx.File, *int64) (httpx.Resource, error)
+	UpdateMarkdown(context.Context, string, httpx.File, httpx.File, *int64) (httpx.Resource, error)
+	GetMarkdown(context.Context, string) (httpx.MarkdownResponse, error)
 	DeleteWhiteboard(context.Context, httpx.WhiteboardKind, string) error
 	CreateImages(context.Context, []httpx.File, *int64) ([]httpx.Resource, error)
 	UpdateImage(context.Context, string, httpx.File, *int64) (httpx.Resource, error)
@@ -136,7 +139,7 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 		}
 		return factory.loadGeneralConfiguration()
 	}
-	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newDeleteCommand(), factory.newImageCommand(), factory.newAgentCommand())
+	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newGetCommand(), factory.newDeleteCommand(), factory.newImageCommand(), factory.newAgentCommand())
 	return root, nil
 }
 

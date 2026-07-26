@@ -31,6 +31,13 @@ type multiResourceOutput struct {
 	Resources     []jsonResource `json:"resources"`
 }
 
+type markdownOutput struct {
+	SchemaVersion int          `json:"schema_version"`
+	Resource      jsonResource `json:"resource"`
+	Markdown      string       `json:"markdown"`
+	Context       string       `json:"context"`
+}
+
 type deleteOutput struct {
 	SchemaVersion int `json:"schema_version"`
 }
@@ -77,6 +84,25 @@ func writeResource(writer io.Writer, jsonMode bool, client Client, resource http
 		}
 	} else {
 		fmt.Fprintln(&output, resolved[0].URL)
+	}
+	_, err = writer.Write(output.Bytes())
+	return err
+}
+
+func writeMarkdown(writer io.Writer, client Client, response http.MarkdownResponse) error {
+	resolved, err := resolveJSONResources(client, []http.Resource{response.Resource})
+	if err != nil {
+		return err
+	}
+
+	var output bytes.Buffer
+	if err := json.NewEncoder(&output).Encode(markdownOutput{
+		SchemaVersion: 1,
+		Resource:      resolved[0],
+		Markdown:      response.Markdown,
+		Context:       response.Context,
+	}); err != nil {
+		return err
 	}
 	_, err = writer.Write(output.Bytes())
 	return err

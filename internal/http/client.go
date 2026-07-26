@@ -27,6 +27,11 @@ type File struct {
 	Reader io.Reader
 }
 
+type multipartFile struct {
+	fieldName string
+	file      File
+}
+
 type WhiteboardKind string
 
 const (
@@ -68,9 +73,32 @@ func (c *Client) CreateWhiteboard(
 	if err != nil {
 		return Resource{}, err
 	}
+	if kind == WhiteboardMarkdown {
+		return Resource{}, clientInvalidRequest("markdown context is required")
+	}
+	return c.createWhiteboard(ctx, endpoint, []multipartFile{{fieldName: "file", file: file}}, expiresInSeconds)
+}
 
+func (c *Client) CreateMarkdown(
+	ctx context.Context,
+	markdown File,
+	creatorContext File,
+	expiresInSeconds *int64,
+) (Resource, error) {
+	return c.createWhiteboard(ctx, APIWhiteboardMarkdown, []multipartFile{
+		{fieldName: "file", file: markdown},
+		{fieldName: "context", file: creatorContext},
+	}, expiresInSeconds)
+}
+
+func (c *Client) createWhiteboard(
+	ctx context.Context,
+	endpoint string,
+	files []multipartFile,
+	expiresInSeconds *int64,
+) (Resource, error) {
 	var response ResourceResponse
-	err = c.doMultipart(ctx, standardhttp.MethodPost, endpoint, "file", []File{file}, expiresInSeconds, standardhttp.StatusCreated, &response)
+	err := c.doMultipart(ctx, standardhttp.MethodPost, endpoint, files, expiresInSeconds, standardhttp.StatusCreated, &response)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -91,12 +119,38 @@ func (c *Client) UpdateWhiteboard(
 	if err != nil {
 		return Resource{}, err
 	}
+	if kind == WhiteboardMarkdown {
+		return Resource{}, clientInvalidRequest("markdown context is required")
+	}
+	return c.updateWhiteboard(ctx, endpoint, id, []multipartFile{{fieldName: "file", file: file}}, expiresInSeconds)
+}
+
+func (c *Client) UpdateMarkdown(
+	ctx context.Context,
+	id string,
+	markdown File,
+	creatorContext File,
+	expiresInSeconds *int64,
+) (Resource, error) {
+	return c.updateWhiteboard(ctx, APIWhiteboardMarkdown, id, []multipartFile{
+		{fieldName: "file", file: markdown},
+		{fieldName: "context", file: creatorContext},
+	}, expiresInSeconds)
+}
+
+func (c *Client) updateWhiteboard(
+	ctx context.Context,
+	endpoint string,
+	id string,
+	files []multipartFile,
+	expiresInSeconds *int64,
+) (Resource, error) {
 	if err := common.ValidateID(id); err != nil {
 		return Resource{}, err
 	}
 
 	var response ResourceResponse
-	err = c.doMultipart(ctx, standardhttp.MethodPut, endpoint+"/"+url.PathEscape(id), "file", []File{file}, expiresInSeconds, standardhttp.StatusOK, &response)
+	err := c.doMultipart(ctx, standardhttp.MethodPut, endpoint+"/"+url.PathEscape(id), files, expiresInSeconds, standardhttp.StatusOK, &response)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -104,6 +158,21 @@ func (c *Client) UpdateWhiteboard(
 		return Resource{}, err
 	}
 	return response.Resource, nil
+}
+
+func (c *Client) GetMarkdown(ctx context.Context, id string) (MarkdownResponse, error) {
+	if err := common.ValidateID(id); err != nil {
+		return MarkdownResponse{}, err
+	}
+
+	var response MarkdownResponse
+	if err := c.do(ctx, standardhttp.MethodGet, APIWhiteboardMarkdown+"/"+url.PathEscape(id), nil, "", standardhttp.StatusOK, &response); err != nil {
+		return MarkdownResponse{}, err
+	}
+	if err := c.validateResource(response.Resource, id); err != nil {
+		return MarkdownResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) DeleteWhiteboard(ctx context.Context, kind WhiteboardKind, id string) error {
@@ -123,7 +192,7 @@ func (c *Client) CreateImages(ctx context.Context, files []File, expiresInSecond
 	}
 
 	var response ImagesResponse
-	err := c.doMultipart(ctx, standardhttp.MethodPost, APIImages, "images", files, expiresInSeconds, standardhttp.StatusCreated, &response)
+	err := c.doMultipart(ctx, standardhttp.MethodPost, APIImages, multipartFiles("images", files), expiresInSeconds, standardhttp.StatusCreated, &response)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +223,7 @@ func (c *Client) UpdateImage(
 	}
 
 	var response ResourceResponse
-	err := c.doMultipart(ctx, standardhttp.MethodPut, APIImages+"/"+url.PathEscape(id), "file", []File{file}, expiresInSeconds, standardhttp.StatusOK, &response)
+	err := c.doMultipart(ctx, standardhttp.MethodPut, APIImages+"/"+url.PathEscape(id), []multipartFile{{fieldName: "file", file: file}}, expiresInSeconds, standardhttp.StatusOK, &response)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -219,18 +288,17 @@ func (c *Client) doMultipart(
 	ctx context.Context,
 	method string,
 	endpoint string,
-	fieldName string,
-	files []File,
+	files []multipartFile,
 	expiresInSeconds *int64,
 	wantStatus int,
 	result any,
 ) error {
-	if fieldName == "" || len(files) == 0 {
+	if len(files) == 0 {
 		return clientInvalidRequest("multipart files are required")
 	}
-	for _, file := range files {
-		if file.Name == "" || common.IsNil(file.Reader) {
-			return clientInvalidRequest("file name and reader are required")
+	for _, upload := range files {
+		if upload.fieldName == "" || upload.file.Name == "" || common.IsNil(upload.file.Reader) {
+			return clientInvalidRequest("file field, name, and reader are required")
 		}
 	}
 
@@ -244,7 +312,7 @@ func (c *Client) doMultipart(
 	}
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 
-	go writeMultipart(writer, multipartWriter, fieldName, files, expiresInSeconds)
+	go writeMultipart(writer, multipartWriter, files, expiresInSeconds)
 	err = c.execute(request, wantStatus, result)
 	_ = reader.CloseWithError(err)
 	return contextError(ctx, err)
@@ -253,8 +321,7 @@ func (c *Client) doMultipart(
 func writeMultipart(
 	pipe *io.PipeWriter,
 	writer *multipart.Writer,
-	fieldName string,
-	files []File,
+	files []multipartFile,
 	expiresInSeconds *int64,
 ) {
 	var writeErr error
@@ -264,13 +331,13 @@ func writeMultipart(
 		}
 		_ = pipe.CloseWithError(writeErr)
 	}()
-	for _, file := range files {
-		part, err := writer.CreateFormFile(fieldName, file.Name)
+	for _, upload := range files {
+		part, err := writer.CreateFormFile(upload.fieldName, upload.file.Name)
 		if err != nil {
 			writeErr = clientStreamError()
 			break
 		}
-		if _, err := io.Copy(part, file.Reader); err != nil {
+		if _, err := io.Copy(part, upload.file.Reader); err != nil {
 			writeErr = clientStreamError()
 			break
 		}
@@ -285,6 +352,14 @@ func writeMultipart(
 			writeErr = clientStreamError()
 		}
 	}
+}
+
+func multipartFiles(fieldName string, files []File) []multipartFile {
+	uploads := make([]multipartFile, 0, len(files))
+	for _, file := range files {
+		uploads = append(uploads, multipartFile{fieldName: fieldName, file: file})
+	}
+	return uploads
 }
 
 func (c *Client) do(
