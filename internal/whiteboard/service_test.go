@@ -57,6 +57,7 @@ func TestCreateMarkdownPersistsExactDocumentAndDefaultExpiration(t *testing.T) {
 	now := time.Unix(1_700_000_000, 123).UTC()
 	wantExpiration := time.Unix(now.Unix()+3600, 0).UTC()
 	source := []byte("# Hello\n\n世界\n")
+	creatorContext := []byte("Goal: preserve this exactly.\nAssumption: 世界\n")
 
 	clock.EXPECT().Now().Return(now).Once()
 	ids.EXPECT().NewID().Return(testID, nil).Once()
@@ -64,12 +65,13 @@ func TestCreateMarkdownPersistsExactDocumentAndDefaultExpiration(t *testing.T) {
 		return got.ID == testID &&
 			got.Kind == whiteboard.KindMarkdown &&
 			bytes.Equal(got.Source, source) &&
+			bytes.Equal(got.Context, creatorContext) &&
 			got.CreatedAt.Equal(now) &&
 			got.UpdatedAt.Equal(now) &&
 			got.ExpiresAt != nil && got.ExpiresAt.Equal(wantExpiration)
 	})).Return(nil).Once()
 
-	result, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: source})
+	result, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: source, Context: creatorContext})
 	require.NoError(t, err)
 	require.Equal(t, whiteboard.Result{
 		ID:        testID,
@@ -94,6 +96,7 @@ func TestCreateWithExplicitZeroExpirationIsPermanent(t *testing.T) {
 
 	result, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{
 		Source:           []byte("permanent"),
+		Context:          []byte("creator context"),
 		ExpiresInSeconds: &zero,
 	})
 	require.NoError(t, err)
@@ -107,14 +110,30 @@ func TestCreateMarkdownRejectsInvalidInputBeforeDependencies(t *testing.T) {
 		message string
 	}{
 		{
-			name:    "invalid UTF-8",
-			input:   whiteboard.CreateInput{Source: []byte{0xff}},
+			name:    "empty source",
+			input:   whiteboard.CreateInput{Context: []byte("valid")},
+			message: "markdown must not be empty",
+		},
+		{
+			name:    "invalid source UTF-8",
+			input:   whiteboard.CreateInput{Source: []byte{0xff}, Context: []byte("valid")},
 			message: "markdown must be UTF-8",
+		},
+		{
+			name:    "empty context",
+			input:   whiteboard.CreateInput{Source: []byte("valid")},
+			message: "markdown context must not be empty",
+		},
+		{
+			name:    "invalid context UTF-8",
+			input:   whiteboard.CreateInput{Source: []byte("valid"), Context: []byte{0xff}},
+			message: "markdown context must be UTF-8",
 		},
 		{
 			name: "negative expiration",
 			input: whiteboard.CreateInput{
 				Source:           []byte("valid"),
+				Context:          []byte("valid context"),
 				ExpiresInSeconds: int64Ptr(-1),
 			},
 			message: "expiration must not be negative",
@@ -123,6 +142,7 @@ func TestCreateMarkdownRejectsInvalidInputBeforeDependencies(t *testing.T) {
 			name: "overflowing expiration",
 			input: whiteboard.CreateInput{
 				Source:           []byte("valid"),
+				Context:          []byte("valid context"),
 				ExpiresInSeconds: int64Ptr(math.MaxInt64),
 			},
 			message: "expiration overflows unix time",
@@ -132,7 +152,7 @@ func TestCreateMarkdownRejectsInvalidInputBeforeDependencies(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			service, _, clock, _ := newTestService(t, 3600)
-			if tt.name != "invalid UTF-8" {
+			if tt.name == "negative expiration" || tt.name == "overflowing expiration" {
 				clock.EXPECT().Now().Return(time.Unix(1_700_000_000, 0).UTC()).Once()
 			}
 
@@ -158,6 +178,17 @@ func TestCreateHTMLPreservesValidOriginalBytes(t *testing.T) {
 	result, err := service.CreateHTML(ctx, whiteboard.CreateInput{Source: source})
 	require.NoError(t, err)
 	require.Equal(t, whiteboard.KindHTML, result.Kind)
+}
+
+func TestCreateHTMLRejectsContextBeforeDependencies(t *testing.T) {
+	service, _, _, _ := newTestService(t, 0)
+
+	result, err := service.CreateHTML(context.Background(), whiteboard.CreateInput{
+		Source:  []byte(`<!doctype html><html><head></head><body></body></html>`),
+		Context: []byte("not supported"),
+	})
+	require.Zero(t, result)
+	assertDomainError(t, err, common.CodeInvalidRequest, "html must not include context")
 }
 
 func TestCreateHTMLRejectsUnsafeOrIncompleteDocuments(t *testing.T) {
@@ -204,7 +235,7 @@ func TestCreateRetriesOnlyIDCollisions(t *testing.T) {
 			return got.ID == testID2
 		})).Return(nil).Once()
 
-		result, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: []byte("valid")})
+		result, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: []byte("valid"), Context: []byte("valid context")})
 		require.NoError(t, err)
 		require.Equal(t, testID2, result.ID)
 	})
@@ -219,7 +250,7 @@ func TestCreateRetriesOnlyIDCollisions(t *testing.T) {
 		ids.EXPECT().NewID().Return(testID, nil).Once()
 		store.EXPECT().Create(sameContext(ctx), mock.Anything).Return(storeErr).Once()
 
-		_, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: []byte("valid")})
+		_, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: []byte("valid"), Context: []byte("valid context")})
 		require.ErrorIs(t, err, storeErr)
 	})
 }
@@ -237,7 +268,7 @@ func TestCreateStopsAfterThreeIDCollisions(t *testing.T) {
 		})).Return(common.ErrIDCollision).Once()
 	}
 
-	result, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: []byte("valid")})
+	result, err := service.CreateMarkdown(ctx, whiteboard.CreateInput{Source: []byte("valid"), Context: []byte("valid context")})
 	require.Zero(t, result)
 	assertDomainError(t, err, common.CodeInternal, "internal error")
 	require.NotErrorIs(t, err, common.ErrIDCollision)
@@ -262,6 +293,21 @@ func TestGetReturnsCurrentWhiteboardWithExactContext(t *testing.T) {
 	got, err := service.Get(ctx, testID)
 	require.NoError(t, err)
 	require.Equal(t, record, got)
+}
+
+func TestGetAllowsLegacyMarkdownWithoutContext(t *testing.T) {
+	service, store, clock, _ := newTestService(t, 0)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	legacy := whiteboard.Whiteboard{
+		ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte("legacy markdown"), Context: nil,
+	}
+	store.EXPECT().Get(mock.Anything, testID).Return(legacy, nil).Once()
+	clock.EXPECT().Now().Return(now).Once()
+
+	got, err := service.Get(context.Background(), testID)
+	require.NoError(t, err)
+	require.Equal(t, legacy, got)
+	require.Empty(t, got.Context)
 }
 
 func TestGetRejectsMalformedIDBeforeStore(t *testing.T) {
@@ -305,7 +351,7 @@ func TestGetReturnsNonNotFoundStoreError(t *testing.T) {
 	require.Same(t, storeErr, err)
 }
 
-func TestUpdateReplacesLatestRecordAndPreservesCreationAndExpiration(t *testing.T) {
+func TestUpdateReplacesLegacyMarkdownWithExactPairedContent(t *testing.T) {
 	service, store, clock, _ := newTestService(t, 0)
 	ctx := context.WithValue(context.Background(), contextKey{}, "update")
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -314,12 +360,14 @@ func TestUpdateReplacesLatestRecordAndPreservesCreationAndExpiration(t *testing.
 	current := whiteboard.Whiteboard{
 		ID:        testID,
 		Kind:      whiteboard.KindMarkdown,
-		Source:    []byte("concurrently updated source"),
+		Source:    []byte("legacy source without creator context"),
+		Context:   nil,
 		CreatedAt: createdAt,
 		UpdatedAt: now.Add(-time.Second),
 		ExpiresAt: &currentExpiration,
 	}
 	newSource := []byte("latest write wins")
+	newContext := []byte("new exact creator context\n")
 
 	store.EXPECT().Get(sameContext(ctx), testID).Return(current, nil).Once()
 	clock.EXPECT().Now().Return(now).Once()
@@ -327,15 +375,17 @@ func TestUpdateReplacesLatestRecordAndPreservesCreationAndExpiration(t *testing.
 		return got.ID == testID &&
 			got.Kind == whiteboard.KindMarkdown &&
 			bytes.Equal(got.Source, newSource) &&
+			bytes.Equal(got.Context, newContext) &&
 			got.CreatedAt.Equal(createdAt) &&
 			got.UpdatedAt.Equal(now) &&
 			got.ExpiresAt != nil && got.ExpiresAt.Equal(currentExpiration)
 	})).Return(nil).Once()
 
 	result, err := service.Update(ctx, whiteboard.UpdateInput{
-		ID:     testID,
-		Kind:   whiteboard.KindMarkdown,
-		Source: newSource,
+		ID:      testID,
+		Kind:    whiteboard.KindMarkdown,
+		Source:  newSource,
+		Context: newContext,
 	})
 	require.NoError(t, err)
 	require.Equal(t, whiteboard.Result{
@@ -363,6 +413,7 @@ func TestUpdateRecalculatesSuppliedExpiration(t *testing.T) {
 		ID:               testID,
 		Kind:             whiteboard.KindMarkdown,
 		Source:           []byte("updated"),
+		Context:          []byte("updated context"),
 		ExpiresInSeconds: int64Ptr(60),
 	})
 	require.NoError(t, err)
@@ -402,9 +453,10 @@ func TestUpdateMapsMissingExpiredAndWrongKindToSameNotFound(t *testing.T) {
 			}
 
 			result, err := service.Update(context.Background(), whiteboard.UpdateInput{
-				ID:     testID,
-				Kind:   whiteboard.KindMarkdown,
-				Source: []byte("valid"),
+				ID:      testID,
+				Kind:    whiteboard.KindMarkdown,
+				Source:  []byte("valid"),
+				Context: []byte("valid context"),
 			})
 			require.Zero(t, result)
 			assertNotFound(t, err)
@@ -412,16 +464,20 @@ func TestUpdateMapsMissingExpiredAndWrongKindToSameNotFound(t *testing.T) {
 	}
 }
 
-func TestUpdateValidatesIDKindAndSourceBeforeStore(t *testing.T) {
+func TestUpdateValidatesIDKindSourceAndContextBeforeStore(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   whiteboard.UpdateInput
 		message string
 	}{
-		{name: "malformed ID", input: whiteboard.UpdateInput{ID: "bad", Kind: whiteboard.KindMarkdown, Source: []byte("valid")}, message: "invalid resource id"},
-		{name: "unknown kind", input: whiteboard.UpdateInput{ID: testID, Kind: KindUnknown, Source: []byte("valid")}, message: "invalid whiteboard kind"},
-		{name: "invalid markdown", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte{0xff}}, message: "markdown must be UTF-8"},
+		{name: "malformed ID", input: whiteboard.UpdateInput{ID: "bad", Kind: whiteboard.KindMarkdown, Source: []byte("valid"), Context: []byte("valid context")}, message: "invalid resource id"},
+		{name: "unknown kind", input: whiteboard.UpdateInput{ID: testID, Kind: KindUnknown, Source: []byte("valid"), Context: []byte("valid context")}, message: "invalid whiteboard kind"},
+		{name: "empty markdown", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Context: []byte("valid context")}, message: "markdown must not be empty"},
+		{name: "invalid markdown", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte{0xff}, Context: []byte("valid context")}, message: "markdown must be UTF-8"},
+		{name: "empty markdown context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte("valid")}, message: "markdown context must not be empty"},
+		{name: "invalid markdown context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte("valid"), Context: []byte{0xff}}, message: "markdown context must be UTF-8"},
 		{name: "invalid HTML", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindHTML, Source: []byte(`<html></html>`)}, message: "html must include a doctype"},
+		{name: "HTML context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindHTML, Source: []byte(`<!doctype html><html><head></head><body></body></html>`), Context: []byte("not supported")}, message: "html must not include context"},
 	}
 
 	for _, tt := range tests {
@@ -445,6 +501,19 @@ func TestDeleteChecksRecordThenDeletesWithExactContext(t *testing.T) {
 	store.EXPECT().Delete(sameContext(ctx), testID).Return(nil).Once()
 
 	require.NoError(t, service.Delete(ctx, whiteboard.KindHTML, testID))
+}
+
+func TestDeleteAllowsLegacyMarkdownWithoutContext(t *testing.T) {
+	service, store, clock, _ := newTestService(t, 0)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	legacy := whiteboard.Whiteboard{
+		ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte("legacy markdown"), Context: nil,
+	}
+	store.EXPECT().Get(mock.Anything, testID).Return(legacy, nil).Once()
+	clock.EXPECT().Now().Return(now).Once()
+	store.EXPECT().Delete(mock.Anything, testID).Return(nil).Once()
+
+	require.NoError(t, service.Delete(context.Background(), whiteboard.KindMarkdown, testID))
 }
 
 func TestDeleteMapsMissingExpiredAndWrongKindToSameNotFound(t *testing.T) {

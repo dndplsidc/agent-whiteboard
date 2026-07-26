@@ -197,11 +197,12 @@ func TestServiceForwardsExactContextsAndValues(t *testing.T) {
 	ctx := context.WithValue(context.Background(), facadeContextKey{}, "sentinel")
 	expires := int64(0)
 
-	createdMarkdown, err := service.CreateMarkdown(ctx, CreateWhiteboardInput{Source: []byte("# hello"), ExpiresInSeconds: &expires})
+	createdMarkdown, err := service.CreateMarkdown(ctx, CreateWhiteboardInput{Source: []byte("# hello"), Context: []byte("creator context"), ExpiresInSeconds: &expires})
 	require.NoError(t, err)
 	require.Same(t, ctx, whiteboards.ctx)
 	require.Equal(t, KindMarkdown, whiteboards.created.Kind)
 	require.Equal(t, []byte("# hello"), whiteboards.created.Source)
+	require.Equal(t, []byte("creator context"), whiteboards.created.Context)
 	require.Equal(t, facadeTestID, createdMarkdown.ID)
 
 	whiteboards.get = whiteboards.created
@@ -212,11 +213,12 @@ func TestServiceForwardsExactContextsAndValues(t *testing.T) {
 
 	whiteboards.get = whiteboards.created
 	updatedWhiteboard, err := service.UpdateWhiteboard(ctx, UpdateWhiteboardInput{
-		ID: facadeTestID, Kind: KindMarkdown, Source: []byte("# updated"), ExpiresInSeconds: &expires,
+		ID: facadeTestID, Kind: KindMarkdown, Source: []byte("# updated"), Context: []byte("updated context"), ExpiresInSeconds: &expires,
 	})
 	require.NoError(t, err)
 	require.Same(t, ctx, whiteboards.ctx)
 	require.Equal(t, []byte("# updated"), whiteboards.replaced.Source)
+	require.Equal(t, []byte("updated context"), whiteboards.replaced.Context)
 	require.Equal(t, facadeTestID, updatedWhiteboard.ID)
 
 	whiteboards.get = whiteboards.replaced
@@ -260,7 +262,7 @@ func TestNewInjectsEachCustomStoreOnlyIntoItsDomain(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
-	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# custom")})
+	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# custom"), Context: []byte("creator context")})
 	require.NoError(t, err)
 	require.Equal(t, facadeTestID, whiteboards.created.ID)
 	_, err = service.CreateImages(context.Background(), CreateImagesInput{Images: []ImageUpload{{Content: validPNG(t)}}})
@@ -275,7 +277,7 @@ func TestDefaultFilesystemCompositionPersistsBothDomainsAndHandlerRoutes(t *test
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
-	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# stored")})
+	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# stored"), Context: []byte("creator context")})
 	require.NoError(t, err)
 	_, err = service.GetWhiteboard(context.Background(), facadeTestID)
 	require.NoError(t, err)

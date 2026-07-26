@@ -83,10 +83,15 @@ func TestExternalConsumerCanUseCompleteFacade(t *testing.T) {
 	require.NotNil(t, externalHandler(service))
 
 	ctx := context.Background()
-	_, _ = service.CreateMarkdown(ctx, agentwb.CreateWhiteboardInput{})
-	_, _ = service.CreateHTML(ctx, agentwb.CreateWhiteboardInput{})
+	_, _ = service.CreateMarkdown(ctx, agentwb.CreateWhiteboardInput{
+		Source: []byte("# markdown"), Context: []byte("creator context"),
+	})
+	_, _ = service.CreateHTML(ctx, agentwb.CreateWhiteboardInput{Source: []byte("<!doctype html><html><head></head><body></body></html>")})
 	_, _ = service.GetWhiteboard(ctx, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-	_, _ = service.UpdateWhiteboard(ctx, agentwb.UpdateWhiteboardInput{})
+	_, _ = service.UpdateWhiteboard(ctx, agentwb.UpdateWhiteboardInput{
+		ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", Kind: agentwb.KindMarkdown,
+		Source: []byte("# updated"), Context: []byte("updated context"),
+	})
 	_ = service.DeleteWhiteboard(ctx, agentwb.KindMarkdown, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	_, _ = service.CreateImages(ctx, agentwb.CreateImagesInput{})
 	_, _ = service.GetImage(ctx, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
@@ -102,6 +107,13 @@ func TestExternalConsumerCanUseCompleteFacade(t *testing.T) {
 		Close() error
 	} = service
 	require.NotNil(t, lifecycle)
+}
+
+func TestPublicWhiteboardTypesExposeCreatorContext(t *testing.T) {
+	contextBytes := []byte("exact creator context")
+	require.Equal(t, contextBytes, agentwb.Whiteboard{Context: contextBytes}.Context)
+	require.Equal(t, contextBytes, agentwb.CreateWhiteboardInput{Context: contextBytes}.Context)
+	require.Equal(t, contextBytes, agentwb.UpdateWhiteboardInput{Context: contextBytes}.Context)
 }
 
 func TestPublicNamedConstantsAreAvailable(t *testing.T) {
