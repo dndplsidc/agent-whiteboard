@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -27,6 +28,8 @@ const (
 	MaxEventTextBytes       = 64 << 10
 	MaxDeltaBytes           = 32 << 10
 	MaxSummaryBytes         = 8 << 10
+	MaxLaunchItems          = 1024
+	MaxLaunchAggregateBytes = 1 << 20
 )
 
 type Name string
@@ -241,48 +244,61 @@ type Session interface {
 	Shutdown(context.Context) error
 }
 
-type LaunchOperation string
-
-const (
-	LaunchCreate LaunchOperation = "create"
-	LaunchResume LaunchOperation = "resume"
-)
-
+// LaunchRequest is the complete provider-neutral process specification. The
+// provider adapter selects its executable, arguments, environment, and private
+// workspace; the launcher must not infer or inherit them.
 type LaunchRequest struct {
-	Provider      Name
-	Access        AccessMode
-	Operation     LaunchOperation
-	NativeSession NativeSessionRef
+	Executable       string
+	Arguments        []string
+	Environment      []string
+	WorkingDirectory string
 }
 
 func (r LaunchRequest) Validate() error {
-	if validateProviderAccess(r.Provider, r.Access) != nil {
+	if !validAbsoluteCleanPath(r.Executable) || !validAbsoluteCleanPath(r.WorkingDirectory) || r.Arguments == nil || r.Environment == nil {
 		return errors.New("invalid provider launch request")
 	}
-	switch r.Operation {
-	case LaunchCreate:
-		if r.NativeSession.Valid() {
-			return errors.New("create launch cannot include a native session reference")
+	if len(r.Arguments) > MaxLaunchItems || len(r.Environment) > MaxLaunchItems {
+		return errors.New("provider launch request exceeds item limit")
+	}
+	total := len(r.Executable) + len(r.WorkingDirectory)
+	for _, argument := range r.Arguments {
+		if !utf8.ValidString(argument) || strings.ContainsRune(argument, '\x00') {
+			return errors.New("invalid provider launch argument")
 		}
-	case LaunchResume:
-		if !r.NativeSession.Valid() {
-			return errors.New("resume launch requires a native session reference")
+		total += len(argument)
+	}
+	seenEnvironment := make(map[string]struct{}, len(r.Environment))
+	for _, entry := range r.Environment {
+		separator := strings.IndexByte(entry, '=')
+		if !utf8.ValidString(entry) || strings.ContainsRune(entry, '\x00') || separator <= 0 {
+			return errors.New("invalid provider launch environment")
 		}
-	default:
-		return errors.New("invalid provider launch operation")
+		name := entry[:separator]
+		if _, duplicate := seenEnvironment[name]; duplicate {
+			return errors.New("duplicate provider launch environment variable")
+		}
+		seenEnvironment[name] = struct{}{}
+		total += len(entry)
+	}
+	if total > MaxLaunchAggregateBytes {
+		return errors.New("provider launch request exceeds byte limit")
 	}
 	return nil
 }
 
+// Launcher starts one isolated provider process from an explicit specification.
 type Launcher interface {
 	Launch(context.Context, LaunchRequest) (ManagedChild, error)
 }
+
+// ManagedChild owns process I/O and process-group escalation. Provider-native
+// graceful shutdown remains Session.Shutdown.
 type ManagedChild interface {
 	Input() io.WriteCloser
 	Output() io.Reader
 	Errors() io.Reader
 	Wait() error
-	RequestShutdown(context.Context) error
 	Terminate() error
 	Kill() error
 }
@@ -610,6 +626,9 @@ func blockedMessage(kind BlockedKind) string {
 	default:
 		return ""
 	}
+}
+func validAbsoluteCleanPath(value string) bool {
+	return validBoundedText(value, MaxNativeReferenceBytes, true) && filepath.IsAbs(value) && filepath.Clean(value) == value
 }
 func validBoundedText(value string, maxBytes int, nonempty bool) bool {
 	return utf8.ValidString(value) && len(value) <= maxBytes && (!nonempty || value != "") && !hasDisallowedC0(value)

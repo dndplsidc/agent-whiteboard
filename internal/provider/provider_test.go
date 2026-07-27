@@ -228,13 +228,30 @@ func TestDriverLifecycleOperationsAreExplicitAndRejectZeroReferences(t *testing.
 	require.Error(t, deleteRequest.Validate())
 }
 
-func TestLaunchOperationDiscriminatorRejectsCreateReferenceAndMissingResumeReference(t *testing.T) {
-	ref, err := provider.NewNativeSessionRef("pi-session-reference")
-	require.NoError(t, err)
-	require.NoError(t, (provider.LaunchRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Operation: provider.LaunchCreate}).Validate())
-	require.NoError(t, (provider.LaunchRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Operation: provider.LaunchResume, NativeSession: ref}).Validate())
-	require.Error(t, (provider.LaunchRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Operation: provider.LaunchCreate, NativeSession: ref}).Validate())
-	require.Error(t, (provider.LaunchRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Operation: provider.LaunchResume}).Validate())
+func TestLaunchRequestCarriesAnExplicitProcessSpecification(t *testing.T) {
+	workingDirectory := t.TempDir()
+	valid := provider.LaunchRequest{
+		Executable: workingDirectory + "/provider",
+		Arguments:  []string{"--mode", "json"},
+		Environment: []string{
+			"HOME=" + workingDirectory,
+		},
+		WorkingDirectory: workingDirectory,
+	}
+	require.NoError(t, valid.Validate())
+
+	invalid := []provider.LaunchRequest{
+		{},
+		{Executable: "relative/provider", Arguments: []string{}, Environment: []string{}, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: nil, Environment: []string{}, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: []string{}, Environment: nil, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: []string{}, Environment: []string{}, WorkingDirectory: "relative/workspace"},
+		{Executable: valid.Executable, Arguments: []string{"bad\x00argument"}, Environment: []string{}, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: []string{}, Environment: []string{"BAD\x00=value"}, WorkingDirectory: workingDirectory},
+	}
+	for _, request := range invalid {
+		require.Error(t, request.Validate())
+	}
 }
 
 func TestPreflightExposesEffectiveSizingAndTypedContextTooLarge(t *testing.T) {
@@ -344,13 +361,12 @@ func (*fakeLauncher) Launch(context.Context, provider.LaunchRequest) (provider.M
 
 type fakeChild struct{}
 
-func (*fakeChild) Input() io.WriteCloser                 { return nopWriteCloser{} }
-func (*fakeChild) Output() io.Reader                     { return nil }
-func (*fakeChild) Errors() io.Reader                     { return nil }
-func (*fakeChild) Wait() error                           { return nil }
-func (*fakeChild) RequestShutdown(context.Context) error { return nil }
-func (*fakeChild) Terminate() error                      { return nil }
-func (*fakeChild) Kill() error                           { return nil }
+func (*fakeChild) Input() io.WriteCloser { return nopWriteCloser{} }
+func (*fakeChild) Output() io.Reader     { return nil }
+func (*fakeChild) Errors() io.Reader     { return nil }
+func (*fakeChild) Wait() error           { return nil }
+func (*fakeChild) Terminate() error      { return nil }
+func (*fakeChild) Kill() error           { return nil }
 
 type nopWriteCloser struct{}
 
@@ -375,9 +391,11 @@ func TestCompileTimeFakesHaveBehaviorallyUsableSignatures(t *testing.T) {
 	require.NoError(t, metadata.Validate())
 	require.NoError(t, driver.Delete(context.Background(), provider.DeleteRequest{Provider: provider.NamePi, NativeSession: ref}))
 
-	child, err := (&fakeLauncher{}).Launch(context.Background(), provider.LaunchRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Operation: provider.LaunchCreate})
+	workingDirectory := t.TempDir()
+	child, err := (&fakeLauncher{}).Launch(context.Background(), provider.LaunchRequest{
+		Executable: workingDirectory + "/provider", Arguments: []string{}, Environment: []string{}, WorkingDirectory: workingDirectory,
+	})
 	require.NoError(t, err)
-	require.NoError(t, child.RequestShutdown(context.Background()))
 	require.NoError(t, child.Terminate())
 	require.NoError(t, child.Kill())
 	require.NoError(t, child.Wait())
