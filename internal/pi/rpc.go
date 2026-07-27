@@ -8,7 +8,9 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
+	"github.com/edocsss/agent-whiteboard/internal/common"
 	"github.com/edocsss/agent-whiteboard/internal/provider"
 )
 
@@ -54,6 +56,7 @@ type rpcClient struct {
 	canceled    map[string]string
 	cancelOrder []string
 	terminal    error
+	eventsSeen  atomic.Uint64
 
 	writes chan rpcWrite
 	events chan json.RawMessage
@@ -65,7 +68,7 @@ func newRPCClient(child provider.ManagedChild) (*rpcClient, error) {
 }
 
 func newRPCClientWithLimits(child provider.ManagedChild, recordLimit, eventCapacity int) (*rpcClient, error) {
-	if child == nil || child.Input() == nil || child.Output() == nil || eventCapacity <= 0 {
+	if common.IsNil(child) || child.Input() == nil || child.Output() == nil || eventCapacity <= 0 {
 		return nil, errors.New("invalid Pi RPC child")
 	}
 	client := &rpcClient{
@@ -175,6 +178,40 @@ func (client *rpcClient) call(ctx context.Context, commandType string, fields ma
 	}
 }
 
+func (client *rpcClient) notify(ctx context.Context, fields map[string]any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	encoded = append(encoded, '\n')
+	result := make(chan error, 1)
+	select {
+	case client.writes <- rpcWrite{encoded: encoded, result: result}:
+	case <-ctx.Done():
+		wipe(encoded)
+		return ctx.Err()
+	case <-client.done:
+		wipe(encoded)
+		return client.terminalError()
+	}
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-client.done:
+		select {
+		case err := <-result:
+			return err
+		default:
+			return client.terminalError()
+		}
+	}
+}
+
 func resolveRPCResult(resolved rpcResult, wrote bool) (rpcResponse, bool, error) {
 	if resolved.err != nil {
 		return rpcResponse{}, wrote, resolved.err
@@ -272,6 +309,7 @@ func (client *rpcClient) readLoop(reader *jsonlReader) {
 			wipe(record)
 			continue
 		}
+		client.eventsSeen.Add(1)
 		select {
 		case client.events <- record:
 		default:
@@ -328,6 +366,8 @@ func (client *rpcClient) finish(err error) {
 		waiter.result <- rpcResult{err: err}
 	}
 }
+
+func (client *rpcClient) eventCount() uint64 { return client.eventsSeen.Load() }
 
 func (client *rpcClient) terminalError() error {
 	client.mu.Lock()

@@ -396,9 +396,9 @@ func (r PreflightRequest) Validate() error {
 	return nil
 }
 
-// PreflightResult reports provider-effective sizing after model resolution.
-// Token counts use the selected provider's tokenizer; EffectiveCapacityTokens
-// is the usable capacity after the reported safety margin.
+// PreflightResult reports a conservative provider-effective sizing estimate
+// after model resolution. EffectiveCapacityTokens is the usable capacity after
+// the reported safety margin.
 type PreflightResult struct {
 	ResolvedModel           string
 	EstimatedInputTokens    int

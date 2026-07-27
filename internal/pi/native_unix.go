@@ -56,7 +56,7 @@ type piSessionHeader struct {
 }
 
 func newNativeManager(root string, ids common.IDGenerator, clock common.Clock) (*nativeManager, error) {
-	if ids == nil || clock == nil || !validCanonicalPath(root) {
+	if common.IsNil(ids) || common.IsNil(clock) || !validCanonicalPath(root) {
 		return nil, errors.New("invalid Pi native manager configuration")
 	}
 	if err := verifyDirectory(root, 0o700); err != nil {
