@@ -55,10 +55,12 @@ func TestDecodeSubmitCarriesCompleteInitialOrReplacementContext(t *testing.T) {
 		})
 	}
 
-	withoutContext := `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","message":"follow up"}}`
+	withoutContext := `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","message":"follow up"}}`
 	decoded, err := agentprotocol.DecodeCommand([]byte(withoutContext))
 	require.NoError(t, err)
-	require.Nil(t, decoded.Payload.(agentprotocol.SubmitPayload).Context)
+	payload := decoded.Payload.(agentprotocol.SubmitPayload)
+	require.Equal(t, "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", payload.TurnID)
+	require.Nil(t, payload.Context)
 }
 
 func TestAllCommandPayloadsAreClosedAndValidated(t *testing.T) {
@@ -151,12 +153,12 @@ func TestCommandBoundsAreMeasuredInBytes(t *testing.T) {
 func TestQueueReplayAndPageBounds(t *testing.T) {
 	queue := make([]agentprotocol.QueueItem, agentprotocol.MaxQueueItems+1)
 	for index := range queue {
-		queue[index] = agentprotocol.QueueItem{MessageID: idA, Message: "message"}
+		queue[index] = agentprotocol.QueueItem{TurnID: idB, MessageID: idA, Message: "message"}
 	}
 	err := agentprotocol.ValidateQueue(queue)
 	require.ErrorIs(t, err, agentprotocol.ErrMessageTooLarge)
 
-	queue = []agentprotocol.QueueItem{{MessageID: idA, Message: strings.Repeat("x", agentprotocol.MaxQueueBytes+1)}}
+	queue = []agentprotocol.QueueItem{{TurnID: idB, MessageID: idA, Message: strings.Repeat("x", agentprotocol.MaxQueueBytes+1)}}
 	err = agentprotocol.ValidateQueue(queue)
 	require.ErrorIs(t, err, agentprotocol.ErrMessageTooLarge)
 
@@ -171,16 +173,17 @@ func TestQueueReplayAndPageBounds(t *testing.T) {
 
 func TestEventEnvelopeAndEveryPayloadTypeRoundTrip(t *testing.T) {
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	turnID := idC
 	payloads := []agentprotocol.EventPayload{
-		agentprotocol.SnapshotPayload{Lifecycle: agentprotocol.LifecycleReady, Queue: []agentprotocol.QueueItem{}, ContextState: agentprotocol.ContextPending},
+		agentprotocol.SnapshotPayload{Lifecycle: agentprotocol.LifecycleReady, Queue: []agentprotocol.QueueItem{}, ContextState: agentprotocol.ContextPending, ActiveTurnID: nil},
 		agentprotocol.CommandResultPayload{CommandID: idA, Status: agentprotocol.CommandSucceeded},
-		agentprotocol.TimelinePayload{Items: []agentprotocol.TimelineItem{}, HasMore: false},
-		agentprotocol.HistoryPayload{Items: []agentprotocol.ArchiveItem{}, HasMore: false},
-		agentprotocol.UserMessagePayload{MessageID: idA, Text: "hello", CreatedAt: now},
-		agentprotocol.AssistantDeltaPayload{MessageID: idA, Text: "part"},
-		agentprotocol.AssistantMessagePayload{MessageID: idA, Text: "answer", CreatedAt: now},
+		agentprotocol.TimelinePayload{CommandID: idA, Items: []agentprotocol.TimelineItem{}, NextCursor: nil},
+		agentprotocol.HistoryPayload{CommandID: idA, Items: []agentprotocol.ArchiveItem{}, NextCursor: nil},
+		agentprotocol.UserMessagePayload{TurnID: idC, MessageID: idA, Text: "hello", CreatedAt: now},
+		agentprotocol.AssistantDeltaPayload{TurnID: idC, MessageID: idA, Text: "part"},
+		agentprotocol.AssistantMessagePayload{TurnID: idC, MessageID: idA, Text: "answer", CreatedAt: now},
 		agentprotocol.QueuePayload{Items: []agentprotocol.QueueItem{}},
-		agentprotocol.LifecyclePayload{State: agentprotocol.LifecycleResponding},
+		agentprotocol.LifecyclePayload{State: agentprotocol.LifecycleResponding, TurnID: &turnID},
 		agentprotocol.ProviderPayload{Provider: agentprotocol.ProviderPi, State: agentprotocol.ProviderReady, Model: "configured-default"},
 		agentprotocol.ContextPayload{Digest: digest, State: agentprotocol.ContextAccepted},
 		agentprotocol.ActivityPayload{Kind: agentprotocol.ActivityCompaction, Summary: "Conversation compacted."},
@@ -218,7 +221,7 @@ func TestEventStrictnessSizeAndSafeSerialization(t *testing.T) {
 
 	large := event
 	large.Type = agentprotocol.EventAssistantMessage
-	large.Payload = agentprotocol.AssistantMessagePayload{MessageID: idA, Text: strings.Repeat("x", agentprotocol.MaxEventBytes), CreatedAt: event.Timestamp}
+	large.Payload = agentprotocol.AssistantMessagePayload{TurnID: idC, MessageID: idA, Text: strings.Repeat("x", agentprotocol.MaxEventBytes), CreatedAt: event.Timestamp}
 	_, err = agentprotocol.EncodeEvent(large)
 	require.ErrorIs(t, err, agentprotocol.ErrMessageTooLarge)
 }
@@ -253,6 +256,155 @@ func TestBrowserErrorsHaveOnlyFixedBrokerOwnedRepresentations(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestActiveTurnIdentityIsExplicitAcrossSubmissionQueueAndEvents(t *testing.T) {
+	decoded, err := agentprotocol.DecodeCommand([]byte(validSubmitJSON("initial")))
+	require.NoError(t, err)
+	require.Equal(t, "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", decoded.Payload.(agentprotocol.SubmitPayload).TurnID)
+
+	active := idC
+	event := validEvent(agentprotocol.SnapshotPayload{
+		Lifecycle: agentprotocol.LifecycleResponding, Queue: []agentprotocol.QueueItem{{TurnID: idA, MessageID: idB, Message: "next"}}, ContextState: agentprotocol.ContextAccepted, ActiveTurnID: &active,
+	})
+	encoded, err := agentprotocol.EncodeEvent(event)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"active_turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`)
+	require.Contains(t, string(encoded), `"turn_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`)
+}
+
+func TestDefaultContextWorstCaseJSONEscapingFitsTransport(t *testing.T) {
+	require.Equal(t, 67<<20, agentprotocol.MaxContextCommandBytes)
+	conversationID := idC
+	command := agentprotocol.Command{
+		APIVersion: agentprotocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: agentprotocol.CommandSubmit,
+		Payload: agentprotocol.SubmitPayload{TurnID: "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", MessageID: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", Message: strings.Repeat("<", agentprotocol.MaxOrdinaryCommandBytes), Context: &agentprotocol.PageContext{
+			Revision: agentprotocol.ContextInitial, Markdown: strings.Repeat("<", agentprotocol.MaxMarkdownBytes), CreatorContext: strings.Repeat("&", agentprotocol.MaxCreatorContextBytes), Title: strings.Repeat("<", agentprotocol.MaxTitleBytes), URL: "https://whiteboard.example/?" + strings.Repeat("&", agentprotocol.MaxURLBytes-len("https://whiteboard.example/?")),
+			Resource: agentprotocol.Resource{Kind: agentprotocol.ResourceMarkdown, ID: idC, CreatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC), UpdatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)}, Digest: digest,
+		}},
+	}
+	encoded, err := json.Marshal(command)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(encoded), agentprotocol.MaxContextCommandBytes)
+	_, err = agentprotocol.DecodeCommand(encoded)
+	require.NoError(t, err)
+}
+
+func TestPageEventsAreCorrelatedAndHaveStableCursors(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	next := idB
+	payload := agentprotocol.TimelinePayload{CommandID: idA, Items: []agentprotocol.TimelineItem{{ItemID: idB, Kind: agentprotocol.TimelineActivity, Text: "Compacted.", CreatedAt: now}}, NextCursor: &next}
+	encoded, err := agentprotocol.EncodeEvent(validEvent(payload))
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`)
+	require.Contains(t, string(encoded), `"item_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"`)
+	require.Contains(t, string(encoded), `"next_cursor":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"`)
+
+	bad := payload
+	invalidCursor := "bad"
+	bad.NextCursor = &invalidCursor
+	_, err = agentprotocol.EncodeEvent(validEvent(bad))
+	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+}
+
+func TestEventRecursiveStrictness(t *testing.T) {
+	encoded, err := agentprotocol.EncodeEvent(validEvent(agentprotocol.UserMessagePayload{TurnID: idC, MessageID: idA, Text: "hello", CreatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)}))
+	require.NoError(t, err)
+	valid := string(encoded)
+	tests := map[string]string{
+		"nested duplicate": strings.Replace(valid, `"turn_id":`, `"turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","turn_id":`, 1),
+		"nested unknown":   strings.Replace(valid, `"text":`, `"native":{},"text":`, 1),
+		"nested null":      strings.Replace(valid, `"text":"hello"`, `"text":null`, 1),
+		"trailing":         valid + `{}`,
+	}
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, decodeErr := agentprotocol.DecodeEvent([]byte(input))
+			require.ErrorIs(t, decodeErr, agentprotocol.ErrInvalidMessage)
+		})
+	}
+}
+
+func TestEventRequiredFieldsAndTypedNilAreRejected(t *testing.T) {
+	encoded, err := agentprotocol.EncodeEvent(validEvent(agentprotocol.UserMessagePayload{TurnID: idC, MessageID: idA, Text: "hello", CreatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)}))
+	require.NoError(t, err)
+	missingTurn := strings.Replace(string(encoded), `"turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",`, "", 1)
+	_, err = agentprotocol.DecodeEvent([]byte(missingTurn))
+	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+
+	var payload *agentprotocol.SnapshotPayload
+	require.NotPanics(t, func() {
+		_, err = agentprotocol.EncodeEvent(agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: idA, ConversationID: idB, Type: agentprotocol.EventSnapshot, Timestamp: time.Now().UTC(), Payload: payload})
+	})
+	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+}
+
+func TestNewEventContractFieldsAreRequired(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	active := idC
+	next := idB
+	archiveNext := idC
+	cases := []struct {
+		name    string
+		payload agentprotocol.EventPayload
+		field   string
+	}{
+		{"snapshot active turn", agentprotocol.SnapshotPayload{Lifecycle: agentprotocol.LifecycleResponding, Queue: []agentprotocol.QueueItem{}, ContextState: agentprotocol.ContextAccepted, ActiveTurnID: &active}, `,"active_turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`},
+		{"queue item turn", agentprotocol.QueuePayload{Items: []agentprotocol.QueueItem{{TurnID: idC, MessageID: idA, Message: "queued"}}}, `"turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",`},
+		{"timeline command", agentprotocol.TimelinePayload{CommandID: idA, Items: []agentprotocol.TimelineItem{{ItemID: idB, Kind: agentprotocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `"command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",`},
+		{"timeline item", agentprotocol.TimelinePayload{CommandID: idA, Items: []agentprotocol.TimelineItem{{ItemID: idB, Kind: agentprotocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `"item_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",`},
+		{"timeline cursor", agentprotocol.TimelinePayload{CommandID: idA, Items: []agentprotocol.TimelineItem{{ItemID: idB, Kind: agentprotocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `,"next_cursor":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"`},
+		{"history command", agentprotocol.HistoryPayload{CommandID: idA, Items: []agentprotocol.ArchiveItem{{ArchiveID: idC, CreatedAt: now, UpdatedAt: now, Provider: agentprotocol.ProviderPi}}, NextCursor: &archiveNext}, `"command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",`},
+		{"history cursor", agentprotocol.HistoryPayload{CommandID: idA, Items: []agentprotocol.ArchiveItem{{ArchiveID: idC, CreatedAt: now, UpdatedAt: now, Provider: agentprotocol.ProviderPi}}, NextCursor: &archiveNext}, `,"next_cursor":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`},
+		{"lifecycle turn", agentprotocol.LifecyclePayload{State: agentprotocol.LifecycleResponding, TurnID: &active}, `,"turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := agentprotocol.EncodeEvent(validEvent(test.payload))
+			require.NoError(t, err)
+			without := strings.Replace(string(encoded), test.field, "", 1)
+			require.NotEqual(t, string(encoded), without)
+			_, err = agentprotocol.DecodeEvent([]byte(without))
+			require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+		})
+	}
+
+	withoutTurn := strings.Replace(validSubmitJSON("initial"), `"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",`, "", 1)
+	_, err := agentprotocol.DecodeCommand([]byte(withoutTurn))
+	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+}
+
+func TestNormalizedEventAndSummaryBoundsAreMeasuredInBytes(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	_, err := agentprotocol.EncodeEvent(validEvent(agentprotocol.ActivityPayload{Kind: agentprotocol.ActivityStatus, Summary: strings.Repeat("é", agentprotocol.MaxSummaryBytes/2+1)}))
+	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+	_, err = agentprotocol.EncodeEvent(validEvent(agentprotocol.UserMessagePayload{TurnID: idC, MessageID: idA, Text: string([]byte{0xff}), CreatedAt: now}))
+	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+}
+
+func TestProviderReadyEventRequiresResolvedModel(t *testing.T) {
+	_, err := agentprotocol.EncodeEvent(validEvent(agentprotocol.ProviderPayload{Provider: agentprotocol.ProviderPi, State: agentprotocol.ProviderReady}))
+	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+}
+
+func TestBrowserErrorTaxonomyCoversBrokerAndProviderOutcomes(t *testing.T) {
+	required := []agentprotocol.BrowserErrorCode{
+		agentprotocol.ErrorInvalidCommand, agentprotocol.ErrorInvalidState, agentprotocol.ErrorQueueFull, agentprotocol.ErrorActiveTurnConflict,
+		agentprotocol.ErrorStaleReference, agentprotocol.ErrorReplayWindowUnavailable, agentprotocol.ErrorStateRepairFailed,
+		agentprotocol.ErrorArchiveDeleteRetained, agentprotocol.ErrorBrokerShuttingDown, agentprotocol.ErrorProviderProtocolFailure,
+		agentprotocol.ErrorProviderMalformedStream, agentprotocol.ErrorAcceptanceOutcomeUnknown,
+	}
+	for _, code := range required {
+		require.Contains(t, agentprotocol.AllBrowserErrorCodes(), code)
+		err := agentprotocol.NewBrowserError(code)
+		require.NotEmpty(t, err.Message())
+		require.NotEmpty(t, err.Action())
+	}
+	require.Equal(t, agentprotocol.ActionNone, agentprotocol.NewBrowserError(agentprotocol.ErrorInvalidCommand).Action())
+}
+
+func validEvent(payload agentprotocol.EventPayload) agentprotocol.Event {
+	return agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: idA, ConversationID: idB, Type: payload.EventType(), Timestamp: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC), Payload: payload}
+}
+
 func assertNoForbiddenWireKeys(t *testing.T, value any) {
 	t.Helper()
 	forbidden := map[string]bool{"native_session": true, "raw": true, "path": true, "credential": true, "reasoning": true}
@@ -270,5 +422,5 @@ func assertNoForbiddenWireKeys(t *testing.T, value any) {
 }
 
 func validSubmitJSON(revision string) string {
-	return `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","message":"question","context":{"revision":"` + revision + `","markdown":"# page","creator_context":"creator summary","title":"Page title","url":"https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}`
+	return `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","message":"question","context":{"revision":"` + revision + `","markdown":"# page","creator_context":"creator summary","title":"Page title","url":"https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}`
 }

@@ -2,6 +2,7 @@ package agentprotocol
 
 import (
 	"encoding/json"
+	"reflect"
 	"time"
 	"unicode/utf8"
 )
@@ -104,11 +105,14 @@ const (
 )
 
 type QueueItem struct {
+	TurnID    string `json:"turn_id"`
 	MessageID string `json:"message_id"`
 	Message   string `json:"message"`
 }
 type TimelineItem struct {
+	ItemID    string           `json:"item_id"`
 	Kind      TimelineItemKind `json:"kind"`
+	TurnID    string           `json:"turn_id,omitempty"`
 	MessageID string           `json:"message_id,omitempty"`
 	Text      string           `json:"text"`
 	CreatedAt time.Time        `json:"created_at"`
@@ -131,11 +135,12 @@ type SnapshotPayload struct {
 	Lifecycle    LifecycleState `json:"lifecycle"`
 	Queue        []QueueItem    `json:"queue"`
 	ContextState ContextState   `json:"context_state"`
+	ActiveTurnID *string        `json:"active_turn_id"`
 }
 
 func (SnapshotPayload) EventType() EventType { return EventSnapshot }
 func (p SnapshotPayload) validate() error {
-	if p.Queue == nil || !validLifecycle(p.Lifecycle) || !validContextState(p.ContextState) {
+	if p.Queue == nil || !validLifecycle(p.Lifecycle) || !validContextState(p.ContextState) || !validActiveTurn(p.Lifecycle, p.ActiveTurnID) {
 		return invalid(nil)
 	}
 	return ValidateQueue(p.Queue)
@@ -156,42 +161,61 @@ func (p CommandResultPayload) validate() error {
 }
 
 type TimelinePayload struct {
-	Items   []TimelineItem `json:"items"`
-	HasMore bool           `json:"has_more"`
+	CommandID  string         `json:"command_id"`
+	Items      []TimelineItem `json:"items"`
+	NextCursor *string        `json:"next_cursor"`
 }
 
 func (TimelinePayload) EventType() EventType { return EventTimeline }
 func (p TimelinePayload) validate() error {
-	if p.Items == nil || len(p.Items) > MaxPageSize {
+	if !validID(p.CommandID) || p.Items == nil || len(p.Items) > MaxPageSize || !validCursor(p.NextCursor) {
 		return invalid(nil)
 	}
+	seen := make(map[string]struct{}, len(p.Items))
 	for _, item := range p.Items {
 		if !validTimelineItem(item) {
 			return invalid(nil)
 		}
+		if _, exists := seen[item.ItemID]; exists {
+			return invalid(nil)
+		}
+		seen[item.ItemID] = struct{}{}
+	}
+	if p.NextCursor != nil && (len(p.Items) == 0 || *p.NextCursor != p.Items[len(p.Items)-1].ItemID) {
+		return invalid(nil)
 	}
 	return nil
 }
 
 type HistoryPayload struct {
-	Items   []ArchiveItem `json:"items"`
-	HasMore bool          `json:"has_more"`
+	CommandID  string        `json:"command_id"`
+	Items      []ArchiveItem `json:"items"`
+	NextCursor *string       `json:"next_cursor"`
 }
 
 func (HistoryPayload) EventType() EventType { return EventHistory }
 func (p HistoryPayload) validate() error {
-	if p.Items == nil || len(p.Items) > MaxPageSize {
+	if !validID(p.CommandID) || p.Items == nil || len(p.Items) > MaxPageSize || !validCursor(p.NextCursor) {
 		return invalid(nil)
 	}
+	seen := make(map[string]struct{}, len(p.Items))
 	for _, item := range p.Items {
 		if !validArchiveItem(item) {
 			return invalid(nil)
 		}
+		if _, exists := seen[item.ArchiveID]; exists {
+			return invalid(nil)
+		}
+		seen[item.ArchiveID] = struct{}{}
+	}
+	if p.NextCursor != nil && (len(p.Items) == 0 || *p.NextCursor != p.Items[len(p.Items)-1].ArchiveID) {
+		return invalid(nil)
 	}
 	return nil
 }
 
 type UserMessagePayload struct {
+	TurnID    string    `json:"turn_id"`
 	MessageID string    `json:"message_id"`
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"created_at"`
@@ -199,26 +223,28 @@ type UserMessagePayload struct {
 
 func (UserMessagePayload) EventType() EventType { return EventUserMessage }
 func (p UserMessagePayload) validate() error {
-	if !validID(p.MessageID) || !validMessage(p.Text) || p.CreatedAt.IsZero() {
+	if !validID(p.TurnID) || !validID(p.MessageID) || !validMessage(p.Text) || p.CreatedAt.IsZero() {
 		return invalid(nil)
 	}
 	return nil
 }
 
 type AssistantDeltaPayload struct {
+	TurnID    string `json:"turn_id"`
 	MessageID string `json:"message_id"`
 	Text      string `json:"text"`
 }
 
 func (AssistantDeltaPayload) EventType() EventType { return EventAssistantDelta }
 func (p AssistantDeltaPayload) validate() error {
-	if !validID(p.MessageID) || !validBoundedText(p.Text, MaxDeltaBytes, true) {
+	if !validID(p.TurnID) || !validID(p.MessageID) || !validBoundedText(p.Text, MaxDeltaBytes, true) {
 		return invalid(nil)
 	}
 	return nil
 }
 
 type AssistantMessagePayload struct {
+	TurnID    string    `json:"turn_id"`
 	MessageID string    `json:"message_id"`
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"created_at"`
@@ -226,7 +252,7 @@ type AssistantMessagePayload struct {
 
 func (AssistantMessagePayload) EventType() EventType { return EventAssistantMessage }
 func (p AssistantMessagePayload) validate() error {
-	if !validID(p.MessageID) || !validMessage(p.Text) || p.CreatedAt.IsZero() {
+	if !validID(p.TurnID) || !validID(p.MessageID) || !validMessage(p.Text) || p.CreatedAt.IsZero() {
 		return invalid(nil)
 	}
 	return nil
@@ -245,12 +271,13 @@ func (p QueuePayload) validate() error {
 }
 
 type LifecyclePayload struct {
-	State LifecycleState `json:"state"`
+	State  LifecycleState `json:"state"`
+	TurnID *string        `json:"turn_id"`
 }
 
 func (LifecyclePayload) EventType() EventType { return EventLifecycle }
 func (p LifecyclePayload) validate() error {
-	if !validLifecycle(p.State) {
+	if !validLifecycle(p.State) || !validActiveTurn(p.State, p.TurnID) {
 		return invalid(nil)
 	}
 	return nil
@@ -264,7 +291,7 @@ type ProviderPayload struct {
 
 func (ProviderPayload) EventType() EventType { return EventProvider }
 func (p ProviderPayload) validate() error {
-	if p.Provider != ProviderPi || !validProviderState(p.State) || !validBoundedText(p.Model, MaxTitleBytes, false) {
+	if p.Provider != ProviderPi || !validProviderState(p.State) || !validBoundedText(p.Model, MaxTitleBytes, false) || (p.State == ProviderReady && p.Model == "") {
 		return invalid(nil)
 	}
 	return nil
@@ -290,7 +317,7 @@ type ActivityPayload struct {
 
 func (ActivityPayload) EventType() EventType { return EventActivity }
 func (p ActivityPayload) validate() error {
-	if !validActivity(p.Kind) || !validMessage(p.Summary) {
+	if !validActivity(p.Kind) || !validBoundedText(p.Summary, MaxSummaryBytes, true) {
 		return invalid(nil)
 	}
 	return nil
@@ -426,6 +453,9 @@ type eventMarshalWire struct {
 }
 
 func EncodeEvent(event Event) ([]byte, error) {
+	if isNilEventPayload(event.Payload) {
+		return nil, invalid(nil)
+	}
 	encoded, err := json.Marshal(eventMarshalWire{event.APIVersion, event.EventID, event.ConversationID, event.Type, event.Timestamp, event.Payload})
 	if err != nil {
 		return nil, invalid(err)
@@ -443,7 +473,12 @@ func DecodeEvent(data []byte) (Event, error) {
 	if len(data) > MaxEventBytes {
 		return Event{}, ErrMessageTooLarge
 	}
-	if err := inspectJSON(data, map[string]bool{}); err != nil {
+	nullable := map[string]bool{
+		"payload.active_turn_id": true,
+		"payload.next_cursor":    true,
+		"payload.turn_id":        true,
+	}
+	if err := inspectJSON(data, nullable); err != nil {
 		return Event{}, err
 	}
 	var wire eventWire
@@ -469,23 +504,23 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	var required []string
 	switch kind {
 	case EventSnapshot:
-		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state"}
+		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_turn_id"}
 	case EventCommandResult:
 		target, required = &CommandResultPayload{}, []string{"command_id", "status"}
 	case EventTimeline:
-		target, required = &TimelinePayload{}, []string{"items", "has_more"}
+		target, required = &TimelinePayload{}, []string{"command_id", "items", "next_cursor"}
 	case EventHistory:
-		target, required = &HistoryPayload{}, []string{"items", "has_more"}
+		target, required = &HistoryPayload{}, []string{"command_id", "items", "next_cursor"}
 	case EventUserMessage:
-		target, required = &UserMessagePayload{}, []string{"message_id", "text", "created_at"}
+		target, required = &UserMessagePayload{}, []string{"turn_id", "message_id", "text", "created_at"}
 	case EventAssistantDelta:
-		target, required = &AssistantDeltaPayload{}, []string{"message_id", "text"}
+		target, required = &AssistantDeltaPayload{}, []string{"turn_id", "message_id", "text"}
 	case EventAssistantMessage:
-		target, required = &AssistantMessagePayload{}, []string{"message_id", "text", "created_at"}
+		target, required = &AssistantMessagePayload{}, []string{"turn_id", "message_id", "text", "created_at"}
 	case EventQueue:
 		target, required = &QueuePayload{}, []string{"items"}
 	case EventLifecycle:
-		target, required = &LifecyclePayload{}, []string{"state"}
+		target, required = &LifecyclePayload{}, []string{"state", "turn_id"}
 	case EventProvider:
 		target, required = &ProviderPayload{}, []string{"provider", "state"}
 	case EventContext:
@@ -552,10 +587,21 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 }
 
 func validateEvent(event Event) error {
-	if event.APIVersion != APIVersion || !validID(event.EventID) || !validID(event.ConversationID) || event.Timestamp.IsZero() || event.Payload == nil || event.Payload.EventType() != event.Type {
+	if event.APIVersion != APIVersion || !validID(event.EventID) || !validID(event.ConversationID) || event.Timestamp.IsZero() || isNilEventPayload(event.Payload) {
+		return invalid(nil)
+	}
+	if event.Payload.EventType() != event.Type {
 		return invalid(nil)
 	}
 	return event.Payload.validate()
+}
+
+func isNilEventPayload(payload EventPayload) bool {
+	if payload == nil {
+		return true
+	}
+	value := reflect.ValueOf(payload)
+	return value.Kind() == reflect.Pointer && value.IsNil()
 }
 
 func ValidateQueue(items []QueueItem) error {
@@ -569,15 +615,20 @@ func ValidateQueue(items []QueueItem) error {
 			return ErrMessageTooLarge
 		}
 	}
-	seen := make(map[string]struct{}, len(items))
+	seenMessages := make(map[string]struct{}, len(items))
+	seenTurns := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if !validID(item.MessageID) || !validMessage(item.Message) {
+		if !validID(item.TurnID) || !validID(item.MessageID) || !validMessage(item.Message) {
 			return invalid(nil)
 		}
-		if _, exists := seen[item.MessageID]; exists {
+		if _, exists := seenMessages[item.MessageID]; exists {
 			return invalid(nil)
 		}
-		seen[item.MessageID] = struct{}{}
+		if _, exists := seenTurns[item.TurnID]; exists {
+			return invalid(nil)
+		}
+		seenMessages[item.MessageID] = struct{}{}
+		seenTurns[item.TurnID] = struct{}{}
 	}
 	return nil
 }
@@ -624,18 +675,27 @@ func validArchiveAction(value ArchiveAction) bool {
 	return value == ArchiveCreated || value == ArchiveRestored || value == ArchiveDeleted
 }
 func validTimelineItem(item TimelineItem) bool {
-	if item.CreatedAt.IsZero() || !validMessage(item.Text) {
+	if !validID(item.ItemID) || item.CreatedAt.IsZero() || !validMessage(item.Text) {
 		return false
 	}
 	switch item.Kind {
 	case TimelineUser, TimelineAssistant:
-		return validID(item.MessageID)
+		return validID(item.TurnID) && validID(item.MessageID)
 	case TimelineActivity:
-		return item.MessageID == ""
+		return item.MessageID == "" && (item.TurnID == "" || validID(item.TurnID))
 	default:
 		return false
 	}
 }
 func validArchiveItem(item ArchiveItem) bool {
 	return validID(item.ArchiveID) && !item.CreatedAt.IsZero() && !item.UpdatedAt.IsZero() && !item.UpdatedAt.Before(item.CreatedAt) && item.Provider == ProviderPi && validBoundedText(item.Model, MaxTitleBytes, false) && validBoundedText(item.Preview, MaxTitleBytes, false) && utf8.ValidString(item.Preview)
+}
+func validCursor(cursor *string) bool {
+	return cursor == nil || validID(*cursor)
+}
+func validActiveTurn(lifecycle LifecycleState, turnID *string) bool {
+	if lifecycle == LifecycleResponding {
+		return turnID != nil && validID(*turnID)
+	}
+	return turnID == nil
 }

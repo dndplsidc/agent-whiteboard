@@ -26,23 +26,48 @@ const (
 	ErrorTurnInterrupted              BrowserErrorCode = "turn_interrupted"
 	ErrorBoardRevisionUnavailable     BrowserErrorCode = "board_revision_unavailable"
 	ErrorBoardRevisionMalformed       BrowserErrorCode = "board_revision_malformed"
+	ErrorInvalidCommand               BrowserErrorCode = "invalid_command"
+	ErrorInvalidState                 BrowserErrorCode = "invalid_state"
+	ErrorQueueFull                    BrowserErrorCode = "queue_full"
+	ErrorActiveTurnConflict           BrowserErrorCode = "active_turn_conflict"
+	ErrorStaleReference               BrowserErrorCode = "stale_reference"
+	ErrorReplayWindowUnavailable      BrowserErrorCode = "replay_window_unavailable"
+	ErrorStateRepairFailed            BrowserErrorCode = "state_repair_failed"
+	ErrorArchiveDeleteRetained        BrowserErrorCode = "archive_delete_retained"
+	ErrorBrokerShuttingDown           BrowserErrorCode = "broker_shutting_down"
+	ErrorProviderProtocolFailure      BrowserErrorCode = "provider_protocol_failure"
+	ErrorProviderMalformedStream      BrowserErrorCode = "provider_malformed_stream"
+	ErrorAcceptanceOutcomeUnknown     BrowserErrorCode = "acceptance_outcome_unknown"
+
+	// Compatibility names describe the same frozen wire outcomes.
+	ErrorActiveTurnBusy      = ErrorActiveTurnConflict
+	ErrorReplayUnavailable   = ErrorReplayWindowUnavailable
+	ErrorArchiveDeleteRetry  = ErrorArchiveDeleteRetained
+	ErrorArchiveDeleteFailed = ErrorArchiveDeleteRetained
+	ErrorAcceptanceUnknown   = ErrorAcceptanceOutcomeUnknown
 )
 
 const (
-	ActionRetryConnection   BrowserAction = "retry_connection"
-	ActionEditPort          BrowserAction = "edit_port"
-	ActionGrantLocalNetwork BrowserAction = "grant_local_network"
-	ActionTrustOrigin       BrowserAction = "trust_origin"
-	ActionUpdateBroker      BrowserAction = "update_broker"
-	ActionInstallProvider   BrowserAction = "install_provider"
-	ActionProviderLogin     BrowserAction = "provider_login"
-	ActionTryAgain          BrowserAction = "try_again"
-	ActionConfigureModel    BrowserAction = "configure_model"
-	ActionRestartProvider   BrowserAction = "restart_provider"
-	ActionReduceContext     BrowserAction = "reduce_context"
-	ActionRestoreSession    BrowserAction = "restore_session"
-	ActionRetryTurn         BrowserAction = "retry_turn"
-	ActionReloadBoard       BrowserAction = "reload_board"
+	ActionNone               BrowserAction = "none"
+	ActionRetryConnection    BrowserAction = "retry_connection"
+	ActionEditPort           BrowserAction = "edit_port"
+	ActionGrantLocalNetwork  BrowserAction = "grant_local_network"
+	ActionTrustOrigin        BrowserAction = "trust_origin"
+	ActionUpdateBroker       BrowserAction = "update_broker"
+	ActionInstallProvider    BrowserAction = "install_provider"
+	ActionProviderLogin      BrowserAction = "provider_login"
+	ActionTryAgain           BrowserAction = "try_again"
+	ActionConfigureModel     BrowserAction = "configure_model"
+	ActionRestartProvider    BrowserAction = "restart_provider"
+	ActionReduceContext      BrowserAction = "reduce_context"
+	ActionRestoreSession     BrowserAction = "restore_session"
+	ActionRetryTurn          BrowserAction = "retry_turn"
+	ActionReloadBoard        BrowserAction = "reload_board"
+	ActionRefreshState       BrowserAction = "refresh_state"
+	ActionEditQueue          BrowserAction = "edit_queue"
+	ActionWaitForTurn        BrowserAction = "wait_for_turn"
+	ActionReloadConversation BrowserAction = "reload_conversation"
+	ActionRetryArchiveDelete BrowserAction = "retry_archive_delete"
 )
 
 type browserErrorDefinition struct {
@@ -68,6 +93,18 @@ var browserErrorDefinitions = map[BrowserErrorCode]browserErrorDefinition{
 	ErrorTurnInterrupted:              {"The active turn was interrupted and was not replayed.", ActionRetryTurn},
 	ErrorBoardRevisionUnavailable:     {"The current whiteboard revision is unavailable.", ActionReloadBoard},
 	ErrorBoardRevisionMalformed:       {"The current whiteboard revision is malformed.", ActionReloadBoard},
+	ErrorInvalidCommand:               {"The broker rejected an invalid command.", ActionNone},
+	ErrorInvalidState:                 {"The command is not valid for the current conversation state.", ActionRefreshState},
+	ErrorQueueFull:                    {"The follow-up queue is full.", ActionEditQueue},
+	ErrorActiveTurnConflict:           {"Another turn is already active for this conversation.", ActionWaitForTurn},
+	ErrorStaleReference:               {"The referenced conversation item is no longer current.", ActionRefreshState},
+	ErrorReplayWindowUnavailable:      {"The requested replay window is no longer available.", ActionReloadConversation},
+	ErrorStateRepairFailed:            {"The broker could not repair the saved conversation state.", ActionTryAgain},
+	ErrorArchiveDeleteRetained:        {"The archive was retained because provider deletion did not complete.", ActionRetryArchiveDelete},
+	ErrorBrokerShuttingDown:           {"The local agent broker is shutting down.", ActionRetryConnection},
+	ErrorProviderProtocolFailure:      {"The provider protocol operation failed.", ActionRestartProvider},
+	ErrorProviderMalformedStream:      {"The provider returned a malformed event stream.", ActionRestartProvider},
+	ErrorAcceptanceOutcomeUnknown:     {"The provider turn acceptance outcome is unknown.", ActionRefreshState},
 }
 
 type BrowserError struct{ code BrowserErrorCode }
@@ -84,7 +121,15 @@ func (e BrowserError) Action() BrowserAction  { return browserErrorDefinitions[e
 func (e BrowserError) valid() bool            { _, ok := browserErrorDefinitions[e.code]; return ok }
 
 func AllBrowserErrorCodes() []BrowserErrorCode {
-	return []BrowserErrorCode{ErrorBrokerUnavailable, ErrorWrongPort, ErrorLocalNetworkPermissionDenied, ErrorUntrustedOrigin, ErrorIncompatibleAPI, ErrorProviderMissing, ErrorAuthenticationRequired, ErrorNoUsableModel, ErrorProviderStartupFailed, ErrorContentOnlyUnavailable, ErrorContextTooLarge, ErrorNativeSessionMissing, ErrorProviderCrashed, ErrorProviderRecoveryFailed, ErrorTurnInterrupted, ErrorBoardRevisionUnavailable, ErrorBoardRevisionMalformed}
+	return []BrowserErrorCode{
+		ErrorBrokerUnavailable, ErrorWrongPort, ErrorLocalNetworkPermissionDenied, ErrorUntrustedOrigin,
+		ErrorIncompatibleAPI, ErrorProviderMissing, ErrorAuthenticationRequired, ErrorNoUsableModel,
+		ErrorProviderStartupFailed, ErrorContentOnlyUnavailable, ErrorContextTooLarge, ErrorNativeSessionMissing,
+		ErrorProviderCrashed, ErrorProviderRecoveryFailed, ErrorTurnInterrupted, ErrorBoardRevisionUnavailable,
+		ErrorBoardRevisionMalformed, ErrorInvalidCommand, ErrorInvalidState, ErrorQueueFull, ErrorActiveTurnConflict,
+		ErrorStaleReference, ErrorReplayWindowUnavailable, ErrorStateRepairFailed, ErrorArchiveDeleteRetained,
+		ErrorBrokerShuttingDown, ErrorProviderProtocolFailure, ErrorProviderMalformedStream, ErrorAcceptanceOutcomeUnknown,
+	}
 }
 
 func (e BrowserError) MarshalJSON() ([]byte, error) {

@@ -21,10 +21,15 @@ const (
 	WebSocketSubprotocol = "agent-whiteboard.v1"
 	APIVersionHeader     = "X-Agent-Whiteboard-API-Version"
 
-	MaxContextCommandBytes  = 16 << 20
+	// MaxContextCommandBytes covers 10 MiB Markdown plus 1 MiB creator
+	// context under encoding/json's six-byte HTML escaping, with envelope room.
+	MaxContextCommandBytes  = 67 << 20
 	MaxOrdinaryCommandBytes = 64 << 10
+	MaxMarkdownBytes        = 10 << 20
+	MaxCreatorContextBytes  = 1 << 20
 	MaxTitleBytes           = 512
 	MaxURLBytes             = 8 << 10
+	MaxSummaryBytes         = 8 << 10
 	MaxQueueItems           = 64
 	MaxQueueBytes           = 32 << 20
 	MaxEventBytes           = 256 << 10
@@ -116,6 +121,7 @@ type ConnectPayload struct {
 func (ConnectPayload) commandPayload() {}
 
 type SubmitPayload struct {
+	TurnID    string       `json:"turn_id"`
 	MessageID string       `json:"message_id"`
 	Message   string       `json:"message"`
 	Context   *PageContext `json:"context,omitempty"`
@@ -255,7 +261,7 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 	case CommandConnect:
 		target, required = &ConnectPayload{}, []string{"provider", "resource", "context_digest"}
 	case CommandSubmit:
-		target, required = &SubmitPayload{}, []string{"message_id", "message"}
+		target, required = &SubmitPayload{}, []string{"turn_id", "message_id", "message"}
 	case CommandQueueEdit:
 		target, required = &QueueEditPayload{}, []string{"message_id", "message"}
 	case CommandQueueRemove:
@@ -320,7 +326,7 @@ func validateCommand(command Command) error {
 			return invalid(nil)
 		}
 	case SubmitPayload:
-		if command.Type != CommandSubmit || !validID(payload.MessageID) || !validMessage(payload.Message) {
+		if command.Type != CommandSubmit || !validID(payload.TurnID) || !validID(payload.MessageID) || !validMessage(payload.Message) {
 			return invalid(nil)
 		}
 		if payload.Context != nil && validatePageContext(*payload.Context) != nil {
@@ -370,7 +376,7 @@ func validatePageContext(context PageContext) error {
 	if context.Revision != ContextInitial && context.Revision != ContextReplacement {
 		return invalid(nil)
 	}
-	if context.Markdown == "" || context.CreatorContext == "" || !utf8.ValidString(context.Markdown) || !utf8.ValidString(context.CreatorContext) {
+	if !validBoundedText(context.Markdown, MaxMarkdownBytes, true) || !validBoundedText(context.CreatorContext, MaxCreatorContextBytes, true) {
 		return invalid(nil)
 	}
 	if !validBoundedText(context.Title, MaxTitleBytes, true) || !validPageURL(context.URL) || validateResource(context.Resource) != nil || !validDigest(context.Digest) {
