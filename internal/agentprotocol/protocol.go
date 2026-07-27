@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
 )
 
 const (
@@ -21,17 +22,22 @@ const (
 	WebSocketSubprotocol = "agent-whiteboard.v1"
 	APIVersionHeader     = "X-Agent-Whiteboard-API-Version"
 
-	// MaxContextCommandBytes covers 10 MiB Markdown plus 1 MiB creator
-	// context under encoding/json's six-byte HTML escaping, with envelope room.
-	MaxContextCommandBytes  = 67 << 20
-	MaxOrdinaryCommandBytes = 64 << 10
+	// MaxContextCommandBytes retains ample room for the complete default context.
+	// Ordinary frames allow a valid message to expand under JSON escaping while
+	// MaxMessageBytes remains the logical user/assistant message limit.
+	MaxContextCommandBytes = 67 << 20
+	MaxMessageBytes        = 64 << 10
+	// Three times the logical message limit covers worst-case 2x JSON string
+	// escaping plus the complete ordinary command envelope.
+	MaxOrdinaryCommandBytes = 3 * MaxMessageBytes
 	MaxMarkdownBytes        = 10 << 20
 	MaxCreatorContextBytes  = 1 << 20
 	MaxTitleBytes           = 512
 	MaxURLBytes             = 8 << 10
 	MaxSummaryBytes         = 8 << 10
 	MaxQueueItems           = 64
-	MaxQueueBytes           = 32 << 20
+	MaxQueueBytes           = 96 << 10
+	MaxTimelineBytes        = 96 << 10
 	MaxEventBytes           = 256 << 10
 	MaxDeltaBytes           = 32 << 10
 	MaxReplayEvents         = 2048
@@ -200,11 +206,15 @@ type commandMarshalWire struct {
 	Payload        CommandPayload `json:"payload"`
 }
 
-func (c Command) MarshalJSON() ([]byte, error) {
+func (c Command) MarshalJSON() ([]byte, error) { return EncodeCommand(c) }
+
+// EncodeCommand validates and encodes a command as application JSON without
+// applying HTML-specific escaping.
+func EncodeCommand(c Command) ([]byte, error) {
 	if err := validateCommand(c); err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(commandMarshalWire{c.APIVersion, c.CommandID, c.ClientID, c.ConversationID, c.Type, c.Payload})
+	encoded, err := marshalApplicationJSON(commandMarshalWire{c.APIVersion, c.CommandID, c.ClientID, c.ConversationID, c.Type, c.Payload})
 	if err != nil {
 		return nil, invalid(err)
 	}
@@ -379,7 +389,7 @@ func validatePageContext(context PageContext) error {
 	if !validBoundedText(context.Markdown, MaxMarkdownBytes, true) || !validBoundedText(context.CreatorContext, MaxCreatorContextBytes, true) {
 		return invalid(nil)
 	}
-	if !validBoundedText(context.Title, MaxTitleBytes, true) || !validPageURL(context.URL) || validateResource(context.Resource) != nil || !validDigest(context.Digest) {
+	if !validBoundedText(context.Title, MaxTitleBytes, true) || !validPageURL(context.URL) || validateResource(context.Resource) != nil || context.Digest != contextdigest.Calculate([]byte(context.Markdown), []byte(context.CreatorContext)) {
 		return invalid(nil)
 	}
 	return nil
@@ -400,11 +410,19 @@ func validPageURL(value string) bool {
 		return false
 	}
 	parsed, err := url.Parse(value)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+	return err == nil && parsed.Scheme == "https" && parsed.Hostname() != "" && parsed.User == nil
 }
-func validMessage(value string) bool { return validBoundedText(value, MaxOrdinaryCommandBytes, true) }
+func validMessage(value string) bool { return validBoundedText(value, MaxMessageBytes, true) }
 func validBoundedText(value string, max int, nonempty bool) bool {
-	return utf8.ValidString(value) && len(value) <= max && (!nonempty || value != "")
+	return utf8.ValidString(value) && len(value) <= max && (!nonempty || value != "") && !hasDisallowedC0(value)
+}
+func hasDisallowedC0(value string) bool {
+	for _, char := range value {
+		if char < 0x20 && char != '\t' && char != '\n' && char != '\r' {
+			return true
+		}
+	}
+	return false
 }
 func validID(value string) bool { return common.ValidateID(value) == nil }
 func validDigest(value string) bool {
@@ -434,6 +452,17 @@ func invalid(cause error) error {
 		return ErrInvalidMessage
 	}
 	return fmt.Errorf("%w: %v", ErrInvalidMessage, cause)
+}
+
+func marshalApplicationJSON(value any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	encoded := buffer.Bytes()
+	return encoded[:len(encoded)-1], nil
 }
 
 func strictDecode(data []byte, target any) error {

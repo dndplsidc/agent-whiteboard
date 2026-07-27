@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
 )
 
 const (
@@ -324,7 +325,7 @@ func (p PageContext) Validate() error {
 		return errors.New("invalid context revision")
 	}
 	if !validBoundedBytes(p.Markdown, MaxMarkdownBytes, true) || !validBoundedBytes(p.CreatorContext, MaxCreatorContextBytes, true) ||
-		!validBoundedText(p.Title, MaxTitleBytes, true) || !validURL(p.URL) || !validResource(p.Resource) || !validDigest(p.Digest) {
+		!validBoundedText(p.Title, MaxTitleBytes, true) || !validURL(p.URL) || !validResource(p.Resource) || p.Digest != contextdigest.Calculate(p.Markdown, p.CreatorContext) {
 		return errors.New("invalid page context")
 	}
 	return nil
@@ -441,7 +442,7 @@ type HistoryPage struct {
 }
 
 func (p HistoryPage) Validate() error {
-	if p.NextCursor != "" && !validID(p.NextCursor) {
+	if p.NextCursor != "" && (!validID(p.NextCursor) || len(p.Items) == 0 || p.NextCursor != p.Items[len(p.Items)-1].MessageID) {
 		return errors.New("invalid history next cursor")
 	}
 	return validateHistory(p.Items)
@@ -538,34 +539,34 @@ func NewTerminalFailureEvent(turnID string, failure ProviderError) Event {
 func (e Event) Validate() error {
 	switch e.Kind {
 	case EventUserMessage, EventAssistantMessage:
-		if !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, true) || e.Timestamp.IsZero() {
+		if !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, true) || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider message event")
 		}
 	case EventAssistantDelta:
-		if !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxDeltaBytes, true) {
+		if !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxDeltaBytes, true) || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider delta event")
 		}
 	case EventActivity:
-		if (e.TurnID != "" && !validID(e.TurnID)) || !validActivity(e.Activity) || !validBoundedText(e.Text, MaxSummaryBytes, true) {
+		if (e.TurnID != "" && !validID(e.TurnID)) || e.MessageID != "" || !validActivity(e.Activity) || !validBoundedText(e.Text, MaxSummaryBytes, true) || !e.Timestamp.IsZero() || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider activity event")
 		}
 	case EventBlocked:
-		if !validID(e.TurnID) {
+		if !validID(e.TurnID) || e.MessageID != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider blocked event turn")
 		}
 		if message := blockedMessage(e.Blocked); message == "" || e.Text != message {
 			return errors.New("invalid provider blocked event")
 		}
 	case EventCompletion:
-		if !validID(e.TurnID) {
+		if !validID(e.TurnID) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider completion event")
 		}
 	case EventInterruption:
-		if !validID(e.TurnID) || !validInterruption(e.Interruption) {
+		if !validID(e.TurnID) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || !validInterruption(e.Interruption) || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider interruption event")
 		}
 	case EventTerminalFailure:
-		if (e.TurnID != "" && !validID(e.TurnID)) || !e.Failure.Valid() {
+		if (e.TurnID != "" && !validID(e.TurnID)) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || !e.Failure.Valid() {
 			return errors.New("invalid provider terminal failure event")
 		}
 	default:
@@ -584,23 +585,12 @@ func validateProviderAccess(name Name, access AccessMode) error {
 	return nil
 }
 func validID(value string) bool { return common.ValidateID(value) == nil }
-func validDigest(value string) bool {
-	if len(value) != 64 {
-		return false
-	}
-	for _, char := range value {
-		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
-			return false
-		}
-	}
-	return true
-}
 func validURL(value string) bool {
 	if !validBoundedText(value, MaxURLBytes, true) {
 		return false
 	}
 	parsed, err := url.Parse(value)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+	return err == nil && parsed.Scheme == "https" && parsed.Hostname() != "" && parsed.User == nil
 }
 func validResource(resource Resource) bool {
 	return resource.Kind == ResourceMarkdown && validID(resource.ID) && !resource.CreatedAt.IsZero() && !resource.UpdatedAt.IsZero() && !resource.UpdatedAt.Before(resource.CreatedAt) && (resource.ExpiresAt == nil || !resource.ExpiresAt.Before(resource.CreatedAt))
@@ -622,10 +612,26 @@ func blockedMessage(kind BlockedKind) string {
 	}
 }
 func validBoundedText(value string, maxBytes int, nonempty bool) bool {
-	return utf8.ValidString(value) && len(value) <= maxBytes && (!nonempty || value != "")
+	return utf8.ValidString(value) && len(value) <= maxBytes && (!nonempty || value != "") && !hasDisallowedC0(value)
 }
 func validBoundedBytes(value []byte, maxBytes int, nonempty bool) bool {
-	return utf8.Valid(value) && len(value) <= maxBytes && (!nonempty || len(value) != 0)
+	if !utf8.Valid(value) || len(value) > maxBytes || (nonempty && len(value) == 0) {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x20 && char != '\t' && char != '\n' && char != '\r' {
+			return false
+		}
+	}
+	return true
+}
+func hasDisallowedC0(value string) bool {
+	for _, char := range value {
+		if char < 0x20 && char != '\t' && char != '\n' && char != '\r' {
+			return true
+		}
+	}
+	return false
 }
 
 var _ error = ProviderError{}

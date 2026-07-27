@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
 	"github.com/edocsss/agent-whiteboard/internal/provider"
 	"github.com/stretchr/testify/require"
 )
@@ -81,6 +82,89 @@ func TestNormalizedProviderEventsCarryTurnIdentityAndTypedTerminalFailure(t *tes
 	require.NoError(t, provider.NewTerminalFailureEvent("", failure).Validate())
 	_, err := json.Marshal(terminal)
 	require.Error(t, err)
+}
+
+func TestProviderEventsRejectEveryFieldNotPermittedByKind(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	failure := provider.NewProviderError(provider.ErrorMalformedStream)
+	tests := []struct {
+		name    string
+		event   provider.Event
+		allowed map[string]bool
+	}{
+		{"user message", provider.NewUserMessageEvent(idA, idB, "question", now), map[string]bool{"MessageID": true, "TurnID": true, "Text": true, "Timestamp": true}},
+		{"assistant delta", provider.NewAssistantDeltaEvent(idA, idB, "part"), map[string]bool{"MessageID": true, "TurnID": true, "Text": true}},
+		{"assistant message", provider.NewAssistantMessageEvent(idA, idB, "answer", now), map[string]bool{"MessageID": true, "TurnID": true, "Text": true, "Timestamp": true}},
+		{"activity", provider.NewActivityEvent(idA, provider.ActivityStatus, "working"), map[string]bool{"TurnID": true, "Text": true, "Activity": true}},
+		{"blocked", provider.NewBlockedEvent(idA, provider.BlockedTool), map[string]bool{"TurnID": true, "Text": true, "Blocked": true}},
+		{"completion", provider.NewCompletionEvent(idA), map[string]bool{"TurnID": true}},
+		{"interruption", provider.NewInterruptionEvent(idA, provider.InterruptionRequested), map[string]bool{"TurnID": true, "Interruption": true}},
+		{"terminal failure", provider.NewTerminalFailureEvent(idA, failure), map[string]bool{"TurnID": true, "Failure": true}},
+	}
+	mutations := map[string]func(*provider.Event){
+		"MessageID":    func(event *provider.Event) { event.MessageID = idB },
+		"TurnID":       func(event *provider.Event) { event.TurnID = idA },
+		"Text":         func(event *provider.Event) { event.Text = "contradictory text" },
+		"Timestamp":    func(event *provider.Event) { event.Timestamp = now },
+		"Activity":     func(event *provider.Event) { event.Activity = provider.ActivityStatus },
+		"Blocked":      func(event *provider.Event) { event.Blocked = provider.BlockedTool },
+		"Interruption": func(event *provider.Event) { event.Interruption = provider.InterruptionRequested },
+		"Failure":      func(event *provider.Event) { event.Failure = failure },
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.NoError(t, test.event.Validate())
+			for field, mutate := range mutations {
+				if test.allowed[field] {
+					continue
+				}
+				t.Run(field, func(t *testing.T) {
+					contradictory := test.event
+					mutate(&contradictory)
+					require.Error(t, contradictory.Validate())
+				})
+			}
+		})
+	}
+}
+
+func TestProviderPageContextDigestAndHTTPSHostnameAreValidated(t *testing.T) {
+	request := validTurnRequest()
+	require.NoError(t, request.Context.Validate())
+
+	request.Context.Digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	require.Error(t, request.Context.Validate())
+
+	for name, value := range map[string]string{
+		"empty hostname":      "https://:443/path",
+		"credentials":         "https://user:pass@whiteboard.example/path",
+		"malformed authority": "https://[::1/path",
+	} {
+		t.Run(name, func(t *testing.T) {
+			context := *validTurnRequest().Context
+			context.URL = value
+			require.Error(t, context.Validate())
+		})
+	}
+}
+
+func TestHistoryPageNextCursorMatchesLastReturnedMessage(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	item := provider.HistoryItem{TurnID: idA, MessageID: idB, Role: provider.HistoryUser, Text: "question", CreatedAt: now}
+	require.NoError(t, (provider.HistoryPage{Items: []provider.HistoryItem{item}, NextCursor: idB}).Validate())
+	require.NoError(t, (provider.HistoryPage{Items: []provider.HistoryItem{item}}).Validate())
+	require.Error(t, (provider.HistoryPage{Items: []provider.HistoryItem{item}, NextCursor: idA}).Validate())
+	require.Error(t, (provider.HistoryPage{Items: []provider.HistoryItem{}, NextCursor: idA}).Validate())
+}
+
+func TestProviderUserVisibleTextRejectsDisallowedC0Controls(t *testing.T) {
+	for control := byte(0); control < 0x20; control++ {
+		if control == '\t' || control == '\n' || control == '\r' {
+			continue
+		}
+		event := provider.NewAssistantDeltaEvent(idA, idB, "visible"+string(control))
+		require.Error(t, event.Validate(), "control %#x", control)
+	}
 }
 
 func TestNormalizedProviderEventAndHistoryBounds(t *testing.T) {
@@ -304,7 +388,7 @@ func validTurnRequest() provider.TurnRequest {
 			Revision: provider.ContextInitial, Markdown: []byte("# exact\nmarkdown\n"), CreatorContext: []byte("exact creator context\n"), Title: "Board",
 			URL:      "https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
 			Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", CreatedAt: now, UpdatedAt: now},
-			Digest:   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Digest:   contextdigest.Calculate([]byte("# exact\nmarkdown\n"), []byte("exact creator context\n")),
 		},
 	}
 }

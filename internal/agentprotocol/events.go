@@ -171,10 +171,15 @@ func (p TimelinePayload) validate() error {
 	if !validID(p.CommandID) || p.Items == nil || len(p.Items) > MaxPageSize || !validCursor(p.NextCursor) {
 		return invalid(nil)
 	}
+	total := 0
 	seen := make(map[string]struct{}, len(p.Items))
 	for _, item := range p.Items {
 		if !validTimelineItem(item) {
 			return invalid(nil)
+		}
+		total += len(item.Text)
+		if total > MaxTimelineBytes {
+			return ErrMessageTooLarge
 		}
 		if _, exists := seen[item.ItemID]; exists {
 			return invalid(nil)
@@ -456,7 +461,7 @@ func EncodeEvent(event Event) ([]byte, error) {
 	if isNilEventPayload(event.Payload) {
 		return nil, invalid(nil)
 	}
-	encoded, err := json.Marshal(eventMarshalWire{event.APIVersion, event.EventID, event.ConversationID, event.Type, event.Timestamp, event.Payload})
+	encoded, err := marshalApplicationJSON(eventMarshalWire{event.APIVersion, event.EventID, event.ConversationID, event.Type, event.Timestamp, event.Payload})
 	if err != nil {
 		return nil, invalid(err)
 	}

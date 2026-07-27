@@ -1,12 +1,16 @@
 package agentprotocol_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
+	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -132,9 +136,9 @@ func TestConnectRejectsMalformedNestedSecurityValues(t *testing.T) {
 }
 
 func TestCommandBoundsAreMeasuredInBytes(t *testing.T) {
-	ordinary := `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_edit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","message":"` + strings.Repeat("é", agentprotocol.MaxOrdinaryCommandBytes) + `"}}`
+	ordinary := `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_edit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","message":"` + strings.Repeat("é", agentprotocol.MaxMessageBytes/2+1) + `"}}`
 	_, err := agentprotocol.DecodeCommand([]byte(ordinary))
-	require.ErrorIs(t, err, agentprotocol.ErrMessageTooLarge)
+	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
 
 	context := validSubmitJSON("initial")
 	context = strings.Replace(context, `"# page"`, `"`+strings.Repeat("x", agentprotocol.MaxContextCommandBytes)+`"`, 1)
@@ -148,6 +152,123 @@ func TestCommandBoundsAreMeasuredInBytes(t *testing.T) {
 	tooLongURL := strings.Replace(validSubmitJSON("initial"), `https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC`, `https://whiteboard.example/`+strings.Repeat("u", agentprotocol.MaxURLBytes), 1)
 	_, err = agentprotocol.DecodeCommand([]byte(tooLongURL))
 	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+}
+
+func TestAcceptedExactBoundMessagesAndQueuesAlwaysFitWireFrames(t *testing.T) {
+	require.Equal(t, 64<<10, agentprotocol.MaxMessageBytes)
+	require.Equal(t, 192<<10, agentprotocol.MaxOrdinaryCommandBytes)
+	require.Equal(t, 96<<10, agentprotocol.MaxQueueBytes)
+	require.Equal(t, 256<<10, agentprotocol.MaxEventBytes)
+
+	conversationID := idC
+	worstCharacters := []string{"\t", "\n", "\r", `"`, `\`, "\u2028"}
+	for _, character := range worstCharacters {
+		t.Run(fmt.Sprintf("message_%U", []rune(character)[0]), func(t *testing.T) {
+			message := exactBytes(character, agentprotocol.MaxMessageBytes)
+			command := agentprotocol.Command{
+				APIVersion: agentprotocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: agentprotocol.CommandQueueEdit,
+				Payload: agentprotocol.QueueEditPayload{MessageID: makeID(200), Message: message},
+			}
+			encodedCommand, err := agentprotocol.EncodeCommand(command)
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(encodedCommand), agentprotocol.MaxOrdinaryCommandBytes)
+			_, err = agentprotocol.DecodeCommand(encodedCommand)
+			require.NoError(t, err)
+
+			event := validEvent(agentprotocol.AssistantMessagePayload{TurnID: idC, MessageID: idA, Text: message, CreatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)})
+			encodedEvent, err := agentprotocol.EncodeEvent(event)
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(encodedEvent), agentprotocol.MaxEventBytes)
+		})
+	}
+
+	queue := make([]agentprotocol.QueueItem, agentprotocol.MaxQueueItems)
+	remaining := agentprotocol.MaxQueueBytes
+	for index := range queue {
+		size := remaining / (len(queue) - index)
+		if index == 0 {
+			size = agentprotocol.MaxMessageBytes
+		}
+		remaining -= size
+		queue[index] = agentprotocol.QueueItem{TurnID: makeID(byte(index)), MessageID: makeID(byte(index + agentprotocol.MaxQueueItems)), Message: exactBytes(`"\`, size)}
+	}
+	require.NoError(t, agentprotocol.ValidateQueue(queue))
+	for _, payload := range []agentprotocol.EventPayload{
+		agentprotocol.QueuePayload{Items: queue},
+		agentprotocol.SnapshotPayload{Lifecycle: agentprotocol.LifecycleReady, Queue: queue, ContextState: agentprotocol.ContextPending},
+	} {
+		encoded, err := agentprotocol.EncodeEvent(validEvent(payload))
+		require.NoError(t, err, "%T", payload)
+		require.LessOrEqual(t, len(encoded), agentprotocol.MaxEventBytes)
+	}
+}
+
+func TestAcceptedPageBoundariesFitEventFrame(t *testing.T) {
+	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	timeline := make([]agentprotocol.TimelineItem, agentprotocol.MaxPageSize)
+	remaining := agentprotocol.MaxTimelineBytes
+	for index := range timeline {
+		size := remaining / (len(timeline) - index)
+		remaining -= size
+		timeline[index] = agentprotocol.TimelineItem{ItemID: makeID(byte(index)), Kind: agentprotocol.TimelineActivity, Text: exactBytes(`"\`, size), CreatedAt: now}
+	}
+
+	history := make([]agentprotocol.ArchiveItem, agentprotocol.MaxPageSize)
+	for index := range history {
+		history[index] = agentprotocol.ArchiveItem{ArchiveID: makeID(byte(index)), CreatedAt: now, UpdatedAt: now, Provider: agentprotocol.ProviderPi, Model: exactBytes(`"\`, agentprotocol.MaxTitleBytes), Preview: exactBytes(`"\`, agentprotocol.MaxTitleBytes)}
+	}
+
+	for _, payload := range []agentprotocol.EventPayload{
+		agentprotocol.TimelinePayload{CommandID: idA, Items: timeline},
+		agentprotocol.HistoryPayload{CommandID: idA, Items: history},
+	} {
+		encoded, err := agentprotocol.EncodeEvent(validEvent(payload))
+		require.NoError(t, err, "%T", payload)
+		require.LessOrEqual(t, len(encoded), agentprotocol.MaxEventBytes)
+	}
+}
+
+func TestApplicationJSONEncodingDoesNotEscapeHTMLAndRejectsDisallowedC0Text(t *testing.T) {
+	conversationID := idC
+	command := agentprotocol.Command{
+		APIVersion: agentprotocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: agentprotocol.CommandQueueEdit,
+		Payload: agentprotocol.QueueEditPayload{MessageID: makeID(200), Message: "<>&"},
+	}
+	encoded, err := agentprotocol.EncodeCommand(command)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"message":"<>&"`)
+	require.NotContains(t, string(encoded), `\u003c`)
+
+	event := validEvent(agentprotocol.AssistantDeltaPayload{TurnID: idC, MessageID: idA, Text: "<>&"})
+	encoded, err = agentprotocol.EncodeEvent(event)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"text":"<>&"`)
+	require.NotContains(t, string(encoded), `\u003c`)
+
+	for control := byte(0); control < 0x20; control++ {
+		if control == '\t' || control == '\n' || control == '\r' {
+			continue
+		}
+		bad := command
+		bad.Payload = agentprotocol.QueueEditPayload{MessageID: makeID(200), Message: "visible" + string(control)}
+		_, err = json.Marshal(bad)
+		require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage, "control %#x", control)
+	}
+}
+
+func TestPageContextDigestAndHTTPSHostnameAreValidated(t *testing.T) {
+	valid := validSubmitJSON("initial")
+	for name, input := range map[string]string{
+		"digest mismatch":     strings.Replace(valid, "2955a3d16e16b3a1044e95e84aea4cd29b37440217bdaff323fb32e31b47159b", digest, 1),
+		"empty hostname":      strings.Replace(valid, "https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "https://:443/path", 1),
+		"credentials":         strings.Replace(valid, "https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "https://user:pass@whiteboard.example/path", 1),
+		"malformed authority": strings.Replace(valid, "https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "https://[::1/path", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := agentprotocol.DecodeCommand([]byte(input))
+			require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+		})
+	}
 }
 
 func TestQueueReplayAndPageBounds(t *testing.T) {
@@ -274,14 +395,16 @@ func TestActiveTurnIdentityIsExplicitAcrossSubmissionQueueAndEvents(t *testing.T
 func TestDefaultContextWorstCaseJSONEscapingFitsTransport(t *testing.T) {
 	require.Equal(t, 67<<20, agentprotocol.MaxContextCommandBytes)
 	conversationID := idC
+	markdown := strings.Repeat(`"`, agentprotocol.MaxMarkdownBytes)
+	creatorContext := strings.Repeat(`\`, agentprotocol.MaxCreatorContextBytes)
 	command := agentprotocol.Command{
 		APIVersion: agentprotocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: agentprotocol.CommandSubmit,
-		Payload: agentprotocol.SubmitPayload{TurnID: "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", MessageID: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", Message: strings.Repeat("<", agentprotocol.MaxOrdinaryCommandBytes), Context: &agentprotocol.PageContext{
-			Revision: agentprotocol.ContextInitial, Markdown: strings.Repeat("<", agentprotocol.MaxMarkdownBytes), CreatorContext: strings.Repeat("&", agentprotocol.MaxCreatorContextBytes), Title: strings.Repeat("<", agentprotocol.MaxTitleBytes), URL: "https://whiteboard.example/?" + strings.Repeat("&", agentprotocol.MaxURLBytes-len("https://whiteboard.example/?")),
-			Resource: agentprotocol.Resource{Kind: agentprotocol.ResourceMarkdown, ID: idC, CreatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC), UpdatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)}, Digest: digest,
+		Payload: agentprotocol.SubmitPayload{TurnID: "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", MessageID: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", Message: strings.Repeat("\t", agentprotocol.MaxMessageBytes), Context: &agentprotocol.PageContext{
+			Revision: agentprotocol.ContextInitial, Markdown: markdown, CreatorContext: creatorContext, Title: strings.Repeat(`"`, agentprotocol.MaxTitleBytes), URL: "https://whiteboard.example/?" + strings.Repeat("&", agentprotocol.MaxURLBytes-len("https://whiteboard.example/?")),
+			Resource: agentprotocol.Resource{Kind: agentprotocol.ResourceMarkdown, ID: idC, CreatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC), UpdatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)}, Digest: contextdigest.Calculate([]byte(markdown), []byte(creatorContext)),
 		}},
 	}
-	encoded, err := json.Marshal(command)
+	encoded, err := agentprotocol.EncodeCommand(command)
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(encoded), agentprotocol.MaxContextCommandBytes)
 	_, err = agentprotocol.DecodeCommand(encoded)
@@ -422,5 +545,14 @@ func assertNoForbiddenWireKeys(t *testing.T, value any) {
 }
 
 func validSubmitJSON(revision string) string {
-	return `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","message":"question","context":{"revision":"` + revision + `","markdown":"# page","creator_context":"creator summary","title":"Page title","url":"https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}}`
+	return `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","message":"question","context":{"revision":"` + revision + `","markdown":"# page","creator_context":"creator summary","title":"Page title","url":"https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"digest":"2955a3d16e16b3a1044e95e84aea4cd29b37440217bdaff323fb32e31b47159b"}}}`
+}
+
+func exactBytes(character string, size int) string {
+	return strings.Repeat(character, size/len(character)) + strings.Repeat("x", size%len(character))
+}
+
+func makeID(seed byte) string {
+	raw := bytes.Repeat([]byte{seed}, 24)
+	return base64.RawURLEncoding.EncodeToString(raw)
 }
