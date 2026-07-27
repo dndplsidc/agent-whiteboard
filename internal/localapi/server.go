@@ -35,7 +35,10 @@ type Backend interface {
 }
 
 // Connection is one admitted browser attachment. Events begins with the
-// authoritative snapshot or requested replay.
+// authoritative snapshot or requested replay. Command and Close must return
+// promptly when their context is canceled, and Close must be safe to retry after
+// an error. localapi invokes both synchronously so a noncooperative backend
+// cannot strand a localapi-owned goroutine.
 type Connection interface {
 	ConversationID() string
 	Events() <-chan agentprotocol.Event
@@ -79,8 +82,7 @@ type Server struct {
 	transports  map[*transport]struct{}
 	serveErr    chan error
 	serveOnce   sync.Once
-	closeOnce   sync.Once
-	closeErr    error
+	closeMu     sync.Mutex
 }
 
 // Listen creates the exact IPv4 loopback listener. Port zero selects an
@@ -142,60 +144,95 @@ func (s *Server) Serve() {
 func (s *Server) ServeError() <-chan error { return s.serveErr }
 
 func (s *Server) Close(ctx context.Context) error {
-	s.closeOnce.Do(func() {
-		var errs []error
-		s.mu.Lock()
-		s.stopping = true
-		s.mu.Unlock()
-		if err := s.listener.Close(); err != nil && !isClosedError(err) {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+
+	var errs []error
+	s.mu.Lock()
+	s.stopping = true
+	s.mu.Unlock()
+	if err := s.listener.Close(); err != nil && !isClosedError(err) {
+		errs = append(errs, err)
+	}
+	if err := ctx.Err(); err != nil {
+		errs = append(errs, errTransportCloseIncomplete, err)
+		return errors.Join(errs...)
+	}
+
+	s.mu.Lock()
+	transports := make([]*transport, 0, len(s.transports))
+	for item := range s.transports {
+		transports = append(transports, item)
+	}
+	s.mu.Unlock()
+	for _, item := range transports {
+		if err := item.close(ctx); err != nil {
 			errs = append(errs, err)
+			if ctx.Err() != nil {
+				break
+			}
+			continue
 		}
+		s.untrack(item)
+	}
+	if err := s.http.Shutdown(ctx); err != nil && !isClosedError(err) {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+type closeState struct {
+	mu      sync.Mutex
+	running bool
+	closed  bool
+	done    chan struct{}
+}
+
+func (s *closeState) run(ctx context.Context, fn func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return errors.Join(errTransportCloseIncomplete, err)
+	}
+	for {
 		s.mu.Lock()
-		transports := make([]*transport, 0, len(s.transports))
-		for item := range s.transports {
-			transports = append(transports, item)
+		if s.closed {
+			s.mu.Unlock()
+			return nil
 		}
-		s.mu.Unlock()
-		for _, item := range transports {
-			if err := item.close(ctx); err != nil {
-				errs = append(errs, err)
+		if s.running {
+			done := s.done
+			s.mu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return errors.Join(errTransportCloseIncomplete, ctx.Err())
 			}
 		}
-		if err := s.http.Shutdown(ctx); err != nil && !isClosedError(err) {
-			errs = append(errs, err)
+		s.running = true
+		s.done = make(chan struct{})
+		done := s.done
+		s.mu.Unlock()
+
+		err := fn(ctx)
+
+		s.mu.Lock()
+		s.running = false
+		if err == nil {
+			s.closed = true
 		}
-		s.closeErr = errors.Join(errs...)
-	})
-	return s.closeErr
+		close(done)
+		s.mu.Unlock()
+		return err
+	}
 }
 
 type transport struct {
-	once sync.Once
-	fn   func(context.Context) error
-	done chan struct{}
-	mu   sync.Mutex
-	err  error
+	state closeState
+	fn    func(context.Context) error
 }
 
 func (t *transport) close(ctx context.Context) error {
-	t.once.Do(func() {
-		t.done = make(chan struct{})
-		go func() {
-			err := t.fn(ctx)
-			t.mu.Lock()
-			t.err = err
-			t.mu.Unlock()
-			close(t.done)
-		}()
-	})
-	select {
-	case <-t.done:
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		return t.err
-	case <-ctx.Done():
-		return errors.Join(errTransportCloseIncomplete, ctx.Err())
-	}
+	return t.state.run(ctx, t.fn)
 }
 
 func (s *Server) track(fn func(context.Context) error) *transport {

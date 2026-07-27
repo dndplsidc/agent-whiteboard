@@ -79,9 +79,30 @@ func (s *Server) websocket(response http.ResponseWriter, request *http.Request) 
 	defer func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
 		defer closeCancel()
-		_ = tracked.close(closeCtx)
-		s.untrack(tracked)
+		if tracked.close(closeCtx) == nil {
+			s.untrack(tracked)
+		}
 	}()
+
+	var first agentprotocol.Event
+	select {
+	case event, open := <-safe.Events():
+		if !open {
+			closeWebSocket(socket, websocket.CloseInternalServerErr, "broker unavailable")
+			return
+		}
+		first = event
+	case <-ctx.Done():
+		return
+	}
+	encodedFirst, err := encodeFirstConnectionEvent(safe, connect, first)
+	if err != nil {
+		closeWebSocket(socket, websocket.CloseInternalServerErr, "broker protocol failure")
+		return
+	}
+	if err = socket.WriteMessage(websocket.TextMessage, encodedFirst); err != nil {
+		return
+	}
 
 	writerDone := make(chan error, 1)
 	readDone := make(chan error, 1)

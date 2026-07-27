@@ -21,6 +21,7 @@ type attachment struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	doneOnce   sync.Once
+	lease      sync.RWMutex
 }
 
 func (a *attachment) close(ctx context.Context) error {
@@ -33,42 +34,46 @@ func (a *attachment) close(ctx context.Context) error {
 
 type safeConnection struct {
 	Connection
-	once sync.Once
-	done chan struct{}
-	mu   sync.Mutex
-	err  error
+	closeState closeState
 }
 
 func newSafeConnection(connection Connection) *safeConnection {
-	return &safeConnection{Connection: connection, done: make(chan struct{})}
+	return &safeConnection{Connection: connection}
 }
 
 func (c *safeConnection) Close(ctx context.Context) error {
-	c.once.Do(func() {
-		go func() {
-			err := c.Connection.Close(ctx)
-			c.mu.Lock()
-			c.err = err
-			c.mu.Unlock()
-			close(c.done)
-		}()
-	})
-	select {
-	case <-c.done:
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return c.err
-	case <-ctx.Done():
-		return errors.Join(errTransportCloseIncomplete, ctx.Err())
-	}
+	return c.closeState.run(ctx, c.Connection.Close)
 }
+
+const attachmentLockCount = 64
 
 type attachmentRegistry struct {
 	mu    sync.RWMutex
 	items map[attachmentKey]*attachment
+	locks [attachmentLockCount]sync.Mutex
+}
+
+func (r *attachmentRegistry) keyLock(key attachmentKey) *sync.Mutex {
+	hash := uint32(2166136261)
+	for _, value := range []string{key.origin, key.clientID, key.conversationID} {
+		for index := 0; index < len(value); index++ {
+			hash ^= uint32(value[index])
+			hash *= 16777619
+		}
+		hash ^= 0
+		hash *= 16777619
+	}
+	return &r.locks[hash%attachmentLockCount]
 }
 
 func (r *attachmentRegistry) put(item *attachment) *attachment {
+	lock := r.keyLock(item.key)
+	lock.Lock()
+	defer lock.Unlock()
+	return r.replace(item)
+}
+
+func (r *attachmentRegistry) replace(item *attachment) *attachment {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.items == nil {
@@ -79,7 +84,40 @@ func (r *attachmentRegistry) put(item *attachment) *attachment {
 	return old
 }
 
+func (r *attachmentRegistry) activate(item *attachment, publish func() error) (*attachment, error) {
+	lock := r.keyLock(item.key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	item.lease.Lock()
+	defer item.lease.Unlock()
+	r.mu.RLock()
+	old := r.items[item.key]
+	r.mu.RUnlock()
+	if old != nil {
+		old.lease.Lock()
+		defer old.lease.Unlock()
+	}
+	r.replace(item)
+	if err := publish(); err != nil {
+		r.mu.Lock()
+		if r.items[item.key] == item {
+			if old == nil {
+				delete(r.items, item.key)
+			} else {
+				r.items[item.key] = old
+			}
+		}
+		r.mu.Unlock()
+		return nil, err
+	}
+	return old, nil
+}
+
 func (r *attachmentRegistry) remove(item *attachment) {
+	lock := r.keyLock(item.key)
+	lock.Lock()
+	defer lock.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.items[item.key] == item {
@@ -91,6 +129,28 @@ func (r *attachmentRegistry) get(key attachmentKey) *attachment {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.items[key]
+}
+
+func (r *attachmentRegistry) command(ctx context.Context, key attachmentKey, command agentprotocol.Command) (agentprotocol.Event, bool, error) {
+	for {
+		r.mu.RLock()
+		item := r.items[key]
+		r.mu.RUnlock()
+		if item == nil {
+			return agentprotocol.Event{}, false, nil
+		}
+		item.lease.RLock()
+		r.mu.RLock()
+		current := r.items[key] == item
+		r.mu.RUnlock()
+		if !current {
+			item.lease.RUnlock()
+			continue
+		}
+		event, err := item.connection.Command(ctx, command)
+		item.lease.RUnlock()
+		return event, true, err
+	}
 }
 
 func (r *attachmentRegistry) hasOrigin(origin string) bool {
@@ -134,8 +194,9 @@ func (s *Server) stream(response http.ResponseWriter, request *http.Request) {
 		s.attachments.remove(item)
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
 		defer closeCancel()
-		_ = tracked.close(closeCtx)
-		s.untrack(tracked)
+		if tracked.close(closeCtx) == nil {
+			s.untrack(tracked)
+		}
 	}()
 
 	if !supportsResponseFlush(response) {
@@ -157,21 +218,23 @@ func (s *Server) stream(response http.ResponseWriter, request *http.Request) {
 	case <-request.Context().Done():
 		return
 	}
-	encoded, err := encodeConnectionEvent(safe, first)
+	encoded, err := encodeFirstConnectionEvent(safe, command, first)
 	if err != nil {
 		safeHTTPError(response, http.StatusServiceUnavailable, agentprotocol.ErrorBrokerUnavailable)
 		return
 	}
-	response.Header().Set("Content-Type", "application/x-ndjson")
-	response.WriteHeader(http.StatusOK)
-	if _, err = response.Write(append(encoded, '\n')); err != nil {
+	old, err := s.attachments.activate(item, func() error {
+		response.Header().Set("Content-Type", "application/x-ndjson")
+		response.WriteHeader(http.StatusOK)
+		if _, writeErr := response.Write(append(encoded, '\n')); writeErr != nil {
+			return writeErr
+		}
+		return http.NewResponseController(response).Flush()
+	})
+	if err != nil {
 		return
 	}
-	if err = http.NewResponseController(response).Flush(); err != nil {
-		return
-	}
-
-	if old := s.attachments.put(item); old != nil {
+	if old != nil {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
 		_ = old.close(closeCtx)
 		closeCancel()
@@ -225,6 +288,21 @@ func encodeConnectionEvent(connection *safeConnection, event agentprotocol.Event
 	return agentprotocol.EncodeEvent(event)
 }
 
+func encodeFirstConnectionEvent(connection *safeConnection, connect agentprotocol.Command, event agentprotocol.Event) ([]byte, error) {
+	payload, ok := connect.Payload.(agentprotocol.ConnectPayload)
+	if !ok {
+		return nil, errors.New("connect payload mismatch")
+	}
+	if payload.ReplayAfter == "" {
+		if event.Type != agentprotocol.EventSnapshot {
+			return nil, errors.New("fresh connection must begin with snapshot")
+		}
+	} else if event.EventID == payload.ReplayAfter {
+		return nil, errors.New("replay must begin after requested event")
+	}
+	return encodeConnectionEvent(connection, event)
+}
+
 func (s *Server) command(response http.ResponseWriter, request *http.Request) {
 	origin, ok := s.authorizeMutation(response, request, false)
 	if !ok {
@@ -235,12 +313,11 @@ func (s *Server) command(response http.ResponseWriter, request *http.Request) {
 		safeHTTPError(response, statusForDecodeError(err), agentprotocol.ErrorInvalidCommand)
 		return
 	}
-	item := s.attachments.get(attachmentKey{origin: origin, clientID: command.ClientID, conversationID: *command.ConversationID})
-	if item == nil {
+	event, attached, err := s.attachments.command(request.Context(), attachmentKey{origin: origin, clientID: command.ClientID, conversationID: *command.ConversationID}, command)
+	if !attached {
 		safeHTTPError(response, http.StatusForbidden, agentprotocol.ErrorUntrustedOrigin)
 		return
 	}
-	event, err := item.connection.Command(request.Context(), command)
 	if err != nil {
 		safeHTTPError(response, http.StatusConflict, backendErrorCode(err, agentprotocol.ErrorInvalidState))
 		return
