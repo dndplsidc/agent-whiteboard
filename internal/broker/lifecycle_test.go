@@ -192,7 +192,7 @@ func (nopWriteCloser) Write(value []byte) (int, error) { return len(value), nil 
 func (nopWriteCloser) Close() error                    { return nil }
 
 func validLifecycleConfig(state StateStore, driver provider.Driver, ids common.IDGenerator) Config {
-	return Config{State: state, Driver: driver, IDs: ids, Clock: testClock{now: testTime()}, ShutdownTimeout: time.Second}
+	return Config{State: state, Driver: driver, IDs: ids, Clock: testClock{now: testTime()}, Timers: RealTimerFactory{}, IdleTimeout: time.Hour, ShutdownTimeout: time.Second}
 }
 func lifecycleConnect(client, resource string) agentprotocol.Command {
 	payload := agentprotocol.ConnectPayload{Provider: agentprotocol.ProviderPi, Resource: testResource(resource), ContextDigest: string(make([]byte, 64))}
@@ -214,6 +214,19 @@ func TestNewRejectsNilTypedNilAndInvalidTimeout(t *testing.T) {
 	require.Error(t, err)
 	config := validLifecycleConfig(state, driver, ids)
 	config.ShutdownTimeout = 0
+	_, err = New(config)
+	require.Error(t, err)
+	config = validLifecycleConfig(state, driver, ids)
+	config.IdleTimeout = 0
+	_, err = New(config)
+	require.Error(t, err)
+	config = validLifecycleConfig(state, driver, ids)
+	config.Timers = nil
+	_, err = New(config)
+	require.Error(t, err)
+	var typedTimers *manualTimerFactory
+	config = validLifecycleConfig(state, driver, ids)
+	config.Timers = typedTimers
 	_, err = New(config)
 	require.Error(t, err)
 }

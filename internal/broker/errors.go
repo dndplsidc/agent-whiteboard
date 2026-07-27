@@ -60,6 +60,7 @@ var (
 	ErrQueueInvalid         = errors.New("invalid queued turn")
 	ErrReplayCursorMissing  = errors.New("replay cursor missing")
 	ErrReplayCursorEvicted  = errors.New("replay cursor evicted")
+	errActorRetired         = errors.New("broker actor retired")
 )
 
 // MapProviderError exhaustively translates provider failures to frozen browser

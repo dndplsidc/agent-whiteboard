@@ -23,6 +23,8 @@ type conversation struct {
 	requests          chan any
 	done              chan struct{}
 	clock             common.Clock
+	timers            TimerFactory
+	idleTimeout       time.Duration
 	resource          agentprotocol.Resource
 	contextDigest     string
 	contextState      agentprotocol.ContextState
@@ -41,6 +43,7 @@ type conversation struct {
 
 	closeMu sync.Mutex
 	closed  atomic.Bool
+	retired atomic.Bool
 }
 
 type queuedAttachmentEvent struct {
@@ -186,11 +189,12 @@ type closeConversationRequest struct {
 }
 type shutdownWorkerResult struct {
 	response chan error
+	cancel   context.CancelFunc
 	err      error
 }
 
-func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session, state StateStore, ids common.IDGenerator, clock common.Clock, lifecycleCtx context.Context, shutdownTimeout time.Duration) (*conversation, error) {
-	if mapping.Validate(identity) != nil || mapping.Current == nil || common.IsNil(state) || common.IsNil(session) || common.IsNil(clock) || lifecycleCtx == nil || shutdownTimeout <= 0 {
+func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session, state StateStore, ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
+	if mapping.Validate(identity) != nil || mapping.Current == nil || common.IsNil(state) || common.IsNil(session) || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
 		return nil, errors.New("invalid conversation actor")
 	}
 	factory, err := NewEventFactory(mapping.Current.ConversationID, ids, clock)
@@ -200,8 +204,9 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 	actor := &conversation{
 		identity: identity, mapping: cloneMapping(mapping), state: state, session: session,
 		factory: factory, replay: NewReplayLog(), requests: make(chan any),
-		done: make(chan struct{}), clock: clock, contextState: agentprotocol.ContextPending,
-		lifecycle: agentprotocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(),
+		done: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
+		contextState: agentprotocol.ContextPending,
+		lifecycle:    agentprotocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(),
 		lifecycleCtx: lifecycleCtx, shutdownTimeout: shutdownTimeout,
 	}
 	if actor.mapping.Current.Observed != nil {
@@ -222,13 +227,18 @@ func (actor *conversation) run() {
 	turnResults := make(chan turnWorkerResult, 1)
 	historyResults := make(chan historyWorkerResult, 1)
 	shutdownActive := false
-	startShutdown := func(request *closeConversationRequest, attempt *actorShutdown) {
+	var shutdownWaiters []chan error
+	var idleTimer Timer
+	startShutdown := func(request *closeConversationRequest, attempt *actorShutdown, cancel context.CancelFunc) {
 		go func() {
 			err := attempt.run(request.ctx, actor.shutdownTimeout)
-			shutdownResults <- shutdownWorkerResult{response: request.response, err: err}
+			shutdownResults <- shutdownWorkerResult{response: request.response, cancel: cancel, err: err}
 		}()
 	}
 	defer func() {
+		if idleTimer != nil {
+			idleTimer.Stop()
+		}
 		actor.queue.Clear()
 		if actor.active != nil {
 			zeroProviderContext(actor.active.request.Context)
@@ -241,6 +251,17 @@ func (actor *conversation) run() {
 		close(actor.done)
 	}()
 	for {
+		idle := len(attachments) == 0 && actor.active == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !shutdownActive && !actor.stopping
+		if idle && idleTimer == nil {
+			idleTimer = actor.timers.NewTimer(actor.idleTimeout)
+		} else if !idle && idleTimer != nil {
+			idleTimer.Stop()
+			idleTimer = nil
+		}
+		var idleChannel <-chan time.Time
+		if idleTimer != nil {
+			idleChannel = idleTimer.C()
+		}
 		select {
 		case raw := <-actor.requests:
 			switch request := raw.(type) {
@@ -253,7 +274,7 @@ func (actor *conversation) run() {
 				actor.handleCommand(attachments, turnResults, historyResults, request)
 			case closeConversationRequest:
 				if shutdownActive {
-					request.response <- NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
+					shutdownWaiters = append(shutdownWaiters, request.response)
 					continue
 				}
 				actor.stopping = true
@@ -264,7 +285,7 @@ func (actor *conversation) run() {
 					actor.shutdownAttempt = newActorShutdown(actor.session, actor.workerSettled)
 				}
 				shutdownActive = true
-				startShutdown(&request, actor.shutdownAttempt)
+				startShutdown(&request, actor.shutdownAttempt, nil)
 			}
 		case result := <-turnResults:
 			actor.handleTurnResult(attachments, turnResults, result)
@@ -272,13 +293,38 @@ func (actor *conversation) run() {
 			actor.handleHistoryResult(attachments, turnResults, result)
 		case result := <-shutdownResults:
 			shutdownActive = false
+			if result.cancel != nil {
+				result.cancel()
+			}
 			if result.err != nil {
-				result.response <- NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
+				failure := NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
+				result.response <- failure
+				for _, waiter := range shutdownWaiters {
+					waiter <- failure
+				}
+				shutdownWaiters = nil
 				continue
 			}
 			actor.closed.Store(true)
 			result.response <- nil
+			for _, waiter := range shutdownWaiters {
+				waiter <- nil
+			}
 			return
+		case <-idleChannel:
+			idleTimer = nil
+			if len(attachments) != 0 || actor.active != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || shutdownActive || actor.stopping {
+				continue
+			}
+			actor.stopping = true
+			actor.retired.Store(true)
+			if actor.shutdownAttempt == nil {
+				actor.shutdownAttempt = newActorShutdown(actor.session, nil)
+			}
+			shutdownActive = true
+			idleShutdownCtx, cancel := context.WithTimeout(context.Background(), actor.shutdownTimeout)
+			request := &closeConversationRequest{ctx: idleShutdownCtx, response: make(chan error, 1)}
+			startShutdown(request, actor.shutdownAttempt, cancel)
 		case event, open := <-providerEvents:
 			if !open {
 				providerEvents = nil
@@ -290,6 +336,10 @@ func (actor *conversation) run() {
 }
 
 func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, request attachRequest) {
+	if actor.retired.Load() {
+		request.response <- attachResponse{err: errActorRetired}
+		return
+	}
 	if err := request.ctx.Err(); err != nil {
 		request.response <- attachResponse{err: err}
 		return
@@ -494,6 +544,9 @@ func (actor *conversation) send(attachments map[*attachment]struct{}, item *atta
 }
 
 func (actor *conversation) attach(ctx context.Context, clientID, replayAfter string, resource agentprotocol.Resource, contextDigest string) (*Connection, error) {
+	if actor.retired.Load() {
+		return nil, errActorRetired
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -501,6 +554,9 @@ func (actor *conversation) attach(ctx context.Context, clientID, replayAfter str
 	select {
 	case actor.requests <- request:
 	case <-actor.done:
+		if actor.retired.Load() {
+			return nil, errActorRetired
+		}
 		return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 	case <-ctx.Done():
 		return nil, ctx.Err()

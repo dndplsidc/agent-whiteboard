@@ -34,6 +34,8 @@ type Config struct {
 	Driver          provider.Driver
 	IDs             common.IDGenerator
 	Clock           common.Clock
+	Timers          TimerFactory
+	IdleTimeout     time.Duration
 	ShutdownTimeout time.Duration
 }
 
@@ -42,6 +44,8 @@ type Broker struct {
 	driver          provider.Driver
 	ids             *serializedIDs
 	clock           common.Clock
+	timers          TimerFactory
+	idleTimeout     time.Duration
 	shutdownTimeout time.Duration
 	lifecycleCtx    context.Context
 	cancelLifecycle context.CancelFunc
@@ -103,6 +107,12 @@ func New(config Config) (*Broker, error) {
 	if common.IsNil(config.Clock) {
 		return nil, errors.New("broker clock is required")
 	}
+	if common.IsNil(config.Timers) {
+		return nil, errors.New("broker timer factory is required")
+	}
+	if config.IdleTimeout <= 0 {
+		return nil, errors.New("broker idle timeout must be positive")
+	}
 	if config.ShutdownTimeout <= 0 {
 		return nil, errors.New("broker shutdown timeout must be positive")
 	}
@@ -110,6 +120,7 @@ func New(config Config) (*Broker, error) {
 	return &Broker{
 		state: config.State, driver: config.Driver,
 		ids: &serializedIDs{raw: config.IDs}, clock: config.Clock,
+		timers: config.Timers, idleTimeout: config.IdleTimeout,
 		shutdownTimeout: config.ShutdownTimeout,
 		lifecycleCtx:    lifecycleCtx, cancelLifecycle: cancelLifecycle,
 		registry: make(map[agentstate.Identity]*conversationSlot),
@@ -133,47 +144,62 @@ func (broker *Broker) Connect(ctx context.Context, origin string, command agentp
 		return nil, NewBrokerError(agentprotocol.ErrorInvalidCommand)
 	}
 
-	broker.mu.Lock()
-	if broker.stopping {
-		broker.mu.Unlock()
-		return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
-	}
-	slot := broker.registry[identity]
-	creator := slot == nil
-	if creator {
-		slot = &conversationSlot{ready: make(chan struct{})}
-		broker.registry[identity] = slot
-	}
-	broker.mu.Unlock()
-
-	if creator {
-		go broker.initializeSlot(slot, identity)
-	}
-	select {
-	case <-slot.ready:
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	for {
+		broker.mu.Lock()
+		if broker.stopping {
+			broker.mu.Unlock()
+			return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 		}
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		slot := broker.registry[identity]
+		creator := slot == nil
+		if creator {
+			slot = &conversationSlot{ready: make(chan struct{})}
+			broker.registry[identity] = slot
+		}
+		broker.mu.Unlock()
+
+		if creator {
+			go broker.initializeSlot(slot, identity)
+		}
+		select {
+		case <-slot.ready:
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if slot.err != nil {
+			return nil, slot.err
+		}
+		if slot.actor == nil {
+			return nil, NewBrokerError(agentprotocol.ErrorBrokerUnavailable)
+		}
+		broker.mu.Lock()
+		stopping := broker.stopping
+		broker.mu.Unlock()
+		if stopping {
+			return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
+		}
+		connection, attachErr := slot.actor.attach(ctx, command.ClientID, payload.ReplayAfter, payload.Resource, payload.ContextDigest)
+		if !errors.Is(attachErr, errActorRetired) {
+			if attachErr != nil {
+				return nil, attachErr
+			}
+			return connection, nil
+		}
+		select {
+		case <-slot.actor.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		broker.mu.Lock()
+		if broker.registry[identity] == slot {
+			delete(broker.registry, identity)
+		}
+		broker.mu.Unlock()
 	}
-	if slot.err != nil {
-		return nil, slot.err
-	}
-	if slot.actor == nil {
-		return nil, NewBrokerError(agentprotocol.ErrorBrokerUnavailable)
-	}
-	broker.mu.Lock()
-	stopping := broker.stopping
-	broker.mu.Unlock()
-	if stopping {
-		return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
-	}
-	connection, err := slot.actor.attach(ctx, command.ClientID, payload.ReplayAfter, payload.Resource, payload.ContextDigest)
-	if err != nil {
-		return nil, err
-	}
-	return connection, nil
+
 }
 
 func (broker *Broker) initializeSlot(slot *conversationSlot, identity agentstate.Identity) {
@@ -188,6 +214,18 @@ func (broker *Broker) initializeSlot(slot *conversationSlot, identity agentstate
 		delete(broker.registry, identity)
 	}
 	close(slot.ready)
+	broker.mu.Unlock()
+	if actor != nil {
+		go broker.watchActor(identity, slot, actor)
+	}
+}
+
+func (broker *Broker) watchActor(identity agentstate.Identity, slot *conversationSlot, actor *conversation) {
+	<-actor.done
+	broker.mu.Lock()
+	if broker.registry[identity] == slot && slot.actor == actor {
+		delete(broker.registry, identity)
+	}
 	broker.mu.Unlock()
 }
 
@@ -504,7 +542,7 @@ func stopPreActor(ctx context.Context, session provider.Session, events <-chan p
 }
 
 func (broker *Broker) newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session) (*conversation, error) {
-	actor, err := newConversation(identity, mapping, session, broker.state, broker.ids, broker.clock, broker.lifecycleCtx, broker.shutdownTimeout)
+	actor, err := newConversation(identity, mapping, session, broker.state, broker.ids, broker.clock, broker.timers, broker.lifecycleCtx, broker.idleTimeout, broker.shutdownTimeout)
 	if err != nil {
 		broker.retainStop(identity, session)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
