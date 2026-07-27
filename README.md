@@ -130,6 +130,7 @@ Capability URLs are public but marked non-indexable. Non-indexing is not access 
 - [Go API and dependency injection](docs/go-api.md)
 - [filesystem storage](docs/storage.md)
 - [versioned CLI JSON](docs/cli-json.md)
+- [optional hosted-provider smoke test](docs/hosted-provider-smoke.md)
 - examples: [Markdown/Mermaid](docs/examples/diagram.md) and [standalone HTML](docs/examples/standalone.html)
 
 Asset development uses Node 24 and pnpm 11.4:

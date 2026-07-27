@@ -663,6 +663,60 @@ function createSidebarBroker(initialAllowedOrigin) {
   };
 }
 
+function createPiModelServer() {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push({ method: request.method, url: request.url, headers: { ...request.headers }, body });
+      if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+        response.writeHead(404, { "Content-Type": "application/json" });
+        response.end('{"error":{"message":"not found"}}');
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+      const write = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
+      write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
+      write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: { content: "Real Pi fixture reply" }, finish_reason: null }] });
+      write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+      write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [], usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } });
+      response.end("data: [DONE]\n\n");
+    });
+  });
+  return { server, requests };
+}
+
+async function reserveLoopbackPort() {
+  const temporary = http.createServer();
+  const port = await listen(temporary, "127.0.0.1");
+  await new Promise((resolve, reject) => temporary.close((error) => (error ? reject(error) : resolve())));
+  return port;
+}
+
+async function waitForAgentStatus(port, origin, child, output) {
+  const deadline = Date.now() + processTimeout;
+  let lastError;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      const captured = output();
+      throw new Error(`agent service exited before readiness\nstdout:\n${captured.stdout}\nstderr:\n${captured.stderr}`);
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/v1/agent/status`, { headers: { Origin: origin }, signal: AbortSignal.timeout(500) });
+      const body = await response.json();
+      if (response.status === 200 && body.available === true && body.origin_trusted === true) return;
+      lastError = new Error(`unexpected agent status ${response.status}: ${JSON.stringify(body)}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+  const captured = output();
+  throw new Error(`agent service readiness timed out: ${lastError}\nstdout:\n${captured.stdout}\nstderr:\n${captured.stderr}`);
+}
+
 function createLoopbackStub() {
   const requests = [];
   const server = http.createServer((request, response) => {
@@ -847,6 +901,64 @@ export const test = base.extend({
           source ? closeNodeServer(source.server, sourceSockets) : Promise.resolve(),
         ]);
         await stopServer(running.child);
+      }
+    },
+    { scope: "worker" },
+  ],
+
+  realAgentSidebar: [
+    async ({ server, localAgentSidebar }, use) => {
+      const root = path.join(server.root, "real-agent-sidebar");
+      const home = path.join(root, "home");
+      const piConfig = path.join(home, ".pi", "agent");
+      const temporary = path.join(root, "tmp");
+      await Promise.all([
+        fs.mkdir(piConfig, { recursive: true, mode: 0o700 }),
+        fs.mkdir(temporary, { recursive: true, mode: 0o700 }),
+      ]);
+      const model = createPiModelServer();
+      const modelSockets = trackConnections(model.server);
+      const modelPort = await listen(model.server, "127.0.0.1");
+      const providerName = "agent-whiteboard-browser";
+      await Promise.all([
+        fs.writeFile(path.join(piConfig, "models.json"), `${JSON.stringify({ providers: {
+          [providerName]: {
+            baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "browser-placeholder-key",
+            models: [{ id: providerName, name: "Agent Whiteboard Browser", reasoning: false, input: ["text"], contextWindow: 32768, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+          },
+        } }, null, 2)}\n`, { mode: 0o600 }),
+        fs.writeFile(path.join(piConfig, "settings.json"), `${JSON.stringify({
+          defaultProvider: providerName, defaultModel: providerName, defaultThinkingLevel: "off", defaultProjectTrust: "never",
+          enableInstallTelemetry: false, compaction: { enabled: false }, retry: { enabled: false, provider: { timeoutMs: 5000, maxRetries: 0 } },
+        }, null, 2)}\n`, { mode: 0o600 }),
+      ]);
+      const configPath = path.join(root, "config.yaml");
+      await fs.writeFile(configPath, `version: 1\nagent:\n  trusted_origins:\n    - "${localAgentSidebar.origin}"\n  provider_idle_timeout: 10m\n  shutdown_timeout: 10s\n  default_access: content-only\n`, { mode: 0o600 });
+      const agentPort = await reserveLoopbackPort();
+      const piExecutable = path.join(projectRoot, "node_modules", ".bin", "pi");
+      const env = { ...isolatedEnvironment(home), TMPDIR: temporary };
+      const child = spawn(server.binary, ["--config", configPath, "agent", "serve", "--port", String(agentPort), "--pi-executable", piExecutable], {
+        cwd: root, env, stdio: ["ignore", "pipe", "pipe"],
+      });
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      const output = () => ({ stdout, stderr });
+      try {
+        await waitForAgentStatus(agentPort, localAgentSidebar.origin, child, output);
+        await use({
+          origin: localAgentSidebar.origin,
+          brokerPort: agentPort,
+          publish: localAgentSidebar.publish,
+          modelRequests: model.requests,
+          agentOutput: output,
+        });
+      } finally {
+        await stopServer(child);
+        await closeNodeServer(model.server, modelSockets);
       }
     },
     { scope: "worker" },

@@ -8,11 +8,13 @@ Never publish credentials, tokens, secrets, personal or sensitive data, or priva
 
 Markdown context is not hidden reasoning or a private agent channel. It is stored beside source, shares the same capability and lifecycle, and is returned by `agent-whiteboard --json get markdown ID` and the machine HTTP API. Keep it to concise goals, decisions, assumptions, and open questions. Exclude hidden reasoning, raw tool output, unrelated personal information, credentials, and all sensitive material.
 
-Markdown is rendered in the browser and sanitized. Standalone HTML is different: it is trusted, same-origin active content and may execute inline JavaScript. Publish HTML only when its entire source is trusted. Do not use the origin for authentication cookies or sensitive application state. Never upload SVG; use PNG, JPEG, GIF, or WebP.
+Markdown is rendered in the browser and sanitized. Standalone HTML is trusted active content, but its capability URL serves an application wrapper around a credentialless `sandbox="allow-scripts"` iframe. Submitted scripts run with an opaque origin and restrictive network, framing, form, popup, download, and top-navigation policy. They can still navigate their own child frame to a publishing-origin destination allowed by the wrapper; credentials and referrers are stripped, but code can deliberately encode its capability into that navigation. Publish HTML only when its entire source is trusted. Never upload SVG; use PNG, JPEG, GIF, or WebP.
 
 The CLI and server sanitize stable errors and do not echo source, context, request bodies, internal causes, or filesystem paths. A create error may still return a capability if rollback is uncertain; retain it privately and check or delete the possibly live resource.
 
 Trusted-origin configuration accepts exact HTTPS origins only. The foreground local broker reloads this allowlist for each new admission; existing accepted connections keep their original trust decision. Trust commands do not make whiteboard content private or authenticated.
+
+The optional Markdown drawer contacts only literal `127.0.0.1` at the reader-selected decimal port. Status is the only pre-consent request; Connect carries no Markdown or creator context. The first contextual message sends both complete artifacts, and reconnect never automatically resubmits an interrupted or uncertain turn. Browser preferences contain only theme, drawer-open state, and port—never capability or conversation IDs, messages, context, output, or credentials.
 
 Managed daemon lifecycle is macOS-only. `agent serve --daemon` records absolute agent/configuration paths, the Pi path when resolved during installation, and no ambient environment or provider credentials; `stop` retains the plist while `uninstall` removes it. Linux requires foreground `agent serve`. Authenticate through Pi's provider-native login; agent-whiteboard does not collect, store, or expose provider credentials.
 
