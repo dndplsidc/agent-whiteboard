@@ -43,9 +43,9 @@ func TestLaunchUsesExactSpecification(t *testing.T) {
 	_, err = child.Input().Write([]byte("closed"))
 	require.ErrorIs(t, err, os.ErrClosed)
 	_, err = child.Output().Read(make([]byte, 1))
-	require.ErrorIs(t, err, os.ErrClosed)
+	require.True(t, errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed))
 	_, err = child.Errors().Read(make([]byte, 1))
-	require.ErrorIs(t, err, os.ErrClosed)
+	require.True(t, errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed))
 
 	fields := strings.Split(strings.TrimSpace(output), "\n")
 	require.Equal(t, []string{
@@ -53,6 +53,35 @@ func TestLaunchUsesExactSpecification(t *testing.T) {
 		"first\x00second",
 		helperEnvironment + "\x00EXPLICIT=value",
 	}, fields)
+}
+
+func TestLaunchPreservesExplicitEmptyEnvironment(t *testing.T) {
+	const sentinel = "AGENT_WHITEBOARD_MUST_NOT_BE_INHERITED"
+	t.Setenv(sentinel, "broker-secret")
+	request := helperRequest(t, "report-empty-environment", sentinel)
+	request.Environment = []string{}
+
+	child, err := NewLauncher().Launch(context.Background(), request)
+	require.NoError(t, err)
+	require.NotNil(t, child.(*managedChild).command.Env)
+	require.Empty(t, child.(*managedChild).command.Env)
+	require.NoError(t, child.Wait())
+	output, err := io.ReadAll(child.Output())
+	require.NoError(t, err)
+	require.Equal(t, "false\n0\n", string(output))
+}
+
+func TestWaitThenReadDrainsFinalOutput(t *testing.T) {
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "final-output"))
+	require.NoError(t, err)
+	require.NoError(t, child.Wait())
+
+	output, err := io.ReadAll(child.Output())
+	require.NoError(t, err)
+	errorsOutput, err := io.ReadAll(child.Errors())
+	require.NoError(t, err)
+	require.Equal(t, "FINAL stdout\n", string(output))
+	require.Equal(t, "FINAL stderr\n", string(errorsOutput))
 }
 
 func TestLaunchRejectsInvalidSpecification(t *testing.T) {
@@ -113,6 +142,38 @@ func TestCanceledLaunchDoesNotStart(t *testing.T) {
 	require.Nil(t, child)
 	require.ErrorIs(t, err, context.Canceled)
 	requireErrorKind(t, err, ErrorCanceled)
+}
+
+func TestPGIDVerificationFailureKillsPotentialGroupAndReaps(t *testing.T) {
+	request := helperRequest(t, "cancel-tree")
+	resultPath := filepath.Join(request.WorkingDirectory, "started-pids")
+	request.Arguments = append(request.Arguments, resultPath)
+	before := openFileDescriptorCount(t)
+
+	originalGetProcessGroupID := getProcessGroupID
+	getProcessGroupID = func(int) (int, error) {
+		require.Eventually(t, func() bool {
+			contents, err := os.ReadFile(resultPath)
+			return err == nil && len(strings.Fields(string(contents))) == 2
+		}, 2*time.Second, time.Millisecond)
+		return 0, syscall.EIO
+	}
+	t.Cleanup(func() { getProcessGroupID = originalGetProcessGroupID })
+
+	child, err := NewLauncher().Launch(context.Background(), request)
+	require.Nil(t, child)
+	requireErrorKind(t, err, ErrorUnsafeProcessGroup)
+
+	contents, readErr := os.ReadFile(resultPath)
+	require.NoError(t, readErr)
+	fields := strings.Fields(string(contents))
+	require.Len(t, fields, 2)
+	rootPID, conversionError := strconv.Atoi(fields[0])
+	require.NoError(t, conversionError)
+	grandchildPID, conversionError := strconv.Atoi(fields[1])
+	require.NoError(t, conversionError)
+	requireProcessesGone(t, rootPID, grandchildPID)
+	require.Eventually(t, func() bool { return openFileDescriptorCount(t) == before }, time.Second, 5*time.Millisecond)
 }
 
 func TestCancellationDuringLaunchReapsEntireStartedGroup(t *testing.T) {
@@ -231,6 +292,67 @@ func TestSignalGuardNeverTargetsBrokerGroup(t *testing.T) {
 	requireErrorKind(t, child.Kill(), ErrorUnsafeProcessGroup)
 }
 
+func TestSignalsAfterWaitNeverUseEndedProcessGroup(t *testing.T) {
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "exit", "0"))
+	require.NoError(t, err)
+	managed := child.(*managedChild)
+	require.NoError(t, child.Wait())
+
+	managed.mu.Lock()
+	managed.signalFn = func(int, unix.Signal) error {
+		t.Fatal("signal syscall made after Wait completed")
+		return nil
+	}
+	managed.mu.Unlock()
+
+	require.NoError(t, child.Terminate())
+	require.NoError(t, child.Kill())
+}
+
+func TestKillDominatesLaterTerminate(t *testing.T) {
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "wait-stdin"))
+	require.NoError(t, err)
+	managed := child.(*managedChild)
+	var signals []unix.Signal
+
+	managed.mu.Lock()
+	managed.signalFn = func(pid int, signal unix.Signal) error {
+		signals = append(signals, signal)
+		return unix.Kill(pid, signal)
+	}
+	managed.mu.Unlock()
+
+	require.NoError(t, child.Kill())
+	require.NoError(t, child.Terminate())
+	require.Error(t, child.Wait())
+	require.Equal(t, []unix.Signal{unix.SIGKILL}, signals)
+}
+
+func TestConcurrentWaitTerminateKillIsRaceClean(t *testing.T) {
+	for iteration := 0; iteration < 5; iteration++ {
+		child, rootPID, grandchildPID := launchTree(t, "tree-ignore-term")
+		const callers = 24
+		var waitGroup sync.WaitGroup
+		for caller := 0; caller < callers; caller++ {
+			waitGroup.Add(1)
+			go func(operation int) {
+				defer waitGroup.Done()
+				switch operation % 3 {
+				case 0:
+					_ = child.Wait()
+				case 1:
+					require.NoError(t, child.Terminate())
+				case 2:
+					require.NoError(t, child.Kill())
+				}
+			}(caller)
+		}
+		waitGroup.Wait()
+		require.Error(t, child.Wait())
+		requireProcessesGone(t, rootPID, grandchildPID)
+	}
+}
+
 func testSignalEntireGroup(t *testing.T, force bool) {
 	t.Helper()
 	child, rootPID, grandchildPID := launchTree(t, "tree-wait")
@@ -338,17 +460,21 @@ func requireProcessesGone(t *testing.T, pids ...int) {
 }
 
 func TestProcessGroupHelper(t *testing.T) {
-	if os.Getenv("AGENT_WHITEBOARD_PROCESSGROUP_HELPER") != "1" {
-		return
-	}
 	separator := -1
+	helperRun := false
 	for index, argument := range os.Args {
+		if argument == "-test.run=^TestProcessGroupHelper$" {
+			helperRun = true
+		}
 		if argument == "--" {
 			separator = index
 			break
 		}
 	}
-	if separator < 0 || separator+1 >= len(os.Args) {
+	if !helperRun || separator < 0 {
+		return
+	}
+	if separator+1 >= len(os.Args) {
 		os.Exit(90)
 	}
 	mode := os.Args[separator+1]
@@ -360,6 +486,12 @@ func TestProcessGroupHelper(t *testing.T) {
 			os.Exit(91)
 		}
 		fmt.Printf("%s\n%s\n%s\n", cwd, strings.Join(arguments, "\x00"), strings.Join(os.Environ(), "\x00"))
+	case "report-empty-environment":
+		_, present := os.LookupEnv(arguments[0])
+		fmt.Printf("%t\n%d\n", present, len(os.Environ()))
+	case "final-output":
+		fmt.Fprintln(os.Stdout, "FINAL stdout")
+		fmt.Fprintln(os.Stderr, "FINAL stderr")
 	case "wait-stdin":
 		_, _ = os.Stdin.Read(make([]byte, 1))
 	case "exit":

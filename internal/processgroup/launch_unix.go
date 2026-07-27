@@ -17,24 +17,48 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var getProcessGroupID = unix.Getpgid
+
+type lifecyclePhase uint8
+
+const (
+	lifecycleActive lifecyclePhase = iota
+	lifecycleTerminated
+	lifecycleKilled
+	lifecycleEnded
+)
+
 type managedChild struct {
-	command    *exec.Cmd
-	input      *os.File
-	output     *os.File
-	errors     *os.File
-	pid        int
+	command *exec.Cmd
+	input   *os.File
+	output  *eofReader
+	errors  *eofReader
+	pid     int
+
+	mu         sync.Mutex
+	phase      lifecyclePhase
 	pgid       int
 	brokerPGID int
-
-	waitOnce sync.Once
-	waitErr  error
-	term     signalResult
-	kill     signalResult
+	termDone   bool
+	killDone   bool
+	termErr    error
+	killErr    error
+	waitErr    error
+	done       chan struct{}
+	signalFn   func(int, unix.Signal) error
 }
 
-type signalResult struct {
+type eofReader struct {
+	file *os.File
 	once sync.Once
-	err  error
+}
+
+func (reader *eofReader) Read(buffer []byte) (int, error) {
+	count, err := reader.file.Read(buffer)
+	if err != nil {
+		reader.once.Do(func() { _ = reader.file.Close() })
+	}
+	return count, err
 }
 
 type childPipes struct {
@@ -75,7 +99,8 @@ func (*Launcher) Launch(ctx context.Context, request provider.LaunchRequest) (pr
 
 	command := exec.Command(request.Executable, request.Arguments...)
 	command.Args = append([]string{request.Executable}, request.Arguments...)
-	command.Env = append([]string(nil), request.Environment...)
+	command.Env = make([]string, len(request.Environment))
+	copy(command.Env, request.Environment)
 	command.Dir = request.WorkingDirectory
 	command.Stdin = pipes.childInput
 	command.Stdout = pipes.childOutput
@@ -88,9 +113,9 @@ func (*Launcher) Launch(ctx context.Context, request provider.LaunchRequest) (pr
 	pipes.closeChildEnds()
 
 	pid := command.Process.Pid
-	pgid, err := unix.Getpgid(pid)
+	pgid, err := getProcessGroupID(pid)
 	if err != nil || pgid != pid {
-		cleanupStartedProcess(command, pid, pgid)
+		cleanupStartedProcess(command, pid)
 		if err == nil {
 			err = fmt.Errorf("child PID %d has process group %d", pid, pgid)
 		}
@@ -98,14 +123,29 @@ func (*Launcher) Launch(ctx context.Context, request provider.LaunchRequest) (pr
 	}
 	brokerPGID := unix.Getpgrp()
 	if pgid == brokerPGID {
-		cleanupStartedProcess(command, pid, 0)
+		cleanupStartedProcess(command, pid)
 		return nil, processError(ErrorUnsafeProcessGroup, "verify child process group", errors.New("child process group matches broker process group"))
 	}
 
-	child := &managedChild{
-		command: command, input: pipes.input, output: pipes.output, errors: pipes.errors,
-		pid: pid, pgid: pgid, brokerPGID: brokerPGID,
+	identity, err := newProcessIdentity(pid)
+	if err != nil {
+		cleanupStartedProcess(command, pid)
+		return nil, processError(ErrorUnsafeProcessGroup, "track child process", err)
 	}
+	child := &managedChild{
+		command:    command,
+		input:      pipes.input,
+		output:     &eofReader{file: pipes.output},
+		errors:     &eofReader{file: pipes.errors},
+		pid:        pid,
+		phase:      lifecycleActive,
+		pgid:       pgid,
+		brokerPGID: brokerPGID,
+		done:       make(chan struct{}),
+		signalFn:   unix.Kill,
+	}
+	go child.reap(identity)
+
 	if err := ctx.Err(); err != nil {
 		cleanupErr := child.cleanupCanceledLaunch()
 		if cleanupErr != nil {
@@ -206,17 +246,21 @@ func (pipes *childPipes) closeAll() {
 	pipes.closeParentEnds()
 }
 
-func cleanupStartedProcess(command *exec.Cmd, pid, verifiedPGID int) {
-	if verifiedPGID == pid && verifiedPGID > 0 && verifiedPGID != unix.Getpgrp() {
-		_ = unix.Kill(-verifiedPGID, unix.SIGKILL)
-	} else if command.Process != nil && pid > 0 {
+// cleanupStartedProcess is used only before ownership is published. Setpgid was
+// requested, so -pid is the only possible new group and cannot be the broker's
+// group. Kill that potential tree before killing the leader and reaping it.
+func cleanupStartedProcess(command *exec.Cmd, pid int) {
+	if pid > 0 {
+		_ = unix.Kill(-pid, unix.SIGKILL)
+	}
+	if command.Process != nil {
 		_ = command.Process.Kill()
 	}
 	_ = command.Wait()
 }
 
 func (child *managedChild) cleanupCanceledLaunch() error {
-	signalErr := child.signal(unix.SIGKILL, "cancel launch")
+	signalErr := child.Kill()
 	waitErr := child.Wait()
 	if signalErr != nil {
 		return signalErr
@@ -228,43 +272,86 @@ func (child *managedChild) cleanupCanceledLaunch() error {
 	return nil
 }
 
+func (child *managedChild) reap(identity processIdentity) {
+	// pidfd/kqueue reports this specific leader's exit without reaping it. The
+	// lifecycle lock can therefore retire group ownership before command.Wait
+	// permits PID reuse; signal methods hold the same lock across kill(2).
+	identityErr := identity.waitForExit()
+	_ = identity.close()
+
+	child.mu.Lock()
+	if identityErr != nil && child.phase != lifecycleEnded {
+		// Identity monitoring failed while the leader remains unreaped. End the
+		// owned group before relinquishing its numeric identity.
+		_ = child.signalGroupLocked(unix.SIGKILL, "monitor child")
+	}
+	child.phase = lifecycleEnded
+	child.pgid = 0
+	child.mu.Unlock()
+
+	waitErr := child.command.Wait()
+	_ = child.input.Close()
+	if identityErr != nil {
+		waitErr = errors.Join(waitErr, processError(ErrorStart, "monitor child", identityErr))
+	}
+
+	child.mu.Lock()
+	child.waitErr = waitErr
+	close(child.done)
+	child.mu.Unlock()
+}
+
 func (child *managedChild) Input() io.WriteCloser { return child.input }
 func (child *managedChild) Output() io.Reader     { return child.output }
 func (child *managedChild) Errors() io.Reader     { return child.errors }
 
 func (child *managedChild) Wait() error {
-	child.waitOnce.Do(func() {
-		if child.command == nil {
-			child.waitErr = processError(ErrorStart, "wait", errors.New("child was not started"))
-			return
-		}
-		child.waitErr = child.command.Wait()
-		_ = child.input.Close()
-		_ = child.output.Close()
-		_ = child.errors.Close()
-	})
+	if child.done == nil {
+		return processError(ErrorStart, "wait", errors.New("child was not started"))
+	}
+	<-child.done
+	child.mu.Lock()
+	defer child.mu.Unlock()
 	return child.waitErr
 }
 
 func (child *managedChild) Terminate() error {
-	child.term.once.Do(func() {
-		child.term.err = child.signal(unix.SIGTERM, "terminate")
-	})
-	return child.term.err
+	child.mu.Lock()
+	defer child.mu.Unlock()
+
+	if child.termDone {
+		return child.termErr
+	}
+	child.termDone = true
+	if child.phase == lifecycleEnded || child.phase == lifecycleKilled {
+		return nil
+	}
+	child.phase = lifecycleTerminated
+	child.termErr = child.signalGroupLocked(unix.SIGTERM, "terminate")
+	return child.termErr
 }
 
 func (child *managedChild) Kill() error {
-	child.kill.once.Do(func() {
-		child.kill.err = child.signal(unix.SIGKILL, "kill")
-	})
-	return child.kill.err
+	child.mu.Lock()
+	defer child.mu.Unlock()
+
+	if child.killDone {
+		return child.killErr
+	}
+	child.killDone = true
+	if child.phase == lifecycleEnded {
+		return nil
+	}
+	child.phase = lifecycleKilled
+	child.killErr = child.signalGroupLocked(unix.SIGKILL, "kill")
+	return child.killErr
 }
 
-func (child *managedChild) signal(value unix.Signal, operation string) error {
+func (child *managedChild) signalGroupLocked(value unix.Signal, operation string) error {
 	if child.pid <= 0 || child.pgid <= 0 || child.pgid != child.pid || child.pgid == child.brokerPGID || child.pgid == unix.Getpgrp() {
 		return processError(ErrorUnsafeProcessGroup, operation, errors.New("refusing to signal an unverified or broker process group"))
 	}
-	if err := unix.Kill(-child.pgid, value); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := child.signalFn(-child.pgid, value); err != nil && !errors.Is(err, unix.ESRCH) {
 		return processError(ErrorSignal, operation, err)
 	}
 	return nil
