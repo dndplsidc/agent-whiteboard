@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
 )
 
 type ViewerConfig struct {
@@ -65,10 +67,24 @@ func (v *Viewer) Render(w io.Writer, board Whiteboard) error {
 			Markdown   string `json:"markdown"`
 			Context    string `json:"context"`
 			LocalAgent struct {
-				Enabled bool `json:"enabled"`
+				Enabled       bool   `json:"enabled"`
+				ContextDigest string `json:"context_digest"`
+				Resource      struct {
+					Kind      Kind       `json:"kind"`
+					ID        string     `json:"id"`
+					CreatedAt time.Time  `json:"created_at"`
+					UpdatedAt time.Time  `json:"updated_at"`
+					ExpiresAt *time.Time `json:"expires_at"`
+				} `json:"resource"`
 			} `json:"local_agent"`
 		}{Markdown: string(board.Source), Context: string(board.Context)}
 		payload.LocalAgent.Enabled = true
+		payload.LocalAgent.ContextDigest = contextdigest.Calculate(board.Source, board.Context)
+		payload.LocalAgent.Resource.Kind = board.Kind
+		payload.LocalAgent.Resource.ID = board.ID
+		payload.LocalAgent.Resource.CreatedAt = board.CreatedAt
+		payload.LocalAgent.Resource.UpdatedAt = board.UpdatedAt
+		payload.LocalAgent.Resource.ExpiresAt = board.ExpiresAt
 		if err := encoder.Encode(payload); err != nil {
 			return err
 		}

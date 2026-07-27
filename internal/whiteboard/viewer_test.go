@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
@@ -133,10 +135,14 @@ func TestViewerEnabledRendersExactSafelyEscapedSourceContextAndFlag(t *testing.T
 
 	source := "# source </script><source>&\u2028\u2029"
 	creatorContext := "context </script><context>&\u2028\u2029"
+	createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(time.Hour)
+	expiresAt := createdAt.Add(24 * time.Hour)
 	var output bytes.Buffer
 	require.NoError(t, viewer.Render(&output, whiteboard.Whiteboard{
 		ID: testWhiteboardID, Kind: whiteboard.KindMarkdown,
 		Source: []byte(source), Context: []byte(creatorContext),
+		CreatedAt: createdAt, UpdatedAt: updatedAt, ExpiresAt: &expiresAt,
 	}))
 
 	document, err := html.Parse(bytes.NewReader(output.Bytes()))
@@ -149,15 +155,29 @@ func TestViewerEnabledRendersExactSafelyEscapedSourceContextAndFlag(t *testing.T
 		Markdown   string `json:"markdown"`
 		Context    string `json:"context"`
 		LocalAgent struct {
-			Enabled bool `json:"enabled"`
+			Enabled       bool   `json:"enabled"`
+			ContextDigest string `json:"context_digest"`
+			Resource      struct {
+				Kind      whiteboard.Kind `json:"kind"`
+				ID        string          `json:"id"`
+				CreatedAt time.Time       `json:"created_at"`
+				UpdatedAt time.Time       `json:"updated_at"`
+				ExpiresAt *time.Time      `json:"expires_at"`
+			} `json:"resource"`
 		} `json:"local_agent"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(textContent(sourceScripts[0])), &payload))
 	require.Equal(t, source, payload.Markdown)
 	require.Equal(t, creatorContext, payload.Context)
 	require.True(t, payload.LocalAgent.Enabled)
-	require.Equal(t, `{"markdown":"# source \u003c/script\u003e\u003csource\u003e\u0026\u2028\u2029","context":"context \u003c/script\u003e\u003ccontext\u003e\u0026\u2028\u2029","local_agent":{"enabled":true}}
-`, textContent(sourceScripts[0]))
+	require.Equal(t, contextdigest.Calculate([]byte(source), []byte(creatorContext)), payload.LocalAgent.ContextDigest)
+	require.Equal(t, whiteboard.KindMarkdown, payload.LocalAgent.Resource.Kind)
+	require.Equal(t, testWhiteboardID, payload.LocalAgent.Resource.ID)
+	require.Equal(t, createdAt, payload.LocalAgent.Resource.CreatedAt)
+	require.Equal(t, updatedAt, payload.LocalAgent.Resource.UpdatedAt)
+	require.Equal(t, expiresAt, *payload.LocalAgent.Resource.ExpiresAt)
+	require.Contains(t, textContent(sourceScripts[0]), `"context_digest":"`)
+	require.Contains(t, textContent(sourceScripts[0]), `"resource":{"kind":"markdown"`)
 
 	raw := output.String()
 	require.Contains(t, raw, `\u003c/script\u003e`)
@@ -178,9 +198,14 @@ func TestViewerEnabledPreservesLegacyEmptyContext(t *testing.T) {
 		CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
 	})
 	require.NoError(t, err)
+	createdAt := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
 	var output bytes.Buffer
-	require.NoError(t, viewer.Render(&output, whiteboard.Whiteboard{Source: []byte("legacy"), Context: nil}))
-	require.Contains(t, output.String(), `{"markdown":"legacy","context":"","local_agent":{"enabled":true}}`)
+	require.NoError(t, viewer.Render(&output, whiteboard.Whiteboard{
+		ID: testWhiteboardID, Kind: whiteboard.KindMarkdown, Source: []byte("legacy"), Context: nil,
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+	}))
+	require.Contains(t, output.String(), `"markdown":"legacy","context":""`)
+	require.Contains(t, output.String(), `"enabled":true,"context_digest":"`)
 }
 
 func countElements(root *html.Node, name string) int {
