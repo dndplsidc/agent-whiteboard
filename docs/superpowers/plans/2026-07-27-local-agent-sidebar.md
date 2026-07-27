@@ -98,8 +98,9 @@ This release also closes the same-origin active-content path that would otherwis
 ### R4 — Standalone HTML and Markdown presentation security
 
 - Every existing and new standalone HTML public URL returns an application-controlled wrapper containing the submitted document in an iframe.
-- The iframe has `sandbox="allow-scripts"` without `allow-same-origin`; network connections, forms, parent access, storage, popups, downloads, framing, and top-level navigation remain unavailable.
-- The inner response enforces restrictive HTTP CSP, including `connect-src 'none'`, while preserving inline standalone behavior permitted by the sandbox.
+- The iframe has `sandbox="allow-scripts"` without `allow-same-origin`; origin credentials and storage, parent access, forms, popups, downloads, child framing, and top-level navigation remain unavailable.
+- The inner response enforces restrictive HTTP CSP, including `connect-src 'none'`, to block fetch/XHR/WebSocket and subresource network access while preserving inline standalone behavior permitted by the sandbox.
+- Chromium does not support a CSP directive that blocks a script-capable sandbox from navigating its own frame. Submitted scripts and links may therefore navigate that child frame, send a request, and deliberately encode the inner capability URL. This accepted risk keeps standalone HTML a trusted-active-content feature; it must never render untrusted code. The opaque origin, no-referrer policy, and broker Origin checks still prevent the child from reading publishing-origin or broker responses or establishing an authorized broker connection.
 - Standalone HTML never receives the agent drawer.
 - Markdown responses deny framing with both `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`.
 - Markdown and assistant output use sanitized Markdown with raw HTML disabled.
@@ -204,7 +205,7 @@ The feature separates four authorities:
 3. The loopback broker authorizes exact web origins, owns local mappings and process lifecycle, and mediates a narrow content-only protocol.
 4. Pi retains native authentication, models, transcripts, and session semantics.
 
-Standalone HTML becomes opaque-origin active content so trusting a publishing origin cannot accidentally trust arbitrary uploaded JavaScript at that origin.
+Standalone HTML becomes opaque-origin active content so trusting a publishing origin does not grant submitted JavaScript that origin's credentials, storage, parent access, or broker authorization. Submitted JavaScript remains trusted code and retains the accepted ability to navigate its own sandboxed frame.
 
 ### Components
 
@@ -273,7 +274,7 @@ Adapters must redact filesystem paths, credentials, provider-native IDs, raw pay
 
 ### Important decisions
 
-- Exact Origin allowlisting replaces browser pairing or broker credentials because the only active content at a trusted publishing origin is application-controlled after HTML sandboxing.
+- Exact Origin allowlisting replaces browser pairing or broker credentials because only application-controlled content can present the trusted publishing Origin to the broker; sandboxed standalone HTML executes with an opaque Origin.
 - Page-load status is deliberately minimal and contains no provider/session information.
 - Full context replacement favors correctness over compact diffs.
 - Native provider persistence avoids transcript duplication and keeps provider tools capable of inspecting their own sessions outside agent-whiteboard.
@@ -360,7 +361,7 @@ The application uses strict general YAML configuration, CLI/environment preceden
 
 **Deliverable**
 
-Markdown can opt into the drawer shell and cannot be framed; all standalone HTML is served through the approved opaque-origin sandbox without access to localhost or parent authority.
+Markdown can opt into the drawer shell and cannot be framed; all standalone HTML is served through the approved opaque-origin sandbox without publishing-origin, parent, or authorized broker authority. Standalone scripts retain the accepted ability to navigate their own child frame.
 
 **Implementation**
 
@@ -368,12 +369,12 @@ Markdown can opt into the drawer shell and cannot be framed; all standalone HTML
 2. Add Markdown frame denial and a CSP that permits only required bundled behavior plus loopback broker transport when enabled.
 3. Replace direct standalone HTML serving with wrapper and inner sandbox responses whose headers enforce the approved restrictions for existing and new resources.
 4. Keep public capability URLs stable and document the breaking standalone rendering semantics.
-5. Add hostile HTML fixtures for network, storage, parent, popup, form, download, framing, and navigation attempts.
+5. Add hostile HTML fixtures for network APIs/subresources, storage, parent, popup, form, download, framing, top-level navigation, and the explicitly accepted child-frame navigation risk.
 
 **Validation**
 
 - Handler/viewer tests verify exact security headers, feature-disabled output, escaped embedded data, and stable capability routing.
-- Browser tests verify Markdown framing denial and that malicious sandboxed HTML cannot obtain prohibited capabilities.
+- Browser tests verify Markdown framing denial; that sandboxed HTML cannot obtain publishing-origin, parent, storage, or authorized broker capabilities; and that child-frame navigation is isolated from publishing-origin credentials, sends no referrer, and is treated as an accepted trusted-content risk rather than a denied capability.
 - Existing Markdown rendering, themes, Mermaid, sanitization, and no-CDN behavior remain green.
 
 ### Milestone 4: Broker core, local API, state, and macOS daemon
@@ -515,7 +516,7 @@ The browser job installs pinned dependencies and Chromium before running. CI con
 - Supported publishing origins are HTTPS. The first-release browser contract does not rely on insecure remote HTTP origins.
 - Chrome's evolving Local Network Access behavior is a release risk. M1 is a hard pre-implementation gate: it must prove denial plus permission-granted status and both transports from a source Chrome classifies as public, and synthetic requests cannot replace that evidence.
 - Provider protocol drift may break runtime use because no version range is enforced. Strict required-message handling and actionable errors limit failure impact; pinned real-CLI E2E establishes a known baseline.
-- Sandboxing all standalone HTML intentionally changes existing rendering authority. Stable capability URLs and migration documentation reduce disruption, but preserving unrestricted same-origin behavior is not compatible with the approved security boundary.
+- Sandboxing all standalone HTML intentionally changes existing rendering authority. Stable capability URLs and migration documentation reduce disruption, but preserving unrestricted same-origin behavior is not compatible with the approved security boundary. Because Chromium cannot block self-navigation while allowing arbitrary scripts, trusted standalone code may navigate its own opaque child frame and explicitly disclose its capability URL; this accepted limitation must be documented and regression-tested.
 - No concurrency cap may permit high local resource use after many explicit Connect actions. Per-process idle shutdown, bounded queues/messages, and explicit daemon controls are the approved safeguards.
 - Native provider deletion behavior may fail or change. Mapping retention on failure prevents undiscoverable sessions.
 - Initial context sizing is approximate. The safety margin must be documented and tested; inability to establish a safe model limit fails closed.
