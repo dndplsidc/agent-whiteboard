@@ -37,6 +37,12 @@ const (
 	turnWorkerInterrupt
 )
 
+type deferredInterrupt struct {
+	commandID string
+	clientID  string
+	turnID    string
+}
+
 type turnWorkerResult struct {
 	kind      turnWorkerKind
 	turnID    string
@@ -53,7 +59,7 @@ func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, t
 	if actor.queue.ContainsTurnID(payload.TurnID) || actor.queue.ContainsMessageID(payload.MessageID) {
 		return false, agentprotocol.ErrorInvalidState
 	}
-	if actor.lifecycle == agentprotocol.LifecycleUnavailable || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil {
+	if (actor.workerSettled != nil && actor.active == nil) || actor.lifecycle == agentprotocol.LifecycleUnavailable || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil {
 		return false, agentprotocol.ErrorInvalidState
 	}
 
@@ -201,17 +207,25 @@ func (actor *conversation) startSubmitWorker(results chan<- turnWorkerResult, re
 }
 
 func (actor *conversation) commandInterrupt(results chan<- turnWorkerResult, command agentprotocol.Command, payload agentprotocol.TurnReferencePayload) (bool, agentprotocol.BrowserErrorCode) {
-	if actor.active == nil || actor.active.phase != turnRunning || actor.active.accepted == nil || actor.active.request.TurnID != payload.TurnID {
+	if actor.active == nil || actor.active.phase != turnRunning || actor.active.accepted == nil || actor.active.request.TurnID != payload.TurnID || actor.deferredInterrupt != nil {
 		return false, agentprotocol.ErrorInvalidState
 	}
+	if actor.workerSettled != nil {
+		actor.deferredInterrupt = &deferredInterrupt{commandID: command.CommandID, clientID: command.ClientID, turnID: payload.TurnID}
+		return true, ""
+	}
+	actor.startInterruptWorker(results, command.CommandID, command.ClientID)
+	return true, ""
+}
+
+func (actor *conversation) startInterruptWorker(results chan<- turnWorkerResult, commandID, clientID string) {
 	accepted := *actor.active.accepted
 	actor.active.phase = turnInterrupting
 	actor.workerSettled = make(chan struct{})
 	go func() {
 		err := actor.session.Interrupt(actor.lifecycleCtx, accepted)
-		results <- turnWorkerResult{kind: turnWorkerInterrupt, turnID: accepted.TurnID, commandID: command.CommandID, clientID: command.ClientID, err: err}
+		results <- turnWorkerResult{kind: turnWorkerInterrupt, turnID: accepted.TurnID, commandID: commandID, clientID: clientID, err: err}
 	}()
-	return true, ""
 }
 
 func (actor *conversation) handleTurnResult(attachments map[*attachment]struct{}, results chan<- turnWorkerResult, result turnWorkerResult) {
@@ -405,6 +419,12 @@ func (actor *conversation) finishActive(attachments map[*attachment]struct{}, re
 	}
 	if actor.stopping || actor.queue.Empty() {
 		actor.lifecycle = terminalLifecycle
+		actor.publishShared(attachments, agentprotocol.LifecyclePayload{State: actor.lifecycle})
+		return
+	}
+	if actor.workerSettled != nil {
+		actor.dispatchPending = true
+		actor.lifecycle = agentprotocol.LifecycleReady
 		actor.publishShared(attachments, agentprotocol.LifecyclePayload{State: actor.lifecycle})
 		return
 	}

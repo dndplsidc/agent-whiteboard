@@ -6,7 +6,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 )
 
-func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, request commandRequest) {
+func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, historyResults chan<- historyWorkerResult, request commandRequest) {
 	if err := request.ctx.Err(); err != nil {
 		request.response <- commandResponse{err: err}
 		return
@@ -78,6 +78,12 @@ func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, t
 			return
 		}
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
+	case agentprotocol.PageRequestPayload:
+		if request.command.Type != agentprotocol.CommandHistoryPage || actor.workerSettled != nil || actor.stopping {
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
+			return
+		}
+		actor.startHistoryWorker(historyResults, request.command.CommandID, request.command.ClientID, payload)
 	case agentprotocol.ResyncPayload:
 		replayed, err := actor.replay.Replay(request.command.ClientID, payload.AfterEventID)
 		if err != nil {

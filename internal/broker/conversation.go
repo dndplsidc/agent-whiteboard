@@ -14,28 +14,30 @@ import (
 )
 
 type conversation struct {
-	identity        agentstate.Identity
-	mapping         agentstate.Mapping
-	state           StateStore
-	session         provider.Session
-	factory         *EventFactory
-	replay          *ReplayLog
-	requests        chan any
-	done            chan struct{}
-	clock           common.Clock
-	resource        agentprotocol.Resource
-	contextDigest   string
-	contextState    agentprotocol.ContextState
-	lifecycle       agentprotocol.LifecycleState
-	queue           *Queue
-	commands        commandLedger
-	active          *activeTurn
-	workerSettled   chan struct{}
-	shutdownAttempt *actorShutdown
-	lifecycleCtx    context.Context
-	stopping        bool
-	dispatchBlocked bool
-	shutdownTimeout time.Duration
+	identity          agentstate.Identity
+	mapping           agentstate.Mapping
+	state             StateStore
+	session           provider.Session
+	factory           *EventFactory
+	replay            *ReplayLog
+	requests          chan any
+	done              chan struct{}
+	clock             common.Clock
+	resource          agentprotocol.Resource
+	contextDigest     string
+	contextState      agentprotocol.ContextState
+	lifecycle         agentprotocol.LifecycleState
+	queue             *Queue
+	commands          commandLedger
+	active            *activeTurn
+	workerSettled     chan struct{}
+	shutdownAttempt   *actorShutdown
+	deferredInterrupt *deferredInterrupt
+	lifecycleCtx      context.Context
+	stopping          bool
+	dispatchBlocked   bool
+	dispatchPending   bool
+	shutdownTimeout   time.Duration
 
 	closeMu sync.Mutex
 	closed  atomic.Bool
@@ -218,6 +220,7 @@ func (actor *conversation) run() {
 	attachments := make(map[*attachment]struct{})
 	shutdownResults := make(chan shutdownWorkerResult, 1)
 	turnResults := make(chan turnWorkerResult, 1)
+	historyResults := make(chan historyWorkerResult, 1)
 	shutdownActive := false
 	startShutdown := func(request *closeConversationRequest, attempt *actorShutdown) {
 		go func() {
@@ -247,7 +250,7 @@ func (actor *conversation) run() {
 				actor.detach(attachments, request.attachment)
 				close(request.ack)
 			case commandRequest:
-				actor.handleCommand(attachments, turnResults, request)
+				actor.handleCommand(attachments, turnResults, historyResults, request)
 			case closeConversationRequest:
 				if shutdownActive {
 					request.response <- NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
@@ -265,6 +268,8 @@ func (actor *conversation) run() {
 			}
 		case result := <-turnResults:
 			actor.handleTurnResult(attachments, turnResults, result)
+		case result := <-historyResults:
+			actor.handleHistoryResult(attachments, turnResults, result)
 		case result := <-shutdownResults:
 			shutdownActive = false
 			if result.err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,13 @@ type turnSession struct {
 	interruptErr           error
 	interruptEvent         *provider.Event
 	interruptGate          chan struct{}
+	historyPage            provider.HistoryPage
+	historyErr             error
+	historyEntered         chan struct{}
+	historyGate            chan struct{}
+	providerCalls          atomic.Int32
+	maximumProviderCalls   atomic.Int32
+	historyCalls           atomic.Int32
 	submitted              chan provider.TurnRequest
 	interrupted            chan provider.AcceptedTurn
 }
@@ -41,7 +49,42 @@ func newTurnSession(ref string) *turnSession {
 		interrupted:      make(chan provider.AcceptedTurn, 8),
 	}
 }
+func (session *turnSession) enterProviderCall() func() {
+	current := session.providerCalls.Add(1)
+	for observed := session.maximumProviderCalls.Load(); current > observed && !session.maximumProviderCalls.CompareAndSwap(observed, current); observed = session.maximumProviderCalls.Load() {
+	}
+	return func() { session.providerCalls.Add(-1) }
+}
+
+func (session *turnSession) History(ctx context.Context, request provider.HistoryRequest) (provider.HistoryPage, error) {
+	session.historyCalls.Add(1)
+	leave := session.enterProviderCall()
+	defer leave()
+	if request.Validate() != nil {
+		return provider.HistoryPage{}, errors.New("invalid history request")
+	}
+	session.mu.Lock()
+	page, err, entered, gate := session.historyPage, session.historyErr, session.historyEntered, session.historyGate
+	session.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return provider.HistoryPage{}, ctx.Err()
+		}
+	}
+	return page, err
+}
+
 func (session *turnSession) Preflight(ctx context.Context, request provider.PreflightRequest) (provider.PreflightResult, error) {
+	leave := session.enterProviderCall()
+	defer leave()
 	if request.Validate() != nil {
 		return provider.PreflightResult{}, errors.New("invalid preflight")
 	}
@@ -69,6 +112,8 @@ func (session *turnSession) Preflight(ctx context.Context, request provider.Pref
 	return result, err
 }
 func (session *turnSession) Submit(ctx context.Context, request provider.TurnRequest) (provider.AcceptedTurn, error) {
+	leave := session.enterProviderCall()
+	defer leave()
 	if err := ctx.Err(); err != nil {
 		return provider.AcceptedTurn{}, err
 	}
@@ -103,6 +148,8 @@ func (session *turnSession) Submit(ctx context.Context, request provider.TurnReq
 	return provider.AcceptedTurn{TurnID: request.TurnID, AcceptedAt: testTime()}, nil
 }
 func (session *turnSession) Interrupt(ctx context.Context, accepted provider.AcceptedTurn) error {
+	leave := session.enterProviderCall()
+	defer leave()
 	select {
 	case session.interrupted <- accepted:
 	case <-ctx.Done():
