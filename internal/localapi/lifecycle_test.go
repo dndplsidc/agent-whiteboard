@@ -348,8 +348,8 @@ func TestAttachmentRegistrySerializesActivationWithCommandDispatch(t *testing.T)
 	newCtx, newCancel := context.WithCancel(context.Background())
 	defer oldCancel()
 	defer newCancel()
-	old := &attachment{key: key, connection: newSafeConnection(oldConnection), cancel: oldCancel, done: make(chan struct{})}
-	newItem := &attachment{key: key, connection: newSafeConnection(newConnection), cancel: newCancel, done: make(chan struct{})}
+	old := &attachment{key: key, connection: newSafeConnection(oldConnection), ctx: oldCtx, cancel: oldCancel, done: make(chan struct{})}
+	newItem := &attachment{key: key, connection: newSafeConnection(newConnection), ctx: newCtx, cancel: newCancel, done: make(chan struct{})}
 	var registry attachmentRegistry
 	registry.put(old)
 
@@ -681,6 +681,87 @@ func TestServerCloseCanRetryAfterCanceledAttempt(t *testing.T) {
 		t.Fatal("retry did not close backend connection")
 	}
 	response.Body.Close()
+}
+
+func TestServerCloseCancelsCooperativeFallbackCommand(t *testing.T) {
+	commandBlock := make(chan struct{})
+	commandStarted := make(chan struct{}, 1)
+	connection := newControlledConnection(snapshotEvent())
+	connection.commandBlock = commandBlock
+	connection.commandStarted = commandStarted
+	server, baseURL, client := startServerWithBackend(t, &queuedBackend{connections: []*controlledConnection{connection}})
+
+	streamRequest, err := http.NewRequest(http.MethodPost, baseURL+agentprotocol.ConnectPath, bytes.NewReader(encodeCommand(t, connectCommand())))
+	require.NoError(t, err)
+	streamRequest.Header.Set("Origin", trustedOrigin)
+	streamRequest.Header.Set("Content-Type", "application/json")
+	streamRequest.Header.Set(agentprotocol.APIVersionHeader, agentprotocol.APIVersion)
+	stream, err := client.Do(streamRequest)
+	require.NoError(t, err)
+	_, err = bufio.NewReader(stream.Body).ReadBytes('\n')
+	require.NoError(t, err)
+
+	commandDone := make(chan error, 1)
+	go func() {
+		request, requestErr := http.NewRequest(http.MethodPost, baseURL+CommandsPath, bytes.NewReader(encodeCommand(t, ordinaryCommand())))
+		if requestErr == nil {
+			request.Header.Set("Origin", trustedOrigin)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set(agentprotocol.APIVersionHeader, agentprotocol.APIVersion)
+			var response *http.Response
+			response, requestErr = client.Do(request)
+			if response != nil {
+				response.Body.Close()
+			}
+		}
+		commandDone <- requestErr
+	}()
+	select {
+	case <-commandStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fallback command did not reach backend")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, server.Close(ctx))
+	select {
+	case <-commandDone:
+	case <-time.After(time.Second):
+		t.Fatal("fallback command handler remained blocked after server close")
+	}
+	stream.Body.Close()
+}
+
+func TestWebSocketDisconnectBeforeFirstEventClosesConnection(t *testing.T) {
+	connection := newControlledConnection()
+	connected := make(chan struct{}, 1)
+	server, _, _ := startServerWithBackend(t, &queuedBackend{
+		connections: []*controlledConnection{connection},
+		connected:   connected,
+	})
+	wsURL := url.URL{Scheme: "ws", Host: server.Host(), Path: agentprotocol.ConnectPath}
+	dialer := websocket.Dialer{Subprotocols: []string{agentprotocol.WebSocketSubprotocol}}
+	socket, _, err := dialer.Dial(wsURL.String(), http.Header{"Origin": []string{trustedOrigin}})
+	require.NoError(t, err)
+	require.NoError(t, socket.WriteMessage(websocket.TextMessage, encodeCommand(t, connectCommand())))
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket connect did not reach backend")
+	}
+	require.NoError(t, socket.Close())
+
+	select {
+	case <-connection.closed:
+	case <-time.After(time.Second):
+		t.Fatal("peer disconnect before first event did not close backend connection")
+	}
+	require.Eventually(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return len(server.transports) == 0
+	}, time.Second, time.Millisecond)
 }
 
 func TestServerCloseCancelsCooperativeWebSocketCommand(t *testing.T) {

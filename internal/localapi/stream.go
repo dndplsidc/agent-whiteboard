@@ -18,6 +18,7 @@ type attachmentKey struct {
 type attachment struct {
 	key        attachmentKey
 	connection *safeConnection
+	ctx        context.Context
 	cancel     context.CancelFunc
 	done       chan struct{}
 	doneOnce   sync.Once
@@ -147,7 +148,11 @@ func (r *attachmentRegistry) command(ctx context.Context, key attachmentKey, com
 			item.lease.RUnlock()
 			continue
 		}
-		event, err := item.connection.Command(ctx, command)
+		commandCtx, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(item.ctx, cancel)
+		event, err := item.connection.Command(commandCtx, command)
+		stop()
+		cancel()
 		item.lease.RUnlock()
 		return event, true, err
 	}
@@ -186,6 +191,7 @@ func (s *Server) stream(response http.ResponseWriter, request *http.Request) {
 	item := &attachment{
 		key:        attachmentKey{origin: origin, clientID: command.ClientID, conversationID: connection.ConversationID()},
 		connection: safe,
+		ctx:        ctx,
 		cancel:     cancel,
 		done:       make(chan struct{}),
 	}

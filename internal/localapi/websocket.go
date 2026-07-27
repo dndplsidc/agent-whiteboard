@@ -84,29 +84,80 @@ func (s *Server) websocket(response http.ResponseWriter, request *http.Request) 
 		}
 	}()
 
+	commands := make(chan agentprotocol.Command, 1)
+	readDone := make(chan error, 1)
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		for {
+			kind, frame, readErr := socket.ReadMessage()
+			if readErr != nil {
+				readDone <- readErr
+				return
+			}
+			if kind != websocket.TextMessage {
+				closeWebSocket(socket, websocket.CloseUnsupportedData, "text frames required")
+				readDone <- errors.New("binary frame")
+				return
+			}
+			command, decodeErr := agentprotocol.DecodeCommand(frame)
+			if decodeErr != nil || command.Type == agentprotocol.CommandConnect || command.ConversationID == nil || command.ClientID != connect.ClientID || *command.ConversationID != safe.ConversationID() {
+				closeWebSocket(socket, closeCode(decodeErr), "invalid command frame")
+				readDone <- errors.New("invalid command")
+				return
+			}
+			select {
+			case commands <- command:
+			case <-ctx.Done():
+				readDone <- ctx.Err()
+				return
+			default:
+				closeWebSocket(socket, websocket.ClosePolicyViolation, "command already pending")
+				readDone <- errors.New("command already pending")
+				return
+			}
+		}
+	}()
+
 	var first agentprotocol.Event
 	select {
 	case event, open := <-safe.Events():
 		if !open {
 			closeWebSocket(socket, websocket.CloseInternalServerErr, "broker unavailable")
+			cancel()
+			_ = socket.Close()
+			workers.Wait()
 			return
 		}
 		first = event
+	case <-readDone:
+		cancel()
+		_ = socket.Close()
+		workers.Wait()
+		return
 	case <-ctx.Done():
+		_ = socket.Close()
+		workers.Wait()
 		return
 	}
 	encodedFirst, err := encodeFirstConnectionEvent(safe, connect, first)
 	if err != nil {
 		closeWebSocket(socket, websocket.CloseInternalServerErr, "broker protocol failure")
+		cancel()
+		_ = socket.Close()
+		workers.Wait()
 		return
 	}
 	if err = socket.WriteMessage(websocket.TextMessage, encodedFirst); err != nil {
+		cancel()
+		_ = socket.Close()
+		workers.Wait()
 		return
 	}
 
 	writerDone := make(chan error, 1)
-	readDone := make(chan error, 1)
-	var workers sync.WaitGroup
+	commandDone := make(chan error, 1)
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
@@ -139,36 +190,20 @@ func (s *Server) websocket(response http.ResponseWriter, request *http.Request) 
 		for {
 			select {
 			case <-ctx.Done():
-				readDone <- ctx.Err()
+				commandDone <- ctx.Err()
 				return
-			default:
-			}
-			kind, frame, readErr := socket.ReadMessage()
-			if readErr != nil {
-				readDone <- readErr
-				return
-			}
-			if kind != websocket.TextMessage {
-				closeWebSocket(socket, websocket.CloseUnsupportedData, "text frames required")
-				readDone <- errors.New("binary frame")
-				return
-			}
-			command, decodeErr := agentprotocol.DecodeCommand(frame)
-			if decodeErr != nil || command.Type == agentprotocol.CommandConnect || command.ConversationID == nil || command.ClientID != connect.ClientID || *command.ConversationID != safe.ConversationID() {
-				closeWebSocket(socket, closeCode(decodeErr), "invalid command frame")
-				readDone <- errors.New("invalid command")
-				return
-			}
-			result, commandErr := safe.Command(ctx, command)
-			if commandErr != nil {
-				closeWebSocket(socket, websocket.ClosePolicyViolation, "command rejected")
-				readDone <- commandErr
-				return
-			}
-			if !matchingCommandResult(result, command) {
-				closeWebSocket(socket, websocket.CloseInternalServerErr, "broker protocol failure")
-				readDone <- errors.New("invalid command result")
-				return
+			case command := <-commands:
+				result, commandErr := safe.Command(ctx, command)
+				if commandErr != nil {
+					closeWebSocket(socket, websocket.ClosePolicyViolation, "command rejected")
+					commandDone <- commandErr
+					return
+				}
+				if !matchingCommandResult(result, command) {
+					closeWebSocket(socket, websocket.CloseInternalServerErr, "broker protocol failure")
+					commandDone <- errors.New("invalid command result")
+					return
+				}
 			}
 		}
 	}()
@@ -176,6 +211,7 @@ func (s *Server) websocket(response http.ResponseWriter, request *http.Request) 
 	select {
 	case <-writerDone:
 	case <-readDone:
+	case <-commandDone:
 	case <-ctx.Done():
 	}
 	cancel()

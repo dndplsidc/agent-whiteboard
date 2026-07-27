@@ -317,6 +317,7 @@ func TestFallbackFlushFailureDoesNotReplaceOldAttachment(t *testing.T) {
 	old := &attachment{
 		key:        attachmentKey{origin: trustedOrigin, clientID: clientID, conversationID: conversation},
 		connection: newSafeConnection(oldConnection),
+		ctx:        oldCtx,
 		cancel:     oldCancel,
 		done:       make(chan struct{}),
 	}
