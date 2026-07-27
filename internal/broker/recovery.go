@@ -27,6 +27,13 @@ func (actor *conversation) startRecovery(attachments map[*attachment]struct{}, r
 	if actor.stopping || actor.recoveryActive || actor.recoveryAttempted == actor.generation || results == nil {
 		return
 	}
+	if actor.workerSettled != nil && actor.workerKind == providerWorkerArchive {
+		if !actor.recoveryPending {
+			actor.recoveryPending = true
+			actor.recoveryPendingTrigger = trigger
+		}
+		return
+	}
 	actor.recoveryAttempted = actor.generation
 	actor.recoveryActive = true
 	actor.dispatchBlocked = true

@@ -14,45 +14,47 @@ import (
 )
 
 type conversation struct {
-	identity            agentstate.Identity
-	mapping             agentstate.Mapping
-	state               StateStore
-	driver              provider.Driver
-	retainSession       func(*sessionHandle)
-	session             *sessionHandle
-	generation          uint64
-	factory             *EventFactory
-	replay              *ReplayLog
-	requests            chan any
-	done                chan struct{}
-	clock               common.Clock
-	timers              TimerFactory
-	idleTimeout         time.Duration
-	resource            agentprotocol.Resource
-	contextDigest       string
-	contextState        agentprotocol.ContextState
-	lifecycle           agentprotocol.LifecycleState
-	queue               *Queue
-	commands            commandLedger
-	active              *activeTurn
-	workerSettled       chan struct{}
-	workerKind          providerWorkerKind
-	workerCommandID     string
-	workerClientID      string
-	workerResolved      bool
-	shutdownAttempt     *actorShutdown
-	deferredInterrupt   *deferredInterrupt
-	lifecycleCtx        context.Context
-	recoveryCancel      context.CancelFunc
-	recoveryResults     chan<- recoveryWorkerResult
-	recoveryActive      bool
-	recoveryAttempted   uint64
-	recoveryUnavailable bool
-	deferredObserve     *deferredObservation
-	stopping            bool
-	dispatchBlocked     bool
-	dispatchPending     bool
-	shutdownTimeout     time.Duration
+	identity               agentstate.Identity
+	mapping                agentstate.Mapping
+	state                  StateStore
+	driver                 provider.Driver
+	retainSession          func(*sessionHandle)
+	session                *sessionHandle
+	generation             uint64
+	factory                *EventFactory
+	replay                 *ReplayLog
+	requests               chan any
+	done                   chan struct{}
+	clock                  common.Clock
+	timers                 TimerFactory
+	idleTimeout            time.Duration
+	resource               agentprotocol.Resource
+	contextDigest          string
+	contextState           agentprotocol.ContextState
+	lifecycle              agentprotocol.LifecycleState
+	queue                  *Queue
+	commands               commandLedger
+	active                 *activeTurn
+	workerSettled          chan struct{}
+	workerKind             providerWorkerKind
+	workerCommandID        string
+	workerClientID         string
+	workerResolved         bool
+	shutdownAttempt        *actorShutdown
+	deferredInterrupt      *deferredInterrupt
+	lifecycleCtx           context.Context
+	recoveryCancel         context.CancelFunc
+	recoveryResults        chan<- recoveryWorkerResult
+	recoveryActive         bool
+	recoveryAttempted      uint64
+	recoveryUnavailable    bool
+	recoveryPending        bool
+	recoveryPendingTrigger recoveryTrigger
+	deferredObserve        *deferredObservation
+	stopping               bool
+	dispatchBlocked        bool
+	dispatchPending        bool
+	shutdownTimeout        time.Duration
 
 	closeMu sync.Mutex
 	closed  atomic.Bool
@@ -212,6 +214,7 @@ const (
 	providerWorkerSubmit
 	providerWorkerInterrupt
 	providerWorkerHistory
+	providerWorkerArchive
 )
 
 type shutdownWorkerResult struct {
@@ -255,6 +258,7 @@ func (actor *conversation) run() {
 	shutdownResults := make(chan shutdownWorkerResult, 1)
 	turnResults := make(chan turnWorkerResult, 1)
 	historyResults := make(chan historyWorkerResult, 1)
+	archiveResults := make(chan archiveWorkerResult, 1)
 	recoveryResults := make(chan recoveryWorkerResult, 1)
 	actor.recoveryResults = recoveryResults
 	shutdownActive := false
@@ -303,7 +307,7 @@ func (actor *conversation) run() {
 				actor.detach(attachments, request.attachment)
 				close(request.ack)
 			case commandRequest:
-				actor.handleCommand(attachments, turnResults, historyResults, request)
+				actor.handleCommand(attachments, turnResults, historyResults, archiveResults, request)
 			case closeConversationRequest:
 				if shutdownActive || actor.recoveryActive {
 					shutdownWaiters = append(shutdownWaiters, request.response)
@@ -330,6 +334,8 @@ func (actor *conversation) run() {
 			actor.handleTurnResult(attachments, turnResults, result)
 		case result := <-historyResults:
 			actor.handleHistoryResult(attachments, turnResults, result)
+		case result := <-archiveResults:
+			actor.handleArchiveResult(attachments, recoveryResults, result)
 		case result := <-shutdownResults:
 			shutdownActive = false
 			if result.cancel != nil {
@@ -542,7 +548,7 @@ func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, re
 	contextChanged := false
 	var contextEvent agentprotocol.Event
 	var err error
-	if actor.recoveryActive {
+	if actor.recoveryActive || (actor.workerSettled != nil && actor.workerKind == providerWorkerArchive) {
 		if err = actor.deferObservation(request.resource, request.contextDigest); err != nil {
 			request.response <- attachResponse{err: err}
 			return

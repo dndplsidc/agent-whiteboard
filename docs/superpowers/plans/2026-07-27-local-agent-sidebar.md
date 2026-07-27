@@ -142,7 +142,7 @@ This release also closes the same-origin active-content path that would otherwis
 - Stable private workspaces live under `~/.agent-whiteboard/state/workspaces/` and share conversation retention.
 - Directories and files are owner-only and updates are atomic.
 - New conversation archives the current native session and creates a fresh current session.
-- Sidebar history lists archived conversations with timestamps, provider/model when known, and a short first-reader-message preview. Restore archives the current session before making the selected archive current.
+- Sidebar history lists archived conversations with timestamps and provider/model when known. Preview is empty because the broker does not persist transcripts or resume archives merely to inspect them. Restore archives the current session before making the selected archive current.
 - Conversations persist until explicitly deleted, even after remote whiteboard expiration or deletion.
 - Delete removes both mapping and native provider session. If native deletion fails, mapping remains discoverable for retry.
 
@@ -446,7 +446,7 @@ The opt-in Markdown viewer provides the complete accessible reader experience ac
 2. Add Pi availability, native login guidance, read-only model display, and explicit Connect consent.
 3. Implement WebSocket client with HTTP-stream fallback, version negotiation, reconnect/resync, stable event handling, and multi-tab synchronization through broker state.
 4. Render sanitized user/assistant Markdown and collapsible normalized activity with expanded blocked/error states and no hidden reasoning.
-5. Add shared editable/removable follow-up queue, Stop, Retry interrupted turn, and disconnected completion behavior.
+5. Add shared editable/removable follow-up queue, Stop, and disconnected completion behavior. Keep Retry unavailable until an approved browser command supplies authoritative message/context bytes plus fresh turn/message IDs; the broker never reconstructs or automatically replays an interrupted turn.
 6. Add current-context inspection, digest/update notices, complete-replacement flow, and clear oversized/unknown-context-limit failure.
 7. Add New conversation and history list/restore/delete with synchronized tab updates and safe confirmation/error recovery.
 8. Preserve only drawer state and port in `localStorage`.
