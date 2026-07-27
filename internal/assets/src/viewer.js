@@ -55,7 +55,7 @@ function installTaskListRule(markdown) {
     `<input class="task-list-item-checkbox" type="checkbox" disabled${tokens[index].meta.checked ? " checked" : ""}> `;
 }
 
-function createMarkdownRenderer(diagramSources) {
+function createMarkdownRenderer(diagramSources, { mermaidEnabled = true } = {}) {
   const markdown = new MarkdownIt({
     html: false,
     linkify: true,
@@ -66,7 +66,7 @@ function createMarkdownRenderer(diagramSources) {
   markdown.renderer.rules.fence = (tokens, index, options, environment, renderer) => {
     const token = tokens[index];
     const language = token.info.trim().split(/\s+/u, 1)[0].toLowerCase();
-    if (language !== "mermaid") {
+    if (language !== "mermaid" || !mermaidEnabled) {
       return defaultFence(tokens, index, options, environment, renderer);
     }
 
@@ -97,7 +97,7 @@ function highlightCode(container) {
 
 function setDocumentTitle(container, doc) {
   const firstHeading = container.querySelector("h1");
-  const title = firstHeading?.textContent?.trim();
+  const title = firstHeading?.textContent?.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/gu, "").trim();
   doc.title = title || DEFAULT_TITLE;
 }
 
@@ -437,14 +437,1319 @@ function viewerContainer(doc) {
   return container;
 }
 
+export const AGENT_DRAWER_STORAGE_KEY = "agent-whiteboard-agent-drawer-open";
+export const AGENT_PORT_STORAGE_KEY = "agent-whiteboard-agent-port";
+export const DEFAULT_AGENT_PORT = 8568;
+export const AGENT_API_VERSION = "1";
+export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v1";
+export const MAX_AGENT_MESSAGE_BYTES = 64 * 1024;
+export const MAX_AGENT_EVENT_BYTES = 256 * 1024;
+
+const AGENT_CONNECT_TIMEOUT_MS = 30_000;
+const ID_PATTERN = /^[A-Za-z0-9_-]{32}$/u;
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/u;
+const DATE_PATTERN = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{1,9}))?(?:Z|([+-])(\d\d):(\d\d))$/u;
+const MAX_STATE_EVENTS = 2048;
+const MAX_TIMELINE_ITEMS = 200;
+const MAX_ARCHIVES = 100;
+const MAX_QUEUE_ITEMS = 64;
+const MAX_TIMELINE_TEXT_BYTES = 96 * 1024;
+const MAX_DELTA_BYTES = 32 * 1024;
+const encoder = new TextEncoder();
+
+const ERROR_DEFINITIONS = {
+  broker_unavailable: ["The local agent broker is unavailable.", "retry_connection"],
+  wrong_port: ["No compatible local agent broker was found on this port.", "edit_port"],
+  local_network_permission_denied: ["Browser permission to reach the local agent broker was denied.", "grant_local_network"],
+  untrusted_origin: ["This whiteboard origin is not trusted by the local agent broker.", "trust_origin"],
+  incompatible_api: ["The local agent broker uses an incompatible API version.", "update_broker"],
+  provider_missing: ["The Pi provider executable is not available.", "install_provider"],
+  authentication_required: ["Pi requires provider-native authentication.", "provider_login"],
+  no_usable_model: ["Pi has no usable default model.", "configure_model"],
+  provider_startup_failed: ["Pi could not be started.", "try_again"],
+  content_only_unavailable: ["Pi cannot enforce content-only access.", "try_again"],
+  context_too_large: ["The complete page context does not fit safely in the selected model.", "reduce_context"],
+  native_session_missing: ["The provider session for this conversation is unavailable.", "restore_session"],
+  provider_crashed: ["Pi stopped unexpectedly and the active turn was interrupted.", "retry_turn"],
+  provider_recovery_failed: ["Pi could not recover the conversation.", "restart_provider"],
+  turn_interrupted: ["The active turn was interrupted and was not replayed.", "retry_turn"],
+  board_revision_unavailable: ["The current whiteboard revision is unavailable.", "reload_board"],
+  board_revision_malformed: ["The current whiteboard revision is malformed.", "reload_board"],
+  invalid_command: ["The broker rejected an invalid command.", "none"],
+  invalid_state: ["The command is not valid for the current conversation state.", "refresh_state"],
+  queue_full: ["The follow-up queue is full.", "edit_queue"],
+  active_turn_conflict: ["Another turn is already active for this conversation.", "wait_for_turn"],
+  stale_reference: ["The referenced conversation item is no longer current.", "refresh_state"],
+  replay_window_unavailable: ["The requested replay window is no longer available.", "reload_conversation"],
+  state_repair_failed: ["The broker could not repair the saved conversation state.", "try_again"],
+  archive_delete_retained: ["The archive was retained because provider deletion did not complete.", "retry_archive_delete"],
+  broker_shutting_down: ["The local agent broker is shutting down.", "retry_connection"],
+  provider_protocol_failure: ["The provider protocol operation failed.", "restart_provider"],
+  provider_malformed_stream: ["The provider returned a malformed event stream.", "restart_provider"],
+  acceptance_outcome_unknown: ["The provider turn acceptance outcome is unknown.", "refresh_state"],
+};
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactObject(value, required, optional = []) {
+  if (!isRecord(value)) return false;
+  const allowed = new Set([...required, ...optional]);
+  const keys = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key)) && keys.every((key) => allowed.has(key));
+}
+
+function validID(value) {
+  if (typeof value !== "string" || !ID_PATTERN.test(value)) return false;
+  try {
+    const decoded = atob(value.replaceAll("-", "+").replaceAll("_", "/"));
+    return decoded.length === 24;
+  } catch {
+    return false;
+  }
+}
+
+function validDate(value) {
+  if (typeof value !== "string") return false;
+  const match = DATE_PATTERN.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , , offsetHourText, offsetMinuteText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const daysInMonth = [31, year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const validOffset = offsetHourText === undefined || (Number(offsetHourText) <= 23 && Number(offsetMinuteText) <= 59);
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1] && Number(hourText) <= 23 && Number(minuteText) <= 59 && Number(secondText) <= 59 && validOffset && Number.isFinite(Date.parse(value));
+}
+
+function validText(value, maximum, allowEmpty = false) {
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0) || encoder.encode(value).length > maximum) return false;
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code < 0x20 && character !== "\t" && character !== "\n" && character !== "\r") return false;
+  }
+  return true;
+}
+
+function validResource(value) {
+  if (!exactObject(value, ["kind", "id", "created_at", "updated_at", "expires_at"])) return false;
+  if (value.kind !== "markdown" || !validID(value.id) || !validDate(value.created_at) || !validDate(value.updated_at)) return false;
+  if (value.expires_at !== null && !validDate(value.expires_at)) return false;
+  const created = Date.parse(value.created_at);
+  return Date.parse(value.updated_at) >= created && (value.expires_at === null || Date.parse(value.expires_at) >= created);
+}
+
+export function validateViewerPayload(value) {
+  if (!isRecord(value) || typeof value.markdown !== "string" || encoder.encode(value.markdown).length > 10 * 1024 * 1024) throw new TypeError("invalid whiteboard source payload");
+  if (!Object.hasOwn(value, "local_agent")) {
+    if (!exactObject(value, ["markdown"])) throw new TypeError("invalid whiteboard source payload");
+    return { markdown: value.markdown, context: "", local_agent: { enabled: false } };
+  }
+  if (!exactObject(value, ["markdown", "context", "local_agent"]) || typeof value.context !== "string" || encoder.encode(value.context).length > 1024 * 1024) {
+    throw new TypeError("invalid whiteboard source payload");
+  }
+  const agent = value.local_agent;
+  if (!exactObject(agent, ["enabled", "context_digest", "resource"]) || agent.enabled !== true || !DIGEST_PATTERN.test(agent.context_digest) || !validResource(agent.resource)) {
+    throw new TypeError("invalid whiteboard source payload");
+  }
+  return value;
+}
+
+export function generateAgentID(cryptoObject = globalThis.crypto) {
+  if (typeof cryptoObject?.getRandomValues !== "function") throw new TypeError("secure randomness is unavailable");
+  const bytes = new Uint8Array(24);
+  cryptoObject.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+export function normalizeAgentPort(value) {
+  const text = typeof value === "number" ? String(value) : value;
+  if (typeof text !== "string" || !/^[1-9]\d{0,4}$/u.test(text)) return DEFAULT_AGENT_PORT;
+  const port = Number(text);
+  return Number.isSafeInteger(port) && port <= 65535 ? port : DEFAULT_AGENT_PORT;
+}
+
+function readBoolean(storage, key) {
+  try {
+    const value = storage?.getItem(key);
+    return value === "true" ? true : value === "false" ? false : false;
+  } catch {
+    return false;
+  }
+}
+
+export function readAgentPreferences(storage) {
+  let port;
+  try {
+    port = storage?.getItem(AGENT_PORT_STORAGE_KEY);
+  } catch {
+    port = undefined;
+  }
+  return { open: readBoolean(storage, AGENT_DRAWER_STORAGE_KEY), port: normalizeAgentPort(port) };
+}
+
+export function persistAgentPreference(storage, key, value) {
+  if (key !== AGENT_DRAWER_STORAGE_KEY && key !== AGENT_PORT_STORAGE_KEY) throw new TypeError("unsupported agent preference");
+  const stored = key === AGENT_DRAWER_STORAGE_KEY ? String(value === true) : String(normalizeAgentPort(value));
+  try {
+    storage?.setItem(key, stored);
+  } catch {
+    // The drawer remains usable when browser storage is disabled.
+  }
+}
+
+function agentOrigin(port) {
+  return `http://127.0.0.1:${normalizeAgentPort(port)}`;
+}
+
+function commandEnvelope({ type, payload, clientID, conversationID, idFactory }) {
+  const commandID = idFactory();
+  if (!validID(commandID) || !validID(clientID) || (conversationID !== null && !validID(conversationID))) throw new TypeError("invalid agent command identity");
+  return {
+    api_version: AGENT_API_VERSION,
+    command_id: commandID,
+    client_id: clientID,
+    conversation_id: conversationID,
+    type,
+    payload,
+  };
+}
+
+export function createConnectCommand({ payload, clientID, replayAfter, idFactory = generateAgentID }) {
+  validateViewerPayload(payload);
+  if (payload.local_agent.enabled !== true) throw new TypeError("local agent is disabled");
+  if (replayAfter && !validID(replayAfter)) throw new TypeError("invalid replay event ID");
+  const connectPayload = {
+    provider: "pi",
+    resource: { ...payload.local_agent.resource },
+    context_digest: payload.local_agent.context_digest,
+  };
+  if (replayAfter) connectPayload.replay_after = replayAfter;
+  return commandEnvelope({ type: "connect", payload: connectPayload, clientID, conversationID: null, idFactory });
+}
+
+export function createPageContext(payload, { title, url, revision }) {
+  let parsedURL;
+  try { parsedURL = new URL(url); } catch { throw new TypeError("invalid page context"); }
+  if (!["initial", "replacement"].includes(revision) || !validText(title, 512) || !validText(url, 8 * 1024) || parsedURL.protocol !== "https:" || parsedURL.username || parsedURL.password || !parsedURL.hostname) throw new TypeError("invalid page context");
+  return {
+    revision,
+    markdown: payload.markdown,
+    creator_context: payload.context,
+    title,
+    url,
+    resource: { ...payload.local_agent.resource },
+    digest: payload.local_agent.context_digest,
+  };
+}
+
+export function createSubmitCommand({ message, payload, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
+  if (!validText(message, MAX_AGENT_MESSAGE_BYTES) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
+  if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
+  const turnID = idFactory();
+  const messageID = idFactory();
+  if (!validID(turnID) || !validID(messageID)) throw new TypeError("invalid agent command identity");
+  const submitPayload = { turn_id: turnID, message_id: messageID, message };
+  if (revision === "initial" || revision === "replacement") {
+    submitPayload.context = createPageContext(payload, { title, url, revision });
+  }
+  return commandEnvelope({ type: "submit", payload: submitPayload, clientID, conversationID, idFactory });
+}
+
+export function createAgentCommand({ type, payload, clientID, conversationID, idFactory = generateAgentID }) {
+  if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
+  const validators = {
+    queue_edit: () => exactObject(payload, ["message_id", "message"]) && validID(payload.message_id) && validText(payload.message, MAX_AGENT_MESSAGE_BYTES),
+    queue_remove: () => exactObject(payload, ["message_id"]) && validID(payload.message_id),
+    interrupt: () => exactObject(payload, ["turn_id"]) && validID(payload.turn_id),
+    new: () => exactObject(payload, []),
+    archive_list: () => exactObject(payload, [], ["before", "limit"]) && (!payload.before || validID(payload.before)) && (!Object.hasOwn(payload, "limit") || Number.isInteger(payload.limit) && payload.limit >= 0 && payload.limit <= 100),
+    history_page: () => exactObject(payload, [], ["before", "limit"]) && (!payload.before || validID(payload.before)) && (!Object.hasOwn(payload, "limit") || Number.isInteger(payload.limit) && payload.limit >= 0 && payload.limit <= 100),
+    archive_restore: () => exactObject(payload, ["archive_id"]) && validID(payload.archive_id),
+    archive_delete: () => exactObject(payload, ["archive_id"]) && validID(payload.archive_id),
+    resync: () => exactObject(payload, [], ["after_event_id"]) && (!payload.after_event_id || validID(payload.after_event_id)),
+  };
+  if (!validators[type]?.()) throw new TypeError("invalid agent command");
+  return commandEnvelope({ type, payload, clientID, conversationID, idFactory });
+}
+
+function validBrowserError(value) {
+  if (!exactObject(value, ["code", "message", "action"])) return false;
+  const definition = ERROR_DEFINITIONS[value.code];
+  return definition?.[0] === value.message && definition?.[1] === value.action;
+}
+
+function validQueueItem(item) {
+  return exactObject(item, ["turn_id", "message_id", "message"]) && validID(item.turn_id) && validID(item.message_id) && validText(item.message, MAX_AGENT_MESSAGE_BYTES);
+}
+
+function validTimelineItem(item) {
+  if (!exactObject(item, ["item_id", "kind", "text", "created_at"], ["turn_id", "message_id"]) || !validID(item.item_id) || !["user", "assistant", "activity"].includes(item.kind) || !validText(item.text, MAX_AGENT_MESSAGE_BYTES) || !validDate(item.created_at)) return false;
+  if (item.kind === "activity") return !Object.hasOwn(item, "message_id") && (!Object.hasOwn(item, "turn_id") || validID(item.turn_id));
+  return validID(item.turn_id) && validID(item.message_id);
+}
+
+function validArchiveItem(item) {
+  return exactObject(item, ["archive_id", "created_at", "updated_at", "provider"], ["model", "preview"]) && validID(item.archive_id) && validDate(item.created_at) && validDate(item.updated_at) && Date.parse(item.updated_at) >= Date.parse(item.created_at) && item.provider === "pi" && (!Object.hasOwn(item, "model") || validText(item.model, 512, true)) && (!Object.hasOwn(item, "preview") || validText(item.preview, 512, true));
+}
+
+const lifecycleValues = new Set(["connecting", "ready", "responding", "interrupted", "unavailable"]);
+const contextValues = new Set(["pending", "accepted", "unchanged", "unavailable"]);
+const providerValues = new Set(["starting", "ready", "unavailable", "recovering"]);
+
+function validActiveTurn(lifecycle, turnID) {
+  if (turnID !== null && !validID(turnID)) return false;
+  return lifecycle === "responding" ? turnID !== null : turnID === null;
+}
+
+function validateEventPayload(type, payload) {
+  switch (type) {
+    case "snapshot":
+      return exactObject(payload, ["lifecycle", "queue", "context_state", "active_turn_id"]) && lifecycleValues.has(payload.lifecycle) && Array.isArray(payload.queue) && payload.queue.length <= MAX_QUEUE_ITEMS && payload.queue.every(validQueueItem) && contextValues.has(payload.context_state) && validActiveTurn(payload.lifecycle, payload.active_turn_id);
+    case "command_result":
+      return exactObject(payload, ["command_id", "status"], ["error"]) && validID(payload.command_id) && ["succeeded", "rejected"].includes(payload.status) && (payload.status === "succeeded" ? !Object.hasOwn(payload, "error") : validBrowserError(payload.error));
+    case "timeline":
+      return exactObject(payload, ["command_id", "items", "next_cursor"]) && validID(payload.command_id) && Array.isArray(payload.items) && payload.items.length <= 100 && payload.items.every(validTimelineItem) && (payload.next_cursor === null || validID(payload.next_cursor));
+    case "history":
+      return exactObject(payload, ["command_id", "items", "next_cursor"]) && validID(payload.command_id) && Array.isArray(payload.items) && payload.items.length <= 100 && payload.items.every(validArchiveItem) && (payload.next_cursor === null || validID(payload.next_cursor));
+    case "user_message":
+    case "assistant_message":
+      return exactObject(payload, ["turn_id", "message_id", "text", "created_at"]) && validID(payload.turn_id) && validID(payload.message_id) && validText(payload.text, MAX_AGENT_MESSAGE_BYTES) && validDate(payload.created_at);
+    case "assistant_delta":
+      return exactObject(payload, ["turn_id", "message_id", "text"]) && validID(payload.turn_id) && validID(payload.message_id) && validText(payload.text, MAX_DELTA_BYTES);
+    case "queue":
+      return exactObject(payload, ["items"]) && Array.isArray(payload.items) && payload.items.length <= MAX_QUEUE_ITEMS && payload.items.every(validQueueItem);
+    case "lifecycle":
+      return exactObject(payload, ["state", "turn_id"]) && lifecycleValues.has(payload.state) && validActiveTurn(payload.state, payload.turn_id);
+    case "provider":
+      return exactObject(payload, ["provider", "state"], ["model"]) && payload.provider === "pi" && providerValues.has(payload.state) && (!Object.hasOwn(payload, "model") || validText(payload.model, 512, true)) && (payload.state !== "ready" || validText(payload.model, 512));
+    case "context":
+      return exactObject(payload, ["digest", "state"]) && DIGEST_PATTERN.test(payload.digest) && contextValues.has(payload.state);
+    case "activity":
+      return exactObject(payload, ["kind", "summary"]) && ["status", "visible_summary", "retry", "compaction"].includes(payload.kind) && validText(payload.summary, 8192);
+    case "blocked":
+      return exactObject(payload, ["kind", "message"]) && ((payload.kind === "tool" && payload.message === "A provider tool request was blocked by content-only policy.") || (payload.kind === "permission" && payload.message === "A provider permission request was blocked by content-only policy."));
+    case "error":
+      return exactObject(payload, ["error"]) && validBrowserError(payload.error);
+    case "completion":
+      return exactObject(payload, ["turn_id"]) && validID(payload.turn_id);
+    case "interruption":
+      return exactObject(payload, ["turn_id", "reason"]) && validID(payload.turn_id) && ["requested", "provider_exit", "shutdown"].includes(payload.reason);
+    case "archive":
+      return exactObject(payload, ["action", "archive_id"]) && ["created", "restored", "deleted"].includes(payload.action) && validID(payload.archive_id);
+    default:
+      return false;
+  }
+}
+
+export function validateAgentEvent(value) {
+  if (!exactObject(value, ["api_version", "event_id", "conversation_id", "type", "timestamp", "payload"]) || value.api_version !== AGENT_API_VERSION || !validID(value.event_id) || !validID(value.conversation_id) || !validDate(value.timestamp) || !validateEventPayload(value.type, value.payload)) {
+    throw new TypeError("invalid agent event");
+  }
+  const payload = value.payload;
+  if (value.type === "timeline" && (new Set(payload.items.map((item) => item.item_id)).size !== payload.items.length || encoder.encode(payload.items.map((item) => item.text).join("")).length > MAX_TIMELINE_TEXT_BYTES || (payload.next_cursor !== null && (payload.items.length === 0 || payload.next_cursor !== payload.items.at(-1).item_id)))) throw new TypeError("invalid agent event");
+  if (value.type === "history" && (new Set(payload.items.map((item) => item.archive_id)).size !== payload.items.length || (payload.next_cursor !== null && (payload.items.length === 0 || payload.next_cursor !== payload.items.at(-1).archive_id)))) throw new TypeError("invalid agent event");
+  if (["snapshot", "queue"].includes(value.type)) {
+    const items = value.type === "snapshot" ? payload.queue : payload.items;
+    if (new Set(items.map((item) => item.message_id)).size !== items.length || new Set(items.map((item) => item.turn_id)).size !== items.length || encoder.encode(items.map((item) => item.message).join("")).length > 96 * 1024) throw new TypeError("invalid agent event");
+  }
+  return value;
+}
+
+function parseJSONWithoutDuplicateKeys(source) {
+  let index = 0;
+  let depth = 0;
+  const skipWhitespace = () => { while (/\s/u.test(source[index] ?? "")) index += 1; };
+  function parseString() {
+    const start = index++;
+    while (index < source.length) {
+      if (source[index] === "\\") { index += 2; continue; }
+      if (source[index++] === '"') return JSON.parse(source.slice(start, index));
+    }
+    throw new SyntaxError("unterminated JSON string");
+  }
+  function parseValue() {
+    skipWhitespace();
+    if (++depth > 64) throw new SyntaxError("JSON nesting is too deep");
+    const character = source[index];
+    if (character === "{") {
+      index += 1;
+      const keys = new Set();
+      skipWhitespace();
+      if (source[index] === "}") index += 1;
+      else for (;;) {
+        skipWhitespace();
+        if (source[index] !== '"') throw new SyntaxError("invalid JSON object key");
+        const key = parseString();
+        if (keys.has(key)) throw new SyntaxError("duplicate JSON object key");
+        keys.add(key);
+        skipWhitespace();
+        if (source[index++] !== ":") throw new SyntaxError("invalid JSON object");
+        parseValue();
+        skipWhitespace();
+        const delimiter = source[index++];
+        if (delimiter === "}") break;
+        if (delimiter !== ",") throw new SyntaxError("invalid JSON object");
+      }
+    } else if (character === "[") {
+      index += 1;
+      skipWhitespace();
+      if (source[index] === "]") index += 1;
+      else for (;;) {
+        parseValue();
+        skipWhitespace();
+        const delimiter = source[index++];
+        if (delimiter === "]") break;
+        if (delimiter !== ",") throw new SyntaxError("invalid JSON array");
+      }
+    } else if (character === '"') {
+      parseString();
+    } else {
+      const start = index;
+      while (index < source.length && !/[\s,}\]]/u.test(source[index])) index += 1;
+      JSON.parse(source.slice(start, index));
+    }
+    depth -= 1;
+  }
+  parseValue();
+  skipWhitespace();
+  if (index !== source.length) throw new SyntaxError("trailing JSON value");
+  return JSON.parse(source);
+}
+
+export function decodeAgentEvent(source) {
+  if (typeof source !== "string" || encoder.encode(source).length > MAX_AGENT_EVENT_BYTES) throw new TypeError("invalid agent event frame");
+  let value;
+  try {
+    value = parseJSONWithoutDuplicateKeys(source);
+  } catch {
+    throw new TypeError("invalid agent event frame");
+  }
+  return validateAgentEvent(value);
+}
+
+async function readBoundedResponseText(response, maximum) {
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let total = 0;
+    let text = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maximum) {
+        void reader.cancel();
+        throw new TypeError("agent response is too large");
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  }
+  const text = await response.text();
+  if (encoder.encode(text).length > maximum) throw new TypeError("agent response is too large");
+  return text;
+}
+
+function parseStrictJSONOrNull(source) {
+  try { return parseJSONWithoutDuplicateKeys(source); }
+  catch { return null; }
+}
+
+export function createAgentState() {
+  return {
+    conversationID: null,
+    lifecycle: "connecting",
+    activeTurnID: null,
+    contextState: "pending",
+    contextDigest: null,
+    provider: { provider: "pi", state: "starting", model: "" },
+    timeline: [],
+    queue: [],
+    archives: [],
+    timelineCursor: null,
+    archiveCursor: null,
+    errors: [],
+    lastEventID: null,
+    seenEventIDs: new Set(),
+    pendingCommandIDs: new Set(),
+    knownCommandIDs: new Set(),
+    connected: false,
+  };
+}
+
+function appendTimeline(state, item) {
+  const key = item.item_id ?? item.message_id ?? `${item.kind}-${state.lastEventID}`;
+  if (state.timeline.some((current) => (current.item_id ?? current.message_id) === key)) return;
+  state.timeline.push({ ...item });
+  if (state.timeline.length > MAX_TIMELINE_ITEMS) state.timeline.splice(0, state.timeline.length - MAX_TIMELINE_ITEMS);
+}
+
+export function registerAgentCommand(state, command) {
+  if (!validID(command?.command_id) || state.pendingCommandIDs.size >= 128) throw new TypeError("invalid pending agent command");
+  while (state.knownCommandIDs.size >= 1024) {
+    const oldest = state.knownCommandIDs.values().next().value;
+    if (state.pendingCommandIDs.has(oldest)) throw new TypeError("agent command correlation window is full");
+    state.knownCommandIDs.delete(oldest);
+  }
+  state.pendingCommandIDs.add(command.command_id);
+  state.knownCommandIDs.add(command.command_id);
+}
+
+export function applyAgentEvent(state, untrustedEvent) {
+  const draft = {
+    ...state,
+    provider: { ...state.provider },
+    timeline: state.timeline.map((item) => ({ ...item })),
+    queue: state.queue.map((item) => ({ ...item })),
+    archives: state.archives.map((item) => ({ ...item })),
+    errors: state.errors.map((item) => ({ ...item })),
+    seenEventIDs: new Set(state.seenEventIDs),
+    pendingCommandIDs: new Set(state.pendingCommandIDs),
+    knownCommandIDs: new Set(state.knownCommandIDs),
+  };
+  const changed = applyAgentEventMutable(draft, untrustedEvent);
+  if (changed) Object.assign(state, draft);
+  return changed;
+}
+
+function applyAgentEventMutable(state, untrustedEvent) {
+  const event = validateAgentEvent(untrustedEvent);
+  if (state.conversationID !== null && state.conversationID !== event.conversation_id) throw new TypeError("agent conversation changed unexpectedly");
+  if (state.seenEventIDs.has(event.event_id)) return false;
+  if (["command_result", "timeline", "history"].includes(event.type) && !state.knownCommandIDs.has(event.payload.command_id)) throw new TypeError("uncorrelated agent command event");
+  state.conversationID = event.conversation_id;
+  state.lastEventID = event.event_id;
+  state.connected = true;
+  state.seenEventIDs.add(event.event_id);
+  while (state.seenEventIDs.size > MAX_STATE_EVENTS) state.seenEventIDs.delete(state.seenEventIDs.values().next().value);
+  const payload = event.payload;
+  switch (event.type) {
+    case "snapshot":
+      state.lifecycle = payload.lifecycle;
+      state.activeTurnID = payload.active_turn_id;
+      state.contextState = payload.context_state;
+      state.queue = payload.queue.map((item) => ({ ...item }));
+      state.connected = true;
+      break;
+    case "timeline": {
+      const known = new Set(state.timeline.map((item) => item.item_id ?? item.message_id));
+      const older = payload.items.filter((item) => !known.has(item.item_id)).map((item) => ({ ...item })).reverse();
+      state.timeline = [...older, ...state.timeline].slice(-MAX_TIMELINE_ITEMS);
+      state.timelineCursor = payload.next_cursor;
+      break;
+    }
+    case "history": {
+      const known = new Set(state.archives.map((item) => item.archive_id));
+      state.archives = [...state.archives, ...payload.items.filter((item) => !known.has(item.archive_id)).map((item) => ({ ...item }))].slice(0, MAX_ARCHIVES);
+      state.archiveCursor = payload.next_cursor;
+      break;
+    }
+    case "user_message":
+      appendTimeline(state, { kind: "user", ...payload });
+      break;
+    case "assistant_delta": {
+      const current = state.timeline.find((item) => item.kind === "assistant" && item.message_id === payload.message_id);
+      if (current) {
+        const next = `${current.text}${payload.text}`;
+        if (encoder.encode(next).length > MAX_AGENT_MESSAGE_BYTES) throw new TypeError("agent stream message is too large");
+        current.text = next;
+      } else appendTimeline(state, { kind: "assistant", ...payload, text: payload.text, streaming: true });
+      break;
+    }
+    case "assistant_message": {
+      const current = state.timeline.find((item) => item.kind === "assistant" && item.message_id === payload.message_id);
+      if (current) Object.assign(current, payload, { streaming: false });
+      else appendTimeline(state, { kind: "assistant", ...payload });
+      break;
+    }
+    case "queue": state.queue = payload.items.map((item) => ({ ...item })); break;
+    case "lifecycle": state.lifecycle = payload.state; state.activeTurnID = payload.turn_id; break;
+    case "provider": state.provider = { provider: payload.provider, state: payload.state, model: payload.model ?? "" }; break;
+    case "context": state.contextDigest = payload.digest; state.contextState = payload.state; break;
+    case "activity": appendTimeline(state, { kind: "activity", activity: payload.kind, text: payload.summary, created_at: event.timestamp, item_id: event.event_id }); break;
+    case "blocked": appendTimeline(state, { kind: "activity", activity: "blocked", text: payload.message, created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
+    case "error": state.errors.push({ ...payload.error }); state.errors = state.errors.slice(-20); appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
+    case "completion": state.lifecycle = "ready"; state.activeTurnID = null; break;
+    case "interruption": state.lifecycle = "interrupted"; state.activeTurnID = null; appendTimeline(state, { kind: "activity", activity: "interruption", text: "The active response was interrupted and was not replayed automatically.", created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
+    case "archive":
+      if (payload.action === "deleted" || payload.action === "restored") state.archives = state.archives.filter((item) => item.archive_id !== payload.archive_id);
+      break;
+    case "command_result":
+      state.pendingCommandIDs.delete(payload.command_id);
+      if (payload.status === "rejected") {
+        state.errors.push({ ...payload.error });
+        appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true });
+      }
+      state.errors = state.errors.slice(-20);
+      break;
+  }
+  return true;
+}
+
+export function renderAgentMarkdown(source, doc = document) {
+  const markdown = createMarkdownRenderer([], { mermaidEnabled: false });
+  const rendered = markdown.render(source);
+  return purifierFor(doc).sanitize(rendered, { FORBID_TAGS: ["img", "picture", "source", "audio", "video"] });
+}
+
+function safeHTTPErrorCode(body, fallback) {
+  try {
+    return validBrowserError(body?.error) ? body.error.code : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function createAgentTransport({
+  payload,
+  port = DEFAULT_AGENT_PORT,
+  clientID = generateAgentID(),
+  fetchImpl = globalThis.fetch?.bind(globalThis),
+  WebSocketImpl = globalThis.WebSocket,
+  onEvent = () => {},
+  onDisconnect = () => {},
+  idFactory = generateAgentID,
+} = {}) {
+  let socket;
+  let fallbackAbort;
+  let currentPort = normalizeAgentPort(port);
+  let conversationID = null;
+  let lastEventID = null;
+  let consented = false;
+  let transportKind = null;
+  let closed = false;
+  const seenEventIDs = new Set();
+
+  function acceptFrame(frame, { requireSnapshot = false } = {}) {
+    const event = decodeAgentEvent(frame);
+    if (requireSnapshot && event.type !== "snapshot") throw new TypeError("fresh agent connection must begin with a snapshot");
+    if (conversationID !== null && event.conversation_id !== conversationID) throw new TypeError("agent conversation changed unexpectedly");
+    if (seenEventIDs.has(event.event_id)) return event;
+    onEvent(event);
+    conversationID = event.conversation_id;
+    seenEventIDs.add(event.event_id);
+    while (seenEventIDs.size > MAX_STATE_EVENTS) seenEventIDs.delete(seenEventIDs.values().next().value);
+    lastEventID = event.event_id;
+    return event;
+  }
+
+  async function probe() {
+    const response = await fetchImpl(`${agentOrigin(currentPort)}/api/v1/agent/status`, {
+      method: "GET",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+    });
+    const responseText = await readBoundedResponseText(response, 4096);
+    const body = parseStrictJSONOrNull(responseText);
+    if (!response.ok) return { ok: false, code: safeHTTPErrorCode(body, "wrong_port") };
+    if (!exactObject(body, ["available", "api_version", "origin_trusted"]) || body.available !== true) return { ok: false, code: "wrong_port" };
+    if (body.api_version !== AGENT_API_VERSION) return { ok: false, code: "incompatible_api" };
+    if (body.origin_trusted !== true) return { ok: false, code: "untrusted_origin" };
+    return { ok: true, code: null };
+  }
+
+  function connectCommand() {
+    return createConnectCommand({ payload, clientID, replayAfter: lastEventID, idFactory });
+  }
+
+  async function fallbackConnect(command) {
+    transportKind = "fallback";
+    fallbackAbort = new AbortController();
+    const response = await fetchImpl(`${agentOrigin(currentPort)}/api/v1/agent/connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": AGENT_API_VERSION },
+      body: JSON.stringify(command),
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+      signal: fallbackAbort.signal,
+    });
+    if (!response.ok || !response.body?.getReader) {
+      let body = null;
+      try { body = parseStrictJSONOrNull(await readBoundedResponseText(response, 4096)); } catch { body = null; }
+      const error = new Error(safeHTTPErrorCode(body, "broker_unavailable"));
+      error.code = safeHTTPErrorCode(body, "broker_unavailable");
+      throw error;
+    }
+    const reader = response.body.getReader();
+    const textDecoder = new TextDecoder("utf-8", { fatal: true });
+    let buffered = "";
+    let firstEvent;
+    while (!closed) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffered += textDecoder.decode(value, { stream: true });
+      if (encoder.encode(buffered).length > MAX_AGENT_EVENT_BYTES * 2) throw new TypeError("agent stream line is too large");
+      for (;;) {
+        const newline = buffered.indexOf("\n");
+        if (newline < 0) break;
+        const line = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        if (!line || line.endsWith("\r")) throw new TypeError("invalid agent stream line");
+        const accepted = acceptFrame(line, { requireSnapshot: firstEvent === undefined && !Object.hasOwn(command.payload, "replay_after") });
+        firstEvent ??= accepted;
+        if (firstEvent) return { firstEvent, reader, buffered, textDecoder };
+      }
+    }
+    throw new Error("broker_unavailable");
+  }
+
+  async function continueFallback(reader, initialBuffer = "", textDecoder = new TextDecoder("utf-8", { fatal: true })) {
+    let buffered = initialBuffer;
+    try {
+      while (!closed) {
+        for (;;) {
+          const newline = buffered.indexOf("\n");
+          if (newline < 0) break;
+          const line = buffered.slice(0, newline);
+          buffered = buffered.slice(newline + 1);
+          if (!line || line.endsWith("\r")) throw new TypeError("invalid agent stream line");
+          acceptFrame(line);
+        }
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffered += textDecoder.decode(value, { stream: true });
+        if (encoder.encode(buffered).length > MAX_AGENT_EVENT_BYTES * 2) throw new TypeError("agent stream line is too large");
+      }
+      buffered += textDecoder.decode();
+      if (buffered) throw new TypeError("truncated agent stream line");
+      if (!closed) onDisconnect(new Error("agent connection closed"));
+    } catch (error) {
+      if (error instanceof TypeError) error.protocolViolation = true;
+      if (!closed) onDisconnect(error);
+    }
+  }
+
+  function websocketConnect(command) {
+    return new Promise((resolve, reject) => {
+      if (typeof WebSocketImpl !== "function") { reject(new Error("websocket unavailable")); return; }
+      let settled = false;
+      const ws = new WebSocketImpl(`${agentOrigin(currentPort).replace("http:", "ws:")}/api/v1/agent/connect`, AGENT_WEBSOCKET_PROTOCOL);
+      const timer = setTimeout(() => {
+        if (!settled) {
+          ws.close();
+          reject(new Error("websocket connection timed out"));
+        }
+      }, AGENT_CONNECT_TIMEOUT_MS);
+      socket = ws;
+      ws.addEventListener("open", () => {
+        if (ws.protocol !== AGENT_WEBSOCKET_PROTOCOL) { clearTimeout(timer); ws.close(); reject(new Error("incompatible websocket")); return; }
+        ws.send(JSON.stringify(command));
+      });
+      ws.addEventListener("message", (message) => {
+        try {
+          if (typeof message.data !== "string") throw new TypeError("text agent frames required");
+          const event = acceptFrame(message.data, { requireSnapshot: !settled && !Object.hasOwn(command.payload, "replay_after") });
+          if (!settled) { settled = true; clearTimeout(timer); transportKind = "websocket"; resolve(event); }
+        } catch (error) {
+          clearTimeout(timer);
+          const failure = error instanceof Error ? error : new Error("invalid agent event");
+          failure.protocolViolation = true;
+          ws.close();
+          if (!settled) reject(failure); else onDisconnect(failure);
+        }
+      });
+      ws.addEventListener("error", () => { if (!settled) { clearTimeout(timer); reject(new Error("websocket handshake failed")); } });
+      ws.addEventListener("close", () => {
+        clearTimeout(timer);
+        if (!settled) reject(new Error("websocket handshake failed"));
+        else if (!closed) onDisconnect(new Error("agent connection closed"));
+      });
+    });
+  }
+
+  async function connect() {
+    if (!consented) throw new Error("agent consent required");
+    closed = false;
+    const command = connectCommand();
+    try {
+      return await websocketConnect(command);
+    } catch (error) {
+      socket?.close?.();
+      if (error?.protocolViolation) throw error;
+      const connected = await fallbackConnect(command);
+      void continueFallback(connected.reader, connected.buffered, connected.textDecoder);
+      return connected.firstEvent;
+    }
+  }
+
+  async function send(command) {
+    if (!consented || !conversationID) throw new Error("agent is not connected");
+    if (transportKind === "websocket" && socket?.readyState === 1) {
+      socket.send(JSON.stringify(command));
+      return;
+    }
+    const response = await fetchImpl(`${agentOrigin(currentPort)}/api/v1/agent/commands`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": AGENT_API_VERSION },
+      body: JSON.stringify(command),
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+    });
+    let responseText = "";
+    try { responseText = await readBoundedResponseText(response, MAX_AGENT_EVENT_BYTES); } catch { responseText = ""; }
+    if (!response.ok) {
+      const body = parseStrictJSONOrNull(responseText);
+      const error = new Error(safeHTTPErrorCode(body, "broker_unavailable"));
+      error.code = safeHTTPErrorCode(body, "broker_unavailable");
+      throw error;
+    }
+    if (!responseText) throw new TypeError("missing agent command result");
+    if (conversationID !== command.conversation_id) throw new TypeError("stale agent command result");
+    const result = acceptFrame(responseText);
+    if (result.type !== "command_result" || result.payload.command_id !== command.command_id) throw new TypeError("uncorrelated agent command result");
+  }
+
+  return {
+    clientID,
+    get conversationID() { return conversationID; },
+    get lastEventID() { return lastEventID; },
+    get transportKind() { return transportKind; },
+    get consented() { return consented; },
+    probe,
+    setPort(value) { currentPort = normalizeAgentPort(value); },
+    grantConsent() { consented = true; },
+    connect,
+    reconnect: connect,
+    resetConversation() { conversationID = null; lastEventID = null; seenEventIDs.clear(); },
+    resetReplay() { lastEventID = null; seenEventIDs.clear(); },
+    send,
+    close() { closed = true; socket?.close?.(); fallbackAbort?.abort(); transportKind = null; },
+  };
+}
+
+function actionGuidance(action, doc) {
+  const origin = doc.location?.origin ?? "this HTTPS origin";
+  const guidance = {
+    none: "",
+    retry_connection: "Check the broker and try connecting again.",
+    edit_port: "Check the configured broker port.",
+    grant_local_network: "Allow Local Network Access for this site in Chrome, then check again.",
+    trust_origin: `Trust this exact origin with: agent-whiteboard agent trust add ${origin}`,
+    update_broker: "Update agent-whiteboard so the browser and broker API versions match.",
+    install_provider: "Install the pinned Pi provider executable, then restart the broker.",
+    provider_login: "Run Pi in a terminal and complete provider-native login, then try again.",
+    configure_model: "Configure a usable default model in Pi, then try again.",
+    try_again: "Try the operation again; if it still fails, restart the broker.",
+    restart_provider: "Restart the local agent broker before trying again.",
+    reduce_context: "Reduce the complete page Markdown or creator context before trying again.",
+    restore_session: "Restore an available archive or start a new conversation.",
+    retry_turn: "Send a new message when ready; interrupted turns are never replayed automatically.",
+    reload_board: "Reload the whiteboard to obtain its current complete revision.",
+    refresh_state: "Reconnect to refresh the conversation state; no turn will be resubmitted.",
+    edit_queue: "Edit or remove a queued follow-up before trying again.",
+    wait_for_turn: "Wait for the active turn to finish or stop it first.",
+    reload_conversation: "Reconnect for a fresh snapshot; no turn will be resubmitted.",
+    retry_archive_delete: "Try deleting the retained archive again.",
+  };
+  return guidance[action] ?? "";
+}
+
+function browserErrorText(code, doc, fallback) {
+  const definition = ERROR_DEFINITIONS[code];
+  if (!definition) return fallback;
+  const guidance = actionGuidance(definition[1], doc);
+  return guidance ? `${definition[0]} ${guidance}` : definition[0];
+}
+
+function appendAgentMessage(doc, container, item) {
+  const article = doc.createElement("article");
+  article.className = `agent-message agent-message-${item.kind}`;
+  const label = doc.createElement("strong");
+  label.textContent = item.kind === "assistant" ? "Pi" : "You";
+  const body = doc.createElement("div");
+  body.className = "agent-message-body";
+  body.innerHTML = renderAgentMarkdown(item.text, doc);
+  article.append(label, body);
+  container.append(article);
+}
+
+export function createAgentDrawer({ payload, doc = document, storage = browserStorage(doc), transportFactory = createAgentTransport, pageTitle = doc.title, pageURL = doc.location.href } = {}) {
+  const preferences = readAgentPreferences(storage);
+  const state = createAgentState();
+  let open = preferences.open;
+  let port = preferences.port;
+  let restoreFocus;
+  let contextRevision;
+  let contextAccepted = false;
+  let contextCommandID = null;
+  let contextDeliveryUnknown = false;
+  let reconnectTimer;
+  let destroyed = false;
+  let handoffCommandID = null;
+
+  const toggle = doc.createElement("button");
+  toggle.type = "button";
+  toggle.className = "agent-toggle";
+  toggle.setAttribute("aria-controls", "agent-whiteboard-agent-drawer");
+  toggle.setAttribute("aria-label", "Open local agent");
+
+  const statusDot = doc.createElement("span");
+  statusDot.className = "agent-status-dot";
+  statusDot.setAttribute("aria-hidden", "true");
+  const toggleText = doc.createElement("span");
+  toggleText.textContent = "Agent";
+  toggle.append(statusDot, toggleText);
+
+  const overlay = doc.createElement("button");
+  overlay.type = "button";
+  overlay.className = "agent-overlay";
+  overlay.setAttribute("aria-label", "Close local agent");
+
+  const drawer = doc.createElement("aside");
+  drawer.id = "agent-whiteboard-agent-drawer";
+  drawer.className = "agent-drawer";
+  drawer.setAttribute("role", "complementary");
+  drawer.setAttribute("aria-label", "Local agent conversation");
+  drawer.setAttribute("aria-modal", "false");
+
+  const header = doc.createElement("header");
+  header.className = "agent-drawer-header";
+  const heading = doc.createElement("h2");
+  heading.textContent = "Local agent";
+  const liveStatus = doc.createElement("p");
+  liveStatus.className = "agent-live-status";
+  liveStatus.setAttribute("role", "status");
+  liveStatus.setAttribute("aria-live", "polite");
+  liveStatus.textContent = "Checking local broker…";
+  const close = doc.createElement("button");
+  close.type = "button";
+  close.className = "agent-icon-button";
+  close.setAttribute("aria-label", "Close local agent");
+  close.textContent = "×";
+  header.append(heading, liveStatus, close);
+
+  const setup = doc.createElement("section");
+  setup.className = "agent-setup";
+  const portLabel = doc.createElement("label");
+  portLabel.textContent = "Broker port";
+  const portInput = doc.createElement("input");
+  portInput.type = "number";
+  portInput.min = "1";
+  portInput.max = "65535";
+  portInput.inputMode = "numeric";
+  portInput.value = String(port);
+  portInput.setAttribute("aria-label", "Local agent broker port");
+  portLabel.append(portInput);
+  const consentDisclosure = doc.createElement("p");
+  consentDisclosure.className = "agent-consent";
+  consentDisclosure.textContent = "Connect to your local Pi agent in content-only mode. No page content is sent when you connect. Your first message sends the complete Page Markdown and Creator context, and may resume a conversation saved by your local broker.";
+  const guidance = doc.createElement("p");
+  guidance.className = "agent-guidance";
+  const checkButton = doc.createElement("button");
+  checkButton.type = "button";
+  checkButton.textContent = "Check again";
+  const connectButton = doc.createElement("button");
+  connectButton.type = "button";
+  connectButton.className = "agent-primary";
+  connectButton.textContent = "Connect";
+  setup.append(portLabel, consentDisclosure, guidance, checkButton, connectButton);
+
+  const actions = doc.createElement("div");
+  actions.className = "agent-actions";
+  const reconnectButton = doc.createElement("button"); reconnectButton.type = "button"; reconnectButton.textContent = "Reconnect";
+  const newButton = doc.createElement("button"); newButton.type = "button"; newButton.textContent = "New";
+  const historyButton = doc.createElement("button"); historyButton.type = "button"; historyButton.textContent = "Archives";
+  actions.append(reconnectButton, newButton, historyButton);
+
+  const contextDetails = doc.createElement("details");
+  contextDetails.className = "agent-context";
+  const contextSummary = doc.createElement("summary"); contextSummary.textContent = "Page context";
+  const contextStatus = doc.createElement("p");
+  const contextMetadata = doc.createElement("p");
+  contextMetadata.textContent = `Markdown resource updated ${payload.local_agent.resource.updated_at}. Complete context is sent only with the next initial or replacement message.`;
+  const markdownLabel = doc.createElement("h3"); markdownLabel.textContent = "Page Markdown";
+  const markdownContext = doc.createElement("pre"); markdownContext.textContent = payload.markdown; markdownContext.setAttribute("aria-label", "Page Markdown");
+  const creatorLabel = doc.createElement("h3"); creatorLabel.textContent = "Creator context";
+  const creatorContext = doc.createElement("pre"); creatorContext.textContent = payload.context; creatorContext.setAttribute("aria-label", "Creator context");
+  contextDetails.append(contextSummary, contextStatus, contextMetadata, markdownLabel, markdownContext, creatorLabel, creatorContext);
+
+  const timeline = doc.createElement("section");
+  timeline.className = "agent-timeline";
+  timeline.setAttribute("aria-label", "Conversation");
+
+  const queue = doc.createElement("section");
+  queue.className = "agent-queue";
+  queue.setAttribute("aria-label", "Queued follow-ups");
+
+  const archives = doc.createElement("section");
+  archives.className = "agent-archives";
+  archives.setAttribute("aria-label", "Conversation archives");
+  archives.hidden = true;
+
+  const composer = doc.createElement("form");
+  composer.className = "agent-composer";
+  const message = doc.createElement("textarea");
+  message.maxLength = MAX_AGENT_MESSAGE_BYTES;
+  message.setAttribute("aria-label", "Message Pi about this whiteboard");
+  const sendButton = doc.createElement("button"); sendButton.type = "submit"; sendButton.textContent = "Send";
+  const stopButton = doc.createElement("button"); stopButton.type = "button"; stopButton.textContent = "Stop";
+  composer.append(message, sendButton, stopButton);
+
+  drawer.append(header, setup, actions, contextDetails, timeline, queue, archives, composer);
+  doc.body.append(overlay, drawer, toggle);
+
+  const transport = transportFactory({
+    payload,
+    port,
+    onEvent(event) {
+      if (!applyAgentEvent(state, event)) return;
+      if (event.type === "command_result" && event.payload.command_id === handoffCommandID && event.payload.status === "rejected") handoffCommandID = null;
+      if (event.type === "command_result" && event.payload.command_id === contextCommandID && event.payload.status === "rejected") contextCommandID = null;
+      if (event.type === "snapshot" && contextDeliveryUnknown) {
+        if (contextCommandID !== null) state.pendingCommandIDs.delete(contextCommandID);
+        contextCommandID = null;
+        contextDeliveryUnknown = false;
+      }
+      if ((event.type === "context" && ["accepted", "unchanged"].includes(event.payload.state)) || (event.type === "snapshot" && ["accepted", "unchanged"].includes(event.payload.context_state))) {
+        contextAccepted = true;
+        contextRevision = undefined;
+        contextCommandID = null;
+        contextDeliveryUnknown = false;
+      }
+      if (event.type === "context" && event.payload.state === "pending" && contextAccepted) contextRevision = "replacement";
+      if (event.type === "timeline" && state.contextState === "pending" && contextRevision === undefined && contextCommandID === null) contextRevision = state.timeline.length > 0 ? "replacement" : "initial";
+      render();
+    },
+    onDisconnect(error) {
+      state.connected = false;
+      state.lifecycle = "unavailable";
+      if (contextCommandID !== null) {
+        contextDeliveryUnknown = true;
+        resetForFreshSnapshot({ preserveContextDelivery: true });
+      }
+      if (handoffCommandID !== null) {
+        transport.resetConversation();
+        state.conversationID = null;
+        state.seenEventIDs.clear();
+        state.timeline = [];
+        state.queue = [];
+        state.timelineCursor = null;
+        state.pendingCommandIDs.clear();
+        state.knownCommandIDs.clear();
+        state.contextState = "pending";
+        state.contextDigest = null;
+        contextAccepted = false;
+        contextRevision = undefined;
+        contextCommandID = null;
+        contextDeliveryUnknown = false;
+        handoffCommandID = null;
+      }
+      render();
+      if (error?.protocolViolation) {
+        liveStatus.textContent = "The local broker sent an invalid event stream. Update or restart the broker before reconnecting.";
+        return;
+      }
+      if (transport.consented) scheduleReconnect();
+    },
+  });
+
+  function resetForFreshSnapshot({ preserveContextDelivery = false } = {}) {
+    transport.resetReplay();
+    state.seenEventIDs.clear();
+    state.lastEventID = null;
+    state.timeline = [];
+    state.timelineCursor = null;
+    state.pendingCommandIDs.clear();
+    state.knownCommandIDs.clear();
+    if (!preserveContextDelivery) {
+      contextRevision = undefined;
+      contextCommandID = null;
+      contextDeliveryUnknown = false;
+    }
+  }
+
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(async () => {
+      if (destroyed) return;
+      try {
+        await transport.reconnect();
+        if (state.timeline.length === 0) void sendCommand("history_page", { limit: 50 });
+      } catch (error) {
+        if (error?.code === "replay_window_unavailable") resetForFreshSnapshot();
+        if (!destroyed) scheduleReconnect();
+      }
+    }, 1000);
+  }
+
+  function setOpen(next, { focus = true } = {}) {
+    open = next;
+    const modal = open && doc.defaultView?.matchMedia?.("(max-width: 40rem)").matches === true;
+    drawer.classList.toggle("is-open", open);
+    overlay.classList.toggle("is-open", open);
+    drawer.setAttribute("role", modal ? "dialog" : "complementary");
+    drawer.setAttribute("aria-modal", String(modal));
+    doc.body.classList.toggle("agent-drawer-modal-open", modal);
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.setAttribute("aria-label", open ? "Close local agent" : "Open local agent");
+    persistAgentPreference(storage, AGENT_DRAWER_STORAGE_KEY, open);
+    if (open && focus) {
+      restoreFocus = doc.activeElement;
+      close.focus();
+    } else if (!open && focus) {
+      restoreFocus?.focus?.();
+    }
+  }
+
+  function render() {
+    statusDot.dataset.state = state.connected ? state.lifecycle : "unavailable";
+    if (state.connected) {
+      const model = state.provider.model ? ` (${state.provider.model})` : "";
+      liveStatus.textContent = `Pi ${state.provider.state}${model}; conversation ${state.lifecycle}.`;
+    }
+    setup.hidden = state.connected;
+    composer.hidden = !state.connected;
+    actions.hidden = !state.connected;
+    const awaitingContextDecision = state.contextState === "pending" && contextRevision === undefined;
+    sendButton.disabled = awaitingContextDecision || contextCommandID !== null || contextDeliveryUnknown;
+    stopButton.disabled = state.activeTurnID === null;
+    message.setAttribute("aria-describedby", "agent-whiteboard-context-status");
+    contextStatus.id = "agent-whiteboard-context-status";
+    contextStatus.textContent = contextDeliveryUnknown
+      ? `Digest ${state.contextDigest ?? payload.local_agent.context_digest}; delivery outcome unknown. Reconnect before sending another message.`
+      : awaitingContextDecision
+        ? `Digest ${state.contextDigest ?? payload.local_agent.context_digest}; checking whether complete context is initial or replacement.`
+        : `Digest ${state.contextDigest ?? payload.local_agent.context_digest}; context ${state.contextState}.`;
+    timeline.replaceChildren();
+    for (const item of state.timeline) {
+      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item);
+      else {
+        const details = doc.createElement("details");
+        details.className = `agent-activity agent-activity-${item.activity}`;
+        details.open = item.expanded === true;
+        const summary = doc.createElement("summary"); summary.textContent = item.activity === "blocked" ? "Blocked request" : item.activity === "error" ? "Error" : item.activity === "interruption" ? "Interrupted" : "Activity";
+        const content = doc.createElement("p");
+        const guidanceText = actionGuidance(item.action, doc);
+        content.textContent = guidanceText ? `${item.text} ${guidanceText}` : item.text;
+        details.append(summary, content); timeline.append(details);
+      }
+    }
+    if (state.timelineCursor) {
+      const older = doc.createElement("button");
+      older.type = "button";
+      older.className = "agent-page-button";
+      older.textContent = "Load older messages";
+      older.addEventListener("click", () => void sendCommand("history_page", { before: state.timelineCursor, limit: 50 }));
+      timeline.prepend(older);
+    }
+    queue.replaceChildren();
+    if (state.queue.length) {
+      const title = doc.createElement("h3"); title.textContent = "Queued follow-ups"; queue.append(title);
+    }
+    for (const item of state.queue) {
+      const row = doc.createElement("div"); row.className = "agent-queue-item";
+      const input = doc.createElement("textarea"); input.value = item.message; input.maxLength = MAX_AGENT_MESSAGE_BYTES; input.setAttribute("aria-label", "Edit queued message");
+      const save = doc.createElement("button"); save.type = "button"; save.textContent = "Save";
+      const remove = doc.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
+      save.addEventListener("click", () => {
+        if (!validText(input.value, MAX_AGENT_MESSAGE_BYTES)) {
+          input.setCustomValidity("Enter a queued message no larger than 64 KiB.");
+          input.reportValidity();
+          return;
+        }
+        input.setCustomValidity("");
+        void sendCommand("queue_edit", { message_id: item.message_id, message: input.value });
+      });
+      remove.addEventListener("click", () => void sendCommand("queue_remove", { message_id: item.message_id }));
+      row.append(input, save, remove); queue.append(row);
+    }
+    archives.replaceChildren();
+    for (const item of state.archives) {
+      const row = doc.createElement("article");
+      const preview = doc.createElement("p"); preview.textContent = `Updated ${item.updated_at}${item.model ? ` · ${item.model}` : ""}`;
+      const restore = doc.createElement("button"); restore.type = "button"; restore.textContent = "Restore";
+      const remove = doc.createElement("button"); remove.type = "button"; remove.textContent = "Delete";
+      restore.addEventListener("click", () => {
+        if (doc.defaultView?.confirm("Archive the current conversation and restore this one?")) void forcedConversationCommand("archive_restore", { archive_id: item.archive_id });
+      });
+      remove.addEventListener("click", () => {
+        if (doc.defaultView?.confirm("Delete this archived conversation permanently?")) void sendCommand("archive_delete", { archive_id: item.archive_id });
+      });
+      row.append(preview, restore, remove); archives.append(row);
+    }
+    if (state.archiveCursor) {
+      const more = doc.createElement("button");
+      more.type = "button";
+      more.className = "agent-page-button";
+      more.textContent = "Load more archives";
+      more.addEventListener("click", () => void sendCommand("archive_list", { before: state.archiveCursor, limit: 50 }));
+      archives.append(more);
+    }
+  }
+
+  async function sendCommand(type, commandPayload, { handoff = false } = {}) {
+    const command = createAgentCommand({ type, payload: commandPayload, clientID: transport.clientID, conversationID: transport.conversationID });
+    registerAgentCommand(state, command);
+    if (handoff) handoffCommandID = command.command_id;
+    try { await transport.send(command); }
+    catch (error) {
+      if (error?.code) state.pendingCommandIDs.delete(command.command_id);
+      if (handoffCommandID === command.command_id) handoffCommandID = null;
+      liveStatus.textContent = `Agent error: ${browserErrorText(error.code, doc, "The local broker is unavailable.")}`;
+    }
+    return command;
+  }
+
+  async function forcedConversationCommand(type, commandPayload) {
+    await sendCommand(type, commandPayload, { handoff: true });
+  }
+
+  async function probe() {
+    liveStatus.textContent = "Checking local broker…";
+    try {
+      const result = await transport.probe();
+      const messages = {
+        wrong_port: "No compatible broker was found. Check the port.",
+        local_network_permission_denied: "Allow Local Network Access in Chrome, then check again.",
+        untrusted_origin: `This whiteboard origin is not trusted. Run: agent-whiteboard agent trust add ${doc.location.origin}`,
+        incompatible_api: "The local broker version is incompatible.",
+        broker_unavailable: "The local broker is unavailable. Check the port and Local Network Access.",
+      };
+      liveStatus.textContent = result.ok ? "Local broker available; connect when ready." : messages[result.code] ?? messages.broker_unavailable;
+      guidance.textContent = liveStatus.textContent;
+      connectButton.disabled = !result.ok;
+      return result;
+    } catch {
+      let permissionDenied = false;
+      try {
+        const permission = await doc.defaultView?.navigator?.permissions?.query({ name: "local-network-access" });
+        permissionDenied = permission?.state === "denied";
+      } catch {
+        permissionDenied = false;
+      }
+      const code = permissionDenied ? "local_network_permission_denied" : "broker_unavailable";
+      liveStatus.textContent = permissionDenied
+        ? "Allow Local Network Access for this site in Chrome, then check again."
+        : "The local broker is unavailable. Check the port and Local Network Access.";
+      guidance.textContent = liveStatus.textContent;
+      connectButton.disabled = true;
+      return { ok: false, code };
+    }
+  }
+
+  toggle.addEventListener("click", () => setOpen(!open));
+  close.addEventListener("click", () => setOpen(false));
+  overlay.addEventListener("click", () => setOpen(false));
+  portInput.addEventListener("change", () => {
+    const normalized = normalizeAgentPort(portInput.value);
+    if (String(normalized) !== portInput.value) {
+      portInput.setCustomValidity("Enter a decimal port from 1 to 65535.");
+      portInput.reportValidity();
+      return;
+    }
+    portInput.setCustomValidity("");
+    port = normalized;
+    persistAgentPreference(storage, AGENT_PORT_STORAGE_KEY, port);
+    transport.setPort(port);
+    void probe();
+  });
+  checkButton.addEventListener("click", () => void probe());
+  connectButton.addEventListener("click", async () => {
+    transport.grantConsent();
+    liveStatus.textContent = "Connecting to Pi…";
+    try {
+      await transport.connect();
+      render();
+      void sendCommand("history_page", { limit: 50 });
+    } catch (error) { liveStatus.textContent = `Unable to connect: ${browserErrorText(error.code, doc, "check the broker, port, Local Network Access, and trust.")}`; }
+  });
+  composer.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = message.value;
+    if (!validText(text, MAX_AGENT_MESSAGE_BYTES)) { message.setCustomValidity("Enter a message no larger than 64 KiB."); message.reportValidity(); return; }
+    if (state.contextState === "pending" && contextRevision === undefined) {
+      liveStatus.textContent = "Wait for the broker to determine whether this page context is initial or replacement.";
+      return;
+    }
+    if (contextCommandID !== null || contextDeliveryUnknown) {
+      liveStatus.textContent = "Wait for the complete context handoff to be confirmed before sending another message.";
+      return;
+    }
+    message.setCustomValidity("");
+    const revision = state.contextState === "pending" ? contextRevision : undefined;
+    const command = createSubmitCommand({ message: text, payload, clientID: transport.clientID, conversationID: transport.conversationID, title: pageTitle, url: pageURL, revision });
+    registerAgentCommand(state, command);
+    if (revision !== undefined) contextCommandID = command.command_id;
+    render();
+    try { await transport.send(command); message.value = ""; }
+    catch (error) {
+      if (error?.code) state.pendingCommandIDs.delete(command.command_id);
+      if (contextCommandID === command.command_id) {
+        if (error?.code) contextCommandID = null;
+        else contextDeliveryUnknown = true;
+      }
+      render();
+      liveStatus.textContent = `Unable to send: ${browserErrorText(error.code, doc, "the delivery outcome is unknown; reconnect before trying again.")}`;
+    }
+  });
+  stopButton.addEventListener("click", () => { if (state.activeTurnID) void sendCommand("interrupt", { turn_id: state.activeTurnID }); });
+  reconnectButton.addEventListener("click", () => {
+    transport.close();
+    state.connected = false;
+    state.lifecycle = "unavailable";
+    render();
+    scheduleReconnect();
+  });
+  newButton.addEventListener("click", () => {
+    if (doc.defaultView?.confirm("Archive this conversation and start a new one?")) void forcedConversationCommand("new", {});
+  });
+  historyButton.addEventListener("click", () => { archives.hidden = !archives.hidden; if (!archives.hidden) void sendCommand("archive_list", { limit: 50 }); });
+  doc.addEventListener("keydown", onKeydown);
+  function onKeydown(event) {
+    if (event.key === "Escape" && open) { setOpen(false); return; }
+    if (event.key !== "Tab" || !open || doc.defaultView?.matchMedia?.("(max-width: 40rem)").matches !== true) return;
+    const focusable = [...drawer.querySelectorAll("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), summary")].filter((element) => element.closest("[hidden]") === null);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && (doc.activeElement === first || !drawer.contains(doc.activeElement))) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && doc.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+
+  setOpen(open, { focus: open });
+  render();
+  void probe();
+
+  return {
+    state,
+    transport,
+    elements: { toggle, drawer, close, overlay, portInput, connectButton, composer, message, timeline, queue, archives },
+    get open() { return open; },
+    setOpen,
+    probe,
+    sendCommand,
+    destroy() {
+      destroyed = true;
+      clearTimeout(reconnectTimer);
+      transport.close();
+      doc.removeEventListener("keydown", onKeydown);
+      doc.body.classList.remove("agent-drawer-modal-open");
+      toggle.remove(); overlay.remove(); drawer.remove();
+    },
+  };
+}
+
 export async function bootViewer(doc = document) {
   const sourceElement = doc.querySelector("#agent-whiteboard-source");
   if (!sourceElement) return undefined;
-  const payload = JSON.parse(sourceElement.textContent || "null");
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload) || typeof payload.markdown !== "string") {
-    throw new TypeError("invalid whiteboard source payload");
+  let parsed;
+  try { parsed = JSON.parse(sourceElement.textContent || "null"); }
+  catch { throw new TypeError("invalid whiteboard source payload"); }
+  const payload = validateViewerPayload(parsed);
+  const viewer = await renderWhiteboard(payload.markdown, { container: viewerContainer(doc), doc });
+  if (payload.local_agent.enabled) {
+    viewer.agent = createAgentDrawer({ payload, doc });
+    const destroyViewer = viewer.destroy.bind(viewer);
+    viewer.destroy = () => { viewer.agent.destroy(); destroyViewer(); };
   }
-  return renderWhiteboard(payload.markdown, { container: viewerContainer(doc), doc });
+  return viewer;
 }
 
 function startBrowserEntry() {

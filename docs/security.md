@@ -8,7 +8,7 @@ Resources are public but non-indexed. `X-Robots-Tag` and Markdown robots meta as
 
 Every new or updated Markdown resource contains two artifacts: rendered source and creator context. The context is intended to summarize goals, decisions, assumptions, and open questions. It must not contain hidden reasoning, credentials, unrelated personal data, sensitive data, private source, or raw tool output.
 
-The current browser viewer renders only the Markdown source, but `GET /api/v1/whiteboards/markdown/{id}` and `agent-whiteboard --json get markdown ID` return both exact strings. Anyone holding the public URL can recover its ID and use that retrieval route. Context therefore has exactly the same bearer-capability exposure and expiration/deletion lifecycle as source; it is not private merely because it is absent from the rendered page.
+The main browser document renders only the Markdown source. When the local-agent viewer is enabled, its Page context disclosure also lets the reader inspect the exact Markdown and creator context before sending a message. `GET /api/v1/whiteboards/markdown/{id}` and `agent-whiteboard --json get markdown ID` likewise return both exact strings. Anyone holding the public URL can recover its ID and use that retrieval route. Context therefore has exactly the same bearer-capability exposure and expiration/deletion lifecycle as source; it is not private merely because it is absent from the main rendered document.
 
 Markdown is rendered client-side by bundled JavaScript. Raw Markdown HTML is disabled, links and generated SVG are sanitized with DOMPurify, Mermaid uses strict security settings, and no CDN is needed. The JSON source envelope escapes script-closing sequences. These controls reduce injection risk but do not make publication of secrets safe.
 
@@ -19,6 +19,14 @@ Standalone HTML remains trusted active content, but its public capability URL no
 Sandboxing does not generically prevent a script-capable child from navigating itself. Under the supported wrapper, the outer `frame-src 'self'` policy limits that navigation to the publishing origin, while `credentialless` and `no-referrer` prevent publishing-origin cookies and the capability Referer from accompanying it. Submitted code can still deliberately encode its `/content` capability URL into a permitted same-origin navigation, exposing it to publishing-origin request handlers or logs. Cross-origin child navigation is additionally blocked by the wrapper's current CSP, but direct top-level navigation to `/content` is not the supported entry point and does not gain the wrapper's destination restriction. Treat self-navigation capability disclosure as an accepted risk and publish only HTML you trust.
 
 Image uploads accept PNG, JPEG, GIF, and WebP only after signature detection and format-specific configuration validation. SVG is rejected because it can contain active content. Responses use `nosniff`, a detected media type, inline filename, no-store caching, and `noimageindex`.
+
+## Local browser agent
+
+The optional Markdown drawer talks only to the configured decimal port on literal `127.0.0.1`; it never scans hosts or ports. Before explicit Connect consent, it may issue only the bounded status request. Connect carries resource metadata and the context digest but no Markdown or creator context. The first contextual message sends both complete artifacts together; later messages omit them until an observed resource revision requires a complete replacement. A disconnect or uncertain delivery never automatically resubmits a model turn.
+
+The browser accepts only the versioned, strictly validated broker event schema. Provider payloads, native IDs, paths, credentials, hidden reasoning, and raw tool output are not browser events. Assistant Markdown is sanitized and automatic-fetch media is removed. Browser storage is limited to theme, drawer-open state, and the decimal loopback port—never capabilities, messages, context, conversation IDs, provider output, or credentials.
+
+Chrome Local Network Access is an additional browser permission, not broker authorization. The broker still binds only to IPv4 loopback, requires an exact canonical HTTPS Origin and Host, reloads the trust list for admission, omits credentials and referrers from browser requests, and applies exact-origin CORS. Standalone HTML has an opaque origin and cannot obtain this authority.
 
 ## Configuration and origin allowlist
 

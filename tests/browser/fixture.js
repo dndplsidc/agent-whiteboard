@@ -71,10 +71,10 @@ function runProcess(command, args, { cwd = projectRoot, env = process.env, timeo
   });
 }
 
-function startServer(binary, storage, env) {
+function startServer(binary, storage, env, globalArgs = []) {
   const child = spawn(
     binary,
-    ["serve", "--host", "127.0.0.1", "--port", "0", "--storage", storage, "--log-mode", "json"],
+    [...globalArgs, "serve", "--host", "127.0.0.1", "--port", "0", "--storage", storage, "--log-mode", "json"],
     { cwd: projectRoot, env, stdio: ["ignore", "pipe", "pipe"] },
   );
   child.stdout.setEncoding("utf8");
@@ -275,8 +275,49 @@ function createHTTPSSource(credentials, upstreamURL) {
 
 function webSocketFrame(payload) {
   const body = Buffer.from(payload);
-  if (body.length >= 126) throw new Error("test WebSocket payload is unexpectedly large");
-  return Buffer.concat([Buffer.from([0x81, body.length]), body]);
+  if (body.length < 126) return Buffer.concat([Buffer.from([0x81, body.length]), body]);
+  if (body.length <= 0xffff) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(body.length, 2);
+    return Buffer.concat([header, body]);
+  }
+  const header = Buffer.alloc(10);
+  header[0] = 0x81;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(body.length), 2);
+  return Buffer.concat([header, body]);
+}
+
+function consumeClientWebSocketFrames(buffer, onPayload) {
+  let offset = 0;
+  while (buffer.length - offset >= 2) {
+    const first = buffer[offset];
+    const second = buffer[offset + 1];
+    let length = second & 0x7f;
+    let headerLength = 2;
+    if (length === 126) {
+      if (buffer.length - offset < 4) break;
+      length = buffer.readUInt16BE(offset + 2);
+      headerLength = 4;
+    } else if (length === 127) {
+      if (buffer.length - offset < 10) break;
+      const wide = buffer.readBigUInt64BE(offset + 2);
+      if (wide > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("oversized WebSocket test frame");
+      length = Number(wide);
+      headerLength = 10;
+    }
+    if ((second & 0x80) === 0 || buffer.length - offset < headerLength + 4 + length) break;
+    const maskOffset = offset + headerLength;
+    const bodyOffset = maskOffset + 4;
+    const payload = Buffer.alloc(length);
+    for (let index = 0; index < length; index += 1) payload[index] = buffer[bodyOffset + index] ^ buffer[maskOffset + (index % 4)];
+    if (first !== 0x81) throw new Error("unexpected WebSocket test frame");
+    onPayload(payload.toString("utf8"));
+    offset = bodyOffset + length;
+  }
+  return buffer.subarray(offset);
 }
 
 function requestRecord(request) {
@@ -415,6 +456,213 @@ function createLoopbackBroker(initialAllowedOrigin) {
   };
 }
 
+function protocolID(value) {
+  return Buffer.alloc(24, value % 256).toString("base64url");
+}
+
+function createSidebarBroker(initialAllowedOrigin) {
+  const requests = [];
+  const streams = new Set();
+  const webSockets = new Set();
+  const webSocketCommands = [];
+  const conversationID = protocolID(201);
+  let allowedOrigin = initialAllowedOrigin;
+  let webSocketEnabled = false;
+  let sequence = 1;
+  let contextState = "pending";
+  let contextDigest = "0".repeat(64);
+  let holdResponses = false;
+  let activeTurn = null;
+  const queue = [];
+  const history = [];
+
+  const nextEvent = (type, payload) => ({
+    api_version: "1",
+    event_id: protocolID(sequence++),
+    conversation_id: conversationID,
+    type,
+    timestamp: "2026-07-27T03:04:05Z",
+    payload,
+  });
+  const snapshotPayload = () => ({ lifecycle: activeTurn === null ? "ready" : "responding", queue: queue.map((item) => ({ ...item })), context_state: contextState, active_turn_id: activeTurn });
+  const corsHeaders = () => ({ "Access-Control-Allow-Origin": allowedOrigin, Vary: "Origin" });
+  const sendJSON = (response, record, status, value) => {
+    const body = `${JSON.stringify(value)}\n`;
+    record.status = status;
+    record.responseHeaders = { ...corsHeaders(), "Content-Type": "application/json", "Cache-Control": "no-store" };
+    response.writeHead(status, record.responseHeaders);
+    response.end(body);
+  };
+  const emit = (event) => {
+    const encoded = JSON.stringify(event);
+    for (const response of streams) response.write(`${encoded}\n`);
+    for (const socket of webSockets) socket.write(webSocketFrame(encoded));
+  };
+  const commandResult = (command, error) => nextEvent("command_result", error
+    ? { command_id: command.command_id, status: "rejected", error }
+    : { command_id: command.command_id, status: "succeeded" });
+  const handleCommand = (command) => {
+    if (command.type === "history_page") {
+      emit(nextEvent("timeline", { command_id: command.command_id, items: [...history].reverse(), next_cursor: null }));
+    } else if (command.type === "submit") {
+      if (activeTurn !== null) {
+        queue.push({ turn_id: command.payload.turn_id, message_id: command.payload.message_id, message: command.payload.message });
+        emit(nextEvent("queue", { items: queue.map((item) => ({ ...item })) }));
+      } else {
+        if (command.payload.context) {
+          contextState = "accepted";
+          contextDigest = command.payload.context.digest;
+          emit(nextEvent("context", { digest: contextDigest, state: "accepted" }));
+        }
+        const createdAt = "2026-07-27T03:04:05Z";
+        const user = { item_id: command.payload.message_id, kind: "user", turn_id: command.payload.turn_id, message_id: command.payload.message_id, text: command.payload.message, created_at: createdAt };
+        history.push(user);
+        activeTurn = command.payload.turn_id;
+        emit(nextEvent("user_message", { turn_id: user.turn_id, message_id: user.message_id, text: user.text, created_at: createdAt }));
+        emit(nextEvent("lifecycle", { state: "responding", turn_id: command.payload.turn_id }));
+        if (!holdResponses) {
+          const assistantID = protocolID(150 + history.length);
+          emit(nextEvent("assistant_delta", { turn_id: command.payload.turn_id, message_id: assistantID, text: "Fixture " }));
+          emit(nextEvent("assistant_delta", { turn_id: command.payload.turn_id, message_id: assistantID, text: "reply" }));
+          const assistant = { item_id: assistantID, kind: "assistant", turn_id: command.payload.turn_id, message_id: assistantID, text: "Fixture reply", created_at: createdAt };
+          history.push(assistant);
+          emit(nextEvent("assistant_message", { turn_id: assistant.turn_id, message_id: assistant.message_id, text: assistant.text, created_at: createdAt }));
+          emit(nextEvent("completion", { turn_id: command.payload.turn_id }));
+          activeTurn = null;
+        }
+      }
+    } else if (command.type === "queue_edit") {
+      const item = queue.find((candidate) => candidate.message_id === command.payload.message_id);
+      if (item) item.message = command.payload.message;
+      emit(nextEvent("queue", { items: queue.map((candidate) => ({ ...candidate })) }));
+    } else if (command.type === "queue_remove") {
+      const index = queue.findIndex((candidate) => candidate.message_id === command.payload.message_id);
+      if (index >= 0) queue.splice(index, 1);
+      emit(nextEvent("queue", { items: queue.map((candidate) => ({ ...candidate })) }));
+    } else if (command.type === "interrupt" && activeTurn === command.payload.turn_id) {
+      emit(nextEvent("interruption", { turn_id: activeTurn, reason: "requested" }));
+      activeTurn = null;
+    }
+    const result = commandResult(command);
+    emit(result);
+    return result;
+  };
+
+  const server = http.createServer((request, response) => {
+    const record = requestRecord(request);
+    requests.push(record);
+    if (request.headers.origin !== allowedOrigin) {
+      sendJSON(response, record, 403, { error: { code: "untrusted_origin", message: "This whiteboard origin is not trusted by the local agent broker.", action: "trust_origin" } });
+      return;
+    }
+    if (request.method === "OPTIONS") {
+      record.status = 204;
+      record.responseHeaders = {
+        ...corsHeaders(),
+        "Access-Control-Allow-Methods": request.headers["access-control-request-method"] ?? "POST",
+        "Access-Control-Allow-Headers": "content-type, x-agent-whiteboard-api-version",
+      };
+      response.writeHead(204, record.responseHeaders);
+      response.end();
+      return;
+    }
+    if (request.method === "GET" && request.url === "/api/v1/agent/status") {
+      sendJSON(response, record, 200, { available: true, api_version: "1", origin_trusted: true });
+      return;
+    }
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      record.body = Buffer.concat(chunks).toString("utf8");
+      let command;
+      try { command = JSON.parse(record.body); }
+      catch {
+        sendJSON(response, record, 400, { error: { code: "invalid_command", message: "The broker rejected an invalid command.", action: "none" } });
+        return;
+      }
+      if (request.method === "POST" && request.url === "/api/v1/agent/connect") {
+        record.status = 200;
+        record.responseHeaders = { ...corsHeaders(), "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" };
+        response.writeHead(200, record.responseHeaders);
+        streams.add(response);
+        response.once("close", () => streams.delete(response));
+        response.write(`${JSON.stringify(nextEvent("snapshot", snapshotPayload()))}\n`);
+        response.write(`${JSON.stringify(nextEvent("provider", { provider: "pi", state: "ready", model: "fixture-model" }))}\n`);
+        return;
+      }
+      if (request.method !== "POST" || request.url !== "/api/v1/agent/commands") {
+        sendJSON(response, record, 404, { error: { code: "invalid_command", message: "The broker rejected an invalid command.", action: "none" } });
+        return;
+      }
+
+      sendJSON(response, record, 200, handleCommand(command));
+    });
+  });
+  server.on("upgrade", (request, socket) => {
+    const record = requestRecord(request);
+    requests.push(record);
+    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v1") {
+      record.status = 503;
+      socket.end("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    const key = request.headers["sec-websocket-key"];
+    const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+    record.status = 101;
+    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v1" };
+    socket.write([
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Accept: ${accept}`,
+      "Sec-WebSocket-Protocol: agent-whiteboard.v1",
+      "",
+      "",
+    ].join("\r\n"));
+    webSockets.add(socket);
+    socket.once("close", () => webSockets.delete(socket));
+    let buffered = Buffer.alloc(0);
+    let connected = false;
+    socket.on("data", (chunk) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      try {
+        buffered = consumeClientWebSocketFrames(buffered, (payload) => {
+          const command = JSON.parse(payload);
+          webSocketCommands.push(command);
+          if (!connected) {
+            connected = true;
+            socket.write(webSocketFrame(JSON.stringify(nextEvent("snapshot", snapshotPayload()))));
+            socket.write(webSocketFrame(JSON.stringify(nextEvent("provider", { provider: "pi", state: "ready", model: "fixture-model" }))));
+            return;
+          }
+          handleCommand(command);
+        });
+      } catch {
+        socket.destroy();
+      }
+    });
+  });
+
+  return {
+    server,
+    requests,
+    webSocketCommands,
+    setAllowedOrigin(origin) { allowedOrigin = origin; },
+    setWebSocketEnabled(value) { webSocketEnabled = value; },
+    setHoldResponses(value) { holdResponses = value; },
+    resetState() {
+      contextState = "pending";
+      contextDigest = "0".repeat(64);
+      holdResponses = false;
+      activeTurn = null;
+      queue.splice(0);
+      history.splice(0);
+      sequence = 1;
+    },
+    resetRequests() { requests.splice(0); webSocketCommands.splice(0); webSocketEnabled = false; },
+  };
+}
+
 function createLoopbackStub() {
   const requests = [];
   const server = http.createServer((request, response) => {
@@ -538,6 +786,67 @@ export const test = base.extend({
           closeNodeServer(broker.server, brokerSockets),
           closeNodeServer(source.server, sourceSockets),
         ]);
+      }
+    },
+    { scope: "worker" },
+  ],
+
+  localAgentSidebar: [
+    async ({ server }, use) => {
+      const configPath = path.join(server.root, "sidebar-config.yaml");
+      const storage = path.join(server.root, "sidebar-storage");
+      await fs.writeFile(configPath, "version: 1\nviewer:\n  local_agent:\n    enabled: true\n", { mode: 0o600 });
+      await fs.mkdir(storage, { recursive: true });
+      const running = startServer(server.binary, storage, server.env, ["--config", configPath]);
+      let source;
+      let sourceSockets;
+      let broker;
+      let brokerSockets;
+      try {
+        const listening = await running.listening;
+        await waitForReady(listening.url, running.child, running.output);
+        const credentials = await createTestCertificate(server.root);
+        source = createHTTPSSource(credentials, listening.url);
+        sourceSockets = trackConnections(source.server);
+        const sourcePort = await listen(source.server, "::1");
+        const sourceOrigin = `https://[::1]:${sourcePort}`;
+        broker = createSidebarBroker(sourceOrigin);
+        brokerSockets = trackConnections(broker.server);
+        const brokerPort = await listen(broker.server, "127.0.0.1");
+        let sequence = 0;
+        await use({
+          origin: sourceOrigin,
+          brokerPort,
+          brokerRequests: broker.requests,
+          webSocketCommands: broker.webSocketCommands,
+          resetBrokerRequests: broker.resetRequests,
+          resetBrokerState: broker.resetState,
+          setWebSocketEnabled: broker.setWebSocketEnabled,
+          setHoldResponses: broker.setHoldResponses,
+          publish: async (markdown, creatorContext = "Creator context for the local Pi agent.\n") => {
+            const fixturePath = path.join(server.root, `sidebar-${sequence}.md`);
+            const contextPath = path.join(server.root, `sidebar-${sequence++}-context.md`);
+            await Promise.all([
+              fs.writeFile(fixturePath, markdown, { mode: 0o600 }),
+              fs.writeFile(contextPath, creatorContext, { mode: 0o600 }),
+            ]);
+            const { stdout, stderr } = await runProcess(
+              server.binary,
+              ["--server", listening.url, "--json", "create", "markdown", "--context", contextPath, "--expires-in", "0", fixturePath],
+              { env: server.env, timeout: processTimeout },
+            );
+            if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);
+            const envelope = JSON.parse(stdout);
+            const pathName = new URL(envelope.resource.url).pathname;
+            return { ...envelope.resource, url: `${sourceOrigin}${pathName}`, markdown, context: creatorContext };
+          },
+        });
+      } finally {
+        await Promise.all([
+          broker ? closeNodeServer(broker.server, brokerSockets) : Promise.resolve(),
+          source ? closeNodeServer(source.server, sourceSockets) : Promise.resolve(),
+        ]);
+        await stopServer(running.child);
       }
     },
     { scope: "worker" },
