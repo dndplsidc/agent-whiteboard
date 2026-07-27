@@ -248,6 +248,11 @@ func TestLaunchRequestCarriesAnExplicitProcessSpecification(t *testing.T) {
 		{Executable: valid.Executable, Arguments: []string{}, Environment: []string{}, WorkingDirectory: "relative/workspace"},
 		{Executable: valid.Executable, Arguments: []string{"bad\x00argument"}, Environment: []string{}, WorkingDirectory: workingDirectory},
 		{Executable: valid.Executable, Arguments: []string{}, Environment: []string{"BAD\x00=value"}, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: []string{}, Environment: []string{"MISSING_EQUALS"}, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: []string{}, Environment: []string{"=empty-name"}, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: []string{}, Environment: []string{"HOME=/first", "HOME=/second"}, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: make([]string, provider.MaxLaunchItems+1), Environment: []string{}, WorkingDirectory: workingDirectory},
+		{Executable: valid.Executable, Arguments: []string{strings.Repeat("x", provider.MaxLaunchAggregateBytes+1)}, Environment: []string{}, WorkingDirectory: workingDirectory},
 	}
 	for _, request := range invalid {
 		require.Error(t, request.Validate())
