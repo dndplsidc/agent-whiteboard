@@ -62,8 +62,8 @@ func testProviderContext(resource provider.Resource) provider.PageContext {
 
 func TestProviderAndReadinessErrorsAreExhaustivelyMappedWithoutCauses(t *testing.T) {
 	expected := map[provider.ProviderErrorCode]agentprotocol.BrowserErrorCode{
-		provider.ErrorNotReady:               agentprotocol.ErrorBrokerUnavailable,
-		provider.ErrorReadinessFailed:        agentprotocol.ErrorBrokerUnavailable,
+		provider.ErrorNotReady:               agentprotocol.ErrorProviderStartupFailed,
+		provider.ErrorReadinessFailed:        agentprotocol.ErrorProviderStartupFailed,
 		provider.ErrorMissingExecutable:      agentprotocol.ErrorProviderMissing,
 		provider.ErrorStartupFailed:          agentprotocol.ErrorProviderStartupFailed,
 		provider.ErrorAuthenticationRequired: agentprotocol.ErrorAuthenticationRequired,
@@ -83,14 +83,19 @@ func TestProviderAndReadinessErrorsAreExhaustivelyMappedWithoutCauses(t *testing
 		require.Equal(t, expected[code], mapped.Code())
 		require.NotContains(t, mapped.Error(), string(code))
 	}
-	for _, state := range []provider.ReadinessState{
-		provider.MissingExecutable, provider.AuthenticationRequired, provider.StartupFailed,
-		provider.NoUsableModel, provider.ContentOnlyUnavailable, provider.ProtocolIncompatible,
-	} {
+	readinessCodes := map[provider.ReadinessState]agentprotocol.BrowserErrorCode{
+		provider.MissingExecutable:      agentprotocol.ErrorProviderMissing,
+		provider.AuthenticationRequired: agentprotocol.ErrorAuthenticationRequired,
+		provider.StartupFailed:          agentprotocol.ErrorProviderStartupFailed,
+		provider.NoUsableModel:          agentprotocol.ErrorNoUsableModel,
+		provider.ContentOnlyUnavailable: agentprotocol.ErrorContentOnlyUnavailable,
+		provider.ProtocolIncompatible:   agentprotocol.ErrorProviderProtocolFailure,
+	}
+	for state, expectedCode := range readinessCodes {
 		readiness := provider.Readiness{State: state, Provider: provider.NamePi, Model: "model"}
 		mapped, unavailable := MapReadiness(readiness)
 		require.True(t, unavailable)
-		require.True(t, mapped.Valid())
+		require.Equal(t, expectedCode, mapped.Code())
 	}
 	mapped, unavailable := MapReadiness(provider.Readiness{State: provider.Ready, Provider: provider.NamePi, Model: "model"})
 	require.False(t, unavailable)
@@ -104,11 +109,17 @@ func TestProviderAndReadinessErrorsAreExhaustivelyMappedWithoutCauses(t *testing
 	mapped = MapError(cause)
 	require.Equal(t, agentprotocol.ErrorProviderProtocolFailure, mapped.Code())
 	require.NotContains(t, mapped.Error(), cause.Error())
+
+	var browserCoded interface {
+		BrowserErrorCode() agentprotocol.BrowserErrorCode
+	} = mapped
+	require.Equal(t, agentprotocol.ErrorProviderProtocolFailure, browserCoded.BrowserErrorCode())
 }
 
 func TestConversionsRequireCanonicalAuthorizedOriginAndCopyContextBytes(t *testing.T) {
 	resource := testResource(testID('A'))
-	identity := ConnectIdentity{Origin: "https://example.com", Provider: agentprotocol.ProviderPi, Resource: resource}
+	page := testContext(resource)
+	identity := ConnectIdentity{Origin: "https://example.com", Provider: agentprotocol.ProviderPi, Resource: resource, ContextDigest: page.Digest}
 	state, err := ConnectIdentityToState(identity, "https://example.com")
 	require.NoError(t, err)
 	require.Equal(t, "https://example.com", state.Origin)
@@ -116,10 +127,9 @@ func TestConversionsRequireCanonicalAuthorizedOriginAndCopyContextBytes(t *testi
 
 	_, err = ConnectIdentityToState(identity, "https://EXAMPLE.com")
 	require.Error(t, err)
-	_, err = ConnectIdentityToState(ConnectIdentity{Origin: "https://EXAMPLE.com", Provider: agentprotocol.ProviderPi, Resource: resource}, "https://example.com")
+	_, err = ConnectIdentityToState(ConnectIdentity{Origin: "https://EXAMPLE.com", Provider: agentprotocol.ProviderPi, Resource: resource, ContextDigest: page.Digest}, "https://example.com")
 	require.Error(t, err)
 
-	page := testContext(resource)
 	converted, err := PageContextToProvider(page, identity, identity.Origin)
 	require.NoError(t, err)
 	require.Equal(t, page.Digest, converted.Digest)
@@ -135,6 +145,15 @@ func TestConversionsRequireCanonicalAuthorizedOriginAndCopyContextBytes(t *testi
 	require.Equal(t, byte('c'), page.CreatorContext[0])
 
 	_, err = PageContextToProvider(page, identity, "https://other.example.com")
+	require.Error(t, err)
+	mismatch := page
+	mismatch.Resource.UpdatedAt = mismatch.Resource.UpdatedAt.Add(time.Second)
+	_, err = PageContextToProvider(mismatch, identity, identity.Origin)
+	require.Error(t, err)
+	mismatch = page
+	mismatch.Digest = contextdigest.Calculate([]byte(mismatch.Markdown+"changed"), []byte(mismatch.CreatorContext))
+	mismatch.Markdown += "changed"
+	_, err = PageContextToProvider(mismatch, identity, identity.Origin)
 	require.Error(t, err)
 	page.URL = "http://example.com/board/readme"
 	_, err = PageContextToProvider(page, identity, identity.Origin)
@@ -176,13 +195,13 @@ func TestReplayLogUsesWireBytesEvictsExactlyAndFiltersTargets(t *testing.T) {
 	broadcast.EventID = sequenceID(3)
 	require.NoError(t, log.Append(broadcast))
 
-	events, err := log.ReplayForClient(clientB, first.EventID)
+	events, err := log.Replay(clientB, first.EventID)
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	require.Equal(t, broadcast.EventID, events[0].EventID)
-	_, err = log.ReplayForClient(clientB, targeted.EventID)
+	_, err = log.Replay(clientB, targeted.EventID)
 	require.ErrorIs(t, err, ErrReplayCursorMissing)
-	events, err = log.ReplayForClient(clientA, first.EventID)
+	events, err = log.Replay(clientA, first.EventID)
 	require.NoError(t, err)
 	require.Len(t, events, 2)
 	require.NotEqual(t, first.EventID, events[0].EventID) // cursor is strictly later
@@ -199,34 +218,79 @@ func TestReplayLogUsesWireBytesEvictsExactlyAndFiltersTargets(t *testing.T) {
 	}
 	require.LessOrEqual(t, log.Len(), MaxReplayEvents)
 	require.LessOrEqual(t, log.Bytes(), MaxReplayBytes)
-	_, err = log.Replay(first.EventID)
+	_, err = log.Replay(clientA, first.EventID)
 	require.ErrorIs(t, err, ErrReplayCursorEvicted)
 }
 
 func TestReplayLogReturnsStablePayloadCopies(t *testing.T) {
 	log := NewReplayLog()
-	event := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: agentprotocol.EventQueue, Timestamp: testTime(), Payload: agentprotocol.QueuePayload{Items: []agentprotocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Message: "original"}}}}
+	active := testID('D')
+	event := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: agentprotocol.EventSnapshot, Timestamp: testTime(), Payload: agentprotocol.SnapshotPayload{Lifecycle: agentprotocol.LifecycleResponding, Queue: []agentprotocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Message: "original"}}, ContextState: agentprotocol.ContextPending, ActiveTurnID: &active}}
 	require.NoError(t, log.Append(event))
-	payload := event.Payload.(agentprotocol.QueuePayload)
-	payload.Items[0].Message = "changed"
-	got, err := log.Replay("")
+	payload := event.Payload.(agentprotocol.SnapshotPayload)
+	payload.Queue[0].Message = "changed"
+	*payload.ActiveTurnID = testID('E')
+
+	lifecycleTurn := testID('H')
+	lifecycle := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(101), ConversationID: testID('A'), Type: agentprotocol.EventLifecycle, Timestamp: testTime(), Payload: agentprotocol.LifecyclePayload{State: agentprotocol.LifecycleResponding, TurnID: &lifecycleTurn}}
+	require.NoError(t, log.Append(lifecycle))
+	*lifecycle.Payload.(agentprotocol.LifecyclePayload).TurnID = testID('I')
+
+	got, err := log.Replay(testID('G'), "")
 	require.NoError(t, err)
-	require.Equal(t, "original", got[0].Payload.(agentprotocol.QueuePayload).Items[0].Message)
+	stored := got[0].Payload.(agentprotocol.SnapshotPayload)
+	require.Equal(t, "original", stored.Queue[0].Message)
+	require.Equal(t, testID('D'), *stored.ActiveTurnID)
+	require.Equal(t, testID('H'), *got[1].Payload.(agentprotocol.LifecyclePayload).TurnID)
+	*stored.ActiveTurnID = testID('F')
+	*got[1].Payload.(agentprotocol.LifecyclePayload).TurnID = testID('J')
+	again, err := log.Replay(testID('G'), "")
+	require.NoError(t, err)
+	require.Equal(t, testID('D'), *again[0].Payload.(agentprotocol.SnapshotPayload).ActiveTurnID)
+	require.Equal(t, testID('H'), *again[1].Payload.(agentprotocol.LifecyclePayload).TurnID)
 	require.NotContains(t, string(mustEncodeEvent(t, got[0])), "creator_context")
+}
+
+func TestReplayEvictionClassificationTracksRecentVisibilityWithBoundedMemory(t *testing.T) {
+	log := NewReplayLog()
+	clientA := testID('A')
+	clientB := testID('B')
+	conversation := testID('C')
+	recentTargetedIndex := MaxReplayEvents * 2
+	for index := 1; index <= MaxReplayEvents*3; index++ {
+		event := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(uint64(index)), ConversationID: conversation, Type: agentprotocol.EventActivity, Timestamp: testTime(), Payload: agentprotocol.ActivityPayload{Kind: agentprotocol.ActivityStatus, Summary: strings.Repeat("x", 5000)}}
+		target := ""
+		if index == recentTargetedIndex {
+			target = clientA
+		}
+		if target == "" {
+			require.NoError(t, log.Append(event))
+		} else {
+			require.NoError(t, log.AppendForClient(target, event))
+		}
+	}
+	require.Equal(t, MaxReplayEvents, log.evictedLen())
+	recentEvicted := sequenceID(uint64(recentTargetedIndex))
+	_, err := log.Replay(clientB, recentEvicted)
+	require.ErrorIs(t, err, ErrReplayCursorMissing)
+	_, err = log.Replay(clientA, recentEvicted)
+	require.ErrorIs(t, err, ErrReplayCursorEvicted)
 }
 
 func TestQueueFIFOBoundsDuplicatesEditRemoveAndContextErasure(t *testing.T) {
 	queue := NewQueue()
 	resource := provider.Resource{Kind: provider.ResourceMarkdown, ID: testID('H'), CreatedAt: testTime(), UpdatedAt: testTime().Add(time.Minute)}
 	context := testProviderContext(resource)
-	turnA := provider.TurnRequest{TurnID: testID('I'), MessageID: testID('J'), Message: "first", Context: &context}
-	turnB := provider.TurnRequest{TurnID: testID('K'), MessageID: testID('L'), Message: "second"}
+	turnA := QueuedTurn{TurnID: testID('I'), MessageID: testID('J'), Message: "first", Context: &context}
+	turnB := QueuedTurn{TurnID: testID('K'), MessageID: testID('L'), Message: "second"}
 	require.NoError(t, queue.Enqueue(turnA))
 	require.NoError(t, queue.Enqueue(turnB))
 	require.Equal(t, len("first")+len("second"), queue.Bytes())
 	require.Equal(t, []agentprotocol.QueueItem{{TurnID: turnA.TurnID, MessageID: turnA.MessageID, Message: "first"}, {TurnID: turnB.TurnID, MessageID: turnB.MessageID, Message: "second"}}, queue.Items())
-	require.ErrorIs(t, queue.Enqueue(provider.TurnRequest{TurnID: turnA.TurnID, MessageID: testID('M'), Message: "duplicate"}), ErrQueueDuplicateID)
-	require.ErrorIs(t, queue.Enqueue(provider.TurnRequest{TurnID: testID('N'), MessageID: turnB.MessageID, Message: "duplicate"}), ErrQueueDuplicateID)
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: turnA.TurnID, MessageID: testID('M'), Message: "duplicate"}), ErrQueueDuplicateID)
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('N'), MessageID: turnB.MessageID, Message: "duplicate"}), ErrQueueDuplicateID)
+	secondContext := testProviderContext(resource)
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('M'), MessageID: testID('N'), Message: "second context", Context: &secondContext}), ErrQueueContextConflict)
 	require.NoError(t, queue.Edit(turnA.MessageID, "edited"))
 	require.Equal(t, "edited", queue.Items()[0].Message)
 	require.ErrorIs(t, queue.Edit(testID('O'), "missing"), ErrQueueItemNotFound)
@@ -241,20 +305,27 @@ func TestQueueFIFOBoundsDuplicatesEditRemoveAndContextErasure(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, turnB.TurnID, dequeued.TurnID)
 	require.True(t, queue.Empty())
+
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('M'), MessageID: testID('N'), Message: "second context", Context: &secondContext}))
+	secondOwned := queue.items[0].context
+	queue.Clear()
+	require.True(t, queue.Empty())
+	require.Nil(t, secondOwned.Markdown)
+	require.Nil(t, secondOwned.CreatorContext)
 }
 
 func TestQueueBoundsAreByteAndItemExact(t *testing.T) {
 	queue := NewQueue()
 	for index := 0; index < MaxQueueItems; index++ {
-		require.NoError(t, queue.Enqueue(provider.TurnRequest{TurnID: sequenceID(uint64(index + 1)), MessageID: sequenceID(uint64(index + 1000)), Message: "x"}))
+		require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(uint64(index + 1)), MessageID: sequenceID(uint64(index + 1000)), Message: "x"}))
 	}
-	require.ErrorIs(t, queue.Enqueue(provider.TurnRequest{TurnID: sequenceID(10000), MessageID: sequenceID(10001), Message: "x"}), ErrQueueFull)
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(10000), MessageID: sequenceID(10001), Message: "x"}), ErrQueueFull)
 
 	queue = NewQueue()
 	message := strings.Repeat("界", 49152/len("界"))
-	require.NoError(t, queue.Enqueue(provider.TurnRequest{TurnID: testID('P'), MessageID: testID('Q'), Message: message}))
-	require.NoError(t, queue.Enqueue(provider.TurnRequest{TurnID: testID('R'), MessageID: testID('S'), Message: message}))
-	require.ErrorIs(t, queue.Enqueue(provider.TurnRequest{TurnID: testID('W'), MessageID: testID('X'), Message: "x"}), ErrQueueFull)
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('P'), MessageID: testID('Q'), Message: message}))
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('R'), MessageID: testID('S'), Message: message}))
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('W'), MessageID: testID('X'), Message: "x"}), ErrQueueFull)
 }
 
 type testIDGenerator struct {
@@ -271,6 +342,67 @@ func (generator *testIDGenerator) NewID() (string, error) {
 type testClock struct{ now time.Time }
 
 func (clock testClock) Now() time.Time { return clock.now }
+
+func TestEventFactoryRejectsTypedNilDependenciesAndPayload(t *testing.T) {
+	var ids *testIDGenerator
+	_, err := NewEventFactory(testID('T'), ids, testClock{now: testTime()})
+	require.ErrorIs(t, err, ErrNilEventIDGenerator)
+	var clock *nilClock
+	_, err = NewEventFactory(testID('T'), &testIDGenerator{}, clock)
+	require.ErrorIs(t, err, ErrNilEventClock)
+
+	factory, err := NewEventFactory(testID('T'), &testIDGenerator{ids: []string{testID('U')}}, testClock{now: testTime()})
+	require.NoError(t, err)
+	var payload *agentprotocol.CompletionPayload
+	_, err = factory.New(payload)
+	require.Error(t, err)
+}
+
+type nilClock struct{}
+
+func (*nilClock) Now() time.Time { return time.Time{} }
+
+func TestEventFactoryValidatesAndConvertsEveryProviderEvent(t *testing.T) {
+	now := testTime()
+	providerEvents := []provider.Event{
+		provider.NewUserMessageEvent(testID('A'), testID('B'), "question", now),
+		provider.NewAssistantDeltaEvent(testID('A'), testID('C'), "part"),
+		provider.NewAssistantMessageEvent(testID('A'), testID('C'), "answer", now),
+		provider.NewActivityEvent(testID('A'), provider.ActivityStatus, "working"),
+		provider.NewBlockedEvent(testID('A'), provider.BlockedTool),
+		provider.NewCompletionEvent(testID('A')),
+		provider.NewInterruptionEvent(testID('A'), provider.InterruptionRequested),
+		provider.NewTerminalFailureEvent(testID('A'), provider.NewProviderError(provider.ErrorProtocolFailure)),
+	}
+	expected := []agentprotocol.EventType{
+		agentprotocol.EventUserMessage,
+		agentprotocol.EventAssistantDelta,
+		agentprotocol.EventAssistantMessage,
+		agentprotocol.EventActivity,
+		agentprotocol.EventBlocked,
+		agentprotocol.EventCompletion,
+		agentprotocol.EventInterruption,
+		agentprotocol.EventError,
+	}
+	ids := make([]string, len(providerEvents))
+	for index := range ids {
+		ids[index] = sequenceID(uint64(index + 1))
+	}
+	factory, err := NewEventFactory(testID('T'), &testIDGenerator{ids: ids}, testClock{now: now})
+	require.NoError(t, err)
+	for index, providerEvent := range providerEvents {
+		event, err := factory.FromProvider(providerEvent)
+		require.NoError(t, err)
+		require.Equal(t, expected[index], event.Type)
+	}
+
+	malformed := provider.NewCompletionEvent(testID('V'))
+	malformed.Text = "forbidden provider field"
+	_, err = factory.FromProvider(malformed)
+	var brokerFailure BrokerError
+	require.ErrorAs(t, err, &brokerFailure)
+	require.Equal(t, agentprotocol.ErrorProviderMalformedStream, brokerFailure.Code())
+}
 
 func TestEventFactoryUsesInjectedIDAndClockAndValidates(t *testing.T) {
 	conversation := testID('T')

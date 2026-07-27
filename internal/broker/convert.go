@@ -17,9 +17,10 @@ import (
 // conversation. Origin is deliberately kept outside agentprotocol's payload:
 // it is supplied by the authenticated HTTP request boundary.
 type ConnectIdentity struct {
-	Origin   string
-	Provider agentprotocol.ProviderName
-	Resource agentprotocol.Resource
+	Origin        string
+	Provider      agentprotocol.ProviderName
+	Resource      agentprotocol.Resource
+	ContextDigest string
 }
 
 func (identity ConnectIdentity) Validate(authorizedOrigin string) error {
@@ -31,7 +32,7 @@ func (identity ConnectIdentity) Validate(authorizedOrigin string) error {
 	if err != nil || authorized != authorizedOrigin || authorized != identity.Origin {
 		return errors.New("connect origin is not the authorized canonical origin")
 	}
-	if identity.Provider != agentprotocol.ProviderPi || validateProtocolResource(identity.Resource) != nil {
+	if identity.Provider != agentprotocol.ProviderPi || validateProtocolResource(identity.Resource) != nil || !validDigest(identity.ContextDigest) {
 		return errors.New("invalid connect identity")
 	}
 	return nil
@@ -60,7 +61,7 @@ func IdentityFromConnect(origin string, payload agentprotocol.ConnectPayload, au
 			return agentstate.Identity{}, errors.New("invalid replay cursor")
 		}
 	}
-	return ConnectIdentityToState(ConnectIdentity{Origin: origin, Provider: payload.Provider, Resource: payload.Resource}, authorizedOrigin)
+	return ConnectIdentityToState(ConnectIdentity{Origin: origin, Provider: payload.Provider, Resource: payload.Resource, ContextDigest: payload.ContextDigest}, authorizedOrigin)
 }
 
 func ResourceToProvider(resource agentprotocol.Resource) (provider.Resource, error) {
@@ -100,6 +101,9 @@ func PageContextToProvider(context agentprotocol.PageContext, identity ConnectId
 	if err := validateProtocolPageContext(context); err != nil {
 		return provider.PageContext{}, err
 	}
+	if !equalProtocolResource(context.Resource, identity.Resource) || context.Digest != identity.ContextDigest {
+		return provider.PageContext{}, errors.New("page context does not match the connected revision")
+	}
 	if err := requireSameOriginHTTPS(context.URL, identity.Origin); err != nil {
 		return provider.PageContext{}, err
 	}
@@ -109,8 +113,8 @@ func PageContextToProvider(context agentprotocol.PageContext, identity ConnectId
 	}
 	converted := provider.PageContext{
 		Revision:       provider.ContextRevision(context.Revision),
-		Markdown:       cloneBytes([]byte(context.Markdown)),
-		CreatorContext: cloneBytes([]byte(context.CreatorContext)),
+		Markdown:       []byte(context.Markdown),
+		CreatorContext: []byte(context.CreatorContext),
 		Title:          context.Title,
 		URL:            context.URL,
 		Resource:       resource,
@@ -129,17 +133,20 @@ func PageContextFromProvider(context provider.PageContext, identity ConnectIdent
 	if err := context.Validate(); err != nil {
 		return agentprotocol.PageContext{}, errors.New("invalid provider page context")
 	}
-	if err := requireSameOriginHTTPS(context.URL, identity.Origin); err != nil {
-		return agentprotocol.PageContext{}, err
-	}
 	resource, err := ResourceFromProvider(context.Resource)
 	if err != nil {
 		return agentprotocol.PageContext{}, err
 	}
+	if !equalProtocolResource(resource, identity.Resource) || context.Digest != identity.ContextDigest {
+		return agentprotocol.PageContext{}, errors.New("provider page context does not match the connected revision")
+	}
+	if err := requireSameOriginHTTPS(context.URL, identity.Origin); err != nil {
+		return agentprotocol.PageContext{}, err
+	}
 	converted := agentprotocol.PageContext{
 		Revision:       agentprotocol.ContextRevision(context.Revision),
-		Markdown:       string(cloneBytes(context.Markdown)),
-		CreatorContext: string(cloneBytes(context.CreatorContext)),
+		Markdown:       string(context.Markdown),
+		CreatorContext: string(context.CreatorContext),
 		Title:          context.Title,
 		URL:            context.URL,
 		Resource:       resource,
@@ -149,13 +156,6 @@ func PageContextFromProvider(context provider.PageContext, identity ConnectIdent
 		return agentprotocol.PageContext{}, errors.New("invalid converted page context")
 	}
 	return converted, nil
-}
-
-// ConvertPageContext aliases the direction used when handing browser context
-// to a provider. The explicit directional functions above should be preferred
-// where the ownership transfer is important.
-func ConvertPageContext(context agentprotocol.PageContext, identity ConnectIdentity, authorizedOrigin string) (provider.PageContext, error) {
-	return PageContextToProvider(context, identity, authorizedOrigin)
 }
 
 func cloneBytes(value []byte) []byte {
@@ -210,6 +210,28 @@ func validateProtocolPageContext(context agentprotocol.PageContext) error {
 		},
 	})
 	return err
+}
+
+func equalProtocolResource(left, right agentprotocol.Resource) bool {
+	if left.Kind != right.Kind || left.ID != right.ID || left.CreatedAt != right.CreatedAt || left.UpdatedAt != right.UpdatedAt {
+		return false
+	}
+	if left.ExpiresAt == nil || right.ExpiresAt == nil {
+		return left.ExpiresAt == nil && right.ExpiresAt == nil
+	}
+	return *left.ExpiresAt == *right.ExpiresAt
+}
+
+func validDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func requireSameOriginHTTPS(pageURL, expectedOrigin string) error {

@@ -52,14 +52,20 @@ type ReplayEntry struct {
 	encodedBytes   int
 }
 
+type evictedReplayEntry struct {
+	eventID        string
+	targetClientID string
+}
+
 type ReplayLog struct {
-	entries []ReplayEntry
-	total   int
-	evicted map[string]struct{}
+	entries      []ReplayEntry
+	total        int
+	evicted      map[string]string
+	evictedOrder []evictedReplayEntry
 }
 
 func NewReplayLog() *ReplayLog {
-	return &ReplayLog{evicted: make(map[string]struct{})}
+	return &ReplayLog{evicted: make(map[string]string)}
 }
 
 func (log *ReplayLog) Len() int {
@@ -75,22 +81,30 @@ func (log *ReplayLog) Bytes() int {
 	return log.total
 }
 
-// Append adds a broadcast event unless an optional client target is supplied.
-// The event's bound is measured from the exact agentprotocol wire encoding,
-// not from a logical payload estimate.
-func (log *ReplayLog) Append(event agentprotocol.Event, targetClientID ...string) error {
+func (log *ReplayLog) evictedLen() int {
+	if log == nil {
+		return 0
+	}
+	return len(log.evictedOrder)
+}
+
+// Append adds a broadcast event. The event's bound is measured from the exact
+// agentprotocol wire encoding, not from a logical payload estimate.
+func (log *ReplayLog) Append(event agentprotocol.Event) error {
+	return log.append(event, "")
+}
+
+// AppendForClient adds an event visible only to the identified client.
+func (log *ReplayLog) AppendForClient(clientID string, event agentprotocol.Event) error {
+	return log.append(event, clientID)
+}
+
+func (log *ReplayLog) append(event agentprotocol.Event, target string) error {
 	if log == nil {
 		return errors.New("nil replay log")
 	}
-	target := ""
-	if len(targetClientID) > 1 {
+	if target != "" && common.ValidateID(target) != nil {
 		return errors.New("invalid replay target")
-	}
-	if len(targetClientID) == 1 {
-		target = targetClientID[0]
-		if target != "" && common.ValidateID(target) != nil {
-			return errors.New("invalid replay target")
-		}
 	}
 	encoded, err := agentprotocol.EncodeEvent(event)
 	if err != nil {
@@ -113,11 +127,6 @@ func (log *ReplayLog) Append(event agentprotocol.Event, targetClientID ...string
 	return nil
 }
 
-// AppendForClient is the explicit targeted form of Append.
-func (log *ReplayLog) AppendForClient(clientID string, event agentprotocol.Event) error {
-	return log.Append(event, clientID)
-}
-
 func (log *ReplayLog) evictOldest() {
 	if len(log.entries) == 0 {
 		return
@@ -126,28 +135,29 @@ func (log *ReplayLog) evictOldest() {
 	log.entries[0] = ReplayEntry{}
 	log.entries = log.entries[1:]
 	log.total -= oldest.encodedBytes
-	if len(log.evicted) < MaxReplayEvents {
-		log.evicted[oldest.Event.EventID] = struct{}{}
+	if len(log.evictedOrder) == MaxReplayEvents {
+		forgotten := log.evictedOrder[0]
+		delete(log.evicted, forgotten.eventID)
+		copy(log.evictedOrder, log.evictedOrder[1:])
+		log.evictedOrder[len(log.evictedOrder)-1] = evictedReplayEntry{}
+		log.evictedOrder = log.evictedOrder[:len(log.evictedOrder)-1]
 	}
+	record := evictedReplayEntry{eventID: oldest.Event.EventID, targetClientID: oldest.TargetClientID}
+	log.evicted[record.eventID] = record.targetClientID
+	log.evictedOrder = append(log.evictedOrder, record)
 }
 
 // Replay returns visible events strictly after afterEventID. An empty cursor
 // starts at the beginning. Cursor lookup occurs before visibility filtering so
 // a client cannot use another client's targeted event as an ordering anchor.
-func (log *ReplayLog) Replay(afterEventID string, clientID ...string) ([]agentprotocol.Event, error) {
+func (log *ReplayLog) Replay(clientID, afterEventID string) ([]agentprotocol.Event, error) {
 	if log == nil {
 		return nil, errors.New("nil replay log")
 	}
-	if len(clientID) > 1 {
+	if common.ValidateID(clientID) != nil {
 		return nil, errors.New("invalid replay client")
 	}
-	client := ""
-	if len(clientID) == 1 {
-		client = clientID[0]
-		if client != "" && common.ValidateID(client) != nil {
-			return nil, errors.New("invalid replay client")
-		}
-	}
+	client := clientID
 	start := 0
 	if afterEventID != "" {
 		if common.ValidateID(afterEventID) != nil {
@@ -165,7 +175,10 @@ func (log *ReplayLog) Replay(afterEventID string, clientID ...string) ([]agentpr
 			}
 		}
 		if !found {
-			if _, evicted := log.evicted[afterEventID]; evicted {
+			if target, evicted := log.evicted[afterEventID]; evicted {
+				if target != "" && target != client {
+					return nil, ReplayCursorError{classification: ReplayCursorMissing}
+				}
 				return nil, ReplayCursorError{classification: ReplayCursorEvicted}
 			}
 			return nil, ReplayCursorError{classification: ReplayCursorMissing}
@@ -181,15 +194,6 @@ func (log *ReplayLog) Replay(afterEventID string, clientID ...string) ([]agentpr
 	return result, nil
 }
 
-// ReplayForClient makes the visibility-first call shape explicit.
-func (log *ReplayLog) ReplayForClient(clientID, afterEventID string) ([]agentprotocol.Event, error) {
-	return log.Replay(afterEventID, clientID)
-}
-
-func (log *ReplayLog) EventsAfter(afterEventID, clientID string) ([]agentprotocol.Event, error) {
-	return log.Replay(afterEventID, clientID)
-}
-
 var ErrReplayDuplicateID = errors.New("duplicate replay event ID")
 
 func cloneEvent(event agentprotocol.Event) agentprotocol.Event {
@@ -201,6 +205,10 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 	switch value := payload.(type) {
 	case agentprotocol.SnapshotPayload:
 		value.Queue = append([]agentprotocol.QueueItem(nil), value.Queue...)
+		if value.ActiveTurnID != nil {
+			active := *value.ActiveTurnID
+			value.ActiveTurnID = &active
+		}
 		return value
 	case *agentprotocol.SnapshotPayload:
 		if value == nil {
@@ -211,6 +219,22 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 		if value.ActiveTurnID != nil {
 			active := *value.ActiveTurnID
 			copyOfValue.ActiveTurnID = &active
+		}
+		return &copyOfValue
+	case agentprotocol.LifecyclePayload:
+		if value.TurnID != nil {
+			turnID := *value.TurnID
+			value.TurnID = &turnID
+		}
+		return value
+	case *agentprotocol.LifecyclePayload:
+		if value == nil {
+			return (*agentprotocol.LifecyclePayload)(nil)
+		}
+		copyOfValue := *value
+		if value.TurnID != nil {
+			turnID := *value.TurnID
+			copyOfValue.TurnID = &turnID
 		}
 		return &copyOfValue
 	case agentprotocol.QueuePayload:
@@ -225,6 +249,10 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 		return &copyOfValue
 	case agentprotocol.TimelinePayload:
 		value.Items = append([]agentprotocol.TimelineItem(nil), value.Items...)
+		if value.NextCursor != nil {
+			cursor := *value.NextCursor
+			value.NextCursor = &cursor
+		}
 		return value
 	case *agentprotocol.TimelinePayload:
 		if value == nil {
@@ -239,6 +267,10 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 		return &copyOfValue
 	case agentprotocol.HistoryPayload:
 		value.Items = append([]agentprotocol.ArchiveItem(nil), value.Items...)
+		if value.NextCursor != nil {
+			cursor := *value.NextCursor
+			value.NextCursor = &cursor
+		}
 		return value
 	case *agentprotocol.HistoryPayload:
 		if value == nil {
@@ -252,6 +284,10 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 		}
 		return &copyOfValue
 	case agentprotocol.CommandResultPayload:
+		if value.Error != nil {
+			errorValue := *value.Error
+			value.Error = &errorValue
+		}
 		return value
 	case *agentprotocol.CommandResultPayload:
 		if value == nil {

@@ -26,18 +26,21 @@ func NewEventFactory(conversationID string, ids common.IDGenerator, clock common
 	if common.ValidateID(conversationID) != nil {
 		return nil, errors.New("invalid event conversation ID")
 	}
-	if ids == nil {
+	if common.IsNil(ids) {
 		return nil, ErrNilEventIDGenerator
 	}
-	if clock == nil {
+	if common.IsNil(clock) {
 		return nil, ErrNilEventClock
 	}
 	return &EventFactory{conversationID: conversationID, ids: ids, clock: clock}, nil
 }
 
 func (factory *EventFactory) New(payload agentprotocol.EventPayload) (agentprotocol.Event, error) {
-	if factory == nil || factory.ids == nil || factory.clock == nil {
+	if factory == nil || common.IsNil(factory.ids) || common.IsNil(factory.clock) {
 		return agentprotocol.Event{}, errors.New("invalid event factory")
+	}
+	if common.IsNil(payload) {
+		return agentprotocol.Event{}, errors.New("nil event payload")
 	}
 	eventID, err := factory.ids.NewID()
 	if err != nil {
@@ -48,21 +51,13 @@ func (factory *EventFactory) New(payload agentprotocol.EventPayload) (agentproto
 		EventID:        eventID,
 		ConversationID: factory.conversationID,
 		Type:           payloadType(payload),
-		Timestamp:      factory.clock.Now(),
+		Timestamp:      factory.clock.Now().UTC(),
 		Payload:        payload,
 	}
 	if _, err := agentprotocol.EncodeEvent(event); err != nil {
 		return agentprotocol.Event{}, err
 	}
 	return event, nil
-}
-
-func (factory *EventFactory) Build(payload agentprotocol.EventPayload) (agentprotocol.Event, error) {
-	return factory.New(payload)
-}
-
-func (factory *EventFactory) Event(payload agentprotocol.EventPayload) (agentprotocol.Event, error) {
-	return factory.New(payload)
 }
 
 func payloadType(payload agentprotocol.EventPayload) agentprotocol.EventType {
@@ -76,6 +71,9 @@ func payloadType(payload agentprotocol.EventPayload) agentprotocol.EventType {
 // event text is copied only into the protocol's bounded, validated fields;
 // native references and untrusted provider payloads have no representation.
 func (factory *EventFactory) FromProvider(event provider.Event) (agentprotocol.Event, error) {
+	if err := event.Validate(); err != nil {
+		return agentprotocol.Event{}, NewBrokerError(agentprotocol.ErrorProviderMalformedStream)
+	}
 	var payload agentprotocol.EventPayload
 	switch event.Kind {
 	case provider.EventUserMessage:

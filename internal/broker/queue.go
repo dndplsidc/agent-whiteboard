@@ -31,8 +31,9 @@ type queueItem struct {
 // Queue is a pure, non-concurrent FIFO. Its byte bound counts UTF-8 message
 // bytes exactly as the browser protocol does.
 type Queue struct {
-	items []queueItem
-	bytes int
+	items      []queueItem
+	bytes      int
+	hasContext bool
 }
 
 func NewQueue() *Queue { return &Queue{} }
@@ -50,27 +51,25 @@ func (queue *Queue) Bytes() int {
 }
 func (queue *Queue) Empty() bool { return queue == nil || len(queue.items) == 0 }
 
-// Enqueue accepts either QueuedTurn or provider.TurnRequest. The broad input
-// form keeps this substrate explicit at the provider boundary while retaining
-// one validation path and one ownership-copy rule.
-func (queue *Queue) Enqueue(value any) error {
+// Enqueue copies one broker-owned follow-up. At most one queued turn may hold
+// complete page context, bounding retained context independently from messages.
+func (queue *Queue) Enqueue(turn QueuedTurn) error {
 	if queue == nil {
 		return errors.New("nil queue")
 	}
-	turn, err := queuedTurn(value)
-	if err != nil {
-		return err
-	}
 	if err := turn.validate(); err != nil {
 		return err
-	}
-	if len(queue.items) >= MaxQueueItems || queue.bytes+len(turn.Message) > MaxQueueBytes {
-		return ErrQueueFull
 	}
 	for _, item := range queue.items {
 		if item.turnID == turn.TurnID || item.messageID == turn.MessageID {
 			return ErrQueueDuplicateID
 		}
+	}
+	if turn.Context != nil && queue.hasContext {
+		return ErrQueueContextConflict
+	}
+	if len(queue.items) >= MaxQueueItems || queue.bytes+len(turn.Message) > MaxQueueBytes {
+		return ErrQueueFull
 	}
 	queue.items = append(queue.items, queueItem{
 		turnID:    turn.TurnID,
@@ -79,10 +78,9 @@ func (queue *Queue) Enqueue(value any) error {
 		context:   cloneProviderContext(turn.Context),
 	})
 	queue.bytes += len(turn.Message)
+	queue.hasContext = queue.hasContext || turn.Context != nil
 	return nil
 }
-
-func (queue *Queue) Add(value any) error { return queue.Enqueue(value) }
 
 func (turn QueuedTurn) validate() error {
 	request := provider.TurnRequest{TurnID: turn.TurnID, MessageID: turn.MessageID, Message: turn.Message, Context: turn.Context}
@@ -90,27 +88,6 @@ func (turn QueuedTurn) validate() error {
 		return ErrQueueInvalid
 	}
 	return nil
-}
-
-func queuedTurn(value any) (QueuedTurn, error) {
-	switch turn := value.(type) {
-	case QueuedTurn:
-		return turn, nil
-	case *QueuedTurn:
-		if turn == nil {
-			return QueuedTurn{}, ErrQueueInvalid
-		}
-		return *turn, nil
-	case provider.TurnRequest:
-		return QueuedTurn{TurnID: turn.TurnID, MessageID: turn.MessageID, Message: turn.Message, Context: turn.Context}, nil
-	case *provider.TurnRequest:
-		if turn == nil {
-			return QueuedTurn{}, ErrQueueInvalid
-		}
-		return QueuedTurn{TurnID: turn.TurnID, MessageID: turn.MessageID, Message: turn.Message, Context: turn.Context}, nil
-	default:
-		return QueuedTurn{}, ErrQueueInvalid
-	}
 }
 
 // Edit changes only a still-queued message. Turn IDs and context are not
@@ -153,6 +130,9 @@ func (queue *Queue) Remove(messageID string) error {
 			continue
 		}
 		item := queue.items[index]
+		if item.context != nil {
+			queue.hasContext = false
+		}
 		zeroProviderContext(item.context)
 		queue.bytes -= len(item.message)
 		copy(queue.items[index:], queue.items[index+1:])
@@ -174,10 +154,11 @@ func (queue *Queue) Dequeue() (provider.TurnRequest, bool) {
 	queue.items[0] = queueItem{}
 	queue.items = queue.items[1:]
 	queue.bytes -= len(item.message)
+	if item.context != nil {
+		queue.hasContext = false
+	}
 	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Context: item.context}, true
 }
-
-func (queue *Queue) Pop() (provider.TurnRequest, bool) { return queue.Dequeue() }
 
 // Items exposes only browser-safe queue values. Context bytes never enter the
 // replay or protocol representation.
@@ -192,7 +173,19 @@ func (queue *Queue) Items() []agentprotocol.QueueItem {
 	return items
 }
 
-func (queue *Queue) Snapshot() []agentprotocol.QueueItem { return queue.Items() }
+// Clear releases every queued item and erases owned page buffers.
+func (queue *Queue) Clear() {
+	if queue == nil {
+		return
+	}
+	for index := range queue.items {
+		zeroProviderContext(queue.items[index].context)
+		queue.items[index] = queueItem{}
+	}
+	queue.items = nil
+	queue.bytes = 0
+	queue.hasContext = false
+}
 
 func cloneProviderContext(context *provider.PageContext) *provider.PageContext {
 	if context == nil {

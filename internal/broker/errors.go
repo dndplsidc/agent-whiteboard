@@ -26,6 +26,9 @@ func NewBrokerError(code agentprotocol.BrowserErrorCode) BrokerError {
 }
 
 func (e BrokerError) Code() agentprotocol.BrowserErrorCode { return e.code }
+func (e BrokerError) BrowserErrorCode() agentprotocol.BrowserErrorCode {
+	return e.code
+}
 func (e BrokerError) Valid() bool {
 	return e.Code() != "" && agentprotocol.NewBrowserError(e.code).Code() == e.code
 }
@@ -50,12 +53,13 @@ func (e BrokerError) Is(target error) bool {
 }
 
 var (
-	ErrQueueFull           = NewBrokerError(agentprotocol.ErrorQueueFull)
-	ErrQueueItemNotFound   = errors.New("queued item not found")
-	ErrQueueDuplicateID    = errors.New("duplicate queued identifier")
-	ErrQueueInvalid        = errors.New("invalid queued turn")
-	ErrReplayCursorMissing = errors.New("replay cursor missing")
-	ErrReplayCursorEvicted = errors.New("replay cursor evicted")
+	ErrQueueFull            = NewBrokerError(agentprotocol.ErrorQueueFull)
+	ErrQueueItemNotFound    = errors.New("queued item not found")
+	ErrQueueDuplicateID     = errors.New("duplicate queued identifier")
+	ErrQueueContextConflict = errors.New("queued context already retained")
+	ErrQueueInvalid         = errors.New("invalid queued turn")
+	ErrReplayCursorMissing  = errors.New("replay cursor missing")
+	ErrReplayCursorEvicted  = errors.New("replay cursor evicted")
 )
 
 // MapProviderError exhaustively translates provider failures to frozen browser
@@ -65,7 +69,7 @@ func MapProviderError(failure provider.ProviderError) BrokerError {
 	var code agentprotocol.BrowserErrorCode
 	switch failure.Code() {
 	case provider.ErrorNotReady, provider.ErrorReadinessFailed:
-		code = agentprotocol.ErrorBrokerUnavailable
+		code = agentprotocol.ErrorProviderStartupFailed
 	case provider.ErrorMissingExecutable:
 		code = agentprotocol.ErrorProviderMissing
 	case provider.ErrorStartupFailed:
@@ -120,17 +124,6 @@ func MapReadiness(readiness provider.Readiness) (BrokerError, bool) {
 	}
 }
 
-// ProviderFailureCode and ReadinessErrorCode are convenient code-only forms
-// for call sites that do not need to retain a BrokerError value.
-func ProviderFailureCode(failure provider.ProviderError) agentprotocol.BrowserErrorCode {
-	return MapProviderError(failure).Code()
-}
-
-func ReadinessErrorCode(readiness provider.Readiness) (agentprotocol.BrowserErrorCode, bool) {
-	failure, unavailable := MapReadiness(readiness)
-	return failure.Code(), unavailable
-}
-
 // MapError maps only known provider errors. All other failures become the
 // generic provider protocol outcome, with no interpolation of the original
 // error's text.
@@ -142,4 +135,11 @@ func MapError(failure error) BrokerError {
 	return NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 }
 
-var _ error = BrokerError{}
+type browserErrorCoder interface {
+	BrowserErrorCode() agentprotocol.BrowserErrorCode
+}
+
+var (
+	_ error             = BrokerError{}
+	_ browserErrorCoder = BrokerError{}
+)
