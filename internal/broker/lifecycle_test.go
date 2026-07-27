@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,7 +37,7 @@ func (s *lifecycleState) Load(identity agentstate.Identity) (agentstate.Mapping,
 	if !ok {
 		return agentstate.Mapping{}, os.ErrNotExist
 	}
-	return mapping, nil
+	return cloneMapping(mapping), nil
 }
 func (s *lifecycleState) Create(identity agentstate.Identity, session agentstate.Session, at time.Time) (agentstate.CommitOutcome, error) {
 	s.mu.Lock()
@@ -50,6 +51,26 @@ func (s *lifecycleState) Create(identity agentstate.Identity, session agentstate
 		s.mappings[identity] = agentstate.Mapping{SchemaVersion: agentstate.SchemaVersion, Identity: identity, Current: &session, Archives: []agentstate.Session{}, CreatedAt: at, UpdatedAt: at}
 	}
 	return outcome, s.createErr
+}
+func (s *lifecycleState) ObserveRevision(identity agentstate.Identity, revision agentstate.Revision, at time.Time) (agentstate.CommitOutcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mapping, ok := s.mappings[identity]
+	if !ok || mapping.Current == nil || mapping.Current.PreparedCommit != nil {
+		return agentstate.CommitNotApplied, errors.New("observation rejected")
+	}
+	observed := revision
+	mapping.Current.Observed = &observed
+	mapping.Current.UpdatedAt = at
+	mapping.UpdatedAt = at
+	s.mappings[identity] = mapping
+	return agentstate.CommitApplied, nil
+}
+func (s *lifecycleState) PromotePrepared(identity agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	return agentstate.CommitNotApplied, errors.New("promotion not configured")
+}
+func (s *lifecycleState) ReconcilePrepared(identity agentstate.Identity, turnID string, accepted bool, at time.Time) (agentstate.CommitOutcome, error) {
+	return agentstate.CommitNotApplied, errors.New("reconciliation not configured")
 }
 func (s *lifecycleState) EnsureWorkspace(id string) (string, error) {
 	s.mu.Lock()
@@ -234,6 +255,34 @@ func (g *lockedIDs) NewID() (string, error) {
 	defer g.mu.Unlock()
 	g.next++
 	return sequenceID(g.next), nil
+}
+
+func TestAttachObservesInitialDigestAndClassifiesMatchingObservedDigestPending(t *testing.T) {
+	state := &lifecycleState{mappings: make(map[agentstate.Identity]agentstate.Mapping)}
+	broker, err := New(validLifecycleConfig(state, &lifecycleDriver{}, &lockedIDs{next: 40}))
+	require.NoError(t, err)
+	defer broker.Close(context.Background())
+	origin := "https://example.com"
+	resourceID := sequenceID(41)
+
+	first, err := broker.Connect(context.Background(), origin, lifecycleConnect(sequenceID(42), resourceID))
+	require.NoError(t, err)
+	firstSnapshot := receiveLifecycle(t, first.Events()).Payload.(agentprotocol.SnapshotPayload)
+	require.Equal(t, agentprotocol.ContextPending, firstSnapshot.ContextState)
+	identity, err := IdentityFromConnect(origin, lifecycleConnect(sequenceID(42), resourceID).Payload.(agentprotocol.ConnectPayload), origin)
+	require.NoError(t, err)
+	state.mu.Lock()
+	observed := state.mappings[identity].Current.Observed
+	state.mu.Unlock()
+	require.NotNil(t, observed)
+	require.Equal(t, strings.Repeat("0", 64), observed.Digest)
+	require.Equal(t, agentstate.RevisionInitial, observed.Revision)
+	require.Equal(t, testResource(resourceID).UpdatedAt, observed.SourceUpdatedAt)
+
+	second, err := broker.Connect(context.Background(), origin, lifecycleConnect(sequenceID(43), resourceID))
+	require.NoError(t, err)
+	secondSnapshot := receiveLifecycle(t, second.Events()).Payload.(agentprotocol.SnapshotPayload)
+	require.Equal(t, agentprotocol.ContextPending, secondSnapshot.ContextState)
 }
 
 func TestUnsupportedCommandIsTargetedAndConnectionCloseDoesNotShutdownProvider(t *testing.T) {

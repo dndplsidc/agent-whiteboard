@@ -67,13 +67,59 @@ func (state *hardeningState) Load(identity agentstate.Identity) (agentstate.Mapp
 	if state.mapping == nil {
 		return agentstate.Mapping{}, os.ErrNotExist
 	}
-	return *state.mapping, nil
+	return cloneMapping(*state.mapping), nil
 }
 func (state *hardeningState) Create(agentstate.Identity, agentstate.Session, time.Time) (agentstate.CommitOutcome, error) {
 	if state.outcome == "" {
 		return agentstate.CommitNotApplied, errors.New("not applied")
 	}
 	return state.outcome, errors.New("not applied")
+}
+func (state *hardeningState) ObserveRevision(_ agentstate.Identity, revision agentstate.Revision, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.mapping == nil || state.mapping.Current == nil || state.mapping.Current.PreparedCommit != nil {
+		return agentstate.CommitNotApplied, errors.New("observation rejected")
+	}
+	observed := revision
+	state.mapping.Current.Observed = &observed
+	state.mapping.Current.UpdatedAt = at
+	state.mapping.UpdatedAt = at
+	return agentstate.CommitApplied, nil
+}
+func (state *hardeningState) PromotePrepared(_ agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.mapping == nil || state.mapping.Current == nil || state.mapping.Current.PreparedCommit == nil || state.mapping.Current.PreparedCommit.TurnID != turnID || state.mapping.Current.PreparedCommit.Phase != agentstate.CommitAccepted {
+		return agentstate.CommitNotApplied, errors.New("promotion rejected")
+	}
+	committed := state.mapping.Current.PreparedCommit.Revision
+	state.mapping.Current.Committed = &committed
+	state.mapping.Current.Observed = nil
+	state.mapping.Current.PreparedCommit = nil
+	state.mapping.Current.UpdatedAt = at
+	state.mapping.UpdatedAt = at
+	return agentstate.CommitApplied, nil
+}
+func (state *hardeningState) ReconcilePrepared(_ agentstate.Identity, turnID string, accepted bool, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.mapping == nil || state.mapping.Current == nil || state.mapping.Current.PreparedCommit == nil || state.mapping.Current.PreparedCommit.TurnID != turnID {
+		return agentstate.CommitNotApplied, errors.New("reconciliation rejected")
+	}
+	prepared := state.mapping.Current.PreparedCommit
+	if accepted {
+		committed := prepared.Revision
+		state.mapping.Current.Committed = &committed
+		state.mapping.Current.Observed = nil
+	} else {
+		observed := prepared.Revision
+		state.mapping.Current.Observed = &observed
+	}
+	state.mapping.Current.PreparedCommit = nil
+	state.mapping.Current.UpdatedAt = at
+	state.mapping.UpdatedAt = at
+	return agentstate.CommitApplied, nil
 }
 func (*hardeningState) EnsureWorkspace(id string) (string, error) {
 	return "/tmp/agent-whiteboard-test/" + id, nil
@@ -144,12 +190,17 @@ func (driver *hardeningDriver) Delete(context.Context, provider.DeleteRequest) e
 }
 
 type hardeningSession struct {
-	native       provider.NativeSession
-	events       chan provider.Event
-	child        provider.ManagedChild
-	shutdownErr  error
-	shutdownFunc func(context.Context) error
-	shutdowns    atomic.Int32
+	native          provider.NativeSession
+	events          chan provider.Event
+	child           provider.ManagedChild
+	shutdownErr     error
+	shutdownFunc    func(context.Context) error
+	reconcileState  provider.TurnState
+	reconcileErr    error
+	reconcileEvent  *provider.Event
+	shutdowns       atomic.Int32
+	reconciliations atomic.Int32
+	submissions     atomic.Int32
 }
 
 func newHardeningSession(refValue string) *hardeningSession {
@@ -167,15 +218,28 @@ func (*hardeningSession) History(context.Context, provider.HistoryRequest) (prov
 func (*hardeningSession) Preflight(context.Context, provider.PreflightRequest) (provider.PreflightResult, error) {
 	return provider.PreflightResult{}, nil
 }
-func (*hardeningSession) Submit(context.Context, provider.TurnRequest) (provider.AcceptedTurn, error) {
+func (session *hardeningSession) Submit(context.Context, provider.TurnRequest) (provider.AcceptedTurn, error) {
+	session.submissions.Add(1)
 	return provider.AcceptedTurn{}, nil
 }
 func (session *hardeningSession) Events() <-chan provider.Event { return session.events }
 func (*hardeningSession) Interrupt(context.Context, provider.AcceptedTurn) error {
 	return nil
 }
-func (*hardeningSession) Reconcile(context.Context, provider.TurnReference) (provider.TurnState, error) {
-	return provider.TurnUnknown, nil
+func (session *hardeningSession) Reconcile(ctx context.Context, _ provider.TurnReference) (provider.TurnState, error) {
+	session.reconciliations.Add(1)
+	if session.reconcileEvent != nil {
+		select {
+		case session.events <- *session.reconcileEvent:
+		case <-ctx.Done():
+			return provider.TurnUnknown, ctx.Err()
+		}
+	}
+	state := session.reconcileState
+	if state == "" {
+		state = provider.TurnUnknown
+	}
+	return state, session.reconcileErr
 }
 func (session *hardeningSession) Child() provider.ManagedChild { return session.child }
 func (session *hardeningSession) Shutdown(ctx context.Context) error {

@@ -19,6 +19,9 @@ import (
 type StateStore interface {
 	Load(agentstate.Identity) (agentstate.Mapping, error)
 	Create(agentstate.Identity, agentstate.Session, time.Time) (agentstate.CommitOutcome, error)
+	ObserveRevision(agentstate.Identity, agentstate.Revision, time.Time) (agentstate.CommitOutcome, error)
+	PromotePrepared(agentstate.Identity, string, time.Time) (agentstate.CommitOutcome, error)
+	ReconcilePrepared(agentstate.Identity, string, bool, time.Time) (agentstate.CommitOutcome, error)
 	EnsureWorkspace(string) (string, error)
 	RemoveWorkspace(string) error
 }
@@ -163,7 +166,7 @@ func (broker *Broker) Connect(ctx context.Context, origin string, command agentp
 	if stopping {
 		return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 	}
-	connection, err := slot.actor.attach(ctx, command.ClientID, payload.ReplayAfter)
+	connection, err := slot.actor.attach(ctx, command.ClientID, payload.ReplayAfter, payload.Resource, payload.ContextDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +267,7 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 	}
 	outcome, commitErr := broker.state.Create(identity, current, at)
 	if outcome == agentstate.CommitApplied && commitErr == nil {
-		mapping := agentstate.Mapping{SchemaVersion: agentstate.SchemaVersion, Identity: identity, Current: &current, CreatedAt: at, UpdatedAt: at}
+		mapping := agentstate.Mapping{SchemaVersion: agentstate.SchemaVersion, Identity: identity, Current: &current, Archives: []agentstate.Session{}, CreatedAt: at, UpdatedAt: at}
 		return broker.newConversation(identity, mapping, session)
 	}
 	if outcome == agentstate.CommitApplied || outcome == agentstate.CommitUncertain {
@@ -297,8 +300,12 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity agentstat
 	if mapping.Validate(identity) != nil || mapping.Current == nil {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
-	if mapping.Current.PreparedCommit != nil {
-		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
+	if prepared := mapping.Current.PreparedCommit; prepared != nil && prepared.Phase == agentstate.CommitAccepted {
+		repaired, err := broker.promoteAccepted(identity, mapping)
+		if err != nil {
+			return nil, err
+		}
+		mapping = repaired
 	}
 	if _, err := agentstate.NativeSessionRef(mapping.Current.NativeSession.Value()); err != nil {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
@@ -327,6 +334,9 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity agentstat
 	if _, err := validateProviderSession(session, &mapping.Current.NativeSession); err != nil {
 		broker.retainStop(identity, session)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
+	}
+	if mapping.Current.PreparedCommit != nil {
+		return broker.reconcilePrepared(ctx, identity, mapping, session)
 	}
 	return broker.newConversation(identity, mapping, session)
 }
@@ -491,7 +501,7 @@ func stopPreActor(ctx context.Context, session provider.Session, events <-chan p
 }
 
 func (broker *Broker) newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session) (*conversation, error) {
-	actor, err := newConversation(identity, mapping, session, broker.ids, broker.clock, broker.shutdownTimeout)
+	actor, err := newConversation(identity, mapping, session, broker.state, broker.ids, broker.clock, broker.shutdownTimeout)
 	if err != nil {
 		broker.retainStop(identity, session)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)

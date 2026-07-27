@@ -16,11 +16,16 @@ import (
 type conversation struct {
 	identity        agentstate.Identity
 	mapping         agentstate.Mapping
+	state           StateStore
 	session         provider.Session
 	factory         *EventFactory
 	replay          *ReplayLog
 	requests        chan any
 	done            chan struct{}
+	clock           common.Clock
+	resource        agentprotocol.Resource
+	contextDigest   string
+	contextState    agentprotocol.ContextState
 	shutdownTimeout time.Duration
 
 	closeMu sync.Mutex
@@ -139,10 +144,12 @@ func (item *attachment) finish() {
 }
 
 type attachRequest struct {
-	ctx         context.Context
-	clientID    string
-	replayAfter string
-	response    chan attachResponse
+	ctx           context.Context
+	clientID      string
+	replayAfter   string
+	resource      agentprotocol.Resource
+	contextDigest string
+	response      chan attachResponse
 }
 type attachResponse struct {
 	attachment *attachment
@@ -171,8 +178,8 @@ type shutdownWorkerResult struct {
 	err      error
 }
 
-func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session, ids common.IDGenerator, clock common.Clock, shutdownTimeout time.Duration) (*conversation, error) {
-	if mapping.Validate(identity) != nil || mapping.Current == nil || common.IsNil(session) || shutdownTimeout <= 0 {
+func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session, state StateStore, ids common.IDGenerator, clock common.Clock, shutdownTimeout time.Duration) (*conversation, error) {
+	if mapping.Validate(identity) != nil || mapping.Current == nil || common.IsNil(state) || common.IsNil(session) || common.IsNil(clock) || shutdownTimeout <= 0 {
 		return nil, errors.New("invalid conversation actor")
 	}
 	factory, err := NewEventFactory(mapping.Current.ConversationID, ids, clock)
@@ -180,9 +187,17 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 		return nil, err
 	}
 	actor := &conversation{
-		identity: identity, mapping: mapping, session: session,
+		identity: identity, mapping: cloneMapping(mapping), state: state, session: session,
 		factory: factory, replay: NewReplayLog(), requests: make(chan any),
-		done: make(chan struct{}), shutdownTimeout: shutdownTimeout,
+		done: make(chan struct{}), clock: clock, contextState: agentprotocol.ContextPending,
+		shutdownTimeout: shutdownTimeout,
+	}
+	if actor.mapping.Current.Observed != nil {
+		actor.contextDigest = actor.mapping.Current.Observed.Digest
+		actor.contextState = agentprotocol.ContextPending
+	} else if actor.mapping.Current.Committed != nil {
+		actor.contextDigest = actor.mapping.Current.Committed.Digest
+		actor.contextState = agentprotocol.ContextUnchanged
 	}
 	go actor.run()
 	return actor, nil
@@ -249,40 +264,62 @@ func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, re
 		request.response <- attachResponse{err: err}
 		return
 	}
-	var initial []agentprotocol.Event
+	var replayed []agentprotocol.Event
 	if request.replayAfter != "" {
-		replayed, err := actor.replay.Replay(request.clientID, request.replayAfter)
-		if err != nil {
+		var replayErr error
+		replayed, replayErr = actor.replay.Replay(request.clientID, request.replayAfter)
+		if replayErr != nil {
 			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorReplayWindowUnavailable)}
 			return
 		}
+	}
+	contextState, newlyObserved, contextEvent, err := actor.observeAttach(request.resource, request.contextDigest)
+	if err != nil {
+		request.response <- attachResponse{err: err}
+		return
+	}
+	var initial []agentprotocol.Event
+	if !newlyObserved {
 		initial = replayed
 	}
-	if request.replayAfter == "" || len(initial) == 0 {
-		snapshot, err := actor.snapshot()
-		if err != nil {
+	if newlyObserved || request.replayAfter == "" || len(initial) == 0 {
+		snapshot, snapshotErr := actor.snapshot(contextState)
+		if snapshotErr != nil {
 			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
 			return
 		}
-		if err := actor.replay.AppendForClient(request.clientID, snapshot); err != nil {
+		if appendErr := actor.replay.AppendForClient(request.clientID, snapshot); appendErr != nil {
 			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
 			return
 		}
 		initial = append(initial, snapshot)
 	}
+	hadExistingAttachments := len(attachments) != 0
 	item, err := newAttachment(request.clientID, initial)
 	if err != nil {
 		request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
 		return
 	}
 	attachments[item] = struct{}{}
+	if newlyObserved && hadExistingAttachments {
+		if err := actor.replay.Append(contextEvent); err != nil {
+			actor.detach(attachments, item)
+			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
+			return
+		}
+		for attached := range attachments {
+			if attached != item {
+				actor.send(attachments, attached, contextEvent)
+			}
+		}
+	}
 	request.response <- attachResponse{attachment: item}
 }
 
-func (actor *conversation) snapshot() (agentprotocol.Event, error) {
+func (actor *conversation) snapshot(contextState agentprotocol.ContextState) (agentprotocol.Event, error) {
 	return actor.factory.New(agentprotocol.SnapshotPayload{
 		Lifecycle: agentprotocol.LifecycleReady, Queue: []agentprotocol.QueueItem{},
-		ContextState: agentprotocol.ContextPending, ActiveTurnID: nil,
+		ContextState: contextState, ActiveTurnID: nil,
 	})
 }
 
@@ -338,11 +375,11 @@ func (actor *conversation) send(attachments map[*attachment]struct{}, item *atta
 	}
 }
 
-func (actor *conversation) attach(ctx context.Context, clientID, replayAfter string) (*Connection, error) {
+func (actor *conversation) attach(ctx context.Context, clientID, replayAfter string, resource agentprotocol.Resource, contextDigest string) (*Connection, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	request := attachRequest{ctx: ctx, clientID: clientID, replayAfter: replayAfter, response: make(chan attachResponse, 1)}
+	request := attachRequest{ctx: ctx, clientID: clientID, replayAfter: replayAfter, resource: cloneProtocolResource(resource), contextDigest: contextDigest, response: make(chan attachResponse, 1)}
 	select {
 	case actor.requests <- request:
 	case <-actor.done:
