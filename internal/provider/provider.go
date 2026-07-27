@@ -615,15 +615,7 @@ func validBoundedText(value string, maxBytes int, nonempty bool) bool {
 	return utf8.ValidString(value) && len(value) <= maxBytes && (!nonempty || value != "") && !hasDisallowedC0(value)
 }
 func validBoundedBytes(value []byte, maxBytes int, nonempty bool) bool {
-	if !utf8.Valid(value) || len(value) > maxBytes || (nonempty && len(value) == 0) {
-		return false
-	}
-	for _, char := range value {
-		if char < 0x20 && char != '\t' && char != '\n' && char != '\r' {
-			return false
-		}
-	}
-	return true
+	return utf8.Valid(value) && len(value) <= maxBytes && (!nonempty || len(value) != 0)
 }
 func hasDisallowedC0(value string) bool {
 	for _, char := range value {

@@ -386,7 +386,7 @@ func validatePageContext(context PageContext) error {
 	if context.Revision != ContextInitial && context.Revision != ContextReplacement {
 		return invalid(nil)
 	}
-	if !validBoundedText(context.Markdown, MaxMarkdownBytes, true) || !validBoundedText(context.CreatorContext, MaxCreatorContextBytes, true) {
+	if !validBoundedUTF8(context.Markdown, MaxMarkdownBytes, true) || !validBoundedUTF8(context.CreatorContext, MaxCreatorContextBytes, true) {
 		return invalid(nil)
 	}
 	if !validBoundedText(context.Title, MaxTitleBytes, true) || !validPageURL(context.URL) || validateResource(context.Resource) != nil || context.Digest != contextdigest.Calculate([]byte(context.Markdown), []byte(context.CreatorContext)) {
@@ -414,7 +414,10 @@ func validPageURL(value string) bool {
 }
 func validMessage(value string) bool { return validBoundedText(value, MaxMessageBytes, true) }
 func validBoundedText(value string, max int, nonempty bool) bool {
-	return utf8.ValidString(value) && len(value) <= max && (!nonempty || value != "") && !hasDisallowedC0(value)
+	return validBoundedUTF8(value, max, nonempty) && !hasDisallowedC0(value)
+}
+func validBoundedUTF8(value string, max int, nonempty bool) bool {
+	return utf8.ValidString(value) && len(value) <= max && (!nonempty || value != "")
 }
 func hasDisallowedC0(value string) bool {
 	for _, char := range value {

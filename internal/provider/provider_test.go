@@ -132,6 +132,12 @@ func TestProviderPageContextDigestAndHTTPSHostnameAreValidated(t *testing.T) {
 	request := validTurnRequest()
 	require.NoError(t, request.Context.Validate())
 
+	exactControlBytes := *request.Context
+	exactControlBytes.Markdown = []byte("# exact\n\x00\x01")
+	exactControlBytes.CreatorContext = []byte("creator\n\x02\x03")
+	exactControlBytes.Digest = contextdigest.Calculate(exactControlBytes.Markdown, exactControlBytes.CreatorContext)
+	require.NoError(t, exactControlBytes.Validate(), "valid published UTF-8 artifacts must preserve exact control bytes")
+
 	request.Context.Digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	require.Error(t, request.Context.Validate())
 

@@ -395,8 +395,8 @@ func TestActiveTurnIdentityIsExplicitAcrossSubmissionQueueAndEvents(t *testing.T
 func TestDefaultContextWorstCaseJSONEscapingFitsTransport(t *testing.T) {
 	require.Equal(t, 67<<20, agentprotocol.MaxContextCommandBytes)
 	conversationID := idC
-	markdown := strings.Repeat(`"`, agentprotocol.MaxMarkdownBytes)
-	creatorContext := strings.Repeat(`\`, agentprotocol.MaxCreatorContextBytes)
+	markdown := strings.Repeat("\x01", agentprotocol.MaxMarkdownBytes)
+	creatorContext := strings.Repeat("\x02", agentprotocol.MaxCreatorContextBytes)
 	command := agentprotocol.Command{
 		APIVersion: agentprotocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: agentprotocol.CommandSubmit,
 		Payload: agentprotocol.SubmitPayload{TurnID: "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", MessageID: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", Message: strings.Repeat("\t", agentprotocol.MaxMessageBytes), Context: &agentprotocol.PageContext{
