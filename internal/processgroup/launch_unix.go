@@ -382,6 +382,9 @@ func (child *managedChild) Kill() error {
 	child.phase = lifecycleKilled
 	missingIsSuccess := !child.cleanupRetry || child.leaderExitObserved
 	child.killErr = child.signalGroupLocked(unix.SIGKILL, "kill", missingIsSuccess)
+	if child.cleanupRetry && child.leaderExitObserved && isExitedLeaderOnlyGroupError(child.killErr) {
+		child.killErr = nil
+	}
 	if child.killErr != nil {
 		err := child.killErr
 		child.mu.Unlock()

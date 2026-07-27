@@ -294,10 +294,13 @@ type Launcher interface {
 
 // ManagedChild owns process I/O and process-group escalation. Provider-native
 // graceful shutdown remains Session.Shutdown. Output and Errors are live
-// streams whose buffered bytes remain readable after Wait. To retain output
-// beyond a launcher's bounded unread backlog, callers should drain both streams
-// concurrently to EOF before Wait; Wait may force bounded draining so process
-// completion never depends on a stalled reader. Overflow is reported by Read.
+// streams whose retained bytes remain readable after Wait. The process-group
+// launcher uses a 1 MiB unread ring and one fixed 32 KiB drain buffer, bounding
+// total unread output held in memory to 1 MiB + 32 KiB per stream. Callers
+// that need all output should drain both streams concurrently to EOF before
+// Wait. Wait may force bounded draining; after
+// retained bytes are read, overflow is reported by Read without waiting for
+// the source to close.
 type ManagedChild interface {
 	Input() io.WriteCloser
 	Output() io.Reader
