@@ -12,6 +12,7 @@ import (
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	"github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/launchagent"
 )
 
 type jsonResource struct {
@@ -40,6 +41,14 @@ type markdownOutput struct {
 
 type deleteOutput struct {
 	SchemaVersion int `json:"schema_version"`
+}
+
+type daemonStatusOutput struct {
+	SchemaVersion int  `json:"schema_version"`
+	Installed     bool `json:"installed"`
+	Loaded        bool `json:"loaded"`
+	Running       bool `json:"running"`
+	PID           int  `json:"pid,omitempty"`
 }
 
 type trustedOriginsOutput struct {
@@ -135,6 +144,29 @@ func writeDeleteSuccess(writer io.Writer, jsonMode bool) error {
 	return json.NewEncoder(writer).Encode(deleteOutput{SchemaVersion: 1})
 }
 
+func writeDaemonStatus(writer io.Writer, jsonMode bool, status launchagent.Status) error {
+	if (status.Running && (!status.Loaded || status.PID <= 0)) || (!status.Running && status.PID != 0) {
+		return errors.New("launch agent manager returned invalid status")
+	}
+	if jsonMode {
+		return json.NewEncoder(writer).Encode(daemonStatusOutput{
+			SchemaVersion: 1,
+			Installed:     status.Installed,
+			Loaded:        status.Loaded,
+			Running:       status.Running,
+			PID:           status.PID,
+		})
+	}
+	if _, err := fmt.Fprintf(writer, "installed: %t\nloaded: %t\nrunning: %t\n", status.Installed, status.Loaded, status.Running); err != nil {
+		return err
+	}
+	if status.Running {
+		_, err := fmt.Fprintf(writer, "pid: %d\n", status.PID)
+		return err
+	}
+	return nil
+}
+
 func writeTrustedOrigins(writer io.Writer, jsonMode bool, origins []string) error {
 	if jsonMode {
 		if origins == nil {
@@ -185,6 +217,9 @@ func commandErrorCode(err error) string {
 }
 
 func commandErrorMessage(err error) string {
+	if errors.Is(err, launchagent.ErrUnsupported) {
+		return launchagent.ErrUnsupported.Error()
+	}
 	if contextErr, contextOnly := contextOnlyError(err); contextOnly {
 		if contextErr == context.DeadlineExceeded {
 			return "request timed out"

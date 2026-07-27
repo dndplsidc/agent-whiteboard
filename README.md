@@ -98,7 +98,9 @@ pi
 agent-whiteboard agent serve
 ```
 
-`agent serve` resolves `pi` from `PATH`; use `--pi-executable PATH` or `AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE` to override it. The adapter uses Pi's `~/.pi/agent/auth.json` and deliberately excludes ambient provider API-key and auth-token variables from the Pi process environment. It binds only to literal IPv4 loopback and admits exact configured HTTPS origins. The browser sidebar and managed daemon commands are not yet available.
+`agent serve` resolves `pi` from `PATH`; use `--pi-executable PATH` or `AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE` to override it. The adapter uses Pi's `~/.pi/agent/auth.json` and deliberately excludes ambient provider API-key and auth-token variables from the Pi process environment. It binds only to literal IPv4 loopback and admits exact configured HTTPS origins.
+
+On macOS, install and start the managed per-user LaunchAgent with `agent-whiteboard agent serve --daemon`. It records absolute agent and configuration paths plus the resolved Pi path when Pi is available during installation; the child reads the configuration when it starts. Inspect it with `agent-whiteboard agent daemon status`, reload it with `restart`, stop it with `stop` (the plist remains installed), or remove it with `uninstall`. Daemon operations are unsupported on Linux; run `agent-whiteboard agent serve` in the foreground instead. Authenticate with Pi itself; agent-whiteboard never stores or accepts provider credentials.
 
 ## Defaults
 

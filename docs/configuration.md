@@ -2,7 +2,7 @@
 
 `agent-whiteboard` uses one strict, versioned YAML configuration file. The default path is `~/.agent-whiteboard/config.yaml`; global `--config PATH` selects a different file and may appear before or after subcommands.
 
-A missing default file is equivalent to `version: 1` with all built-in values. An explicitly selected file must exist. Relative `--config` paths are resolved from the current working directory. `~` and `~/...` are supported; named-user forms such as `~other/...` are not.
+A missing default file is equivalent to `version: 1` with all built-in values. An explicitly selected file must exist when loading configuration for a foreground command. `agent serve --daemon` records the selected absolute path and permits its final file to be absent; the managed child loads it when it starts. Relative `--config` paths are resolved from the current working directory. `~` and `~/...` are supported; named-user forms such as `~other/...` are not.
 
 ## Precedence
 
@@ -74,7 +74,7 @@ agent:
   default_access: content-only
 ```
 
-The current release validates the complete schema, uses `client` and `server` for publication behavior, supports editing `agent.trusted_origins`, and provides foreground `agent serve` for the local agent API. It does not provide a browser sidebar or daemon lifecycle commands.
+The current release validates the complete schema, uses `client` and `server` for publication behavior, supports editing `agent.trusted_origins`, and provides foreground `agent serve` for the local agent API. On macOS, `agent serve --daemon` installs or updates and starts a per-user LaunchAgent; `agent daemon status|restart|stop|uninstall` manages it. `stop` retains the plist and `uninstall` removes it. Managed daemon operations are unsupported on Linux, where foreground `agent serve` is the supported mode.
 
 Durations use Go duration syntax and must be positive. `server.port` accepts 0–65535; YAML `agent.port` accepts 1–65535, while `agent serve --port` also accepts 0 for an ephemeral listener. `default_expires_in` and byte limits are nonnegative integers. Zero default expiration means permanent resources. A zero byte limit selects that limit's built-in value; it does not disable the limit. The effective image request limit cannot be smaller than the effective per-image limit. `log_mode` is `console` or `json`, and `default_access` is currently only `content-only`.
 
@@ -108,7 +108,7 @@ The configuration target must be an unchanged regular file, not a symlink, and m
 
 Trusted-origin list and edit operations have stronger rules on macOS and Linux: the immediate configuration parent must be a real directory, not a symlink, and must not be writable by group or others. The target is opened without following a symlink and is checked for replacement races. Atomic edits use an advisory lock, an owner-only temporary file, file sync, rename, and directory sync. A missing default parent is created as `0700`, and a missing default file created by `agent trust add` is `0600`. Explicitly selected files are never created.
 
-Trusted-origin editing and listing are supported only on macOS and Linux. Other platforms return an unsupported-platform configuration error.
+Trusted-origin editing and listing are supported only on macOS and Linux. Other platforms return an unsupported-platform configuration error. Managed agent daemon lifecycle operations are macOS-only; Linux returns explicit foreground guidance.
 
 ## Trusted HTTPS origins
 

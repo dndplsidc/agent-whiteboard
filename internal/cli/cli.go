@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
 	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/launchagent"
 	"github.com/spf13/cobra"
 )
 
@@ -39,13 +41,15 @@ type Application interface {
 }
 
 type Dependencies struct {
-	Stdout              io.Writer
-	Stderr              io.Writer
-	Getenv              func(string) string
-	LoadConfig          func(string) (generalconfig.Config, error)
-	NewClient           func(httpx.ClientConfig) (Client, error)
-	NewApplication      func(app.ServiceConfig, ...app.Option) (Application, error)
-	NewAgentApplication func(app.AgentServiceConfig) (Application, error)
+	Stdout                io.Writer
+	Stderr                io.Writer
+	Getenv                func(string) string
+	LoadConfig            func(string) (generalconfig.Config, error)
+	NewClient             func(httpx.ClientConfig) (Client, error)
+	NewApplication        func(app.ServiceConfig, ...app.Option) (Application, error)
+	NewAgentApplication   func(app.AgentServiceConfig) (Application, error)
+	NewLaunchAgentManager func() (launchagent.Manager, error)
+	ExecutablePath        func() (string, error)
 }
 
 type rootOptions struct {
@@ -114,6 +118,14 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 			return app.NewAgentService(config)
 		}
 	}
+	if common.IsNil(deps.NewLaunchAgentManager) {
+		deps.NewLaunchAgentManager = func() (launchagent.Manager, error) {
+			return launchagent.NewManager(launchagent.ExecRunner{})
+		}
+	}
+	if common.IsNil(deps.ExecutablePath) {
+		deps.ExecutablePath = os.Executable
+	}
 
 	options := &rootOptions{}
 	root := &cobra.Command{
@@ -140,7 +152,7 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 	}
 	factory := commandFactory{deps: deps, root: options, general: &generalConfiguration{}}
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
-		if cmd == root || isCompletionRequest(cmd) || commandHandlesConfiguration(cmd) {
+		if cmd == root || isCompletionRequest(cmd) || commandHandlesConfiguration(cmd) || isDaemonServeRequest(cmd) {
 			return nil
 		}
 		return factory.loadGeneralConfiguration()
@@ -170,6 +182,29 @@ func isCompletionRequest(cmd *cobra.Command) bool {
 
 func commandHandlesConfiguration(cmd *cobra.Command) bool {
 	return cmd.Annotations[handlesConfigurationAnnotation] == "true"
+}
+
+func isDaemonServeRequest(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Name() != "serve" || cmd.Parent() == nil || cmd.Parent().Name() != "agent" {
+		return false
+	}
+	flag := cmd.Flags().Lookup("daemon")
+	return flag != nil && flag.Value.String() == "true"
+}
+
+// selectedPiExecutableResolver records an explicit Pi selection without
+// copying any ambient environment into the LaunchAgent. Absolute selections
+// are returned as-is; names are resolved using the current PATH.
+type selectedPiExecutableResolver struct{ selected string }
+
+func (resolver selectedPiExecutableResolver) LookPath(name string) (string, error) {
+	if name != launchagent.ProviderPi {
+		return exec.LookPath(name)
+	}
+	if filepath.IsAbs(resolver.selected) {
+		return resolver.selected, nil
+	}
+	return exec.LookPath(resolver.selected)
 }
 
 func (factory commandFactory) newClient(cmd *cobra.Command) (Client, context.Context, context.CancelFunc, error) {

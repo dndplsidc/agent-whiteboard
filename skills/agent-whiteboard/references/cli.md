@@ -14,7 +14,8 @@ agent-whiteboard [global flags] delete html -- ID
 agent-whiteboard [global flags] image upload [--expires-in SECONDS] FILE...
 agent-whiteboard [global flags] image update [--expires-in SECONDS] -- ID FILE
 agent-whiteboard [global flags] image delete -- ID
-agent-whiteboard [global flags] agent serve [--port PORT] [--provider-idle-timeout DURATION] [--shutdown-timeout DURATION] [--pi-executable PATH]
+agent-whiteboard [global flags] agent serve [--daemon] [--port PORT] [--provider-idle-timeout DURATION] [--shutdown-timeout DURATION] [--pi-executable PATH]
+agent-whiteboard [global flags] agent daemon status|restart|stop|uninstall
 agent-whiteboard [global flags] agent trust add ORIGIN
 agent-whiteboard [global flags] agent trust remove ORIGIN
 agent-whiteboard [global flags] agent trust list
@@ -70,4 +71,4 @@ Trust commands add, remove, and list canonical exact HTTPS origins in the select
 
 `agent serve` runs the foreground local agent API and provider broker. It resolves `pi` from `PATH` unless `--pi-executable` or `AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE` selects another executable. Authenticate beforehand with Pi itself; the adapter uses Pi's provider-native `~/.pi/agent/auth.json`. It deliberately does not pass ambient provider API-key or auth-token environment variables to Pi. There are no agent-whiteboard authentication commands.
 
-The command does not manage a daemon or open a browser. The supported operations above are the complete current publication, trust, and foreground-agent surface; do not invent `publish`, authentication commands, asset bundling, broker commands, or a `--permanent` flag.
+On macOS, `agent serve --daemon` installs or updates and starts the per-user LaunchAgent, then exits without constructing a foreground server. It records absolute agent and selected/default configuration paths plus the Pi executable path when Pi resolves during installation; the child reads configuration only when it starts. With `--daemon`, `--pi-executable` (and its environment override) is allowed, while `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` are rejected because the child reads those values from the recorded configuration. `agent daemon status` reports only installed/loaded/running and a running PID; human install/mutation success is silent and JSON install/mutations return `{"schema_version":1}`. `restart` reloads and starts the installed service, `stop` unloads it while retaining the plist, and `uninstall` removes the plist. Linux returns explicit unsupported guidance; run foreground `agent serve` there. Do not invent `publish`, authentication commands, asset bundling, broker commands, or a `--permanent` flag.

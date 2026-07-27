@@ -15,7 +15,7 @@ func (factory commandFactory) newAgentCommand() *cobra.Command {
 		Use:  "agent",
 		Args: usageArgs(cobra.NoArgs),
 	}
-	command.AddCommand(factory.newAgentServeCommand(), factory.newTrustCommand())
+	command.AddCommand(factory.newAgentServeCommand(), factory.newAgentDaemonCommand(), factory.newTrustCommand())
 	return command
 }
 

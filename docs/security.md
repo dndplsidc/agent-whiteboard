@@ -22,7 +22,9 @@ Image uploads accept PNG, JPEG, GIF, and WebP only after signature detection and
 
 ## Configuration and origin allowlist
 
-Trusted origins must be exact HTTPS origins. The CLI rejects paths, queries, fragments, user information, wildcards, and HTTP. Exact origin configuration does not add authentication to whiteboard resources, and the current release does not provide the local broker or browser sidebar that consumes this allowlist.
+Trusted origins must be exact HTTPS origins. The CLI rejects paths, queries, fragments, user information, wildcards, and HTTP. Exact origin configuration does not add authentication to whiteboard resources.
+
+On macOS, the managed daemon records only the absolute agent executable, selected/default configuration path, and—when Pi resolves during installation—the absolute Pi executable path in the per-user LaunchAgent. It does not record ambient environment variables, provider credentials, or raw launchctl output. `agent serve --daemon` installs/updates and starts the service; `stop` unloads it but retains the plist, and `uninstall` removes it. Linux rejects managed daemon operations with foreground guidance. Authenticate with Pi's provider-native login; agent-whiteboard never captures or persists provider credentials.
 
 Configuration files must be regular non-symlinks and must not be writable by group or others. On macOS and Linux, trust operations additionally require the immediate parent to be a non-symlink directory that is not writable by group or others; edits are locked, written to `0600` temporary files, synced, and atomically renamed. See [configuration](configuration.md) for the complete permission and platform contract.
 

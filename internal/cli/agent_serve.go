@@ -12,6 +12,7 @@ import (
 
 type agentServeFlagValues struct {
 	port, providerIdleTimeout, shutdownTimeout, piExecutable string
+	daemon                                                   bool
 }
 
 type resolvedAgentSettings struct {
@@ -35,6 +36,7 @@ func (factory commandFactory) newAgentServeCommand() *cobra.Command {
 	flags.StringVar(&values.providerIdleTimeout, "provider-idle-timeout", "", "provider idle timeout")
 	flags.StringVar(&values.shutdownTimeout, "shutdown-timeout", "", "shutdown timeout")
 	flags.StringVar(&values.piExecutable, "pi-executable", "", "Pi executable")
+	flags.BoolVar(&values.daemon, "daemon", false, "install and start the managed daemon")
 	return command
 }
 
@@ -91,6 +93,22 @@ func (factory commandFactory) resolveAgentSettings(cmd *cobra.Command, flags *ag
 }
 
 func (factory commandFactory) runAgentServe(cmd *cobra.Command, flags *agentServeFlagValues) (resultErr error) {
+	if flags.daemon {
+		if err := rejectDaemonFlags(cmd); err != nil {
+			return err
+		}
+		if cmd.Flags().Changed("pi-executable") && flags.piExecutable == "" {
+			return invalidCommand("Pi executable must not be empty")
+		}
+		if err := factory.installAgentDaemon(cmd, flags.piExecutable, cmd.Flags().Changed("pi-executable")); err != nil {
+			return err
+		}
+		return writeDeleteSuccess(factory.deps.Stdout, factory.root.json)
+	}
+
+	if cmd.Flags().Changed("pi-executable") && flags.piExecutable == "" {
+		return invalidCommand("Pi executable must not be empty")
+	}
 	settings, err := factory.resolveAgentSettings(cmd, flags)
 	if err != nil {
 		return err
