@@ -48,6 +48,10 @@ func TestAttachObservationOrderingConflictsMetadataAndReplay(t *testing.T) {
 	require.Equal(t, agentprotocol.EventSnapshot, firstSnapshot.Type)
 	require.Equal(t, agentprotocol.ContextPending, firstSnapshot.Payload.(agentprotocol.SnapshotPayload).ContextState)
 
+	missed := provider.NewActivityEvent("", provider.ActivityStatus, "missed during reconnect")
+	session.events <- missed
+	require.Equal(t, agentprotocol.EventActivity, receiveLifecycle(t, first.Events()).Type)
+
 	entered := make(chan struct{})
 	gate := make(chan struct{})
 	state.mu.Lock()
@@ -61,7 +65,7 @@ func TestAttachObservationOrderingConflictsMetadataAndReplay(t *testing.T) {
 	newerDigest := strings.Repeat("1", 64)
 	connected := make(chan observationConnectResult, 1)
 	go func() {
-		connection, connectErr := broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1203), identity.CapabilityID, newerDigest, newerResource, ""))
+		connection, connectErr := broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1202), identity.CapabilityID, newerDigest, newerResource, firstSnapshot.EventID))
 		connected <- observationConnectResult{connection: connection, err: connectErr}
 	}()
 	waitLifecycle(t, entered)
@@ -73,6 +77,8 @@ func TestAttachObservationOrderingConflictsMetadataAndReplay(t *testing.T) {
 	close(gate)
 	secondResult := receiveLifecycle(t, connected)
 	require.NoError(t, secondResult.err)
+	require.Equal(t, agentprotocol.EventActivity, receiveLifecycle(t, secondResult.connection.Events()).Type)
+	require.Equal(t, agentprotocol.EventContext, receiveLifecycle(t, secondResult.connection.Events()).Type)
 	secondSnapshot := receiveLifecycle(t, secondResult.connection.Events())
 	require.Equal(t, agentprotocol.EventSnapshot, secondSnapshot.Type)
 	require.Equal(t, agentprotocol.ContextPending, secondSnapshot.Payload.(agentprotocol.SnapshotPayload).ContextState)
@@ -95,9 +101,9 @@ func TestAttachObservationOrderingConflictsMetadataAndReplay(t *testing.T) {
 	require.Equal(t, newerDigest, secondActor.contextDigest)
 
 	require.NoError(t, secondResult.connection.Close(context.Background()))
-	replayed, err := broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1203), identity.CapabilityID, newerDigest, newerResource, secondSnapshot.EventID))
+	replayed, err := broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1202), identity.CapabilityID, newerDigest, newerResource, secondSnapshot.EventID))
 	require.NoError(t, err)
-	require.Equal(t, agentprotocol.EventContext, receiveLifecycle(t, replayed.Events()).Type)
+	require.Equal(t, agentprotocol.EventActivity, receiveLifecycle(t, replayed.Events()).Type)
 
 	olderSameDigest := newerResource
 	olderSameDigest.UpdatedAt = firstResource.UpdatedAt
@@ -116,6 +122,82 @@ func TestAttachObservationOrderingConflictsMetadataAndReplay(t *testing.T) {
 	olderConflictResource.UpdatedAt = newerResource.UpdatedAt.Add(-lifecycleTestTimeout)
 	_, err = broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1206), identity.CapabilityID, strings.Repeat("3", 64), olderConflictResource, ""))
 	requireBrokerCode(t, err, agentprotocol.ErrorBoardRevisionUnavailable)
+}
+
+func TestPendingObservedRevisionOutranksOlderCommittedDigestAndNewerRevertIsAcknowledged(t *testing.T) {
+	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1211))
+	resource := testResource(identity.CapabilityID)
+	committed := agentstate.Revision{Digest: strings.Repeat("d", 64), Revision: agentstate.RevisionInitial, SourceUpdatedAt: resource.UpdatedAt}
+	observed := agentstate.Revision{Digest: strings.Repeat("e", 64), Revision: agentstate.RevisionReplacement, SourceUpdatedAt: resource.UpdatedAt.Add(lifecycleTestTimeout)}
+	mapping.Current.Committed = &committed
+	mapping.Current.Observed = &observed
+	state := &repairState{mapping: &mapping}
+	session := newHardeningSession(mapping.Current.NativeSession.Value())
+	broker, err := New(validLifecycleConfig(state, &hardeningDriver{resumeSession: session}, &lockedIDs{next: 1212}))
+	require.NoError(t, err)
+	defer broker.Close(context.Background())
+
+	older := resource
+	_, err = broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1213), identity.CapabilityID, committed.Digest, older, ""))
+	requireBrokerCode(t, err, agentprotocol.ErrorBoardRevisionUnavailable)
+	equal := resource
+	equal.UpdatedAt = observed.SourceUpdatedAt
+	_, err = broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1214), identity.CapabilityID, committed.Digest, equal, ""))
+	requireBrokerCode(t, err, agentprotocol.ErrorBoardRevisionMalformed)
+
+	newer := resource
+	newer.UpdatedAt = observed.SourceUpdatedAt.Add(lifecycleTestTimeout)
+	connection, err := broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1215), identity.CapabilityID, committed.Digest, newer, ""))
+	require.NoError(t, err)
+	snapshot := receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.SnapshotPayload)
+	require.Equal(t, agentprotocol.ContextUnchanged, snapshot.ContextState)
+	state.mu.Lock()
+	require.Equal(t, 1, state.acknowledgeCalls)
+	require.Nil(t, state.mapping.Current.Observed)
+	require.Equal(t, newer.UpdatedAt, state.mapping.Current.Committed.SourceUpdatedAt)
+	state.mu.Unlock()
+}
+
+func TestAttachAcknowledgementAcceptsOnlyExactLoadedTarget(t *testing.T) {
+	failure := errors.New("directory sync outcome unavailable")
+	for _, test := range []struct {
+		name      string
+		step      repairMutation
+		wantError bool
+	}{
+		{name: "uncertain target", step: repairMutation{outcome: agentstate.CommitUncertain, err: failure, apply: true}},
+		{name: "uncertain precondition", step: repairMutation{outcome: agentstate.CommitUncertain, err: failure}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1216))
+			resource := testResource(identity.CapabilityID)
+			committed := agentstate.Revision{Digest: strings.Repeat("f", 64), Revision: agentstate.RevisionInitial, SourceUpdatedAt: resource.UpdatedAt}
+			observed := agentstate.Revision{Digest: strings.Repeat("a", 64), Revision: agentstate.RevisionReplacement, SourceUpdatedAt: resource.UpdatedAt.Add(lifecycleTestTimeout)}
+			mapping.Current.Committed = &committed
+			mapping.Current.Observed = &observed
+			state := &repairState{mapping: &mapping, acknowledgements: []repairMutation{test.step}}
+			session := newHardeningSession(mapping.Current.NativeSession.Value())
+			broker, err := New(validLifecycleConfig(state, &hardeningDriver{resumeSession: session}, &lockedIDs{next: 1217}))
+			require.NoError(t, err)
+			defer broker.Close(context.Background())
+			newer := resource
+			newer.UpdatedAt = observed.SourceUpdatedAt.Add(lifecycleTestTimeout)
+			connection, connectErr := broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(1218), identity.CapabilityID, committed.Digest, newer, ""))
+			if test.wantError {
+				require.Nil(t, connection)
+				requireBrokerCode(t, connectErr, agentprotocol.ErrorStateRepairFailed)
+				state.mu.Lock()
+				require.NotNil(t, state.mapping.Current.Observed)
+				state.mu.Unlock()
+				return
+			}
+			require.NoError(t, connectErr)
+			require.Equal(t, agentprotocol.ContextUnchanged, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.SnapshotPayload).ContextState)
+			state.mu.Lock()
+			require.Nil(t, state.mapping.Current.Observed)
+			state.mu.Unlock()
+		})
+	}
 }
 
 func TestAttachCommittedDigestIsUnchangedWithoutTimestampObservation(t *testing.T) {

@@ -87,6 +87,19 @@ func (state *hardeningState) ObserveRevision(_ agentstate.Identity, revision age
 	state.mapping.UpdatedAt = at
 	return agentstate.CommitApplied, nil
 }
+func (state *hardeningState) AcknowledgeCommittedRevision(_ agentstate.Identity, revision agentstate.Revision, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.mapping == nil || state.mapping.Current == nil || state.mapping.Current.Committed == nil || state.mapping.Current.Observed == nil || state.mapping.Current.PreparedCommit != nil || state.mapping.Current.Committed.Digest != revision.Digest || !revision.SourceUpdatedAt.After(state.mapping.Current.Observed.SourceUpdatedAt) {
+		return agentstate.CommitNotApplied, errors.New("acknowledgement rejected")
+	}
+	committed := revision
+	state.mapping.Current.Committed = &committed
+	state.mapping.Current.Observed = nil
+	state.mapping.Current.UpdatedAt = at
+	state.mapping.UpdatedAt = at
+	return agentstate.CommitApplied, nil
+}
 func (state *hardeningState) PromotePrepared(_ agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()

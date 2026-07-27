@@ -66,6 +66,9 @@ func (s *lifecycleState) ObserveRevision(identity agentstate.Identity, revision 
 	s.mappings[identity] = mapping
 	return agentstate.CommitApplied, nil
 }
+func (s *lifecycleState) AcknowledgeCommittedRevision(identity agentstate.Identity, revision agentstate.Revision, at time.Time) (agentstate.CommitOutcome, error) {
+	return agentstate.CommitNotApplied, errors.New("acknowledgement not configured")
+}
 func (s *lifecycleState) PromotePrepared(identity agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
 	return agentstate.CommitNotApplied, errors.New("promotion not configured")
 }

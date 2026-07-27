@@ -27,12 +27,14 @@ type repairState struct {
 	promotions       []repairMutation
 	reconciliations  []repairMutation
 	observations     []repairMutation
+	acknowledgements []repairMutation
 	observeEntered   chan struct{}
 	observeGate      chan struct{}
 	observeEnterOnce sync.Once
 	promoteCalls     int
 	reconcileCalls   int
 	observeCalls     int
+	acknowledgeCalls int
 	loadCalls        int
 }
 
@@ -74,6 +76,22 @@ func (state *repairState) ObserveRevision(_ agentstate.Identity, revision agents
 	}
 	if step.apply {
 		updated := observedMapping(*state.mapping, revision, at)
+		state.mapping = &updated
+	}
+	return step.outcome, step.err
+}
+
+func (state *repairState) AcknowledgeCommittedRevision(_ agentstate.Identity, revision agentstate.Revision, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.acknowledgeCalls++
+	step := repairMutation{outcome: agentstate.CommitApplied, apply: true}
+	if len(state.acknowledgements) != 0 {
+		step = state.acknowledgements[0]
+		state.acknowledgements = state.acknowledgements[1:]
+	}
+	if step.apply {
+		updated := acknowledgedMapping(*state.mapping, revision, at)
 		state.mapping = &updated
 	}
 	return step.outcome, step.err
@@ -261,6 +279,42 @@ func TestStartupAcceptedPromotionStopsAfterOneExactPreconditionRetry(t *testing.
 	require.Zero(t, driver.resumeCalls)
 	driver.mu.Unlock()
 	require.NoError(t, broker.Close(context.Background()))
+}
+
+func TestStartupReconciliationErrorsPreserveFrozenTaxonomy(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want agentprotocol.BrowserErrorCode
+	}{
+		{name: "acceptance unknown", err: provider.NewProviderError(provider.ErrorAcceptanceUnknown), want: agentprotocol.ErrorAcceptanceOutcomeUnknown},
+		{name: "native session missing", err: provider.NewProviderError(provider.ErrorNativeSessionMissing), want: agentprotocol.ErrorNativeSessionMissing},
+		{name: "malformed stream", err: provider.NewProviderError(provider.ErrorMalformedStream), want: agentprotocol.ErrorProviderMalformedStream},
+		{name: "child exited", err: provider.NewProviderError(provider.ErrorChildExited), want: agentprotocol.ErrorProviderCrashed},
+		{name: "untyped protocol failure", err: errors.New("native /private/error"), want: agentprotocol.ErrorProviderProtocolFailure},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			identity, mapping, _ := preparedRepairMapping(t, agentstate.CommitPrepared)
+			state := &repairState{mapping: &mapping}
+			session := newHardeningSession(mapping.Current.NativeSession.Value())
+			session.reconcileErr = test.err
+			driver := &hardeningDriver{resumeSession: session}
+			broker, err := New(validLifecycleConfig(state, driver, &lockedIDs{next: 1129}))
+			require.NoError(t, err)
+			connection, connectErr := broker.Connect(context.Background(), identity.Origin, lifecycleConnect(sequenceID(1130), identity.CapabilityID))
+			require.Nil(t, connection)
+			requireBrokerCode(t, connectErr, test.want)
+			require.NotContains(t, connectErr.Error(), "/private/error")
+			state.mu.Lock()
+			require.NotNil(t, state.mapping.Current.PreparedCommit)
+			require.Zero(t, state.reconcileCalls)
+			state.mu.Unlock()
+			require.Zero(t, session.submissions.Load())
+			require.EqualValues(t, 1, session.shutdowns.Load())
+			require.NoError(t, broker.Close(context.Background()))
+		})
+	}
 }
 
 func TestStartupTurnUnknownRetainsPreparedStateAndNeverSubmits(t *testing.T) {

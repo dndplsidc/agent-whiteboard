@@ -139,6 +139,44 @@ func TestRevisionPreparePromoteAndReconcile(t *testing.T) {
 	require.Equal(t, replacement, *loaded.Current.Committed)
 }
 
+func TestAcknowledgeCommittedRevisionClearsOnlyANewerConflictingObservation(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	session := testSession(t, testID, "sessions/current", now)
+	_, err := store.Create(testIdentity(), session, now)
+	require.NoError(t, err)
+	committed := Revision{Digest: strings.Repeat("a", 64), Revision: RevisionInitial, SourceUpdatedAt: now}
+	_, err = store.ObserveRevision(testIdentity(), committed, now)
+	require.NoError(t, err)
+	_, err = store.PrepareCommit(testIdentity(), committed, testID, now)
+	require.NoError(t, err)
+	_, err = store.MarkPreparedAccepted(testIdentity(), testID, now)
+	require.NoError(t, err)
+	_, err = store.PromotePrepared(testIdentity(), testID, now)
+	require.NoError(t, err)
+
+	pending := Revision{Digest: strings.Repeat("b", 64), Revision: RevisionReplacement, SourceUpdatedAt: now.Add(time.Second)}
+	_, err = store.ObserveRevision(testIdentity(), pending, now.Add(time.Second))
+	require.NoError(t, err)
+	reverted := Revision{Digest: committed.Digest, Revision: RevisionReplacement, SourceUpdatedAt: now.Add(2 * time.Second)}
+	outcome, err := store.AcknowledgeCommittedRevision(testIdentity(), reverted, now.Add(2*time.Second))
+	require.NoError(t, err)
+	require.Equal(t, CommitApplied, outcome)
+	loaded, err := store.Load(testIdentity())
+	require.NoError(t, err)
+	require.Equal(t, reverted, *loaded.Current.Committed)
+	require.Nil(t, loaded.Current.Observed)
+
+	_, err = store.ObserveRevision(testIdentity(), pending, now.Add(3*time.Second))
+	require.NoError(t, err)
+	outcome, err = store.AcknowledgeCommittedRevision(testIdentity(), Revision{Digest: committed.Digest, Revision: RevisionReplacement, SourceUpdatedAt: pending.SourceUpdatedAt}, now.Add(4*time.Second))
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+	loaded, err = store.Load(testIdentity())
+	require.NoError(t, err)
+	require.Equal(t, pending, *loaded.Current.Observed)
+}
+
 func TestPreparedCommitTransitionTable(t *testing.T) {
 	store := openTestStore(t)
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)

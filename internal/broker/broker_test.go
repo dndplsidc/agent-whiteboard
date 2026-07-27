@@ -251,6 +251,29 @@ func TestReplayLogReturnsStablePayloadCopies(t *testing.T) {
 	require.NotContains(t, string(mustEncodeEvent(t, got[0])), "creator_context")
 }
 
+func TestReplayClonesPreserveRequiredEmptySlices(t *testing.T) {
+	log := NewReplayLog()
+	conversation := testID('K')
+	client := testID('L')
+	payloads := []agentprotocol.EventPayload{
+		agentprotocol.SnapshotPayload{Lifecycle: agentprotocol.LifecycleReady, Queue: []agentprotocol.QueueItem{}, ContextState: agentprotocol.ContextPending},
+		agentprotocol.QueuePayload{Items: []agentprotocol.QueueItem{}},
+		agentprotocol.TimelinePayload{CommandID: testID('M'), Items: []agentprotocol.TimelineItem{}, NextCursor: nil},
+		agentprotocol.HistoryPayload{CommandID: testID('N'), Items: []agentprotocol.ArchiveItem{}, NextCursor: nil},
+	}
+	for index, payload := range payloads {
+		event := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(uint64(index + 200)), ConversationID: conversation, Type: payload.EventType(), Timestamp: testTime(), Payload: payload}
+		require.NoError(t, log.Append(event))
+	}
+	replayed, err := log.Replay(client, "")
+	require.NoError(t, err)
+	require.Len(t, replayed, len(payloads))
+	for _, event := range replayed {
+		_, err := agentprotocol.EncodeEvent(event)
+		require.NoError(t, err)
+	}
+}
+
 func TestReplayEvictionClassificationTracksRecentVisibilityWithBoundedMemory(t *testing.T) {
 	log := NewReplayLog()
 	clientA := testID('A')

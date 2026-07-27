@@ -60,12 +60,17 @@ func (broker *Broker) reconcilePrepared(ctx context.Context, identity agentstate
 	}
 	drainer := startTemporaryDrainer(session.Events())
 	state, reconcileErr := session.Reconcile(ctx, provider.TurnReference{TurnID: prepared.TurnID})
-	if reconcileErr != nil || state == provider.TurnUnknown {
+	if reconcileErr != nil {
 		drainer.stop()
 		broker.retainStop(identity, session)
 		if ctx.Err() != nil {
 			return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 		}
+		return nil, MapError(reconcileErr)
+	}
+	if state == provider.TurnUnknown {
+		drainer.stop()
+		broker.retainStop(identity, session)
 		return nil, NewBrokerError(agentprotocol.ErrorAcceptanceOutcomeUnknown)
 	}
 	if !state.Valid() || !state.Definitive() {
@@ -174,6 +179,16 @@ func reconciledMapping(mapping agentstate.Mapping, accepted bool, at time.Time) 
 	observed := prepared.Revision
 	result.Current.Observed = &observed
 	result.Current.PreparedCommit = nil
+	result.Current.UpdatedAt = maxTime(result.Current.UpdatedAt, at)
+	result.UpdatedAt = maxTime(result.UpdatedAt, at)
+	return result
+}
+
+func acknowledgedMapping(mapping agentstate.Mapping, revision agentstate.Revision, at time.Time) agentstate.Mapping {
+	result := cloneMapping(mapping)
+	committed := revision
+	result.Current.Committed = &committed
+	result.Current.Observed = nil
 	result.Current.UpdatedAt = maxTime(result.Current.UpdatedAt, at)
 	result.UpdatedAt = maxTime(result.UpdatedAt, at)
 	return result

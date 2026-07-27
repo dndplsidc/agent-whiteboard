@@ -273,16 +273,40 @@ func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, re
 			return
 		}
 	}
-	contextState, newlyObserved, contextEvent, err := actor.observeAttach(request.resource, request.contextDigest)
+	contextState, contextChanged, contextEvent, err := actor.observeAttach(request.resource, request.contextDigest)
 	if err != nil {
 		request.response <- attachResponse{err: err}
 		return
 	}
-	var initial []agentprotocol.Event
-	if !newlyObserved {
-		initial = replayed
-	}
-	if newlyObserved || request.replayAfter == "" || len(initial) == 0 {
+
+	initial := replayed
+	if contextChanged {
+		if err := actor.replay.Append(contextEvent); err != nil {
+			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
+			return
+		}
+		for attached := range attachments {
+			actor.send(attachments, attached, contextEvent)
+		}
+		snapshot, snapshotErr := actor.snapshot(contextState)
+		if snapshotErr != nil {
+			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
+			return
+		}
+		if appendErr := actor.replay.AppendForClient(request.clientID, snapshot); appendErr != nil {
+			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
+			return
+		}
+		if request.replayAfter == "" {
+			initial = []agentprotocol.Event{snapshot}
+		} else {
+			initial, err = actor.replay.Replay(request.clientID, request.replayAfter)
+			if err != nil {
+				request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorReplayWindowUnavailable)}
+				return
+			}
+		}
+	} else if request.replayAfter == "" || len(initial) == 0 {
 		snapshot, snapshotErr := actor.snapshot(contextState)
 		if snapshotErr != nil {
 			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
@@ -294,25 +318,12 @@ func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, re
 		}
 		initial = append(initial, snapshot)
 	}
-	hadExistingAttachments := len(attachments) != 0
 	item, err := newAttachment(request.clientID, initial)
 	if err != nil {
 		request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
 		return
 	}
 	attachments[item] = struct{}{}
-	if newlyObserved && hadExistingAttachments {
-		if err := actor.replay.Append(contextEvent); err != nil {
-			actor.detach(attachments, item)
-			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
-			return
-		}
-		for attached := range attachments {
-			if attached != item {
-				actor.send(attachments, attached, contextEvent)
-			}
-		}
-	}
 	request.response <- attachResponse{attachment: item}
 }
 

@@ -20,6 +20,7 @@ type StateStore interface {
 	Load(agentstate.Identity) (agentstate.Mapping, error)
 	Create(agentstate.Identity, agentstate.Session, time.Time) (agentstate.CommitOutcome, error)
 	ObserveRevision(agentstate.Identity, agentstate.Revision, time.Time) (agentstate.CommitOutcome, error)
+	AcknowledgeCommittedRevision(agentstate.Identity, agentstate.Revision, time.Time) (agentstate.CommitOutcome, error)
 	PromotePrepared(agentstate.Identity, string, time.Time) (agentstate.CommitOutcome, error)
 	ReconcilePrepared(agentstate.Identity, string, bool, time.Time) (agentstate.CommitOutcome, error)
 	EnsureWorkspace(string) (string, error)

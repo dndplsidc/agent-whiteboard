@@ -331,6 +331,31 @@ func (store *Store) ObserveRevision(identity Identity, revision Revision, at tim
 	})
 }
 
+// AcknowledgeCommittedRevision clears a superseded pending observation when a
+// newer source revision returns to the already-committed digest. No provider
+// context commit is required because the committed content is unchanged.
+func (store *Store) AcknowledgeCommittedRevision(identity Identity, revision Revision, at time.Time) (CommitOutcome, error) {
+	if err := revision.validate(); err != nil {
+		return CommitNotApplied, err
+	}
+	return store.updateAt(identity, at, func(mapping *Mapping) error {
+		if mapping.Current == nil || mapping.Current.Committed == nil || mapping.Current.Observed == nil {
+			return os.ErrNotExist
+		}
+		if mapping.Current.PreparedCommit != nil {
+			return errors.New("cannot acknowledge an unresolved prepared revision")
+		}
+		if revision.Revision != RevisionReplacement || mapping.Current.Committed.Digest != revision.Digest || mapping.Current.Observed.Digest == revision.Digest || !revision.SourceUpdatedAt.After(mapping.Current.Observed.SourceUpdatedAt) || !revision.SourceUpdatedAt.After(mapping.Current.Committed.SourceUpdatedAt) {
+			return errors.New("revision does not supersede the pending observation")
+		}
+		committed := revision
+		mapping.Current.Committed = &committed
+		mapping.Current.Observed = nil
+		mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
+		return nil
+	})
+}
+
 func (store *Store) PrepareCommit(identity Identity, revision Revision, turnID string, at time.Time) (CommitOutcome, error) {
 	prepared := PreparedCommit{Revision: revision, TurnID: turnID, Phase: CommitPrepared}
 	if err := prepared.validate(); err != nil {
@@ -642,6 +667,7 @@ func (store *Store) begin(key string) (func(), error) {
 type sessionSnapshot struct {
 	updatedAt time.Time
 	committed *Revision
+	observed  *Revision
 	prepared  *PreparedCommit
 }
 
@@ -652,6 +678,10 @@ func snapshotSessions(mapping Mapping) map[string]sessionSnapshot {
 		if session.Committed != nil {
 			committed := *session.Committed
 			snapshot.committed = &committed
+		}
+		if session.Observed != nil {
+			observed := *session.Observed
+			snapshot.observed = &observed
 		}
 		if session.PreparedCommit != nil {
 			prepared := *session.PreparedCommit
@@ -718,7 +748,11 @@ func validateSessionTransitions(mapping Mapping, before map[string]sessionSnapsh
 			if current.Committed == nil {
 				return errors.New("cannot discard a committed revision")
 			}
-			if previous.prepared == nil || current.PreparedCommit != nil || current.Observed != nil || *current.Committed != previous.prepared.Revision {
+			resolvedPrepared := previous.prepared != nil && current.PreparedCommit == nil && current.Observed == nil && *current.Committed == previous.prepared.Revision
+			acknowledgedCommitted := previous.prepared == nil && previous.committed != nil && previous.observed != nil && current.PreparedCommit == nil && current.Observed == nil &&
+				current.Committed.Digest == previous.committed.Digest && current.Committed.Revision == RevisionReplacement &&
+				current.Committed.SourceUpdatedAt.After(previous.observed.SourceUpdatedAt) && current.Committed.SourceUpdatedAt.After(previous.committed.SourceUpdatedAt)
+			if !resolvedPrepared && !acknowledgedCommitted {
 				return errors.New("cannot change a committed revision without resolving its prepared record")
 			}
 		}
