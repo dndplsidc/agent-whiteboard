@@ -102,7 +102,7 @@ func Open(home string) (*Store, error) {
 		workspaces: layout.workspaces, providers: layout.providers,
 		locks: keyedLocks{entries: make(map[string]*keyedLock)}, homeGuardKey: canonical,
 	}
-	store.ops = defaultFileOps(store.conversations)
+	store.ops = defaultFileOps(store.conversations, store.workspaces)
 	for _, directory := range []*secureDirectory{store.conversations, store.workspaces, store.providers} {
 		directory.setMutationGuard(store.verifyLayout)
 	}
@@ -469,7 +469,7 @@ func (store *Store) RemoveWorkspace(conversationID string) error {
 		return err
 	}
 	defer release()
-	if err := store.workspaces.removeDirectoryWithHook(conversationID, store.ops.beforeWorkspaceTombstone, store.ops.closeWorkspace, store.ops.unlinkWorkspace); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := store.workspaces.removeDirectoryWithHook(conversationID, store.ops.beforeWorkspaceTombstone, store.ops.closeWorkspace, store.ops.unlinkWorkspace, store.ops.syncWorkspaces); err != nil && err != os.ErrNotExist {
 		return err
 	}
 	return store.verifyLayout()

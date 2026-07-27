@@ -318,11 +318,11 @@ func randomStateName(prefix string) (string, error) {
 
 func (directory *secureDirectory) createTemporary() (*os.File, string, error) {
 	for attempt := 0; attempt < 128; attempt++ {
-		if err := directory.verifyMutationAllowed(); err != nil {
-			return nil, "", err
-		}
 		name, err := randomStateName(".mapping.tmp-")
 		if err != nil {
+			return nil, "", err
+		}
+		if err := directory.verifyMutationAllowed(); err != nil {
 			return nil, "", err
 		}
 		fd, err := unix.Openat(directory.fd(), name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
@@ -332,24 +332,45 @@ func (directory *secureDirectory) createTemporary() (*os.File, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
+		var createdStat unix.Stat_t
+		if err := unix.Fstat(fd, &createdStat); err != nil {
+			_ = unix.Close(fd)
+			return nil, "", err
+		}
+		created := identityFromStat(&createdStat)
 		file := os.NewFile(uintptr(fd), name)
 		if file == nil {
 			_ = unix.Close(fd)
-			_ = unix.Unlinkat(directory.fd(), name, 0)
-			return nil, "", errors.New("create temporary mapping")
+			cleanupErr := directory.removeCreatedFile(name, created)
+			return nil, "", errors.Join(errors.New("create temporary mapping"), cleanupErr)
 		}
 		if err := directory.verifyMutationAllowed(); err != nil {
 			_ = file.Close()
-			return nil, "", err
+			cleanupErr := directory.removeCreatedFile(name, created)
+			return nil, "", errors.Join(err, cleanupErr)
 		}
 		if err := file.Chmod(0o600); err != nil {
 			_ = file.Close()
-			_ = unix.Unlinkat(directory.fd(), name, 0)
-			return nil, "", err
+			cleanupErr := directory.removeCreatedFile(name, created)
+			return nil, "", errors.Join(err, cleanupErr)
 		}
 		return file, name, nil
 	}
 	return nil, "", errors.New("temporary mapping collision limit exceeded")
+}
+
+func (directory *secureDirectory) removeCreatedFile(name string, expected fileIdentity) error {
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
+	var current unix.Stat_t
+	if err := unix.Fstatat(directory.fd(), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if identityFromStat(&current) != expected {
+		return errors.New("temporary mapping identity changed before cleanup")
+	}
+	return directory.unlinkFile(name)
 }
 
 func (directory *secureDirectory) readVerified(name string, limit int64) ([]byte, fileIdentity, error) {
@@ -588,6 +609,7 @@ func (directory *secureDirectory) removeDirectory(name string) error {
 		func() {},
 		func(workspace *secureDirectory) error { return workspace.close() },
 		func(parent *secureDirectory, tombstone string) error { return parent.unlinkDirectory(tombstone) },
+		directory.sync,
 	)
 }
 
@@ -596,6 +618,7 @@ func (directory *secureDirectory) removeDirectoryWithHook(
 	beforeTombstone func(),
 	closeWorkspace func(*secureDirectory) error,
 	unlinkWorkspace func(*secureDirectory, string) error,
+	syncParent func() error,
 ) error {
 	if !validName(name) {
 		return errors.New("invalid state directory name")
@@ -610,6 +633,9 @@ func (directory *secureDirectory) removeDirectoryWithHook(
 	if errors.Is(err, unix.ENOENT) {
 		child, err = openDirectoryAt(directory, tombstone, true)
 		if errors.Is(err, unix.ENOENT) {
+			if syncErr := syncParent(); syncErr != nil {
+				return syncErr
+			}
 			return os.ErrNotExist
 		}
 	}
@@ -675,7 +701,7 @@ func (directory *secureDirectory) removeDirectoryWithHook(
 		}
 		return err
 	}
-	return directory.sync()
+	return syncParent()
 }
 
 func (directory *secureDirectory) restoreWorkspaceTombstone(tombstone, name string) error {

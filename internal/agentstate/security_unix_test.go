@@ -163,7 +163,7 @@ func TestCommitOutcomesAndTemporaryCleanup(t *testing.T) {
 		require.False(t, strings.HasPrefix(entry.Name(), ".mapping.tmp-"))
 	}
 
-	store.ops = defaultFileOps(store.conversations)
+	store.ops = defaultFileOps(store.conversations, store.workspaces)
 	_, err = store.Create(testIdentity(), session, now)
 	require.NoError(t, err)
 	store.ops.syncDir = func() error { return errors.New("sync failed") }
@@ -381,12 +381,51 @@ func TestWorkspaceRemovalFailuresRemainRetryable(t *testing.T) {
 			info, statErr := os.Stat(workspace)
 			require.NoError(t, statErr, "failed removal must restore the canonical workspace")
 			require.True(t, info.IsDir())
-			store.ops = defaultFileOps(store.conversations)
+			store.ops = defaultFileOps(store.conversations, store.workspaces)
 			require.NoError(t, store.RemoveWorkspace(testID))
 			_, err = os.Stat(workspace)
 			require.ErrorIs(t, err, os.ErrNotExist)
 		})
 	}
+}
+
+func TestWorkspacePostUnlinkErrorIsNeverSuppressed(t *testing.T) {
+	store := openTestStore(t)
+	workspace, err := store.EnsureWorkspace(testID)
+	require.NoError(t, err)
+	realUnlink := store.ops.unlinkWorkspace
+	postUnlinkErr := errors.New("injected post-unlink failure")
+	store.ops.unlinkWorkspace = func(parent *secureDirectory, name string) error {
+		require.NoError(t, realUnlink(parent, name))
+		return postUnlinkErr
+	}
+
+	err = store.RemoveWorkspace(testID)
+	require.ErrorIs(t, err, postUnlinkErr)
+	_, statErr := os.Stat(workspace)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestWorkspaceAbsentRetryFsyncsParentBeforeSuccess(t *testing.T) {
+	store := openTestStore(t)
+	workspace, err := store.EnsureWorkspace(testID)
+	require.NoError(t, err)
+	realSync := store.ops.syncWorkspaces
+	syncErr := errors.New("injected workspace sync failure")
+	syncs := 0
+	store.ops.syncWorkspaces = func() error {
+		syncs++
+		if syncs == 1 {
+			return syncErr
+		}
+		return realSync()
+	}
+
+	require.ErrorIs(t, store.RemoveWorkspace(testID), syncErr)
+	_, statErr := os.Stat(workspace)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	require.NoError(t, store.RemoveWorkspace(testID))
+	require.Equal(t, 2, syncs, "retry must fsync the workspaces parent before accepting absence")
 }
 
 func TestWorkspaceUnlinkRestoreConflictRetainsDeterministicTombstone(t *testing.T) {
@@ -407,7 +446,7 @@ func TestWorkspaceUnlinkRestoreConflictRetainsDeterministicTombstone(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, []byte("keep"), actual)
 
-	store.ops = defaultFileOps(store.conversations)
+	store.ops = defaultFileOps(store.conversations, store.workspaces)
 	require.Error(t, store.RemoveWorkspace(testID), "a canonical substitution must block tombstone cleanup")
 	require.NoError(t, os.RemoveAll(workspace))
 	require.NoError(t, store.RemoveWorkspace(testID), "retry must discover and remove the deterministic tombstone")

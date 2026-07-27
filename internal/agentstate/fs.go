@@ -24,17 +24,19 @@ type fileOps struct {
 	publish                  func(string, string, *fileIdentity, fileIdentity) error
 	removeExpected           func(string, fileIdentity) error
 	syncDir                  func() error
+	syncWorkspaces           func() error
 	beforePathReturn         func()
 	beforeWorkspaceTombstone func()
 	closeWorkspace           func(*secureDirectory) error
 	unlinkWorkspace          func(*secureDirectory, string) error
 }
 
-func defaultFileOps(directory *secureDirectory) fileOps {
+func defaultFileOps(directory, workspaces *secureDirectory) fileOps {
 	return fileOps{
 		publish:                  directory.publish,
 		removeExpected:           directory.removeExpected,
 		syncDir:                  directory.sync,
+		syncWorkspaces:           workspaces.sync,
 		beforePathReturn:         func() {},
 		beforeWorkspaceTombstone: func() {},
 		closeWorkspace:           func(workspace *secureDirectory) error { return workspace.close() },
