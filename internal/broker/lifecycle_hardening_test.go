@@ -374,6 +374,67 @@ func TestCreateCompensationRetainsRetryOwnershipAtEveryFailedStep(t *testing.T) 
 	}
 }
 
+func TestUnresolvedCreateCleanupGatesReconnectForSameIdentity(t *testing.T) {
+	state := &hardeningState{outcome: agentstate.CommitNotApplied}
+	child := &hardeningChild{killFailures: 3}
+	session := newHardeningSession("sessions/gated-create")
+	session.shutdownErr = errors.New("shutdown failed")
+	session.child = child
+	driver := &hardeningDriver{createSession: session}
+	broker, err := New(validLifecycleConfig(state, driver, &lockedIDs{next: 955}))
+	require.NoError(t, err)
+	origin := "https://example.com"
+	resource := sequenceID(956)
+
+	_, err = broker.Connect(context.Background(), origin, lifecycleConnect(sequenceID(957), resource))
+	require.Error(t, err)
+	_, err = broker.Connect(context.Background(), origin, lifecycleConnect(sequenceID(958), resource))
+	require.Error(t, err)
+	driver.mu.Lock()
+	require.Equal(t, 1, driver.createCalls)
+	driver.mu.Unlock()
+
+	child.mu.Lock()
+	child.killFailures = 0
+	child.mu.Unlock()
+	require.NoError(t, broker.Close(context.Background()))
+	driver.mu.Lock()
+	require.Equal(t, 1, driver.deleteCalls)
+	driver.mu.Unlock()
+	state.mu.Lock()
+	require.Equal(t, 1, state.removeCalls)
+	state.mu.Unlock()
+}
+
+func TestUnresolvedResumeCleanupGatesReconnectForSameIdentity(t *testing.T) {
+	origin := "https://example.com"
+	resource := sequenceID(959)
+	_, mapping := hardeningMapping(t, origin, resource)
+	child := &hardeningChild{killFailures: 3}
+	session := newHardeningSession("sessions/resume")
+	session.shutdownErr = errors.New("shutdown failed")
+	session.child = child
+	driver := &hardeningDriver{resumeSession: session, resumeErr: errors.New("partial resume")}
+	broker, err := New(validLifecycleConfig(&hardeningState{mapping: &mapping}, driver, &lockedIDs{next: 960}))
+	require.NoError(t, err)
+
+	_, err = broker.Connect(context.Background(), origin, lifecycleConnect(sequenceID(961), resource))
+	require.Error(t, err)
+	_, err = broker.Connect(context.Background(), origin, lifecycleConnect(sequenceID(962), resource))
+	require.Error(t, err)
+	driver.mu.Lock()
+	require.Equal(t, 1, driver.resumeCalls)
+	driver.mu.Unlock()
+
+	child.mu.Lock()
+	child.killFailures = 0
+	child.mu.Unlock()
+	require.NoError(t, broker.Close(context.Background()))
+	driver.mu.Lock()
+	require.Zero(t, driver.deleteCalls)
+	driver.mu.Unlock()
+}
+
 func TestActorShutdownWorkerDrainsFinalUnbufferedProviderEvent(t *testing.T) {
 	state := &lifecycleState{mappings: make(map[agentstate.Identity]agentstate.Mapping)}
 	session := newHardeningSession("sessions/actor")
