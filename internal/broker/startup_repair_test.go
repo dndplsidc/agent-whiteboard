@@ -19,11 +19,14 @@ type repairMutation struct {
 	outcome agentstate.CommitOutcome
 	err     error
 	apply   bool
+	mapping *agentstate.Mapping
 }
 
 type repairState struct {
 	mu               sync.Mutex
 	mapping          *agentstate.Mapping
+	preparations     []repairMutation
+	acceptances      []repairMutation
 	promotions       []repairMutation
 	reconciliations  []repairMutation
 	observations     []repairMutation
@@ -31,6 +34,8 @@ type repairState struct {
 	observeEntered   chan struct{}
 	observeGate      chan struct{}
 	observeEnterOnce sync.Once
+	prepareCalls     int
+	acceptCalls      int
 	promoteCalls     int
 	reconcileCalls   int
 	observeCalls     int
@@ -92,6 +97,44 @@ func (state *repairState) AcknowledgeCommittedRevision(_ agentstate.Identity, re
 	}
 	if step.apply {
 		updated := acknowledgedMapping(*state.mapping, revision, at)
+		state.mapping = &updated
+	}
+	return step.outcome, step.err
+}
+
+func (state *repairState) PrepareCommit(_ agentstate.Identity, revision agentstate.Revision, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.prepareCalls++
+	step := repairMutation{outcome: agentstate.CommitApplied, apply: true}
+	if len(state.preparations) != 0 {
+		step = state.preparations[0]
+		state.preparations = state.preparations[1:]
+	}
+	if step.mapping != nil {
+		updated := cloneMapping(*step.mapping)
+		state.mapping = &updated
+	} else if step.apply {
+		updated := preparedMapping(*state.mapping, revision, turnID, at)
+		state.mapping = &updated
+	}
+	return step.outcome, step.err
+}
+
+func (state *repairState) MarkPreparedAccepted(_ agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.acceptCalls++
+	step := repairMutation{outcome: agentstate.CommitApplied, apply: true}
+	if len(state.acceptances) != 0 {
+		step = state.acceptances[0]
+		state.acceptances = state.acceptances[1:]
+	}
+	if step.mapping != nil {
+		updated := cloneMapping(*step.mapping)
+		state.mapping = &updated
+	} else if step.apply {
+		updated := acceptedMapping(*state.mapping, turnID, at)
 		state.mapping = &updated
 	}
 	return step.outcome, step.err

@@ -100,6 +100,31 @@ func (state *hardeningState) AcknowledgeCommittedRevision(_ agentstate.Identity,
 	state.mapping.UpdatedAt = at
 	return agentstate.CommitApplied, nil
 }
+func (state *hardeningState) PrepareCommit(_ agentstate.Identity, revision agentstate.Revision, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.mapping == nil || state.mapping.Current == nil || state.mapping.Current.PreparedCommit != nil {
+		return agentstate.CommitNotApplied, errors.New("preparation rejected")
+	}
+	prepared := agentstate.PreparedCommit{Revision: revision, TurnID: turnID, Phase: agentstate.CommitPrepared}
+	observed := revision
+	state.mapping.Current.Observed = &observed
+	state.mapping.Current.PreparedCommit = &prepared
+	state.mapping.Current.UpdatedAt = at
+	state.mapping.UpdatedAt = at
+	return agentstate.CommitApplied, nil
+}
+func (state *hardeningState) MarkPreparedAccepted(_ agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.mapping == nil || state.mapping.Current == nil || state.mapping.Current.PreparedCommit == nil || state.mapping.Current.PreparedCommit.TurnID != turnID || state.mapping.Current.PreparedCommit.Phase != agentstate.CommitPrepared {
+		return agentstate.CommitNotApplied, errors.New("acceptance rejected")
+	}
+	state.mapping.Current.PreparedCommit.Phase = agentstate.CommitAccepted
+	state.mapping.Current.UpdatedAt = at
+	state.mapping.UpdatedAt = at
+	return agentstate.CommitApplied, nil
+}
 func (state *hardeningState) PromotePrepared(_ agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -270,7 +295,9 @@ type hardeningChild struct {
 	killFailures int
 	waitEntered  chan struct{}
 	waitGate     chan struct{}
+	killSignal   chan struct{}
 	waitOnce     sync.Once
+	killOnce     sync.Once
 }
 
 func (*hardeningChild) Input() io.WriteCloser { return nopWriteCloser{} }
@@ -298,10 +325,14 @@ func (child *hardeningChild) Terminate() error {
 func (child *hardeningChild) Kill() error {
 	child.record("kill")
 	child.mu.Lock()
-	defer child.mu.Unlock()
 	if child.killFailures > 0 {
 		child.killFailures--
+		child.mu.Unlock()
 		return errors.New("kill failed")
+	}
+	child.mu.Unlock()
+	if child.killSignal != nil {
+		child.killOnce.Do(func() { close(child.killSignal) })
 	}
 	return nil
 }
@@ -539,6 +570,7 @@ func TestActorShutdownWorkerDrainsFinalUnbufferedProviderEvent(t *testing.T) {
 func TestFailedActorShutdownRetryNeverOverlaps(t *testing.T) {
 	state := &lifecycleState{mappings: make(map[agentstate.Identity]agentstate.Mapping)}
 	session := newHardeningSession("sessions/shutdown-retry")
+	session.child.(*hardeningChild).killFailures = 1
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var calls atomic.Int32
@@ -573,7 +605,7 @@ func TestFailedActorShutdownRetryNeverOverlaps(t *testing.T) {
 	close(releaseFirst)
 	require.Error(t, receiveLifecycle(t, firstResult))
 	require.NoError(t, receiveLifecycle(t, secondResult))
-	require.EqualValues(t, 2, calls.Load())
+	require.EqualValues(t, 1, calls.Load(), "retry must continue the owned escalation instead of overlapping Shutdown")
 	require.EqualValues(t, 1, maximum.Load())
 }
 

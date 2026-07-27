@@ -21,6 +21,8 @@ type StateStore interface {
 	Create(agentstate.Identity, agentstate.Session, time.Time) (agentstate.CommitOutcome, error)
 	ObserveRevision(agentstate.Identity, agentstate.Revision, time.Time) (agentstate.CommitOutcome, error)
 	AcknowledgeCommittedRevision(agentstate.Identity, agentstate.Revision, time.Time) (agentstate.CommitOutcome, error)
+	PrepareCommit(agentstate.Identity, agentstate.Revision, string, time.Time) (agentstate.CommitOutcome, error)
+	MarkPreparedAccepted(agentstate.Identity, string, time.Time) (agentstate.CommitOutcome, error)
 	PromotePrepared(agentstate.Identity, string, time.Time) (agentstate.CommitOutcome, error)
 	ReconcilePrepared(agentstate.Identity, string, bool, time.Time) (agentstate.CommitOutcome, error)
 	EnsureWorkspace(string) (string, error)
@@ -502,7 +504,7 @@ func stopPreActor(ctx context.Context, session provider.Session, events <-chan p
 }
 
 func (broker *Broker) newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session) (*conversation, error) {
-	actor, err := newConversation(identity, mapping, session, broker.state, broker.ids, broker.clock, broker.shutdownTimeout)
+	actor, err := newConversation(identity, mapping, session, broker.state, broker.ids, broker.clock, broker.lifecycleCtx, broker.shutdownTimeout)
 	if err != nil {
 		broker.retainStop(identity, session)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)

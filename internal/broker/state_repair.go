@@ -158,6 +158,27 @@ func (broker *Broker) mutationTime() (time.Time, bool) {
 	return at, !at.IsZero()
 }
 
+func preparedMapping(mapping agentstate.Mapping, revision agentstate.Revision, turnID string, at time.Time) agentstate.Mapping {
+	result := cloneMapping(mapping)
+	observed := revision
+	prepared := agentstate.PreparedCommit{Revision: revision, TurnID: turnID, Phase: agentstate.CommitPrepared}
+	result.Current.Observed = &observed
+	result.Current.PreparedCommit = &prepared
+	result.Current.UpdatedAt = maxTime(result.Current.UpdatedAt, at)
+	result.UpdatedAt = maxTime(result.UpdatedAt, at)
+	return result
+}
+
+func acceptedMapping(mapping agentstate.Mapping, turnID string, at time.Time) agentstate.Mapping {
+	result := cloneMapping(mapping)
+	if result.Current != nil && result.Current.PreparedCommit != nil && result.Current.PreparedCommit.TurnID == turnID {
+		result.Current.PreparedCommit.Phase = agentstate.CommitAccepted
+		result.Current.UpdatedAt = maxTime(result.Current.UpdatedAt, at)
+		result.UpdatedAt = maxTime(result.UpdatedAt, at)
+	}
+	return result
+}
+
 func promotedMapping(mapping agentstate.Mapping, at time.Time) agentstate.Mapping {
 	result := cloneMapping(mapping)
 	prepared := result.Current.PreparedCommit

@@ -51,6 +51,56 @@ func (queue *Queue) Bytes() int {
 }
 func (queue *Queue) Empty() bool { return queue == nil || len(queue.items) == 0 }
 
+func (queue *Queue) ContainsTurnID(turnID string) bool {
+	if queue == nil {
+		return false
+	}
+	for _, item := range queue.items {
+		if item.turnID == turnID {
+			return true
+		}
+	}
+	return false
+}
+
+func (queue *Queue) ContainsMessageID(messageID string) bool {
+	if queue == nil {
+		return false
+	}
+	for _, item := range queue.items {
+		if item.messageID == messageID {
+			return true
+		}
+	}
+	return false
+}
+
+// attachContextToHead transfers one pending revision to the next queued turn.
+// This preserves FIFO ordering when a revision is observed after follow-ups
+// were already queued: the replacement precedes the next reader message.
+func (queue *Queue) attachContextToHead(page *provider.PageContext) error {
+	if queue == nil || len(queue.items) == 0 || page == nil || page.Validate() != nil || queue.hasContext {
+		return ErrQueueContextConflict
+	}
+	queue.items[0].context = page
+	queue.hasContext = true
+	return nil
+}
+
+func (queue *Queue) discardContext() {
+	if queue == nil || !queue.hasContext {
+		return
+	}
+	for index := range queue.items {
+		if queue.items[index].context == nil {
+			continue
+		}
+		zeroProviderContext(queue.items[index].context)
+		queue.items[index].context = nil
+	}
+	queue.hasContext = false
+}
+
 // Enqueue copies one broker-owned follow-up. At most one queued turn may hold
 // complete page context, bounding retained context independently from messages.
 func (queue *Queue) Enqueue(turn QueuedTurn) error {
@@ -141,6 +191,16 @@ func (queue *Queue) Remove(messageID string) error {
 		return nil
 	}
 	return ErrQueueItemNotFound
+}
+
+// peek exposes the actor-owned head only for synchronous dispatch preparation.
+// Callers must not retain or mutate the returned context before Dequeue.
+func (queue *Queue) peek() (provider.TurnRequest, bool) {
+	if queue == nil || len(queue.items) == 0 {
+		return provider.TurnRequest{}, false
+	}
+	item := queue.items[0]
+	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Context: item.context}, true
 }
 
 // Dequeue transfers ownership of the context to the caller. The queue itself

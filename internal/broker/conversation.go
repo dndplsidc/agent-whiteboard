@@ -26,6 +26,15 @@ type conversation struct {
 	resource        agentprotocol.Resource
 	contextDigest   string
 	contextState    agentprotocol.ContextState
+	lifecycle       agentprotocol.LifecycleState
+	queue           *Queue
+	commands        commandLedger
+	active          *activeTurn
+	workerSettled   chan struct{}
+	shutdownAttempt *actorShutdown
+	lifecycleCtx    context.Context
+	stopping        bool
+	dispatchBlocked bool
 	shutdownTimeout time.Duration
 
 	closeMu sync.Mutex
@@ -178,8 +187,8 @@ type shutdownWorkerResult struct {
 	err      error
 }
 
-func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session, state StateStore, ids common.IDGenerator, clock common.Clock, shutdownTimeout time.Duration) (*conversation, error) {
-	if mapping.Validate(identity) != nil || mapping.Current == nil || common.IsNil(state) || common.IsNil(session) || common.IsNil(clock) || shutdownTimeout <= 0 {
+func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session, state StateStore, ids common.IDGenerator, clock common.Clock, lifecycleCtx context.Context, shutdownTimeout time.Duration) (*conversation, error) {
+	if mapping.Validate(identity) != nil || mapping.Current == nil || common.IsNil(state) || common.IsNil(session) || common.IsNil(clock) || lifecycleCtx == nil || shutdownTimeout <= 0 {
 		return nil, errors.New("invalid conversation actor")
 	}
 	factory, err := NewEventFactory(mapping.Current.ConversationID, ids, clock)
@@ -190,7 +199,8 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 		identity: identity, mapping: cloneMapping(mapping), state: state, session: session,
 		factory: factory, replay: NewReplayLog(), requests: make(chan any),
 		done: make(chan struct{}), clock: clock, contextState: agentprotocol.ContextPending,
-		shutdownTimeout: shutdownTimeout,
+		lifecycle: agentprotocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(),
+		lifecycleCtx: lifecycleCtx, shutdownTimeout: shutdownTimeout,
 	}
 	if actor.mapping.Current.Observed != nil {
 		actor.contextDigest = actor.mapping.Current.Observed.Digest
@@ -207,8 +217,20 @@ func (actor *conversation) run() {
 	providerEvents := actor.session.Events()
 	attachments := make(map[*attachment]struct{})
 	shutdownResults := make(chan shutdownWorkerResult, 1)
+	turnResults := make(chan turnWorkerResult, 1)
 	shutdownActive := false
+	startShutdown := func(request *closeConversationRequest, attempt *actorShutdown) {
+		go func() {
+			err := attempt.run(request.ctx, actor.shutdownTimeout)
+			shutdownResults <- shutdownWorkerResult{response: request.response, err: err}
+		}()
+	}
 	defer func() {
+		actor.queue.Clear()
+		if actor.active != nil {
+			zeroProviderContext(actor.active.request.Context)
+			actor.active = nil
+		}
 		for item := range attachments {
 			delete(attachments, item)
 			item.finish()
@@ -225,21 +247,24 @@ func (actor *conversation) run() {
 				actor.detach(attachments, request.attachment)
 				close(request.ack)
 			case commandRequest:
-				actor.handleCommand(attachments, request)
+				actor.handleCommand(attachments, turnResults, request)
 			case closeConversationRequest:
 				if shutdownActive {
 					request.response <- NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 					continue
 				}
+				actor.stopping = true
 				for item := range attachments {
 					actor.detach(attachments, item)
 				}
+				if actor.shutdownAttempt == nil {
+					actor.shutdownAttempt = newActorShutdown(actor.session, actor.workerSettled)
+				}
 				shutdownActive = true
-				go func() {
-					err := actor.session.Shutdown(request.ctx)
-					shutdownResults <- shutdownWorkerResult{response: request.response, err: err}
-				}()
+				startShutdown(&request, actor.shutdownAttempt)
 			}
+		case result := <-turnResults:
+			actor.handleTurnResult(attachments, turnResults, result)
 		case result := <-shutdownResults:
 			shutdownActive = false
 			if result.err != nil {
@@ -254,7 +279,7 @@ func (actor *conversation) run() {
 				providerEvents = nil
 				continue
 			}
-			actor.handleProviderEvent(attachments, event)
+			actor.handleProviderEvent(attachments, turnResults, event)
 		}
 	}
 }
@@ -281,6 +306,7 @@ func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, re
 
 	initial := replayed
 	if contextChanged {
+		actor.queue.discardContext()
 		if err := actor.replay.Append(contextEvent); err != nil {
 			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
 			return
@@ -328,9 +354,14 @@ func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, re
 }
 
 func (actor *conversation) snapshot(contextState agentprotocol.ContextState) (agentprotocol.Event, error) {
+	var activeTurnID *string
+	if actor.lifecycle == agentprotocol.LifecycleResponding && actor.active != nil {
+		turnID := actor.active.request.TurnID
+		activeTurnID = &turnID
+	}
 	return actor.factory.New(agentprotocol.SnapshotPayload{
-		Lifecycle: agentprotocol.LifecycleReady, Queue: []agentprotocol.QueueItem{},
-		ContextState: contextState, ActiveTurnID: nil,
+		Lifecycle: actor.lifecycle, Queue: actor.queue.Items(),
+		ContextState: contextState, ActiveTurnID: activeTurnID,
 	})
 }
 
@@ -341,36 +372,24 @@ func (actor *conversation) detach(attachments map[*attachment]struct{}, item *at
 	item.finish()
 }
 
-func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, request commandRequest) {
-	if err := request.ctx.Err(); err != nil {
-		request.response <- commandResponse{err: err}
+func (actor *conversation) handleProviderEvent(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, source provider.Event) {
+	if source.Validate() != nil || !actor.providerEventMatchesActive(source) {
+		actor.publishBrowserError(attachments, agentprotocol.ErrorProviderMalformedStream)
 		return
 	}
-	if _, exists := attachments[request.attachment]; !exists || request.command.ClientID != request.attachment.clientID || request.command.ConversationID == nil || actor.mapping.Current == nil || *request.command.ConversationID != actor.mapping.Current.ConversationID {
-		request.response <- commandResponse{err: NewBrokerError(agentprotocol.ErrorInvalidState)}
+	terminal := providerEventTerminal(source)
+	if actor.active != nil && ((actor.active.phase == turnStarting && actor.providerEventTargetsActive(source)) || (actor.active.phase == turnInterrupting && terminal)) {
+		actor.bufferProviderEvent(source)
 		return
 	}
-	browserError := agentprotocol.NewBrowserError(agentprotocol.ErrorInvalidState)
-	result, err := actor.factory.New(agentprotocol.CommandResultPayload{CommandID: request.command.CommandID, Status: agentprotocol.CommandRejected, Error: &browserError})
-	if err != nil {
-		request.response <- commandResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
-		return
-	}
-	if err := actor.replay.AppendForClient(request.attachment.clientID, result); err != nil {
-		request.response <- commandResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
-		return
-	}
-	actor.send(attachments, request.attachment, result)
-	request.response <- commandResponse{event: cloneEvent(result)}
+	actor.publishProviderEvent(attachments, turnResults, source)
 }
 
-func (actor *conversation) handleProviderEvent(attachments map[*attachment]struct{}, source provider.Event) {
+func (actor *conversation) publishProviderEvent(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, source provider.Event) {
 	event, err := actor.factory.FromProvider(source)
 	if err != nil {
-		event, err = actor.factory.New(agentprotocol.ErrorPayload{Error: agentprotocol.NewBrowserError(agentprotocol.ErrorProviderMalformedStream)})
-		if err != nil {
-			return
-		}
+		actor.publishBrowserError(attachments, agentprotocol.ErrorProviderMalformedStream)
+		return
 	}
 	if actor.replay.Append(event) != nil {
 		return
@@ -378,6 +397,89 @@ func (actor *conversation) handleProviderEvent(attachments map[*attachment]struc
 	for item := range attachments {
 		actor.send(attachments, item, event)
 	}
+	if source.Kind == provider.EventTerminalFailure && source.TurnID == "" {
+		actor.handleSessionTerminalFailure(attachments)
+		return
+	}
+	if providerEventTerminal(source) && actor.active != nil {
+		lifecycle := agentprotocol.LifecycleReady
+		if source.Kind == provider.EventInterruption || source.Kind == provider.EventTerminalFailure {
+			lifecycle = agentprotocol.LifecycleInterrupted
+		}
+		actor.finishActive(attachments, turnResults, lifecycle)
+	}
+}
+
+func providerEventTerminal(source provider.Event) bool {
+	return source.Kind == provider.EventCompletion || source.Kind == provider.EventInterruption || source.Kind == provider.EventTerminalFailure
+}
+
+func (actor *conversation) bufferProviderEvent(source provider.Event) {
+	if actor.active == nil || actor.active.pendingOverflow {
+		return
+	}
+	size := len(source.Text) + len(source.TurnID) + len(source.MessageID) + 64
+	if len(actor.active.pendingEvents)+1 > MaxReplayEvents || actor.active.pendingBytes+size > MaxReplayBytes {
+		actor.active.pendingOverflow = true
+		actor.active.pendingEvents = nil
+		actor.active.pendingBytes = 0
+		return
+	}
+	actor.active.pendingEvents = append(actor.active.pendingEvents, source)
+	actor.active.pendingBytes += size
+}
+
+func (actor *conversation) flushPendingProviderEvents(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult) {
+	if actor.active == nil {
+		return
+	}
+	events := actor.active.pendingEvents
+	overflow := actor.active.pendingOverflow
+	actor.active.pendingEvents = nil
+	actor.active.pendingBytes = 0
+	actor.active.pendingOverflow = false
+	if overflow {
+		actor.dispatchBlocked = true
+		actor.lifecycle = agentprotocol.LifecycleUnavailable
+		actor.publishBrowserError(attachments, agentprotocol.ErrorProviderMalformedStream)
+		actor.publishShared(attachments, agentprotocol.LifecyclePayload{State: actor.lifecycle})
+	}
+	for _, source := range events {
+		if actor.active == nil || !actor.providerEventMatchesActive(source) {
+			actor.publishBrowserError(attachments, agentprotocol.ErrorProviderMalformedStream)
+			continue
+		}
+		actor.publishProviderEvent(attachments, turnResults, source)
+	}
+}
+
+func (actor *conversation) providerEventMatchesActive(source provider.Event) bool {
+	if source.Kind == provider.EventActivity && source.TurnID == "" {
+		return true
+	}
+	if source.Kind == provider.EventTerminalFailure && source.TurnID == "" {
+		return true
+	}
+	return actor.providerEventTargetsActive(source)
+}
+
+func (actor *conversation) providerEventTargetsActive(source provider.Event) bool {
+	if actor.active == nil {
+		return false
+	}
+	return source.TurnID == actor.active.request.TurnID || (source.Kind == provider.EventTerminalFailure && source.TurnID == "")
+}
+
+func (actor *conversation) handleSessionTerminalFailure(attachments map[*attachment]struct{}) {
+	actor.dispatchBlocked = true
+	if actor.active != nil {
+		turnID := actor.active.request.TurnID
+		actor.publishShared(attachments, agentprotocol.InterruptionPayload{TurnID: turnID, Reason: agentprotocol.InterruptionProviderExit})
+		zeroProviderContext(actor.active.request.Context)
+		actor.active = nil
+	}
+	actor.lifecycle = agentprotocol.LifecycleUnavailable
+	actor.publishShared(attachments, agentprotocol.LifecyclePayload{State: actor.lifecycle})
 }
 
 func (actor *conversation) send(attachments map[*attachment]struct{}, item *attachment, event agentprotocol.Event) {
@@ -445,5 +547,12 @@ func (actor *conversation) close(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return <-request.response
+	select {
+	case err := <-request.response:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-actor.done:
+		return nil
+	}
 }

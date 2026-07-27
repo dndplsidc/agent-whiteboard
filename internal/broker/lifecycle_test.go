@@ -69,6 +69,12 @@ func (s *lifecycleState) ObserveRevision(identity agentstate.Identity, revision 
 func (s *lifecycleState) AcknowledgeCommittedRevision(identity agentstate.Identity, revision agentstate.Revision, at time.Time) (agentstate.CommitOutcome, error) {
 	return agentstate.CommitNotApplied, errors.New("acknowledgement not configured")
 }
+func (s *lifecycleState) PrepareCommit(identity agentstate.Identity, revision agentstate.Revision, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	return agentstate.CommitNotApplied, errors.New("preparation not configured")
+}
+func (s *lifecycleState) MarkPreparedAccepted(identity agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	return agentstate.CommitNotApplied, errors.New("acceptance not configured")
+}
 func (s *lifecycleState) PromotePrepared(identity agentstate.Identity, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
 	return agentstate.CommitNotApplied, errors.New("promotion not configured")
 }
@@ -497,12 +503,8 @@ func TestConnectionDetachAndBrokerShutdownAreRetrySafe(t *testing.T) {
 	require.Zero(t, driver.sessions[0].shutdownCalls.Load())
 
 	driver.sessions[0].shutdownErr = errors.New("provider /private/ref")
-	closeErr := broker.Close(context.Background())
-	require.Error(t, closeErr)
-	require.NotContains(t, closeErr.Error(), "/private/ref")
-	driver.sessions[0].shutdownErr = nil
-	require.NoError(t, broker.Close(context.Background()))
-	require.EqualValues(t, 2, driver.sessions[0].shutdownCalls.Load())
+	require.NoError(t, broker.Close(context.Background()), "failed graceful shutdown must escalate through the managed child")
+	require.EqualValues(t, 1, driver.sessions[0].shutdownCalls.Load())
 }
 
 func TestBrokerCloseWaitsForInflightStartupWithoutHoldingRegistryMutex(t *testing.T) {
