@@ -198,7 +198,7 @@ type boundFile struct {
 func (binding *boundFile) close() { _ = binding.file.Close() }
 
 func (binding *boundFile) verify() error {
-	current, err := openOwnedRegularAt(binding.directory, binding.name, false)
+	current, err := openOwnedRegularAt(binding.directory, binding.name)
 	if err != nil {
 		return err
 	}
@@ -232,7 +232,7 @@ func ensurePrivateFile(directory *secureDir, name string, ops fileOps) (*boundFi
 		file.Close()
 		return nil, fmt.Errorf("validate private file %q: %w", name, err)
 	}
-	if err := file.Chmod(0o600); err != nil {
+	if err := ensurePrivateMode(file, ops); err != nil {
 		file.Close()
 		return nil, fmt.Errorf("set private file permissions %q: %w", name, err)
 	}
@@ -247,6 +247,20 @@ func ensurePrivateFile(directory *secureDir, name string, ops fileOps) (*boundFi
 		}
 	}
 	return &boundFile{file: file, directory: directory, name: name}, nil
+}
+
+func ensurePrivateMode(file *os.File, ops fileOps) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() == 0o600 {
+		return nil
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	return ops.syncFile(file)
 }
 
 func verifyOwnedRegular(file *os.File, uid uint32) error {
@@ -296,19 +310,34 @@ func (publication *plistPublication) close() {
 	}
 }
 
+func (publication *plistPublication) verify() error {
+	if err := verifyNameBinding(publication.directory, publication.name, publication.published); err != nil {
+		return fmt.Errorf("published LaunchAgent plist changed during operation: %w", err)
+	}
+	return nil
+}
+
 func (publication *plistPublication) commit() error {
 	if !publication.active {
 		return nil
 	}
-	if publication.priorExist {
-		if err := unlinkBoundTemporary(publication.directory, publication.priorName, publication.prior, publication.ops); err != nil {
-			return fmt.Errorf("remove prior LaunchAgent plist backup: %w", err)
-		}
-		if err := publication.ops.syncDir(publication.directory.file); err != nil {
-			return fmt.Errorf("sync LaunchAgents directory after backup removal: %w", err)
-		}
+	if !publication.priorExist {
+		publication.active = false
+		return nil
+	}
+	state, err := removeNameCAS(publication.directory, publication.priorName, publication.prior, publication.ops)
+	if err != nil {
+		publication.active = false
+		return &CommitUncertainError{Err: fmt.Errorf("remove prior LaunchAgent plist backup: %w", err)}
+	}
+	if state.sourcePresent {
+		publication.active = false
+		return &CommitUncertainError{Err: errors.New("prior LaunchAgent plist backup removal did not complete")}
 	}
 	publication.active = false
+	if err := publication.ops.syncDir(publication.directory.file); err != nil {
+		return &CommitUncertainError{Err: fmt.Errorf("sync LaunchAgents directory after backup removal: %w", err)}
+	}
 	return nil
 }
 
@@ -320,35 +349,43 @@ func (publication *plistPublication) rollback() error {
 		if err := publication.ops.exchangeAt(publication.directory.fd(), publication.priorName, publication.directory.fd(), publication.name); err != nil {
 			return fmt.Errorf("restore prior LaunchAgent plist: %w", err)
 		}
-		moved, err := openOwnedRegularAt(publication.directory, publication.priorName, false)
-		if err != nil {
-			return fmt.Errorf("inspect replaced LaunchAgent plist during rollback: %w", err)
-		}
-		matches := sameFile(moved, publication.published)
-		moved.Close()
-		if !matches {
+		restoredErr := verifyNameBinding(publication.directory, publication.name, publication.prior)
+		displacedErr := verifyNameBinding(publication.directory, publication.priorName, publication.published)
+		if restoredErr != nil || displacedErr != nil {
 			if restoreErr := publication.ops.exchangeAt(publication.directory.fd(), publication.priorName, publication.directory.fd(), publication.name); restoreErr != nil {
-				return &CommitUncertainError{Err: errors.Join(errors.New("LaunchAgent plist changed before rollback"), restoreErr)}
+				return &CommitUncertainError{Err: errors.Join(errors.New("LaunchAgent plist changed before rollback"), restoredErr, displacedErr, restoreErr)}
 			}
-			return errors.New("LaunchAgent plist changed before rollback")
+			return errors.Join(errors.New("LaunchAgent plist changed before rollback"), restoredErr, displacedErr)
 		}
-		if err := unlinkBoundTemporary(publication.directory, publication.priorName, publication.published, publication.ops); err != nil {
-			return err
+		publication.active = false
+		if err := publication.ops.syncDir(publication.directory.file); err != nil {
+			return &CommitUncertainError{Err: fmt.Errorf("sync restored LaunchAgents directory: %w", err)}
 		}
-	} else {
-		if err := removeNameCAS(publication.directory, publication.name, publication.published, publication.ops); err != nil {
-			return fmt.Errorf("remove newly published LaunchAgent plist: %w", err)
+		if _, err := removeNameCAS(publication.directory, publication.priorName, publication.published, publication.ops); err != nil {
+			return fmt.Errorf("remove rolled-back LaunchAgent plist: %w", err)
 		}
+		if err := publication.ops.syncDir(publication.directory.file); err != nil {
+			return &CommitUncertainError{Err: fmt.Errorf("sync LaunchAgents directory after rollback cleanup: %w", err)}
+		}
+		return nil
 	}
-	if err := publication.ops.syncDir(publication.directory.file); err != nil {
-		return fmt.Errorf("sync restored LaunchAgents directory: %w", err)
+
+	state, err := removeNameCAS(publication.directory, publication.name, publication.published, publication.ops)
+	if err != nil {
+		return fmt.Errorf("remove newly published LaunchAgent plist: %w", err)
+	}
+	if state.sourcePresent {
+		return &CommitUncertainError{Err: errors.New("newly published LaunchAgent plist removal did not complete")}
 	}
 	publication.active = false
+	if err := publication.ops.syncDir(publication.directory.file); err != nil {
+		return &CommitUncertainError{Err: fmt.Errorf("sync restored LaunchAgents directory: %w", err)}
+	}
 	return nil
 }
 
 func writeAtomic(directory *secureDir, name string, contents []byte, ops fileOps) (*plistPublication, error) {
-	prior, existed, err := openExistingRegular(directory, name, true)
+	prior, existed, err := openExistingRegular(directory, name, ops)
 	if err != nil {
 		return nil, err
 	}
@@ -363,50 +400,51 @@ func writeAtomic(directory *secureDir, name string, contents []byte, ops fileOps
 		directory: directory, name: name, ops: ops, published: temporary,
 		prior: prior, priorName: temporaryNameValue, priorExist: existed,
 	}
+	closeOnError := true
+	defer func() {
+		if closeOnError {
+			publication.close()
+		}
+	}()
 	cleanupTemporary := true
 	defer func() {
 		if cleanupTemporary {
-			_ = ops.unlinkAt(directory.fd(), temporaryNameValue, 0)
+			_, _ = removeNameCAS(directory, temporaryNameValue, temporary, ops)
 		}
 	}()
 
 	if existed {
 		if err := ops.exchangeAt(directory.fd(), temporaryNameValue, directory.fd(), name); err != nil {
-			publication.close()
 			return nil, fmt.Errorf("exchange LaunchAgent plist: %w", err)
 		}
-		moved, openErr := openOwnedRegularAt(directory, temporaryNameValue, false)
-		if openErr != nil || !sameFile(moved, prior) {
-			if moved != nil {
-				moved.Close()
-			}
+		cleanupTemporary = false
+		if err := verifyNameBinding(directory, temporaryNameValue, prior); err != nil {
 			rollbackErr := ops.exchangeAt(directory.fd(), temporaryNameValue, directory.fd(), name)
-			publication.close()
-			if rollbackErr != nil {
-				return nil, &CommitUncertainError{Err: errors.Join(errors.New("LaunchAgent plist changed before publication"), rollbackErr)}
+			if rollbackErr == nil && verifyNameBinding(directory, temporaryNameValue, temporary) == nil {
+				cleanupTemporary = true
 			}
-			return nil, errors.New("LaunchAgent plist changed before publication")
+			if rollbackErr != nil {
+				return nil, &CommitUncertainError{Err: errors.Join(errors.New("LaunchAgent plist changed before publication"), err, rollbackErr)}
+			}
+			return nil, errors.Join(errors.New("LaunchAgent plist changed before publication"), err)
 		}
-		moved.Close()
 	} else {
 		if err := ops.renameNoReplaceAt(directory.fd(), temporaryNameValue, directory.fd(), name); err != nil {
-			publication.close()
 			if errors.Is(err, unix.EEXIST) {
 				return nil, errors.New("LaunchAgent plist appeared before publication")
 			}
 			return nil, fmt.Errorf("publish LaunchAgent plist without replacement: %w", err)
 		}
+		cleanupTemporary = false
 	}
-	cleanupTemporary = false
 	publication.active = true
 	if err := ops.syncDir(directory.file); err != nil {
 		if rollbackErr := publication.rollback(); rollbackErr != nil {
-			publication.close()
 			return nil, &CommitUncertainError{Err: errors.Join(fmt.Errorf("sync LaunchAgents directory: %w", err), rollbackErr)}
 		}
-		publication.close()
 		return nil, fmt.Errorf("sync LaunchAgents directory: %w", err)
 	}
+	closeOnError = false
 	return publication, nil
 }
 
@@ -439,8 +477,8 @@ func createTemporary(directory *secureDir, name string, contents []byte, ops fil
 	failed := true
 	defer func() {
 		if failed {
+			_, _ = removeNameCAS(directory, temporaryNameValue, temporary, ops)
 			temporary.Close()
-			_ = ops.unlinkAt(directory.fd(), temporaryNameValue, 0)
 		}
 	}()
 	if err := verifyOwnedRegular(temporary, directory.uid); err != nil {
@@ -457,7 +495,7 @@ func createTemporary(directory *secureDir, name string, contents []byte, ops fil
 }
 
 func removeDurable(directory *secureDir, name string, ops fileOps) error {
-	expected, existed, err := openExistingRegular(directory, name, true)
+	expected, existed, err := openExistingRegular(directory, name, ops)
 	if err != nil {
 		return err
 	}
@@ -471,93 +509,107 @@ func removeDurable(directory *secureDir, name string, ops fileOps) error {
 		return err
 	}
 	defer tombstone.Close()
-	cleanupTombstone := true
-	defer func() {
-		if cleanupTombstone {
-			_ = ops.unlinkAt(directory.fd(), tombstoneName, 0)
-		}
-	}()
 	if err := ops.exchangeAt(directory.fd(), tombstoneName, directory.fd(), name); err != nil {
-		return fmt.Errorf("exchange LaunchAgent plist for removal: %w", err)
+		_, cleanupErr := removeNameCAS(directory, tombstoneName, tombstone, ops)
+		return errors.Join(fmt.Errorf("exchange LaunchAgent plist for removal: %w", err), cleanupErr)
 	}
-	moved, err := openOwnedRegularAt(directory, tombstoneName, false)
-	if err != nil || !sameFile(moved, expected) {
-		if moved != nil {
-			moved.Close()
+	if err := verifyNameBinding(directory, tombstoneName, expected); err != nil {
+		rollbackErr := ops.exchangeAt(directory.fd(), tombstoneName, directory.fd(), name)
+		if rollbackErr == nil && verifyNameBinding(directory, tombstoneName, tombstone) == nil {
+			_, _ = removeNameCAS(directory, tombstoneName, tombstone, ops)
 		}
-		if restoreErr := ops.exchangeAt(directory.fd(), tombstoneName, directory.fd(), name); restoreErr != nil {
-			return &CommitUncertainError{Err: errors.Join(errors.New("LaunchAgent plist changed before removal"), restoreErr)}
+		if rollbackErr != nil {
+			return &CommitUncertainError{Err: errors.Join(errors.New("LaunchAgent plist changed before removal"), err, rollbackErr)}
 		}
-		return errors.New("LaunchAgent plist changed before removal")
+		return errors.Join(errors.New("LaunchAgent plist changed before removal"), err)
 	}
-	moved.Close()
 
-	if err := removeNameCAS(directory, name, tombstone, ops); err != nil {
-		if restoreErr := ops.renameNoReplaceAt(directory.fd(), tombstoneName, directory.fd(), name); restoreErr != nil {
-			return &CommitUncertainError{Err: errors.Join(err, restoreErr)}
-		}
-		cleanupTombstone = false
-		return err
+	state, removeErr := removeNameCAS(directory, name, tombstone, ops)
+	if removeErr != nil {
+		return restorePriorAfterRemovalError(directory, name, tombstoneName, expected, tombstone, state, removeErr, ops)
+	}
+	if state.sourcePresent {
+		return restorePriorAfterRemovalError(directory, name, tombstoneName, expected, tombstone, state, errors.New("conditional removal did not complete"), ops)
 	}
 	if err := ops.syncDir(directory.file); err != nil {
-		if restoreErr := ops.renameNoReplaceAt(directory.fd(), tombstoneName, directory.fd(), name); restoreErr != nil {
-			return &CommitUncertainError{Err: errors.Join(fmt.Errorf("sync LaunchAgents directory after removal: %w", err), restoreErr)}
-		}
-		cleanupTombstone = false
-		if syncErr := ops.syncDir(directory.file); syncErr != nil {
-			return &CommitUncertainError{Err: errors.Join(fmt.Errorf("sync LaunchAgents directory after removal: %w", err), syncErr)}
-		}
-		return fmt.Errorf("sync LaunchAgents directory after removal: %w", err)
+		return restorePriorAfterRemovalError(directory, name, tombstoneName, expected, tombstone, state, fmt.Errorf("sync LaunchAgents directory after removal: %w", err), ops)
 	}
-	if err := unlinkBoundTemporary(directory, tombstoneName, expected, ops); err != nil {
+	if _, err := removeNameCAS(directory, tombstoneName, expected, ops); err != nil {
 		return fmt.Errorf("remove prior LaunchAgent plist backup: %w", err)
 	}
-	cleanupTombstone = false
 	if err := ops.syncDir(directory.file); err != nil {
 		return &CommitUncertainError{Err: fmt.Errorf("sync LaunchAgents directory after backup removal: %w", err)}
 	}
 	return nil
 }
 
-func removeNameCAS(directory *secureDir, name string, expected *os.File, ops fileOps) error {
-	destination, err := temporaryName(name + ".removed")
-	if err != nil {
-		return err
-	}
-	if err := ops.renameNoReplaceAt(directory.fd(), name, directory.fd(), destination); err != nil {
-		return err
-	}
-	moved, err := openOwnedRegularAt(directory, destination, false)
-	if err != nil || !sameFile(moved, expected) {
-		if moved != nil {
-			moved.Close()
-		}
-		if restoreErr := ops.renameNoReplaceAt(directory.fd(), destination, directory.fd(), name); restoreErr != nil {
-			return &CommitUncertainError{Err: errors.Join(errors.New("file changed before conditional removal"), restoreErr)}
-		}
-		return errors.New("file changed before conditional removal")
-	}
-	moved.Close()
-	if err := ops.unlinkAt(directory.fd(), destination, 0); err != nil {
-		if restoreErr := ops.renameNoReplaceAt(directory.fd(), destination, directory.fd(), name); restoreErr != nil {
-			return &CommitUncertainError{Err: errors.Join(err, restoreErr)}
-		}
-		return err
-	}
-	return nil
+type nameRemovalState struct {
+	sourcePresent bool
 }
 
-func unlinkBoundTemporary(directory *secureDir, name string, expected *os.File, ops fileOps) error {
-	current, err := openOwnedRegularAt(directory, name, false)
+func removeNameCAS(directory *secureDir, name string, expected *os.File, ops fileOps) (nameRemovalState, error) {
+	destination, err := temporaryName(name + ".removed")
+	if err != nil {
+		return nameRemovalState{sourcePresent: true}, err
+	}
+	if err := ops.renameNoReplaceAt(directory.fd(), name, directory.fd(), destination); err != nil {
+		return nameRemovalState{sourcePresent: true}, err
+	}
+	if err := verifyNameBinding(directory, destination, expected); err != nil {
+		if restoreErr := ops.renameNoReplaceAt(directory.fd(), destination, directory.fd(), name); restoreErr != nil {
+			return nameRemovalState{}, &CommitUncertainError{Err: errors.Join(errors.New("file changed before conditional removal"), err, restoreErr)}
+		}
+		return nameRemovalState{sourcePresent: true}, errors.Join(errors.New("file changed before conditional removal"), err)
+	}
+	if err := ops.unlinkAt(directory.fd(), destination, 0); err != nil {
+		if restoreErr := ops.renameNoReplaceAt(directory.fd(), destination, directory.fd(), name); restoreErr != nil {
+			return nameRemovalState{}, &CommitUncertainError{Err: errors.Join(err, restoreErr)}
+		}
+		return nameRemovalState{sourcePresent: true}, err
+	}
+	return nameRemovalState{}, nil
+}
+
+func restorePriorAfterRemovalError(directory *secureDir, name, priorName string, prior, tombstone *os.File, state nameRemovalState, cause error, ops fileOps) error {
+	if err := verifyNameBinding(directory, priorName, prior); err != nil {
+		return &CommitUncertainError{Err: errors.Join(cause, errors.New("prior LaunchAgent plist backup changed during recovery"), err)}
+	}
+	if state.sourcePresent {
+		if err := ops.exchangeAt(directory.fd(), priorName, directory.fd(), name); err != nil {
+			return &CommitUncertainError{Err: errors.Join(cause, fmt.Errorf("restore prior LaunchAgent plist by exchange: %w", err))}
+		}
+	} else {
+		if err := ops.renameNoReplaceAt(directory.fd(), priorName, directory.fd(), name); err != nil {
+			return &CommitUncertainError{Err: errors.Join(cause, fmt.Errorf("restore prior LaunchAgent plist without replacement: %w", err))}
+		}
+	}
+	if err := verifyNameBinding(directory, name, prior); err != nil {
+		return &CommitUncertainError{Err: errors.Join(cause, errors.New("restored LaunchAgent plist identity is uncertain"), err)}
+	}
+	if err := ops.syncDir(directory.file); err != nil {
+		return &CommitUncertainError{Err: errors.Join(cause, fmt.Errorf("sync restored LaunchAgent plist: %w", err))}
+	}
+	if state.sourcePresent && verifyNameBinding(directory, priorName, tombstone) == nil {
+		if _, err := removeNameCAS(directory, priorName, tombstone, ops); err != nil {
+			return &CommitUncertainError{Err: errors.Join(cause, fmt.Errorf("remove restored tombstone: %w", err))}
+		}
+		if err := ops.syncDir(directory.file); err != nil {
+			return &CommitUncertainError{Err: errors.Join(cause, fmt.Errorf("sync restored tombstone cleanup: %w", err))}
+		}
+	}
+	return cause
+}
+
+func verifyNameBinding(directory *secureDir, name string, expected *os.File) error {
+	current, err := openOwnedRegularAt(directory, name)
 	if err != nil {
 		return err
 	}
-	matches := sameFile(current, expected)
-	current.Close()
-	if !matches {
-		return errors.New("temporary LaunchAgent entry changed during operation")
+	defer current.Close()
+	if !sameFile(current, expected) {
+		return errors.New("file changed during operation")
 	}
-	return ops.unlinkAt(directory.fd(), name, 0)
+	return nil
 }
 
 func sameFile(first, second *os.File) bool {
@@ -569,18 +621,22 @@ func sameFile(first, second *os.File) bool {
 	return firstErr == nil && secondErr == nil && os.SameFile(firstInfo, secondInfo)
 }
 
-func openExistingRegular(directory *secureDir, name string, forcePrivate bool) (*os.File, bool, error) {
-	file, err := openOwnedRegularAt(directory, name, forcePrivate)
+func openExistingRegular(directory *secureDir, name string, ops fileOps) (*os.File, bool, error) {
+	file, err := openOwnedRegularAt(directory, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("open LaunchAgent plist: %w", err)
 	}
+	if err := ensurePrivateMode(file, ops); err != nil {
+		file.Close()
+		return nil, false, fmt.Errorf("set private LaunchAgent plist permissions: %w", err)
+	}
 	return file, true, nil
 }
 
-func openOwnedRegularAt(directory *secureDir, name string, forcePrivate bool) (*os.File, error) {
+func openOwnedRegularAt(directory *secureDir, name string) (*os.File, error) {
 	fd, err := unix.Openat(directory.fd(), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
@@ -589,12 +645,6 @@ func openOwnedRegularAt(directory *secureDir, name string, forcePrivate bool) (*
 	if err := verifyOwnedRegular(file, directory.uid); err != nil {
 		file.Close()
 		return nil, err
-	}
-	if forcePrivate {
-		if err := file.Chmod(0o600); err != nil {
-			file.Close()
-			return nil, err
-		}
 	}
 	return file, nil
 }

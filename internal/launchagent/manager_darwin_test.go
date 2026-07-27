@@ -706,6 +706,416 @@ func TestOwnershipMismatchAndUncertainRecoveryAreRejected(t *testing.T) {
 	}
 }
 
+func TestInstallRejectsPlistOnlySubstitutionAfterPublication(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	substitution := []byte("hostile plist after publication")
+	ops := defaultFileOps()
+	originalRename := ops.renameNoReplaceAt
+	injected := false
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		err := originalRename(fromFD, from, toFD, to)
+		if err == nil && !injected && to == filepath.Base(paths.Plist) {
+			injected = true
+			if err := os.Remove(paths.Plist); err != nil {
+				return err
+			}
+			if err := os.WriteFile(paths.Plist, substitution, 0o600); err != nil {
+				return err
+			}
+		}
+		return err
+	}
+	runner := &fakeRunner{}
+	manager := newDarwinManager(runner, home, 510, ops)
+
+	if err := manager.Install(context.Background(), validTestConfig(t, home, "post-publication-swap")); err == nil {
+		t.Fatal("expected final plist binding failure")
+	}
+	contents, err := os.ReadFile(paths.Plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != string(substitution) {
+		t.Fatalf("final plist = %q, want preserved substitution %q", contents, substitution)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("launchctl invoked after plist substitution: %#v", runner.calls)
+	}
+}
+
+func TestCommitBackupRemovalSyncFailureIsUncertain(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	initialRunner := &fakeRunner{results: []runnerResult{{err: ErrNotLoaded}, {}, {}}}
+	if err := newDarwinManager(initialRunner, home, 510, defaultFileOps()).Install(context.Background(), validTestConfig(t, home, "old")); err != nil {
+		t.Fatal(err)
+	}
+
+	ops := defaultFileOps()
+	originalUnlink := ops.unlinkAt
+	originalSyncDir := ops.syncDir
+	removedBackup := false
+	injected := false
+	ops.unlinkAt = func(fd int, name string, flags int) error {
+		err := originalUnlink(fd, name, flags)
+		if err == nil {
+			removedBackup = true
+		}
+		return err
+	}
+	ops.syncDir = func(directory *os.File) error {
+		if removedBackup && !injected {
+			injected = true
+			return errors.New("injected post-backup-unlink sync failure")
+		}
+		return originalSyncDir(directory)
+	}
+	runner := &fakeRunner{}
+	manager := newDarwinManager(runner, home, 510, ops)
+
+	err := manager.Install(context.Background(), validTestConfig(t, home, "new"))
+	var uncertain *CommitUncertainError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("install error = %v, want CommitUncertainError", err)
+	}
+	contents, readErr := os.ReadFile(paths.Plist)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(contents), "config-new.yaml") {
+		t.Fatalf("final plist does not contain committed update: %s", contents)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("launchctl invoked after uncertain commit: %#v", runner.calls)
+	}
+}
+
+func TestCommitBackupRemovalSyncFailureEndsRollbackState(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Plist, []byte("prior plist"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := openLaunchAgents(home, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.close()
+	ops := defaultFileOps()
+	originalUnlink := ops.unlinkAt
+	originalSyncDir := ops.syncDir
+	removedBackup := false
+	ops.unlinkAt = func(fd int, name string, flags int) error {
+		err := originalUnlink(fd, name, flags)
+		if err == nil {
+			removedBackup = true
+		}
+		return err
+	}
+	ops.syncDir = func(directory *os.File) error {
+		if removedBackup {
+			return errors.New("injected post-backup-unlink sync failure")
+		}
+		return originalSyncDir(directory)
+	}
+	publication, err := writeAtomic(directory, filepath.Base(paths.Plist), []byte("new plist"), ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publication.close()
+
+	err = publication.commit()
+	var uncertain *CommitUncertainError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("commit error = %v, want CommitUncertainError", err)
+	}
+	if publication.active {
+		t.Fatal("publication retained rollback state after its prior backup was unlinked")
+	}
+	assertFileContents(t, paths.Plist, []byte("new plist"))
+}
+
+func TestRemoveDurableRestoresPriorAfterConditionalRemovalRenameFailure(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prior := []byte("prior plist")
+	if err := os.WriteFile(paths.Plist, prior, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultFileOps()
+	originalRename := ops.renameNoReplaceAt
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		if from == filepath.Base(paths.Plist) {
+			return errors.New("injected conditional-removal rename failure")
+		}
+		return originalRename(fromFD, from, toFD, to)
+	}
+
+	err := removeWithTestDirectory(t, home, paths, ops)
+	if err == nil {
+		t.Fatal("expected conditional-removal failure")
+	}
+	assertFileContents(t, paths.Plist, prior)
+}
+
+func TestRemoveDurableRestoresPriorAfterConditionalRemovalUnlinkFailure(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prior := []byte("prior plist")
+	if err := os.WriteFile(paths.Plist, prior, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultFileOps()
+	ops.unlinkAt = func(int, string, int) error { return errors.New("injected conditional-removal unlink failure") }
+
+	err := removeWithTestDirectory(t, home, paths, ops)
+	if err == nil {
+		t.Fatal("expected conditional-removal failure")
+	}
+	assertFileContents(t, paths.Plist, prior)
+}
+
+func TestRemoveDurableRestoresPriorAfterConditionalRemovalIdentityMismatch(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prior := []byte("prior plist")
+	if err := os.WriteFile(paths.Plist, prior, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitution := []byte("conditional removal substitution")
+	ops := defaultFileOps()
+	originalRename := ops.renameNoReplaceAt
+	injected := false
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		err := originalRename(fromFD, from, toFD, to)
+		if err == nil && !injected && from == filepath.Base(paths.Plist) {
+			injected = true
+			directory := filepath.Dir(paths.Plist)
+			if err := os.Rename(filepath.Join(directory, to), filepath.Join(directory, to+".expected")); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(directory, to), substitution, 0o600); err != nil {
+				return err
+			}
+		}
+		return err
+	}
+
+	err := removeWithTestDirectory(t, home, paths, ops)
+	if err == nil {
+		t.Fatal("expected conditional-removal identity failure")
+	}
+	assertFileContents(t, paths.Plist, prior)
+	assertDirectoryContainsContents(t, filepath.Dir(paths.Plist), substitution)
+}
+
+func TestRemoveDurableRestoresPriorWhenConditionalRemovalCannotRestoreTombstone(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prior := []byte("prior plist")
+	if err := os.WriteFile(paths.Plist, prior, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultFileOps()
+	originalRename := ops.renameNoReplaceAt
+	ops.unlinkAt = func(int, string, int) error { return errors.New("injected conditional-removal unlink failure") }
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		if strings.Contains(from, ".removed.tmp-") && to == filepath.Base(paths.Plist) {
+			return errors.New("injected tombstone restore failure")
+		}
+		return originalRename(fromFD, from, toFD, to)
+	}
+
+	err := removeWithTestDirectory(t, home, paths, ops)
+	var uncertain *CommitUncertainError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("remove error = %v, want CommitUncertainError", err)
+	}
+	assertFileContents(t, paths.Plist, prior)
+}
+
+func TestCommitCleanupPreservesBackupNameSubstitution(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	initialRunner := &fakeRunner{results: []runnerResult{{err: ErrNotLoaded}, {}, {}}}
+	if err := newDarwinManager(initialRunner, home, 510, defaultFileOps()).Install(context.Background(), validTestConfig(t, home, "old-cleanup")); err != nil {
+		t.Fatal(err)
+	}
+
+	substitution := []byte("hostile backup substitution")
+	ops := defaultFileOps()
+	originalExchange := ops.exchangeAt
+	originalRename := ops.renameNoReplaceAt
+	originalUnlink := ops.unlinkAt
+	backupName := ""
+	injected := false
+	ops.exchangeAt = func(fromFD int, from string, toFD int, to string) error {
+		err := originalExchange(fromFD, from, toFD, to)
+		if err == nil && to == filepath.Base(paths.Plist) && backupName == "" {
+			backupName = from
+		}
+		return err
+	}
+	inject := func(fd int, name string) error {
+		if injected || backupName == "" || name != backupName {
+			return nil
+		}
+		injected = true
+		if err := os.Rename(filepath.Join(filepath.Dir(paths.Plist), backupName), filepath.Join(filepath.Dir(paths.Plist), backupName+".expected")); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(filepath.Dir(paths.Plist), backupName), substitution, 0o600)
+	}
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		if err := inject(fromFD, from); err != nil {
+			return err
+		}
+		return originalRename(fromFD, from, toFD, to)
+	}
+	ops.unlinkAt = func(fd int, name string, flags int) error {
+		if err := inject(fd, name); err != nil {
+			return err
+		}
+		return originalUnlink(fd, name, flags)
+	}
+	runner := &fakeRunner{}
+	err := newDarwinManager(runner, home, 510, ops).Install(context.Background(), validTestConfig(t, home, "new-cleanup"))
+	if err == nil {
+		t.Fatal("expected backup cleanup identity failure")
+	}
+	if !injected {
+		t.Fatal("cleanup substitution hook was not reached")
+	}
+	assertFileContents(t, filepath.Join(filepath.Dir(paths.Plist), backupName), substitution)
+	if len(runner.calls) != 0 {
+		t.Fatalf("launchctl invoked after backup cleanup failure: %#v", runner.calls)
+	}
+}
+
+func TestWriteAtomicDeferredCleanupPreservesSubstitutionAfterExchangeRollback(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Plist, []byte("prior plist"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publicationSubstitution := []byte("publication substitution")
+	cleanupSubstitution := []byte("cleanup substitution")
+	ops := defaultFileOps()
+	originalExchange := ops.exchangeAt
+	originalRename := ops.renameNoReplaceAt
+	originalUnlink := ops.unlinkAt
+	temporary := ""
+	exchanges := 0
+	cleanupInjected := false
+	ops.exchangeAt = func(fromFD int, from string, toFD int, to string) error {
+		if exchanges == 0 {
+			temporary = from
+			if err := os.Rename(paths.Plist, paths.Plist+".expected"); err != nil {
+				return err
+			}
+			if err := os.WriteFile(paths.Plist, publicationSubstitution, 0o600); err != nil {
+				return err
+			}
+		}
+		err := originalExchange(fromFD, from, toFD, to)
+		if err == nil {
+			exchanges++
+		}
+		return err
+	}
+	injectCleanup := func(name string) error {
+		if cleanupInjected || exchanges < 2 || name != temporary {
+			return nil
+		}
+		cleanupInjected = true
+		directory := filepath.Dir(paths.Plist)
+		if err := os.Rename(filepath.Join(directory, temporary), filepath.Join(directory, temporary+".published")); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(directory, temporary), cleanupSubstitution, 0o600)
+	}
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		if err := injectCleanup(from); err != nil {
+			return err
+		}
+		return originalRename(fromFD, from, toFD, to)
+	}
+	ops.unlinkAt = func(fd int, name string, flags int) error {
+		if err := injectCleanup(name); err != nil {
+			return err
+		}
+		return originalUnlink(fd, name, flags)
+	}
+	directory, err := openLaunchAgents(home, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.close()
+
+	if _, err := writeAtomic(directory, filepath.Base(paths.Plist), []byte("new plist"), ops); err == nil {
+		t.Fatal("expected publication identity failure")
+	}
+	if !cleanupInjected {
+		t.Fatal("deferred cleanup substitution hook was not reached")
+	}
+	assertFileContents(t, paths.Plist, publicationSubstitution)
+	assertFileContents(t, filepath.Join(filepath.Dir(paths.Plist), temporary), cleanupSubstitution)
+}
+
+func TestExistingPrivateFileModeCorrectionsAreSynced(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.StdoutLog), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{paths.Plist, paths.StdoutLog, paths.StderrLog} {
+		if err := os.WriteFile(path, []byte("existing"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ops := defaultFileOps()
+	originalSyncFile := ops.syncFile
+	synced := map[string]bool{}
+	ops.syncFile = func(file *os.File) error {
+		synced[file.Name()] = true
+		return originalSyncFile(file)
+	}
+	runner := &fakeRunner{results: []runnerResult{{err: ErrNotLoaded}, {}, {}}}
+	if err := newDarwinManager(runner, home, 510, ops).Install(context.Background(), validTestConfig(t, home, "metadata-sync")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{filepath.Base(paths.Plist), filepath.Base(paths.StdoutLog), filepath.Base(paths.StderrLog)} {
+		if !synced[name] {
+			t.Errorf("corrected metadata for %q was not synced", name)
+		}
+	}
+}
+
 func TestNewManagerUsesTemporaryHOMEAndNeverRealLaunchAgents(t *testing.T) {
 	home := testHome(t)
 	t.Setenv("HOME", home)
@@ -720,6 +1130,45 @@ func TestNewManagerUsesTemporaryHOMEAndNeverRealLaunchAgents(t *testing.T) {
 	if _, err := os.Stat(pathsForHome(home).Plist); err != nil {
 		t.Fatalf("temporary HOME plist missing: %v", err)
 	}
+}
+
+func removeWithTestDirectory(t *testing.T, home string, paths servicePaths, ops fileOps) error {
+	t.Helper()
+	directory, err := openLaunchAgents(home, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.close()
+	return removeDurable(directory, filepath.Base(paths.Plist), ops)
+}
+
+func assertFileContents(t *testing.T, path string, want []byte) {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(contents) != string(want) {
+		t.Fatalf("contents of %s = %q, want %q", path, contents, want)
+	}
+}
+
+func assertDirectoryContainsContents(t *testing.T, directory string, want []byte) {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		contents, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if err == nil && string(contents) == string(want) {
+			return
+		}
+	}
+	t.Fatalf("directory %s does not preserve evidence %q", directory, want)
 }
 
 func validTestConfig(t *testing.T, home, suffix string) Config {

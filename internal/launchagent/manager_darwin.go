@@ -81,7 +81,7 @@ func (manager *darwinManager) Install(ctx context.Context, config Config) error 
 		return err
 	}
 	defer publication.close()
-	if err := manager.verifyPublicationBindings(launchAgents, logs, stdoutLog, stderrLog); err != nil {
+	if err := manager.verifyPublicationBindings(launchAgents, logs, stdoutLog, stderrLog, publication); err != nil {
 		if rollbackErr := publication.rollback(); rollbackErr != nil {
 			return &CommitUncertainError{Err: errors.Join(err, rollbackErr)}
 		}
@@ -135,7 +135,7 @@ func (manager *darwinManager) prepareFilesystem() (*secureDir, *secureDir, *boun
 	return launchAgents, logs, stdoutLog, stderrLog, nil
 }
 
-func (manager *darwinManager) verifyPublicationBindings(launchAgents, logs *secureDir, stdoutLog, stderrLog *boundFile) error {
+func (manager *darwinManager) verifyPublicationBindings(launchAgents, logs *secureDir, stdoutLog, stderrLog *boundFile, publication *plistPublication) error {
 	if err := verifyLaunchAgentsBinding(manager.home, launchAgents); err != nil {
 		return fmt.Errorf("verify LaunchAgents directory after publication: %w", err)
 	}
@@ -147,6 +147,9 @@ func (manager *darwinManager) verifyPublicationBindings(launchAgents, logs *secu
 	}
 	if err := stderrLog.verify(); err != nil {
 		return fmt.Errorf("verify stderr log after publication: %w", err)
+	}
+	if err := publication.verify(); err != nil {
+		return err
 	}
 	return nil
 }
