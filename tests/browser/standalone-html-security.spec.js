@@ -301,13 +301,30 @@ test.describe("standalone HTML authority boundary", () => {
     standaloneCapture,
   }) => {
     const target = `${standaloneCapture.crossOrigin.origin}/cross-origin-navigation`;
+    const markerType = "cross-origin-navigation-attempt";
     const resource = await publishHTML(
-      standaloneHTML(`setTimeout(() => { location.href = ${JSON.stringify(target)}; }, 50);`),
+      standaloneHTML(`
+        parent.postMessage({ type: ${JSON.stringify(markerType)}, target: ${JSON.stringify(target)} }, "*");
+        location.href = ${JSON.stringify(target)};
+      `),
     );
     const proxiedURL = resource.url.replace(new URL(resource.url).origin, standaloneCapture.origin);
+    await page.addInitScript((type) => {
+      if (window === window.top) {
+        addEventListener("message", (event) => {
+          if (event.data?.type === type) globalThis.__crossOriginNavigationMarker = {
+            data: event.data,
+            origin: event.origin,
+          };
+        });
+      }
+    }, markerType);
     await page.goto(proxiedURL);
-    await page.waitForTimeout(300);
 
+    await expect.poll(() => page.evaluate(() => globalThis.__crossOriginNavigationMarker)).not.toBeUndefined();
+    const marker = await page.evaluate(() => globalThis.__crossOriginNavigationMarker);
+    expect(marker).toEqual({ data: { type: markerType, target }, origin: "null" });
+    await page.waitForTimeout(250);
     expect(standaloneCapture.crossOrigin.requests).toEqual([]);
     expect(page.frames().map((frame) => frame.url())).not.toContain(target);
   });
