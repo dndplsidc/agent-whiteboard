@@ -953,6 +953,133 @@ func TestRemoveDurableRestoresPriorWhenConditionalRemovalCannotRestoreTombstone(
 	assertFileContents(t, paths.Plist, prior)
 }
 
+func TestInstallRejectsFinalPlistSubstitutionDuringCommitCleanup(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	initialRunner := &fakeRunner{results: []runnerResult{{err: ErrNotLoaded}, {}, {}}}
+	if err := newDarwinManager(initialRunner, home, 510, defaultFileOps()).Install(context.Background(), validTestConfig(t, home, "old-commit-binding")); err != nil {
+		t.Fatal(err)
+	}
+
+	substitution := []byte("hostile final plist during commit cleanup")
+	ops := defaultFileOps()
+	originalRename := ops.renameNoReplaceAt
+	injected := false
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		if !injected && strings.Contains(to, ".removed.tmp-") {
+			injected = true
+			if err := os.Remove(paths.Plist); err != nil {
+				return err
+			}
+			if err := os.WriteFile(paths.Plist, substitution, 0o600); err != nil {
+				return err
+			}
+		}
+		return originalRename(fromFD, from, toFD, to)
+	}
+	runner := &fakeRunner{}
+	err := newDarwinManager(runner, home, 510, ops).Install(context.Background(), validTestConfig(t, home, "new-commit-binding"))
+	var uncertain *CommitUncertainError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("install error = %v, want CommitUncertainError", err)
+	}
+	if !injected {
+		t.Fatal("commit cleanup substitution hook was not reached")
+	}
+	assertFileContents(t, paths.Plist, substitution)
+	if len(runner.calls) != 0 {
+		t.Fatalf("launchctl invoked after final plist substitution during commit: %#v", runner.calls)
+	}
+}
+
+func TestInstallReverifiesOtherBindingsAfterCommitCleanup(t *testing.T) {
+	tests := []struct {
+		name       string
+		substitute func(t *testing.T, paths servicePaths)
+	}{
+		{
+			name: "LaunchAgents directory",
+			substitute: func(t *testing.T, paths servicePaths) {
+				directory := filepath.Dir(paths.Plist)
+				if err := os.Rename(directory, directory+".expected"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "log directory",
+			substitute: func(t *testing.T, paths servicePaths) {
+				directory := filepath.Dir(paths.StdoutLog)
+				if err := os.Rename(directory, directory+".expected"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "stdout log",
+			substitute: func(t *testing.T, paths servicePaths) {
+				if err := os.Rename(paths.StdoutLog, paths.StdoutLog+".expected"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(paths.StdoutLog, []byte("hostile stdout log"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "stderr log",
+			substitute: func(t *testing.T, paths servicePaths) {
+				if err := os.Rename(paths.StderrLog, paths.StderrLog+".expected"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(paths.StderrLog, []byte("hostile stderr log"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := testHome(t)
+			paths := pathsForHome(home)
+			initialRunner := &fakeRunner{results: []runnerResult{{err: ErrNotLoaded}, {}, {}}}
+			if err := newDarwinManager(initialRunner, home, 510, defaultFileOps()).Install(context.Background(), validTestConfig(t, home, "old-other-binding")); err != nil {
+				t.Fatal(err)
+			}
+
+			ops := defaultFileOps()
+			originalRename := ops.renameNoReplaceAt
+			injected := false
+			ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+				if !injected && strings.Contains(to, ".removed.tmp-") {
+					injected = true
+					test.substitute(t, paths)
+				}
+				return originalRename(fromFD, from, toFD, to)
+			}
+			runner := &fakeRunner{}
+			err := newDarwinManager(runner, home, 510, ops).Install(context.Background(), validTestConfig(t, home, "new-other-binding"))
+			var uncertain *CommitUncertainError
+			if !errors.As(err, &uncertain) {
+				t.Fatalf("install error = %v, want CommitUncertainError", err)
+			}
+			if !injected {
+				t.Fatal("commit cleanup substitution hook was not reached")
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("launchctl invoked after %s substitution during commit: %#v", test.name, runner.calls)
+			}
+		})
+	}
+}
+
 func TestCommitCleanupPreservesBackupNameSubstitution(t *testing.T) {
 	home := testHome(t)
 	paths := pathsForHome(home)

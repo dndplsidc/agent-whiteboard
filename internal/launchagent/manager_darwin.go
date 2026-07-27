@@ -90,6 +90,9 @@ func (manager *darwinManager) Install(ctx context.Context, config Config) error 
 	if err := publication.commit(); err != nil {
 		return err
 	}
+	if err := manager.verifyPublicationBindings(launchAgents, logs, stdoutLog, stderrLog, publication); err != nil {
+		return &CommitUncertainError{Err: err}
+	}
 
 	target := manager.target()
 	output, printErr := manager.runner.Run(ctx, LaunchctlExecutable, "print", target)
