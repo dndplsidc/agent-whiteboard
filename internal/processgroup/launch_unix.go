@@ -40,36 +40,24 @@ const (
 type managedChild struct {
 	command *exec.Cmd
 	input   *os.File
-	output  *eofReader
-	errors  *eofReader
+	output  *outputSpool
+	errors  *outputSpool
 	pid     int
 
-	mu           sync.Mutex
-	phase        lifecyclePhase
-	pgid         int
-	brokerPGID   int
-	termDone     bool
-	killDone     bool
-	termErr      error
-	killErr      error
-	waitErr      error
-	done         chan struct{}
-	signalFn     func(int, unix.Signal) error
-	cleanupRetry bool
-	waitStarted  bool
-}
-
-type eofReader struct {
-	file *os.File
-	once sync.Once
-}
-
-func (reader *eofReader) Read(buffer []byte) (int, error) {
-	count, err := reader.file.Read(buffer)
-	if err != nil {
-		reader.once.Do(func() { _ = reader.file.Close() })
-	}
-	return count, err
+	mu                 sync.Mutex
+	phase              lifecyclePhase
+	pgid               int
+	brokerPGID         int
+	termDone           bool
+	killDone           bool
+	termErr            error
+	killErr            error
+	waitErr            error
+	done               chan struct{}
+	signalFn           func(int, unix.Signal) error
+	cleanupRetry       bool
+	leaderExitObserved bool
+	waitStarted        bool
 }
 
 type childPipes struct {
@@ -146,8 +134,8 @@ func (*Launcher) Launch(ctx context.Context, request provider.LaunchRequest) (pr
 	child := &managedChild{
 		command:    command,
 		input:      pipes.input,
-		output:     &eofReader{file: pipes.output},
-		errors:     &eofReader{file: pipes.errors},
+		output:     newOutputSpool(pipes.output),
+		errors:     newOutputSpool(pipes.errors),
 		pid:        pid,
 		phase:      lifecycleActive,
 		pgid:       pgid,
@@ -288,20 +276,22 @@ func (child *managedChild) reap(identity processIdentity) {
 	// the leader unreaped while the lifecycle lock protects the verified PGID,
 	// and kill any surviving members before numeric ownership is retired.
 	identityErr := identity.waitForExit()
+	exitObserved := identityErr == nil
 	closeErr := identity.close()
 	if closeErr != nil {
 		identityErr = errors.Join(identityErr, closeErr)
 	}
 
 	child.mu.Lock()
+	child.leaderExitObserved = exitObserved
 	var cleanupErr error
 	if child.killDone && child.killErr == nil {
 		// A successful caller-issued SIGKILL already covered the whole group.
 	} else {
 		child.phase = lifecycleKilled
 		child.killDone = true
-		child.killErr = child.signalGroupLocked(unix.SIGKILL, "cleanup child process group", identityErr == nil)
-		if identityErr == nil && isExitedLeaderOnlyGroupError(child.killErr) {
+		child.killErr = child.signalGroupLocked(unix.SIGKILL, "cleanup child process group", exitObserved)
+		if exitObserved && isExitedLeaderOnlyGroupError(child.killErr) {
 			child.killErr = nil
 		}
 		cleanupErr = child.killErr
@@ -333,6 +323,8 @@ func monitorProcessError(err error) error {
 func (child *managedChild) finishWait(identityErr error, publish bool) {
 	waitErr := child.command.Wait()
 	_ = child.input.Close()
+	child.output.wait()
+	child.errors.wait()
 	if !publish {
 		return
 	}
@@ -352,6 +344,8 @@ func (child *managedChild) Wait() error {
 	if child.done == nil {
 		return processError(ErrorStart, "wait", errors.New("child was not started"))
 	}
+	child.output.forceBoundedDrain()
+	child.errors.forceBoundedDrain()
 	<-child.done
 	child.mu.Lock()
 	defer child.mu.Unlock()
@@ -386,7 +380,8 @@ func (child *managedChild) Kill() error {
 	}
 	child.killDone = true
 	child.phase = lifecycleKilled
-	child.killErr = child.signalGroupLocked(unix.SIGKILL, "kill", !child.cleanupRetry)
+	missingIsSuccess := !child.cleanupRetry || child.leaderExitObserved
+	child.killErr = child.signalGroupLocked(unix.SIGKILL, "kill", missingIsSuccess)
 	if child.killErr != nil {
 		err := child.killErr
 		child.mu.Unlock()

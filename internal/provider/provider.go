@@ -293,7 +293,11 @@ type Launcher interface {
 }
 
 // ManagedChild owns process I/O and process-group escalation. Provider-native
-// graceful shutdown remains Session.Shutdown.
+// graceful shutdown remains Session.Shutdown. Output and Errors are live
+// streams whose buffered bytes remain readable after Wait. To retain output
+// beyond a launcher's bounded unread backlog, callers should drain both streams
+// concurrently to EOF before Wait; Wait may force bounded draining so process
+// completion never depends on a stalled reader. Overflow is reported by Read.
 type ManagedChild interface {
 	Input() io.WriteCloser
 	Output() io.Reader

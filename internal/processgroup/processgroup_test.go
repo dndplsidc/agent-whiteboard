@@ -4,6 +4,7 @@ package processgroup
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -82,6 +83,141 @@ func TestWaitThenReadDrainsFinalOutput(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "FINAL stdout\n", string(output))
 	require.Equal(t, "FINAL stderr\n", string(errorsOutput))
+}
+
+func TestWaitThenReadDrainsLargeStdoutAndStderr(t *testing.T) {
+	const streamBytes = 256 << 10
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "large-output", strconv.Itoa(streamBytes)))
+	require.NoError(t, err)
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- child.Wait() }()
+	select {
+	case waitErr := <-waitDone:
+		require.NoError(t, waitErr)
+	case <-time.After(2 * time.Second):
+		_ = child.Kill()
+		t.Fatal("Wait blocked on unread output larger than the OS pipe capacity")
+	}
+
+	output, err := io.ReadAll(child.Output())
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte("o"), streamBytes), output)
+	errorsOutput, err := io.ReadAll(child.Errors())
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte("e"), streamBytes), errorsOutput)
+}
+
+func TestOutputAndErrorsSupportLiveReads(t *testing.T) {
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "live-output"))
+	require.NoError(t, err)
+	output := bufio.NewReader(child.Output())
+	errorsOutput := bufio.NewReader(child.Errors())
+
+	line, err := output.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "LIVE stdout\n", line)
+	line, err = errorsOutput.ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "LIVE stderr\n", line)
+	_, err = child.Input().Write([]byte{1})
+	require.NoError(t, err)
+	require.NoError(t, child.Wait())
+
+	remainder, err := io.ReadAll(output)
+	require.NoError(t, err)
+	require.Equal(t, "FINAL stdout\n", string(remainder))
+	remainder, err = io.ReadAll(errorsOutput)
+	require.NoError(t, err)
+	require.Equal(t, "FINAL stderr\n", string(remainder))
+}
+
+func TestConcurrentStreamingReclaimsUnreadCapacity(t *testing.T) {
+	const streamBytes = 2 * maxUnreadOutputBytes
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "stream-output", strconv.Itoa(streamBytes)))
+	require.NoError(t, err)
+
+	outputStarted := make(chan struct{})
+	errorsStarted := make(chan struct{})
+	var output, errorsOutput []byte
+	var outputErr, errorsErr error
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(2)
+	go func() {
+		defer waitGroup.Done()
+		output, outputErr = io.ReadAll(&firstReadNotifier{reader: child.Output(), started: outputStarted})
+	}()
+	go func() {
+		defer waitGroup.Done()
+		errorsOutput, errorsErr = io.ReadAll(&firstReadNotifier{reader: child.Errors(), started: errorsStarted})
+	}()
+	<-outputStarted
+	<-errorsStarted
+	_, err = child.Input().Write([]byte{1})
+	require.NoError(t, err)
+	waitGroup.Wait()
+	require.NoError(t, child.Wait())
+
+	require.NoError(t, outputErr)
+	require.Equal(t, bytes.Repeat([]byte("o"), streamBytes), output)
+	require.NoError(t, errorsErr)
+	require.Equal(t, bytes.Repeat([]byte("e"), streamBytes), errorsOutput)
+}
+
+type firstReadNotifier struct {
+	reader  io.Reader
+	started chan struct{}
+	once    sync.Once
+}
+
+func (reader *firstReadNotifier) Read(destination []byte) (int, error) {
+	count, err := reader.reader.Read(destination)
+	if count != 0 {
+		reader.once.Do(func() { close(reader.started) })
+	}
+	return count, err
+}
+
+func TestUnreadOutputOverflowIsBoundedAndExplicit(t *testing.T) {
+	const streamBytes = maxUnreadOutputBytes + 64<<10
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "large-output", strconv.Itoa(streamBytes)))
+	require.NoError(t, err)
+	require.NoError(t, child.Wait())
+
+	output, err := io.ReadAll(child.Output())
+	require.ErrorIs(t, err, ErrOutputOverflow)
+	require.Len(t, output, maxUnreadOutputBytes)
+	require.Equal(t, bytes.Repeat([]byte("o"), maxUnreadOutputBytes), output)
+	errorsOutput, err := io.ReadAll(child.Errors())
+	require.ErrorIs(t, err, ErrOutputOverflow)
+	require.Len(t, errorsOutput, maxUnreadOutputBytes)
+	require.Equal(t, bytes.Repeat([]byte("e"), maxUnreadOutputBytes), errorsOutput)
+}
+
+func TestLargeOutputLifecycleDoesNotLeakDrainersOrFileDescriptors(t *testing.T) {
+	before := openFileDescriptors(t)
+	const streamBytes = 128 << 10
+	for range 5 {
+		child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "large-output", strconv.Itoa(streamBytes)))
+		require.NoError(t, err)
+		require.NoError(t, child.Wait())
+		managed := child.(*managedChild)
+		select {
+		case <-managed.output.done:
+		default:
+			t.Fatal("stdout drain goroutine remained active after Wait")
+		}
+		select {
+		case <-managed.errors.done:
+		default:
+			t.Fatal("stderr drain goroutine remained active after Wait")
+		}
+		_, err = io.ReadAll(child.Output())
+		require.NoError(t, err)
+		_, err = io.ReadAll(child.Errors())
+		require.NoError(t, err)
+	}
+	requireNoNewFileDescriptors(t, before)
 }
 
 func TestLaunchRejectsInvalidSpecification(t *testing.T) {
@@ -292,6 +428,53 @@ func TestLeaderExitKillsSurvivingGrandchildBeforeWaitReturns(t *testing.T) {
 	requireProcessesGone(t, rootPID, grandchildPID)
 }
 
+func TestSuccessfulExitObservationWithCloseErrorAllowsCleanupRetry(t *testing.T) {
+	monitorReady := make(chan struct{})
+	monitorRelease := make(chan struct{})
+	originalNewProcessIdentity := newProcessIdentity
+	newProcessIdentity = func(int) (processIdentity, error) {
+		return fakeProcessIdentity{
+			wait: func() error {
+				close(monitorReady)
+				<-monitorRelease
+				return nil
+			},
+			closeFn: func() error { return syscall.EIO },
+		}, nil
+	}
+	t.Cleanup(func() { newProcessIdentity = originalNewProcessIdentity })
+
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "wait-stdin"))
+	require.NoError(t, err)
+	managed := child.(*managedChild)
+	<-monitorReady
+
+	realSignalResult := make(chan error, 1)
+	managed.mu.Lock()
+	managed.signalFn = func(pid int, signal unix.Signal) error {
+		realSignalResult <- unix.Kill(pid, signal)
+		return syscall.EIO
+	}
+	managed.mu.Unlock()
+	close(monitorRelease)
+
+	waitErr := child.Wait()
+	require.NoError(t, <-realSignalResult)
+	requireErrorKinds(t, waitErr, ErrorStart, ErrorSignal)
+	managed.mu.Lock()
+	require.Equal(t, managed.pid, managed.pgid)
+	managed.signalFn = func(int, unix.Signal) error { return syscall.ESRCH }
+	managed.mu.Unlock()
+
+	require.NoError(t, child.Kill(), "successful leader exit observation must make an ESRCH cleanup retry safe")
+	require.Eventually(t, func() bool {
+		managed.mu.Lock()
+		defer managed.mu.Unlock()
+		return managed.pgid == 0
+	}, time.Second, time.Millisecond)
+	requireProcessesGone(t, managed.pid)
+}
+
 func TestMonitorFailureReportsFailedCleanupAndAllowsKillRetry(t *testing.T) {
 	monitorReady := make(chan struct{})
 	monitorRelease := make(chan struct{})
@@ -339,11 +522,17 @@ func TestMonitorFailureReportsFailedCleanupAndAllowsKillRetry(t *testing.T) {
 }
 
 type fakeProcessIdentity struct {
-	wait func() error
+	wait    func() error
+	closeFn func() error
 }
 
 func (identity fakeProcessIdentity) waitForExit() error { return identity.wait() }
-func (fakeProcessIdentity) close() error                { return nil }
+func (identity fakeProcessIdentity) close() error {
+	if identity.closeFn == nil {
+		return nil
+	}
+	return identity.closeFn()
+}
 
 func TestSignalGuardNeverTargetsBrokerGroup(t *testing.T) {
 	brokerGroup := unix.Getpgrp()
@@ -618,6 +807,35 @@ func TestProcessGroupHelper(t *testing.T) {
 		_, present := os.LookupEnv(arguments[0])
 		fmt.Printf("%t\n%d\n", present, len(os.Environ()))
 	case "final-output":
+		fmt.Fprintln(os.Stdout, "FINAL stdout")
+		fmt.Fprintln(os.Stderr, "FINAL stderr")
+	case "large-output", "stream-output":
+		streamBytes, conversionError := strconv.Atoi(arguments[0])
+		if conversionError != nil {
+			os.Exit(99)
+		}
+		written := 0
+		if mode == "stream-output" {
+			_, _ = os.Stdout.Write([]byte("o"))
+			_, _ = os.Stderr.Write([]byte("e"))
+			written = 1
+			_, _ = os.Stdin.Read(make([]byte, 1))
+		}
+		var waitGroup sync.WaitGroup
+		waitGroup.Add(2)
+		go func() {
+			defer waitGroup.Done()
+			_, _ = io.CopyN(os.Stdout, strings.NewReader(strings.Repeat("o", streamBytes-written)), int64(streamBytes-written))
+		}()
+		go func() {
+			defer waitGroup.Done()
+			_, _ = io.CopyN(os.Stderr, strings.NewReader(strings.Repeat("e", streamBytes-written)), int64(streamBytes-written))
+		}()
+		waitGroup.Wait()
+	case "live-output":
+		fmt.Fprintln(os.Stdout, "LIVE stdout")
+		fmt.Fprintln(os.Stderr, "LIVE stderr")
+		_, _ = os.Stdin.Read(make([]byte, 1))
 		fmt.Fprintln(os.Stdout, "FINAL stdout")
 		fmt.Fprintln(os.Stderr, "FINAL stderr")
 	case "wait-stdin":
