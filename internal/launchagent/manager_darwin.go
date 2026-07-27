@@ -68,20 +68,27 @@ func (manager *darwinManager) Install(ctx context.Context, config Config) error 
 	if err != nil {
 		return err
 	}
-	launchAgents, logs, err := manager.prepareFilesystem()
+	launchAgents, logs, stdoutLog, stderrLog, err := manager.prepareFilesystem()
 	if err != nil {
 		return err
 	}
 	defer launchAgents.close()
 	defer logs.close()
-	if err := writeAtomic(launchAgents, filepath.Base(manager.paths.Plist), contents, manager.ops); err != nil {
+	defer stdoutLog.close()
+	defer stderrLog.close()
+	publication, err := writeAtomic(launchAgents, filepath.Base(manager.paths.Plist), contents, manager.ops)
+	if err != nil {
 		return err
 	}
-	if err := verifyLaunchAgentsBinding(manager.home, launchAgents); err != nil {
-		return fmt.Errorf("verify LaunchAgents directory after publication: %w", err)
+	defer publication.close()
+	if err := manager.verifyPublicationBindings(launchAgents, logs, stdoutLog, stderrLog); err != nil {
+		if rollbackErr := publication.rollback(); rollbackErr != nil {
+			return &CommitUncertainError{Err: errors.Join(err, rollbackErr)}
+		}
+		return err
 	}
-	if err := verifyLogDirectoryBinding(manager.home, logs); err != nil {
-		return fmt.Errorf("verify log directory after publication: %w", err)
+	if err := publication.commit(); err != nil {
+		return err
 	}
 
 	target := manager.target()
@@ -102,27 +109,46 @@ func (manager *darwinManager) Install(ctx context.Context, config Config) error 
 	return nil
 }
 
-func (manager *darwinManager) prepareFilesystem() (*secureDir, *secureDir, error) {
+func (manager *darwinManager) prepareFilesystem() (*secureDir, *secureDir, *boundFile, *boundFile, error) {
 	launchAgents, err := openLaunchAgents(manager.home, true)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	logs, err := openLogDirectory(manager.home, true)
 	if err != nil {
 		launchAgents.close()
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	if err := ensurePrivateFile(logs, filepath.Base(manager.paths.StdoutLog), manager.ops); err != nil {
+	stdoutLog, err := ensurePrivateFile(logs, filepath.Base(manager.paths.StdoutLog), manager.ops)
+	if err != nil {
 		launchAgents.close()
 		logs.close()
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	if err := ensurePrivateFile(logs, filepath.Base(manager.paths.StderrLog), manager.ops); err != nil {
+	stderrLog, err := ensurePrivateFile(logs, filepath.Base(manager.paths.StderrLog), manager.ops)
+	if err != nil {
+		stdoutLog.close()
 		launchAgents.close()
 		logs.close()
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return launchAgents, logs, nil
+	return launchAgents, logs, stdoutLog, stderrLog, nil
+}
+
+func (manager *darwinManager) verifyPublicationBindings(launchAgents, logs *secureDir, stdoutLog, stderrLog *boundFile) error {
+	if err := verifyLaunchAgentsBinding(manager.home, launchAgents); err != nil {
+		return fmt.Errorf("verify LaunchAgents directory after publication: %w", err)
+	}
+	if err := verifyLogDirectoryBinding(manager.home, logs); err != nil {
+		return fmt.Errorf("verify log directory after publication: %w", err)
+	}
+	if err := stdoutLog.verify(); err != nil {
+		return fmt.Errorf("verify stdout log after publication: %w", err)
+	}
+	if err := stderrLog.verify(); err != nil {
+		return fmt.Errorf("verify stderr log after publication: %w", err)
+	}
+	return nil
 }
 
 func (manager *darwinManager) installed() (bool, error) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -89,7 +90,7 @@ func resolveProviderExecutables(descriptors []ProviderDescriptor, resolver Execu
 		resolver = pathResolver{}
 	}
 	for _, descriptor := range descriptors {
-		if descriptor == nil {
+		if isNilInterface(descriptor) {
 			return nil, errors.New("provider descriptor is required")
 		}
 		name, executableName := descriptor.ProviderName(), descriptor.ExecutableName()
@@ -122,6 +123,19 @@ func resolveProviderExecutables(descriptors []ProviderDescriptor, resolver Execu
 	return providers, nil
 }
 
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
+}
+
 func resolveConfigPath(path string) (string, error) {
 	if !validAbsolutePath(path) {
 		return "", errors.New("path must be absolute and clean")
@@ -140,6 +154,13 @@ func resolveConfigPath(path string) (string, error) {
 			real, err := filepath.EvalSymlinks(ancestor)
 			if err != nil {
 				return "", err
+			}
+			canonicalAncestor, err := resolveTopLevelAlias(ancestor)
+			if err != nil {
+				return "", err
+			}
+			if filepath.Clean(real) != canonicalAncestor {
+				return "", errors.New("missing configuration path must not traverse symlinked ancestors")
 			}
 			info, err := os.Stat(real)
 			if err != nil {
@@ -164,6 +185,21 @@ func resolveConfigPath(path string) (string, error) {
 		missing = append([]string{filepath.Base(ancestor)}, missing...)
 		ancestor = parent
 	}
+}
+
+func resolveTopLevelAlias(path string) (string, error) {
+	volume := filepath.VolumeName(path)
+	relative := strings.TrimPrefix(path, volume+string(filepath.Separator))
+	first, remainder, _ := strings.Cut(relative, string(filepath.Separator))
+	top := filepath.Join(volume+string(filepath.Separator), first)
+	resolvedTop, err := filepath.EvalSymlinks(top)
+	if err != nil {
+		return "", err
+	}
+	if remainder == "" {
+		return filepath.Clean(resolvedTop), nil
+	}
+	return filepath.Clean(filepath.Join(resolvedTop, remainder)), nil
 }
 
 func resolveRegularPath(path string, executable, private bool) (string, error) {

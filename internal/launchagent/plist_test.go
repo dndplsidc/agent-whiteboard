@@ -179,6 +179,46 @@ func TestPlistOmitsEnvironmentWhenNoProviderOverrideIsExplicit(t *testing.T) {
 	}
 }
 
+func TestNormalizeConfigRejectsTypedNilProviderDescriptor(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	executable := testRegularFile(t, filepath.Join(home, "agent-whiteboard"), 0o700)
+	configPath := filepath.Join(home, "missing-config.yaml")
+	var descriptor *nilTestProviderDescriptor
+	if _, err := normalizeConfig(Config{
+		Executable: executable,
+		ConfigPath: configPath,
+		Providers:  []ProviderDescriptor{descriptor},
+	}); err == nil || !strings.Contains(err.Error(), "provider descriptor is required") {
+		t.Fatalf("typed-nil descriptor error = %v", err)
+	}
+}
+
+type nilTestProviderDescriptor struct{ name string }
+
+func (descriptor *nilTestProviderDescriptor) ProviderName() string { return descriptor.name }
+func (*nilTestProviderDescriptor) ExecutableName() string          { return "pi" }
+
+func TestNormalizeConfigRejectsMissingConfigEscapingSymlinkedBoundary(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	outside := t.TempDir()
+	executable := testRegularFile(t, filepath.Join(home, "agent-whiteboard"), 0o700)
+	intended := filepath.Join(home, "intended")
+	if err := os.Mkdir(intended, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(intended, "link")); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(intended, "link", "missing", "config.yaml")
+	if _, err := normalizeConfig(Config{Executable: executable, ConfigPath: configPath}); err == nil {
+		t.Fatal("missing configuration escaped through a symlinked ancestor")
+	}
+}
+
 func TestNormalizeConfigAllowsAbsentDefaultConfiguration(t *testing.T) {
 	t.Parallel()
 

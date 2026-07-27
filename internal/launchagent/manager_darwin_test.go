@@ -138,6 +138,84 @@ func TestInstallRejectsSymlinkedLaunchAgentsDirectoryWithoutInvokingRunner(t *te
 	}
 }
 
+func TestInstallCASPreservesFinalEntrySwappedBeforePublication(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	substitution := []byte("hostile substitution")
+	ops := defaultFileOps()
+	originalRename := ops.renameNoReplaceAt
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		if to == filepath.Base(paths.Plist) {
+			if err := os.WriteFile(paths.Plist, substitution, 0o600); err != nil {
+				return err
+			}
+		}
+		return originalRename(fromFD, from, toFD, to)
+	}
+	runner := &fakeRunner{}
+	manager := newDarwinManager(runner, home, 503, ops)
+
+	if err := manager.Install(context.Background(), validTestConfig(t, home, "plist-cas")); err == nil {
+		t.Fatal("expected publication CAS failure")
+	}
+	contents, err := os.ReadFile(paths.Plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != string(substitution) {
+		t.Fatalf("final plist = %q, want preserved substitution %q", contents, substitution)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("launchctl invoked after CAS failure: %#v", runner.calls)
+	}
+}
+
+func TestInstallCASPreservesExistingFinalEntrySwappedBeforeExchange(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Plist, []byte("expected prior plist"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitution := []byte("hostile substitution")
+	ops := defaultFileOps()
+	originalExchange := ops.exchangeAt
+	swapped := false
+	ops.exchangeAt = func(fromFD int, from string, toFD int, to string) error {
+		if !swapped && to == filepath.Base(paths.Plist) {
+			swapped = true
+			if err := os.Remove(paths.Plist); err != nil {
+				return err
+			}
+			if err := os.WriteFile(paths.Plist, substitution, 0o600); err != nil {
+				return err
+			}
+		}
+		return originalExchange(fromFD, from, toFD, to)
+	}
+	runner := &fakeRunner{}
+	manager := newDarwinManager(runner, home, 503, ops)
+
+	if err := manager.Install(context.Background(), validTestConfig(t, home, "plist-exchange-cas")); err == nil {
+		t.Fatal("expected publication exchange CAS failure")
+	}
+	contents, err := os.ReadFile(paths.Plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != string(substitution) {
+		t.Fatalf("final plist = %q, want preserved substitution %q", contents, substitution)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("launchctl invoked after exchange CAS failure: %#v", runner.calls)
+	}
+}
+
 func TestInstallFailureBeforeRenamePreservesDurablePlistAndDoesNotRunLaunchctl(t *testing.T) {
 	home := testHome(t)
 	runner := &fakeRunner{results: []runnerResult{{err: ErrNotLoaded}, {}, {}}}
@@ -370,6 +448,45 @@ func TestStopLeavesPlistAndUninstallDurablyRemovesIt(t *testing.T) {
 	}
 }
 
+func TestUninstallCASPreservesFinalEntrySwappedBeforeRemoval(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Plist, []byte("expected plist"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitution := []byte("hostile substitution")
+	ops := defaultFileOps()
+	originalExchange := ops.exchangeAt
+	swapped := false
+	ops.exchangeAt = func(fromFD int, from string, toFD int, to string) error {
+		if !swapped && to == filepath.Base(paths.Plist) {
+			swapped = true
+			if err := os.Remove(paths.Plist); err != nil {
+				return err
+			}
+			if err := os.WriteFile(paths.Plist, substitution, 0o600); err != nil {
+				return err
+			}
+		}
+		return originalExchange(fromFD, from, toFD, to)
+	}
+	manager := newDarwinManager(&fakeRunner{}, home, 509, ops)
+
+	if err := manager.Uninstall(context.Background()); err == nil {
+		t.Fatal("expected removal CAS failure")
+	}
+	contents, err := os.ReadFile(paths.Plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != string(substitution) {
+		t.Fatalf("final plist = %q, want preserved substitution %q", contents, substitution)
+	}
+}
+
 func TestDurableRemovalFailureRestoresInstalledPlist(t *testing.T) {
 	home := testHome(t)
 	paths := pathsForHome(home)
@@ -420,14 +537,18 @@ func TestAtomicPublicationDetectsLaunchAgentsPathSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	ops := defaultFileOps()
-	originalRename := ops.renameAt
+	originalRename := ops.renameNoReplaceAt
 	moved := filepath.Join(home, "Library", "LaunchAgents-old")
-	ops.renameAt = func(fromFD int, from string, toFD int, to string) error {
-		if err := os.Rename(filepath.Dir(paths.Plist), moved); err != nil {
-			return err
-		}
-		if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
-			return err
+	swapped := false
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		if !swapped {
+			swapped = true
+			if err := os.Rename(filepath.Dir(paths.Plist), moved); err != nil {
+				return err
+			}
+			if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+				return err
+			}
 		}
 		return originalRename(fromFD, from, toFD, to)
 	}
@@ -442,8 +563,108 @@ func TestAtomicPublicationDetectsLaunchAgentsPathSwap(t *testing.T) {
 	if _, err := os.Stat(paths.Plist); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("replacement path received plist: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(moved, filepath.Base(paths.Plist))); err != nil {
-		t.Fatalf("verified directory handle did not receive atomic plist: %v", err)
+	if _, err := os.Stat(filepath.Join(moved, filepath.Base(paths.Plist))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("detached directory retained published plist after rollback: %v", err)
+	}
+}
+
+func TestInstallLogSwapFailsAndRollsBackPublishedPlist(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.StdoutLog), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.StdoutLog, []byte("original stdout"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.StderrLog, []byte("original stderr"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultFileOps()
+	originalRename := ops.renameNoReplaceAt
+	swapped := false
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		if !swapped && to == filepath.Base(paths.Plist) {
+			swapped = true
+			if err := os.Rename(paths.StdoutLog, paths.StdoutLog+".original"); err != nil {
+				return err
+			}
+			if err := os.WriteFile(paths.StdoutLog, []byte("replacement stdout"), 0o600); err != nil {
+				return err
+			}
+		}
+		return originalRename(fromFD, from, toFD, to)
+	}
+	runner := &fakeRunner{}
+	manager := newDarwinManager(runner, home, 510, ops)
+
+	if err := manager.Install(context.Background(), validTestConfig(t, home, "log-swap")); err == nil {
+		t.Fatal("expected log binding failure")
+	}
+	if _, err := os.Stat(paths.Plist); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published plist not rolled back after log swap: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("launchctl invoked after log swap: %#v", runner.calls)
+	}
+}
+
+func TestInstallRollbackPreservesFinalEntrySwappedAfterPublication(t *testing.T) {
+	home := testHome(t)
+	paths := pathsForHome(home)
+	if err := os.Mkdir(filepath.Dir(paths.Plist), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.StdoutLog), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.StdoutLog, []byte("original stdout"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.StderrLog, []byte("original stderr"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitution := []byte("later hostile substitution")
+	ops := defaultFileOps()
+	originalRename := ops.renameNoReplaceAt
+	injected := false
+	ops.renameNoReplaceAt = func(fromFD int, from string, toFD int, to string) error {
+		err := originalRename(fromFD, from, toFD, to)
+		if err == nil && !injected && to == filepath.Base(paths.Plist) {
+			injected = true
+			if err := os.Remove(paths.Plist); err != nil {
+				return err
+			}
+			if err := os.WriteFile(paths.Plist, substitution, 0o600); err != nil {
+				return err
+			}
+			if err := os.Rename(paths.StdoutLog, paths.StdoutLog+".original"); err != nil {
+				return err
+			}
+			if err := os.WriteFile(paths.StdoutLog, []byte("replacement stdout"), 0o600); err != nil {
+				return err
+			}
+		}
+		return err
+	}
+	runner := &fakeRunner{}
+	manager := newDarwinManager(runner, home, 510, ops)
+
+	if err := manager.Install(context.Background(), validTestConfig(t, home, "rollback-cas")); err == nil {
+		t.Fatal("expected binding and rollback CAS failure")
+	}
+	contents, err := os.ReadFile(paths.Plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != string(substitution) {
+		t.Fatalf("final plist = %q, want preserved later substitution %q", contents, substitution)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("launchctl invoked after rollback CAS failure: %#v", runner.calls)
 	}
 }
 
