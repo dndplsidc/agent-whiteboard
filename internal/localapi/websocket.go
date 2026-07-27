@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
@@ -61,44 +62,66 @@ func (s *Server) websocket(response http.ResponseWriter, request *http.Request) 
 	connection, err := s.backend.Connect(ctx, origin, connect)
 	if err != nil || !validConnection(connection) {
 		cancel()
-		closeRejectedConnection(connection)
+		closeRejectedConnection(request.Context(), connection)
 		closeWebSocket(socket, websocket.CloseInternalServerErr, "broker unavailable")
 		return
 	}
-	safe := &safeConnection{Connection: connection}
-	tracked := s.track(func() error {
+	safe := newSafeConnection(connection)
+	tracked := s.track(func(closeCtx context.Context) error {
 		cancel()
 		closeWebSocket(socket, websocket.CloseGoingAway, "broker shutting down")
-		return errors.Join(socket.Close(), safe.Close())
+		socketErr := socket.Close()
+		if isClosedError(socketErr) {
+			socketErr = nil
+		}
+		return errors.Join(socketErr, safe.Close(closeCtx))
 	})
 	defer func() {
-		_ = tracked.close()
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
+		defer closeCancel()
+		_ = tracked.close(closeCtx)
 		s.untrack(tracked)
 	}()
 
 	writerDone := make(chan error, 1)
+	readDone := make(chan error, 1)
+	var workers sync.WaitGroup
+	workers.Add(2)
 	go func() {
-		for event := range safe.Events() {
-			if event.ConversationID != safe.ConversationID() {
-				writerDone <- errors.New("event conversation mismatch")
+		defer workers.Done()
+		events := safe.Events()
+		for {
+			select {
+			case <-ctx.Done():
+				writerDone <- ctx.Err()
 				return
-			}
-			encoded, encodeErr := agentprotocol.EncodeEvent(event)
-			if encodeErr != nil {
-				writerDone <- encodeErr
-				return
-			}
-			if writeErr := socket.WriteMessage(websocket.TextMessage, encoded); writeErr != nil {
-				writerDone <- writeErr
-				return
+			case event, open := <-events:
+				if !open {
+					writerDone <- nil
+					return
+				}
+				encoded, encodeErr := encodeConnectionEvent(safe, event)
+				if encodeErr != nil {
+					writerDone <- encodeErr
+					return
+				}
+				if writeErr := socket.WriteMessage(websocket.TextMessage, encoded); writeErr != nil {
+					writerDone <- writeErr
+					return
+				}
 			}
 		}
-		writerDone <- nil
 	}()
 
-	readDone := make(chan error, 1)
 	go func() {
+		defer workers.Done()
 		for {
+			select {
+			case <-ctx.Done():
+				readDone <- ctx.Err()
+				return
+			default:
+			}
 			kind, frame, readErr := socket.ReadMessage()
 			if readErr != nil {
 				readDone <- readErr
@@ -134,6 +157,9 @@ func (s *Server) websocket(response http.ResponseWriter, request *http.Request) 
 	case <-readDone:
 	case <-ctx.Done():
 	}
+	cancel()
+	_ = socket.Close()
+	workers.Wait()
 }
 
 func offersRequiredSubprotocol(request *http.Request) bool {

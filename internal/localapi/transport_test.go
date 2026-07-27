@@ -69,8 +69,22 @@ func TestWebSocketRequiresProtocolRejectsBinaryAndTimesOutFirstFrame(t *testing.
 	wsURL := url.URL{Scheme: "ws", Host: running.server.Host(), Path: agentprotocol.ConnectPath}
 	header := http.Header{"Origin": []string{trustedOrigin}}
 
+	withoutOrigin := websocket.Dialer{Subprotocols: []string{agentprotocol.WebSocketSubprotocol}}
+	_, response, err := withoutOrigin.Dial(wsURL.String(), nil)
+	require.Error(t, err)
+	require.NotNil(t, response)
+	assert.Equal(t, http.StatusForbidden, response.StatusCode)
+	response.Body.Close()
+
+	multipleOrigins := http.Header{"Origin": []string{trustedOrigin, otherOrigin}}
+	_, response, err = withoutOrigin.Dial(wsURL.String(), multipleOrigins)
+	require.Error(t, err)
+	require.NotNil(t, response)
+	assert.Equal(t, http.StatusForbidden, response.StatusCode)
+	response.Body.Close()
+
 	withoutProtocol := websocket.Dialer{}
-	_, response, err := withoutProtocol.Dial(wsURL.String(), header)
+	_, response, err = withoutProtocol.Dial(wsURL.String(), header)
 	require.Error(t, err)
 	require.NotNil(t, response)
 	assert.Equal(t, http.StatusUpgradeRequired, response.StatusCode)

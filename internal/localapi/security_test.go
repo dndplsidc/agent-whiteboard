@@ -78,23 +78,15 @@ type fakeConnection struct {
 	events    chan agentprotocol.Event
 	closed    chan struct{}
 	closeOnce sync.Once
-	mu        sync.RWMutex
 }
 
 func (*fakeConnection) ConversationID() string               { return conversation }
 func (c *fakeConnection) Events() <-chan agentprotocol.Event { return c.events }
-func (c *fakeConnection) Close() error {
-	c.closeOnce.Do(func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		close(c.closed)
-		close(c.events)
-	})
+func (c *fakeConnection) Close(context.Context) error {
+	c.closeOnce.Do(func() { close(c.closed) })
 	return nil
 }
 func (c *fakeConnection) Command(_ context.Context, command agentprotocol.Command) (agentprotocol.Event, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	event := resultEvent(command.CommandID)
 	select {
 	case c.events <- event:

@@ -1,6 +1,7 @@
 package localapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -17,24 +18,49 @@ type attachmentKey struct {
 type attachment struct {
 	key        attachmentKey
 	connection *safeConnection
+	cancel     context.CancelFunc
 	done       chan struct{}
 	doneOnce   sync.Once
 }
 
-func (a *attachment) close() error {
-	a.doneOnce.Do(func() { close(a.done) })
-	return a.connection.Close()
+func (a *attachment) close(ctx context.Context) error {
+	a.doneOnce.Do(func() {
+		close(a.done)
+		a.cancel()
+	})
+	return a.connection.Close(ctx)
 }
 
 type safeConnection struct {
 	Connection
 	once sync.Once
+	done chan struct{}
+	mu   sync.Mutex
 	err  error
 }
 
-func (c *safeConnection) Close() error {
-	c.once.Do(func() { c.err = c.Connection.Close() })
-	return c.err
+func newSafeConnection(connection Connection) *safeConnection {
+	return &safeConnection{Connection: connection, done: make(chan struct{})}
+}
+
+func (c *safeConnection) Close(ctx context.Context) error {
+	c.once.Do(func() {
+		go func() {
+			err := c.Connection.Close(ctx)
+			c.mu.Lock()
+			c.err = err
+			c.mu.Unlock()
+			close(c.done)
+		}()
+	})
+	select {
+	case <-c.done:
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.err
+	case <-ctx.Done():
+		return errors.Join(errTransportCloseIncomplete, ctx.Err())
+	}
 }
 
 type attachmentRegistry struct {
@@ -88,36 +114,68 @@ func (s *Server) stream(response http.ResponseWriter, request *http.Request) {
 		safeHTTPError(response, statusForDecodeError(err), agentprotocol.ErrorInvalidCommand)
 		return
 	}
-	connection, err := s.backend.Connect(request.Context(), origin, command)
+	ctx, cancel := context.WithCancel(request.Context())
+	connection, err := s.backend.Connect(ctx, origin, command)
 	if err != nil || !validConnection(connection) {
-		closeRejectedConnection(connection)
+		cancel()
+		closeRejectedConnection(request.Context(), connection)
 		safeHTTPError(response, http.StatusServiceUnavailable, backendErrorCode(err, agentprotocol.ErrorBrokerUnavailable))
 		return
 	}
-	safe := &safeConnection{Connection: connection}
+	safe := newSafeConnection(connection)
 	item := &attachment{
 		key:        attachmentKey{origin: origin, clientID: command.ClientID, conversationID: connection.ConversationID()},
 		connection: safe,
+		cancel:     cancel,
 		done:       make(chan struct{}),
-	}
-	if old := s.attachments.put(item); old != nil {
-		_ = old.close()
 	}
 	tracked := s.track(item.close)
 	defer func() {
 		s.attachments.remove(item)
-		_ = tracked.close()
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
+		defer closeCancel()
+		_ = tracked.close(closeCtx)
 		s.untrack(tracked)
 	}()
 
-	flusher, ok := response.(http.Flusher)
-	if !ok {
+	if !supportsResponseFlush(response) {
 		safeHTTPError(response, http.StatusInternalServerError, agentprotocol.ErrorBrokerUnavailable)
+		return
+	}
+
+	var first agentprotocol.Event
+	select {
+	case event, open := <-safe.Events():
+		if !open {
+			safeHTTPError(response, http.StatusServiceUnavailable, agentprotocol.ErrorBrokerUnavailable)
+			return
+		}
+		first = event
+	case <-item.done:
+		safeHTTPError(response, http.StatusServiceUnavailable, agentprotocol.ErrorBrokerShuttingDown)
+		return
+	case <-request.Context().Done():
+		return
+	}
+	encoded, err := encodeConnectionEvent(safe, first)
+	if err != nil {
+		safeHTTPError(response, http.StatusServiceUnavailable, agentprotocol.ErrorBrokerUnavailable)
 		return
 	}
 	response.Header().Set("Content-Type", "application/x-ndjson")
 	response.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	if _, err = response.Write(append(encoded, '\n')); err != nil {
+		return
+	}
+	if err = http.NewResponseController(response).Flush(); err != nil {
+		return
+	}
+
+	if old := s.attachments.put(item); old != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
+		_ = old.close(closeCtx)
+		closeCancel()
+	}
 
 	for {
 		select {
@@ -125,20 +183,46 @@ func (s *Server) stream(response http.ResponseWriter, request *http.Request) {
 			if !open {
 				return
 			}
-			encoded, encodeErr := agentprotocol.EncodeEvent(event)
-			if encodeErr != nil || event.ConversationID != safe.ConversationID() {
+			encoded, err := encodeConnectionEvent(safe, event)
+			if err != nil {
 				return
 			}
-			if _, writeErr := response.Write(append(encoded, '\n')); writeErr != nil {
+			if _, err = response.Write(append(encoded, '\n')); err != nil {
 				return
 			}
-			flusher.Flush()
+			if err = http.NewResponseController(response).Flush(); err != nil {
+				return
+			}
 		case <-item.done:
 			return
 		case <-request.Context().Done():
 			return
 		}
 	}
+}
+
+func supportsResponseFlush(response http.ResponseWriter) bool {
+	for {
+		if unwrapper, ok := response.(interface{ Unwrap() http.ResponseWriter }); ok {
+			underlying := unwrapper.Unwrap()
+			if underlying != nil && underlying != response {
+				response = underlying
+				continue
+			}
+		}
+		if _, ok := response.(interface{ FlushError() error }); ok {
+			return true
+		}
+		_, ok := response.(http.Flusher)
+		return ok
+	}
+}
+
+func encodeConnectionEvent(connection *safeConnection, event agentprotocol.Event) ([]byte, error) {
+	if event.ConversationID != connection.ConversationID() {
+		return nil, errors.New("event conversation mismatch")
+	}
+	return agentprotocol.EncodeEvent(event)
 }
 
 func (s *Server) command(response http.ResponseWriter, request *http.Request) {
@@ -204,10 +288,13 @@ func validConnection(connection Connection) bool {
 	return !nilInterface(connection) && common.ValidateID(connection.ConversationID()) == nil && connection.Events() != nil
 }
 
-func closeRejectedConnection(connection Connection) {
-	if !nilInterface(connection) {
-		_ = connection.Close()
+func closeRejectedConnection(ctx context.Context, connection Connection) {
+	if nilInterface(connection) {
+		return
 	}
+	closeCtx, cancel := context.WithTimeout(ctx, transportCleanupTimeout)
+	defer cancel()
+	_ = newSafeConnection(connection).Close(closeCtx)
 }
 
 func matchingCommandResult(event agentprotocol.Event, command agentprotocol.Command) bool {

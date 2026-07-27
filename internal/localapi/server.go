@@ -16,9 +16,12 @@ import (
 )
 
 const (
-	CommandsPath      = agentprotocol.Namespace + "/commands"
-	firstFrameTimeout = 5 * time.Second
+	CommandsPath            = agentprotocol.Namespace + "/commands"
+	firstFrameTimeout       = 5 * time.Second
+	transportCleanupTimeout = time.Second
 )
+
+var errTransportCloseIncomplete = errors.New("local API transport close did not complete")
 
 // TrustSource returns a fresh immutable snapshot of canonical trusted origins.
 // Implementations must not return a cached admission decision.
@@ -37,13 +40,29 @@ type Connection interface {
 	ConversationID() string
 	Events() <-chan agentprotocol.Event
 	Command(context.Context, agentprotocol.Command) (agentprotocol.Event, error)
-	Close() error
+	Close(context.Context) error
+}
+
+// RequestRecord is the complete privacy-safe request diagnostic surface.
+// Route is a canonical local API route or "unknown"; Code is empty for
+// responses without a browser error.
+type RequestRecord struct {
+	Route  string
+	Method string
+	Status int
+	Code   agentprotocol.BrowserErrorCode
+}
+
+// RequestRecorder optionally receives privacy-safe request outcomes.
+type RequestRecorder interface {
+	Record(RequestRecord)
 }
 
 type Config struct {
 	Port        int
 	TrustSource TrustSource
 	Backend     Backend
+	Recorder    RequestRecorder
 }
 
 type Server struct {
@@ -52,6 +71,7 @@ type Server struct {
 	host     string
 	trust    TrustSource
 	backend  Backend
+	recorder RequestRecorder
 
 	attachments attachmentRegistry
 	mu          sync.Mutex
@@ -87,6 +107,7 @@ func Listen(config Config) (*Server, error) {
 		host:       net.JoinHostPort("127.0.0.1", strconv.Itoa(address.Port)),
 		trust:      config.TrustSource,
 		backend:    config.Backend,
+		recorder:   config.Recorder,
 		transports: make(map[*transport]struct{}),
 		serveErr:   make(chan error, 1),
 	}
@@ -136,7 +157,7 @@ func (s *Server) Close(ctx context.Context) error {
 		}
 		s.mu.Unlock()
 		for _, item := range transports {
-			if err := item.close(); err != nil {
+			if err := item.close(ctx); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -150,16 +171,34 @@ func (s *Server) Close(ctx context.Context) error {
 
 type transport struct {
 	once sync.Once
-	fn   func() error
+	fn   func(context.Context) error
+	done chan struct{}
+	mu   sync.Mutex
 	err  error
 }
 
-func (t *transport) close() error {
-	t.once.Do(func() { t.err = t.fn() })
-	return t.err
+func (t *transport) close(ctx context.Context) error {
+	t.once.Do(func() {
+		t.done = make(chan struct{})
+		go func() {
+			err := t.fn(ctx)
+			t.mu.Lock()
+			t.err = err
+			t.mu.Unlock()
+			close(t.done)
+		}()
+	})
+	select {
+	case <-t.done:
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.err
+	case <-ctx.Done():
+		return errors.Join(errTransportCloseIncomplete, ctx.Err())
+	}
 }
 
-func (s *Server) track(fn func() error) *transport {
+func (s *Server) track(fn func(context.Context) error) *transport {
 	item := &transport{fn: fn}
 	s.mu.Lock()
 	stopping := s.stopping
@@ -168,7 +207,9 @@ func (s *Server) track(fn func() error) *transport {
 	}
 	s.mu.Unlock()
 	if stopping {
-		_ = item.close()
+		ctx, cancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
+		defer cancel()
+		_ = item.close(ctx)
 	}
 	return item
 }
