@@ -10,7 +10,7 @@ Publish through the CLI whenever shell execution is available. Use direct HTTP o
 ## Choose the resource
 
 - Choose Markdown for ordinary boards, prose, code, tables, and Mermaid diagrams. The browser renders and sanitizes Markdown.
-- Choose standalone HTML only for trusted active documents. It runs as opaque-origin sandboxed active content, not sanitized Markdown; trusted code can still disclose its capability through permitted child self-navigation.
+- Choose standalone HTML only for trusted active documents. It runs as opaque-origin sandboxed active content without same-origin authority, not sanitized Markdown; trusted code can still disclose its capability through permitted child self-navigation.
 - Choose images for PNG, JPEG, GIF, or WebP binary visuals. Never upload SVG.
 
 Respect the configured limits; defaults are 10 MiB per whiteboard source, 1 MiB per Markdown creator context, 25 MiB per image, and 100 MiB for the complete image request.

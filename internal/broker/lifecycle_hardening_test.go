@@ -288,16 +288,33 @@ func (session *hardeningSession) Shutdown(ctx context.Context) error {
 	return session.shutdownErr
 }
 
+func operationCount(operations []string, target string) int {
+	count := 0
+	for _, operation := range operations {
+		if operation == target {
+			count++
+		}
+	}
+	return count
+}
+
+func nonCooperativeHardeningChild(killFailures int) *hardeningChild {
+	exited := make(chan struct{})
+	return &hardeningChild{killFailures: killFailures, killSignal: exited, waitGate: exited}
+}
+
 type hardeningChild struct {
-	mu           sync.Mutex
-	order        []string
-	terminateErr error
-	killFailures int
-	waitEntered  chan struct{}
-	waitGate     chan struct{}
-	killSignal   chan struct{}
-	waitOnce     sync.Once
-	killOnce     sync.Once
+	mu              sync.Mutex
+	order           []string
+	terminateErr    error
+	killFailures    int
+	waitEntered     chan struct{}
+	waitGate        chan struct{}
+	killSignal      chan struct{}
+	terminateSignal chan struct{}
+	waitOnce        sync.Once
+	killOnce        sync.Once
+	terminateOnce   sync.Once
 }
 
 func (*hardeningChild) Input() io.WriteCloser { return nopWriteCloser{} }
@@ -320,6 +337,9 @@ func (child *hardeningChild) Wait() error {
 }
 func (child *hardeningChild) Terminate() error {
 	child.record("terminate")
+	if child.terminateErr == nil && child.terminateSignal != nil {
+		child.terminateOnce.Do(func() { close(child.terminateSignal) })
+	}
 	return child.terminateErr
 }
 func (child *hardeningChild) Kill() error {
@@ -450,7 +470,7 @@ func TestCreateCompensationRetainsRetryOwnershipAtEveryFailedStep(t *testing.T) 
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state := &hardeningState{outcome: agentstate.CommitNotApplied, removeFailures: test.removeFailures}
-			child := &hardeningChild{killFailures: test.killFailures}
+			child := nonCooperativeHardeningChild(test.killFailures)
 			session := newHardeningSession("sessions/create")
 			session.shutdownErr = test.shutdownErr
 			session.child = child
@@ -484,7 +504,7 @@ func TestCreateCompensationRetainsRetryOwnershipAtEveryFailedStep(t *testing.T) 
 
 func TestUnresolvedCreateCleanupGatesReconnectForSameIdentity(t *testing.T) {
 	state := &hardeningState{outcome: agentstate.CommitNotApplied}
-	child := &hardeningChild{killFailures: 3}
+	child := nonCooperativeHardeningChild(3)
 	session := newHardeningSession("sessions/gated-create")
 	session.shutdownErr = errors.New("shutdown failed")
 	session.child = child
@@ -518,7 +538,7 @@ func TestUnresolvedResumeCleanupGatesReconnectForSameIdentity(t *testing.T) {
 	origin := "https://example.com"
 	resource := sequenceID(959)
 	_, mapping := hardeningMapping(t, origin, resource)
-	child := &hardeningChild{killFailures: 3}
+	child := nonCooperativeHardeningChild(3)
 	session := newHardeningSession("sessions/resume")
 	session.shutdownErr = errors.New("shutdown failed")
 	session.child = child
@@ -570,7 +590,7 @@ func TestActorShutdownWorkerDrainsFinalUnbufferedProviderEvent(t *testing.T) {
 func TestFailedActorShutdownRetryNeverOverlaps(t *testing.T) {
 	state := &lifecycleState{mappings: make(map[agentstate.Identity]agentstate.Mapping)}
 	session := newHardeningSession("sessions/shutdown-retry")
-	session.child.(*hardeningChild).killFailures = 1
+	session.child = nonCooperativeHardeningChild(1)
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var calls atomic.Int32

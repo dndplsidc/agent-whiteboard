@@ -530,11 +530,49 @@ func TestBrokerShutdownCancelsAndJoinsAnInFlightProviderWorker(t *testing.T) {
 	require.EqualValues(t, 1, session.shutdowns.Load())
 }
 
+func TestActorShutdownDoesNotKillChildThatExitsDuringTerminateGrace(t *testing.T) {
+	exited := make(chan struct{})
+	child := &hardeningChild{waitGate: exited, terminateSignal: exited}
+	session := newHardeningSession("sessions/graceful-terminate")
+	session.child = child
+	session.shutdownErr = errors.New("native shutdown failed")
+	attempt := newActorShutdown(captureSession(session), nil)
+
+	require.NoError(t, attempt.run(context.Background(), 40*time.Millisecond))
+	child.mu.Lock()
+	require.Equal(t, []string{"terminate", "wait"}, child.order)
+	child.mu.Unlock()
+	require.EqualValues(t, 1, session.shutdowns.Load())
+}
+
+func TestActorShutdownBoundsPostKillJoinByConfiguredTimeout(t *testing.T) {
+	waitGate := make(chan struct{})
+	shutdownGate := make(chan struct{})
+	workerGate := make(chan struct{})
+	child := &hardeningChild{waitGate: waitGate}
+	session := newHardeningSession("sessions/noncooperative-join")
+	session.child = child
+	session.shutdownFunc = func(context.Context) error {
+		<-shutdownGate
+		return nil
+	}
+	attempt := newActorShutdown(captureSession(session), workerGate)
+	callerCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+
+	require.Error(t, attempt.run(callerCtx, 20*time.Millisecond))
+	require.Less(t, time.Since(started), 60*time.Millisecond)
+	close(waitGate)
+	close(shutdownGate)
+	close(workerGate)
+}
+
 func TestActorShutdownEscalatesAndJoinsNonCooperativeTurnWorker(t *testing.T) {
 	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7145)
 	broker.shutdownTimeout = 40 * time.Millisecond
 	connection.actor.shutdownTimeout = 40 * time.Millisecond
-	child := &hardeningChild{killSignal: make(chan struct{}), killFailures: 1}
+	child := nonCooperativeHardeningChild(1)
 	session.child = child
 	connection.actor.session.child = child
 	session.shutdownFunc = func(context.Context) error {
@@ -564,7 +602,7 @@ func TestActorShutdownEscalatesAndJoinsNonCooperativeTurnWorker(t *testing.T) {
 	require.NoError(t, response.err)
 	requireCommandResult(t, response.event, agentprotocol.CommandRejected, agentprotocol.ErrorProviderProtocolFailure)
 	child.mu.Lock()
-	require.Equal(t, []string{"terminate", "kill", "terminate", "kill", "wait"}, child.order)
+	require.Equal(t, []string{"terminate", "wait", "kill", "kill"}, child.order)
 	child.mu.Unlock()
 	require.EqualValues(t, 1, session.shutdowns.Load())
 }
@@ -572,7 +610,7 @@ func TestActorShutdownEscalatesAndJoinsNonCooperativeTurnWorker(t *testing.T) {
 func TestActorShutdownEscalatesIgnoredGracefulStopInOrder(t *testing.T) {
 	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(7150))
 	state := &hardeningState{mapping: &mapping}
-	child := &hardeningChild{killSignal: make(chan struct{})}
+	child := nonCooperativeHardeningChild(0)
 	session := newHardeningSession(mapping.Current.NativeSession.Value())
 	session.child = child
 	session.shutdownFunc = func(context.Context) error {
@@ -592,7 +630,7 @@ func TestActorShutdownEscalatesIgnoredGracefulStopInOrder(t *testing.T) {
 	go func() { closed <- broker.Close(context.Background()) }()
 	require.NoError(t, receiveLifecycle(t, closed))
 	child.mu.Lock()
-	require.Equal(t, []string{"terminate", "kill", "wait"}, child.order)
+	require.Equal(t, []string{"terminate", "wait", "kill"}, child.order)
 	child.mu.Unlock()
 	require.EqualValues(t, 1, session.shutdowns.Load())
 }

@@ -548,7 +548,7 @@ func TestFailedCandidateCleanupRemainsBrokerOwnedAndRetryable(t *testing.T) {
 	old := newHardeningSession(mapping.Current.NativeSession.Value())
 	candidate := newHardeningSession("sessions/different")
 	candidate.shutdownErr = errors.New("shutdown failed")
-	child := &hardeningChild{killFailures: 1}
+	child := nonCooperativeHardeningChild(1)
 	candidate.child = child
 	driver := &recoverySequenceDriver{sessions: []provider.Session{old, candidate}}
 	broker, err := New(validLifecycleConfig(state, driver, &lockedIDs{next: 1591}))
@@ -566,7 +566,9 @@ func TestFailedCandidateCleanupRemainsBrokerOwnedAndRetryable(t *testing.T) {
 	require.NoError(t, broker.Close(context.Background()))
 	require.EqualValues(t, 2, candidate.shutdowns.Load())
 	child.mu.Lock()
-	require.Equal(t, []string{"terminate", "kill", "terminate", "kill", "wait"}, child.order)
+	require.Equal(t, 2, operationCount(child.order, "terminate"))
+	require.Equal(t, 2, operationCount(child.order, "kill"))
+	require.GreaterOrEqual(t, operationCount(child.order, "wait"), 1)
 	child.mu.Unlock()
 	driver.mu.Lock()
 	require.Zero(t, driver.deletes)

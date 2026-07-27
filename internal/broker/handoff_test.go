@@ -215,7 +215,8 @@ func TestCommandNewStopFailureKeepsDurableCurrentAndCleansCandidate(t *testing.T
 	defer broker.Close(context.Background())
 	old := driver.session.(*turnSession)
 	old.shutdownErr = errors.New("graceful stop failed")
-	old.child.(*hardeningChild).killFailures = 1
+	old.child = nonCooperativeHardeningChild(1)
+	connection.actor.session.child = old.child
 	candidate := newTurnSession("sessions/new-stop-failure")
 	driver.mu.Lock()
 	driver.createSessions = []provider.Session{candidate}
