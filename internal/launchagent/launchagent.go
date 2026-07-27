@@ -4,19 +4,20 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"runtime"
 )
 
 const (
 	Label                       = "com.agent-whiteboard.local-agent"
 	LaunchctlExecutable         = "/bin/launchctl"
 	ProviderPi                  = "pi"
-	PiExecutableEnvironment     = "AGENT_WHITEBOARD_PI_EXECUTABLE"
-	ForegroundGuidance          = "managed agent services are unsupported on this platform; run `agent-whiteboard agent serve` in the foreground"
+	PiExecutableEnvironment     = "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE"
 	installedNotRunningGuidance = "LaunchAgent is installed but not running"
 	notInstalledGuidance        = "LaunchAgent is not installed"
 )
 
 var (
+	ForegroundGuidance     = unsupportedGuidance(runtime.GOOS)
 	ErrUnsupported         = errors.New(ForegroundGuidance)
 	ErrInstalledNotRunning = errors.New(installedNotRunningGuidance)
 	ErrNotInstalled        = errors.New(notInstalledGuidance)
@@ -24,12 +25,34 @@ var (
 	ErrNotLoaded = errors.New("LaunchAgent is not loaded")
 )
 
+func unsupportedGuidance(goos string) string {
+	return "managed agent daemon is unsupported on " + goos + "; run 'agent-whiteboard agent serve' in the foreground"
+}
+
+// ProviderDescriptor describes a registered provider executable. Install only
+// accepts the package's fixed provider names and executable names.
+type ProviderDescriptor interface {
+	ProviderName() string
+	ExecutableName() string
+}
+
+// ExecutableResolver resolves an executable name using the current process
+// environment. Implementations must return exec.ErrNotFound when it is absent.
+type ExecutableResolver interface {
+	LookPath(string) (string, error)
+}
+
+type pathResolver struct{}
+
+func (pathResolver) LookPath(name string) (string, error) { return exec.LookPath(name) }
+
 // Config contains the durable inputs recorded in the LaunchAgent. Paths must
-// be absolute. Install resolves symlinks and records only real paths.
+// be absolute and clean. ConfigPath may name an absent final file.
 type Config struct {
-	Executable          string
-	ConfigPath          string
-	ProviderExecutables map[string]string
+	Executable         string
+	ConfigPath         string
+	Providers          []ProviderDescriptor
+	ExecutableResolver ExecutableResolver
 }
 
 // Status intentionally excludes launch arguments, paths, environment, and raw

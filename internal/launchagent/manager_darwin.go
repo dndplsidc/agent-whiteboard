@@ -68,62 +68,96 @@ func (manager *darwinManager) Install(ctx context.Context, config Config) error 
 	if err != nil {
 		return err
 	}
-	if err := manager.prepareFilesystem(); err != nil {
+	launchAgents, logs, err := manager.prepareFilesystem()
+	if err != nil {
 		return err
 	}
-	if err := writeAtomic(manager.paths.Plist, contents, manager.ops); err != nil {
+	defer launchAgents.close()
+	defer logs.close()
+	if err := writeAtomic(launchAgents, filepath.Base(manager.paths.Plist), contents, manager.ops); err != nil {
 		return err
+	}
+	if err := verifyLaunchAgentsBinding(manager.home, launchAgents); err != nil {
+		return fmt.Errorf("verify LaunchAgents directory after publication: %w", err)
+	}
+	if err := verifyLogDirectoryBinding(manager.home, logs); err != nil {
+		return fmt.Errorf("verify log directory after publication: %w", err)
 	}
 
 	target := manager.target()
-	if _, printErr := manager.runner.Run(ctx, LaunchctlExecutable, "print", target); printErr == nil {
+	output, printErr := manager.runner.Run(ctx, LaunchctlExecutable, "print", target)
+	if printErr == nil {
 		if output, bootoutErr := manager.runner.Run(ctx, LaunchctlExecutable, "bootout", target); bootoutErr != nil && !notLoaded(output, bootoutErr) {
-			return reloadFailure("bootout")
+			return reloadFailure("bootout", bootoutErr)
 		}
+	} else if !notLoaded(output, printErr) {
+		return fmt.Errorf("inspect installed LaunchAgent: %w", printErr)
 	}
 	if _, err := manager.runner.Run(ctx, LaunchctlExecutable, "bootstrap", manager.domain(), manager.paths.Plist); err != nil {
-		return reloadFailure("bootstrap")
+		return reloadFailure("bootstrap", err)
 	}
 	if _, err := manager.runner.Run(ctx, LaunchctlExecutable, "kickstart", "-k", target); err != nil {
-		return reloadFailure("kickstart")
+		return reloadFailure("kickstart", err)
 	}
 	return nil
 }
 
-func (manager *darwinManager) prepareFilesystem() error {
-	if err := ensurePrivateDirectory(manager.home, filepath.Dir(manager.paths.Plist)); err != nil {
-		return err
+func (manager *darwinManager) prepareFilesystem() (*secureDir, *secureDir, error) {
+	launchAgents, err := openLaunchAgents(manager.home, true)
+	if err != nil {
+		return nil, nil, err
 	}
-	if err := ensurePrivateDirectory(manager.home, filepath.Dir(manager.paths.StdoutLog)); err != nil {
-		return err
+	logs, err := openLogDirectory(manager.home, true)
+	if err != nil {
+		launchAgents.close()
+		return nil, nil, err
 	}
-	if err := ensurePrivateFile(manager.paths.StdoutLog); err != nil {
-		return err
+	if err := ensurePrivateFile(logs, filepath.Base(manager.paths.StdoutLog), manager.ops); err != nil {
+		launchAgents.close()
+		logs.close()
+		return nil, nil, err
 	}
-	if err := ensurePrivateFile(manager.paths.StderrLog); err != nil {
-		return err
+	if err := ensurePrivateFile(logs, filepath.Base(manager.paths.StderrLog), manager.ops); err != nil {
+		launchAgents.close()
+		logs.close()
+		return nil, nil, err
 	}
-	if err := manager.ops.syncDir(filepath.Dir(manager.paths.StdoutLog)); err != nil {
-		return fmt.Errorf("sync log directory: %w", err)
+	return launchAgents, logs, nil
+}
+
+func (manager *darwinManager) installed() (bool, error) {
+	launchAgents, err := openLaunchAgents(manager.home, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	return nil
+	if err != nil {
+		return false, err
+	}
+	defer launchAgents.close()
+	return installedPlist(launchAgents, filepath.Base(manager.paths.Plist))
 }
 
 func (manager *darwinManager) Status(ctx context.Context) (Status, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 
-	installed, err := installedPlist(manager.paths.Plist)
+	installed, err := manager.installed()
 	if err != nil {
 		return Status{}, err
 	}
 	status := Status{Installed: installed}
 	output, err := manager.runner.Run(ctx, LaunchctlExecutable, "print", manager.target())
 	if err != nil {
-		return status, nil
+		if notLoaded(output, err) {
+			return status, nil
+		}
+		return status, fmt.Errorf("inspect LaunchAgent status: %w", err)
 	}
 	status.Loaded = true
-	status.Running, status.PID = parseLaunchctlStatus(output)
+	status.Running, status.PID, err = parseLaunchctlStatus(output)
+	if err != nil {
+		return status, err
+	}
 	return status, nil
 }
 
@@ -131,7 +165,7 @@ func (manager *darwinManager) Restart(ctx context.Context) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 
-	installed, err := installedPlist(manager.paths.Plist)
+	installed, err := manager.installed()
 	if err != nil {
 		return err
 	}
@@ -140,13 +174,13 @@ func (manager *darwinManager) Restart(ctx context.Context) error {
 	}
 	target := manager.target()
 	if output, err := manager.runner.Run(ctx, LaunchctlExecutable, "bootout", target); err != nil && !notLoaded(output, err) {
-		return reloadFailure("bootout")
+		return reloadFailure("bootout", err)
 	}
 	if _, err := manager.runner.Run(ctx, LaunchctlExecutable, "bootstrap", manager.domain(), manager.paths.Plist); err != nil {
-		return reloadFailure("bootstrap")
+		return reloadFailure("bootstrap", err)
 	}
 	if _, err := manager.runner.Run(ctx, LaunchctlExecutable, "kickstart", "-k", target); err != nil {
-		return reloadFailure("kickstart")
+		return reloadFailure("kickstart", err)
 	}
 	return nil
 }
@@ -157,7 +191,7 @@ func (manager *darwinManager) Stop(ctx context.Context) error {
 
 	output, err := manager.runner.Run(ctx, LaunchctlExecutable, "bootout", manager.target())
 	if err != nil && !notLoaded(output, err) {
-		return errors.New("stop LaunchAgent: launchctl bootout failed")
+		return fmt.Errorf("stop LaunchAgent: launchctl bootout failed: %w", err)
 	}
 	return nil
 }
@@ -168,9 +202,20 @@ func (manager *darwinManager) Uninstall(ctx context.Context) error {
 
 	output, err := manager.runner.Run(ctx, LaunchctlExecutable, "bootout", manager.target())
 	if err != nil && !notLoaded(output, err) {
-		return errors.New("uninstall LaunchAgent: launchctl bootout failed")
+		return fmt.Errorf("uninstall LaunchAgent: launchctl bootout failed: %w", err)
 	}
-	return removeDurable(manager.paths.Plist, manager.ops)
+	launchAgents, err := openLaunchAgents(manager.home, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer launchAgents.close()
+	if err := removeDurable(launchAgents, filepath.Base(manager.paths.Plist), manager.ops); err != nil {
+		return err
+	}
+	return verifyLaunchAgentsBinding(manager.home, launchAgents)
 }
 
 func (manager *darwinManager) domain() string {
@@ -181,11 +226,14 @@ func (manager *darwinManager) target() string {
 	return manager.domain() + "/" + Label
 }
 
-func reloadFailure(operation string) error {
-	return fmt.Errorf("%w: launchctl %s failed", ErrInstalledNotRunning, operation)
+func reloadFailure(operation string, cause error) error {
+	return errors.Join(ErrInstalledNotRunning, fmt.Errorf("launchctl %s failed: %w", operation, cause))
 }
 
 func notLoaded(output []byte, err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	if errors.Is(err, ErrNotLoaded) {
 		return true
 	}
@@ -193,9 +241,9 @@ func notLoaded(output []byte, err error) bool {
 	return strings.Contains(message, "could not find service") || strings.Contains(message, "service not found") || strings.Contains(message, "no such process")
 }
 
-func parseLaunchctlStatus(output []byte) (bool, int) {
+func parseLaunchctlStatus(output []byte) (bool, int, error) {
 	state := ""
-	pid := 0
+	pidText := ""
 	for _, line := range strings.Split(string(output), "\n") {
 		line = strings.TrimSpace(line)
 		key, value, found := strings.Cut(line, "=")
@@ -206,11 +254,15 @@ func parseLaunchctlStatus(output []byte) (bool, int) {
 		case "state":
 			state = strings.TrimSpace(value)
 		case "pid":
-			parsed, err := strconv.Atoi(strings.TrimSpace(value))
-			if err == nil && parsed > 0 {
-				pid = parsed
-			}
+			pidText = strings.TrimSpace(value)
 		}
 	}
-	return state == "running", pid
+	if state != "running" {
+		return false, 0, nil
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil || pid <= 0 {
+		return false, 0, errors.New("launchctl reported a running service without a positive PID")
+	}
+	return true, pid, nil
 }

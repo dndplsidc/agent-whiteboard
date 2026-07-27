@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -38,6 +39,12 @@ func normalizeHome(home string) (string, error) {
 	return filepath.Clean(real), nil
 }
 
+type normalizedConfig struct {
+	Executable          string
+	ConfigPath          string
+	ProviderExecutables map[string]string
+}
+
 // GeneratePlist validates and resolves all configured paths, then returns the
 // deterministic plist for the supplied real user home.
 func GeneratePlist(config Config, home string) ([]byte, error) {
@@ -52,32 +59,111 @@ func GeneratePlist(config Config, home string) ([]byte, error) {
 	return marshalPlist(normalized, pathsForHome(realHome))
 }
 
-func normalizeConfig(config Config) (Config, error) {
+func normalizeConfig(config Config) (normalizedConfig, error) {
 	executable, err := resolveRegularPath(config.Executable, true, false)
 	if err != nil {
-		return Config{}, fmt.Errorf("validate agent-whiteboard executable: %w", err)
+		return normalizedConfig{}, fmt.Errorf("validate agent-whiteboard executable: %w", err)
 	}
-	configuration, err := resolveRegularPath(config.ConfigPath, false, true)
+	configuration, err := resolveConfigPath(config.ConfigPath)
 	if err != nil {
-		return Config{}, fmt.Errorf("validate configuration path: %w", err)
+		return normalizedConfig{}, fmt.Errorf("validate configuration path: %w", err)
 	}
-
-	providers := make(map[string]string, len(config.ProviderExecutables))
-	for name, path := range config.ProviderExecutables {
-		if name != ProviderPi {
-			return Config{}, fmt.Errorf("unsupported provider executable override %q", name)
-		}
-		resolved, err := resolveRegularPath(path, true, false)
-		if err != nil {
-			return Config{}, fmt.Errorf("validate %s provider executable: %w", name, err)
-		}
-		providers[name] = resolved
+	providers, err := resolveProviderExecutables(config.Providers, config.ExecutableResolver)
+	if err != nil {
+		return normalizedConfig{}, err
 	}
-	return Config{
+	return normalizedConfig{
 		Executable:          executable,
 		ConfigPath:          configuration,
 		ProviderExecutables: providers,
 	}, nil
+}
+
+func resolveProviderExecutables(descriptors []ProviderDescriptor, resolver ExecutableResolver) (map[string]string, error) {
+	providers := make(map[string]string, len(descriptors))
+	seen := make(map[string]struct{}, len(descriptors))
+	if len(descriptors) == 0 {
+		return providers, nil
+	}
+	if resolver == nil {
+		resolver = pathResolver{}
+	}
+	for _, descriptor := range descriptors {
+		if descriptor == nil {
+			return nil, errors.New("provider descriptor is required")
+		}
+		name, executableName := descriptor.ProviderName(), descriptor.ExecutableName()
+		if name != ProviderPi || executableName != "pi" {
+			return nil, fmt.Errorf("unsupported provider executable descriptor %q", name)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, fmt.Errorf("duplicate provider executable descriptor %q", name)
+		}
+		seen[name] = struct{}{}
+		path, err := resolver.LookPath(executableName)
+		if err != nil {
+			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("resolve %s provider executable: %w", name, err)
+		}
+		if !filepath.IsAbs(path) {
+			path, err = filepath.Abs(path)
+			if err != nil {
+				return nil, fmt.Errorf("make %s provider executable absolute: %w", name, err)
+			}
+		}
+		resolved, err := resolveRegularPath(filepath.Clean(path), true, false)
+		if err != nil {
+			return nil, fmt.Errorf("validate %s provider executable: %w", name, err)
+		}
+		providers[name] = resolved
+	}
+	return providers, nil
+}
+
+func resolveConfigPath(path string) (string, error) {
+	if !validAbsolutePath(path) {
+		return "", errors.New("path must be absolute and clean")
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return resolveRegularPath(path, false, true)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	ancestor := filepath.Dir(path)
+	missing := []string{filepath.Base(path)}
+	for {
+		_, err := os.Lstat(ancestor)
+		if err == nil {
+			real, err := filepath.EvalSymlinks(ancestor)
+			if err != nil {
+				return "", err
+			}
+			info, err := os.Stat(real)
+			if err != nil {
+				return "", err
+			}
+			if !info.IsDir() {
+				return "", errors.New("existing configuration parent must be a directory")
+			}
+			resolved := filepath.Join(append([]string{filepath.Clean(real)}, missing...)...)
+			if !validAbsolutePath(resolved) {
+				return "", errors.New("resolved path must be absolute and clean")
+			}
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", err
+		}
+		missing = append([]string{filepath.Base(ancestor)}, missing...)
+		ancestor = parent
+	}
 }
 
 func resolveRegularPath(path string, executable, private bool) (string, error) {
@@ -99,8 +185,10 @@ func resolveRegularPath(path string, executable, private bool) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", errors.New("path must identify a regular file")
 	}
-	if executable && info.Mode().Perm()&0o111 == 0 {
-		return "", errors.New("path must identify an executable file")
+	if executable {
+		if err := currentUserExecutable(real); err != nil {
+			return "", err
+		}
 	}
 	if private && info.Mode().Perm()&0o022 != 0 {
 		return "", errors.New("path must not be writable by group or others")
@@ -120,7 +208,7 @@ func validAbsolutePath(path string) bool {
 	return true
 }
 
-func marshalPlist(config Config, paths servicePaths) ([]byte, error) {
+func marshalPlist(config normalizedConfig, paths servicePaths) ([]byte, error) {
 	for _, path := range []string{config.Executable, config.ConfigPath, paths.Plist, paths.StdoutLog, paths.StderrLog} {
 		if !validAbsolutePath(path) {
 			return nil, errors.New("plist contains an invalid path")

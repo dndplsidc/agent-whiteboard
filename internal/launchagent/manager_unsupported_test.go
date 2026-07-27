@@ -5,6 +5,8 @@ package launchagent
 import (
 	"context"
 	"errors"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -35,8 +37,12 @@ func TestUnsupportedManagerReturnsExactForegroundGuidanceWithoutRunner(t *testin
 			if !errors.Is(err, ErrUnsupported) {
 				t.Fatalf("error = %v, want ErrUnsupported", err)
 			}
-			if err.Error() != ForegroundGuidance {
-				t.Fatalf("error = %q, want exact guidance %q", err, ForegroundGuidance)
+			if runtime.GOOS == "linux" {
+				if err.Error() != "managed agent daemon is unsupported on linux; run 'agent-whiteboard agent serve' in the foreground" {
+					t.Fatalf("error = %q, want exact Linux foreground guidance", err)
+				}
+			} else if strings.Contains(err.Error(), "`") || !strings.Contains(err.Error(), "unsupported on "+runtime.GOOS) {
+				t.Fatalf("error = %q, want actionable %s guidance without backticks", err, runtime.GOOS)
 			}
 		})
 	}

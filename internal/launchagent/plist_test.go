@@ -3,11 +3,25 @@ package launchagent
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestExactContractLiterals(t *testing.T) {
+	if PiExecutableEnvironment != "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE" {
+		t.Fatalf("Pi environment key = %q", PiExecutableEnvironment)
+	}
+	if got := unsupportedGuidance("linux"); got != "managed agent daemon is unsupported on linux; run 'agent-whiteboard agent serve' in the foreground" {
+		t.Fatalf("Linux guidance = %q", got)
+	}
+	if got := unsupportedGuidance("windows"); strings.Contains(got, "`") || !strings.Contains(got, "unsupported on windows") {
+		t.Fatalf("other-GOOS guidance is not actionable: %q", got)
+	}
+}
 
 func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	t.Parallel()
@@ -18,11 +32,10 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	provider := testRegularFile(t, filepath.Join(home, "providers", "pi & rpc"), 0o700)
 	paths := pathsForHome(home)
 	config := Config{
-		Executable: executable,
-		ConfigPath: configuration,
-		ProviderExecutables: map[string]string{
-			ProviderPi: provider,
-		},
+		Executable:         executable,
+		ConfigPath:         configuration,
+		Providers:          []ProviderDescriptor{testProviderDescriptor{name: "pi", executable: "pi"}},
+		ExecutableResolver: testExecutableResolver{paths: map[string]string{"pi": provider}},
 	}
 
 	normalized, err := normalizeConfig(config)
@@ -55,7 +68,7 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	assertStringValue(t, parsed, "StandardOutPath", paths.StdoutLog)
 	assertStringValue(t, parsed, "StandardErrorPath", paths.StderrLog)
 	assertStringDictionary(t, parsed, "EnvironmentVariables", map[string]string{
-		PiExecutableEnvironment: normalized.ProviderExecutables[ProviderPi],
+		"AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE": normalized.ProviderExecutables[ProviderPi],
 	})
 
 	text := string(first)
@@ -102,11 +115,10 @@ func TestNormalizeConfigResolvesRealPathsAndRejectsUnsafeInputs(t *testing.T) {
 	}
 
 	normalized, err := normalizeConfig(Config{
-		Executable: executableLink,
-		ConfigPath: configLink,
-		ProviderExecutables: map[string]string{
-			ProviderPi: providerLink,
-		},
+		Executable:         executableLink,
+		ConfigPath:         configLink,
+		Providers:          []ProviderDescriptor{testProviderDescriptor{name: "pi", executable: "pi"}},
+		ExecutableResolver: testExecutableResolver{paths: map[string]string{"pi": providerLink}},
 	})
 	if err != nil {
 		t.Fatalf("normalize symlinked paths: %v", err)
@@ -129,10 +141,10 @@ func TestNormalizeConfigResolvesRealPathsAndRejectsUnsafeInputs(t *testing.T) {
 			config.ConfigPath = testRegularFile(t, filepath.Join(home, "unsafe.yaml"), 0o666)
 		}},
 		{name: "unknown provider", mutate: func(config *Config) {
-			config.ProviderExecutables = map[string]string{"unknown": realProvider}
+			config.Providers = []ProviderDescriptor{testProviderDescriptor{name: "unknown", executable: "unknown"}}
 		}},
-		{name: "relative provider", mutate: func(config *Config) {
-			config.ProviderExecutables = map[string]string{ProviderPi: "pi"}
+		{name: "unregistered executable name", mutate: func(config *Config) {
+			config.Providers = []ProviderDescriptor{testProviderDescriptor{name: "pi", executable: "arbitrary"}}
 		}},
 	}
 	for _, test := range tests {
@@ -165,6 +177,101 @@ func TestPlistOmitsEnvironmentWhenNoProviderOverrideIsExplicit(t *testing.T) {
 	if _, exists := parsed["EnvironmentVariables"]; exists {
 		t.Fatal("unexpected inherited or empty environment dictionary")
 	}
+}
+
+func TestNormalizeConfigAllowsAbsentDefaultConfiguration(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	executable := testRegularFile(t, filepath.Join(home, "bin", "agent-whiteboard"), 0o700)
+	configPath := filepath.Join(home, ".agent-whiteboard", "config.yaml")
+	normalized, err := normalizeConfig(Config{Executable: executable, ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("normalize absent default config: %v", err)
+	}
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantConfigPath := filepath.Join(realHome, ".agent-whiteboard", "config.yaml")
+	if normalized.ConfigPath != wantConfigPath {
+		t.Fatalf("ConfigPath = %q, want absent default %q", normalized.ConfigPath, wantConfigPath)
+	}
+	contents, err := marshalPlist(normalized, pathsForHome(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStringArray(t, parsePlist(t, contents), "ProgramArguments", []string{
+		normalized.Executable, "--config", wantConfigPath, "agent", "serve",
+	})
+}
+
+func TestProviderResolverFoundMissingAndUntrustedResults(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	base := Config{
+		Executable: testRegularFile(t, filepath.Join(home, "agent-whiteboard"), 0o700),
+		ConfigPath: filepath.Join(home, "missing-config.yaml"),
+		Providers:  []ProviderDescriptor{testProviderDescriptor{name: "pi", executable: "pi"}},
+	}
+	provider := testRegularFile(t, filepath.Join(home, "bin", "pi"), 0o700)
+	found := base
+	found.ExecutableResolver = testExecutableResolver{paths: map[string]string{"pi": provider}}
+	normalized, err := normalizeConfig(found)
+	if err != nil {
+		t.Fatalf("resolve found provider: %v", err)
+	}
+	resolvedProvider, _ := filepath.EvalSymlinks(provider)
+	if normalized.ProviderExecutables["pi"] != resolvedProvider {
+		t.Fatalf("provider path = %q, want %q", normalized.ProviderExecutables["pi"], resolvedProvider)
+	}
+
+	missing := base
+	missing.ExecutableResolver = testExecutableResolver{}
+	normalized, err = normalizeConfig(missing)
+	if err != nil {
+		t.Fatalf("missing provider must be nonfatal: %v", err)
+	}
+	if len(normalized.ProviderExecutables) != 0 {
+		t.Fatalf("missing provider recorded: %#v", normalized.ProviderExecutables)
+	}
+
+	untrusted := testRegularFile(t, filepath.Join(home, "bin", "not-current-user-executable"), 0o001)
+	unsafe := base
+	unsafe.ExecutableResolver = testExecutableResolver{paths: map[string]string{"pi": untrusted}}
+	if _, err := normalizeConfig(unsafe); err == nil {
+		t.Fatal("resolver result inaccessible to the current user was accepted")
+	}
+
+	resolverFailure := base
+	resolverFailure.ExecutableResolver = testExecutableResolver{err: errors.New("resolver failed")}
+	if _, err := normalizeConfig(resolverFailure); err == nil || !strings.Contains(err.Error(), "resolver failed") {
+		t.Fatalf("resolver error = %v", err)
+	}
+}
+
+type testProviderDescriptor struct {
+	name       string
+	executable string
+}
+
+func (descriptor testProviderDescriptor) ProviderName() string   { return descriptor.name }
+func (descriptor testProviderDescriptor) ExecutableName() string { return descriptor.executable }
+
+type testExecutableResolver struct {
+	paths map[string]string
+	err   error
+}
+
+func (resolver testExecutableResolver) LookPath(name string) (string, error) {
+	if resolver.err != nil {
+		return "", resolver.err
+	}
+	if path, ok := resolver.paths[name]; ok {
+		return path, nil
+	}
+	return "", exec.ErrNotFound
 }
 
 func testRegularFile(t *testing.T, path string, mode os.FileMode) string {
