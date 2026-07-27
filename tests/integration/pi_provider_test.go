@@ -19,6 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
+	piadapter "github.com/edocsss/agent-whiteboard/internal/pi"
+	"github.com/edocsss/agent-whiteboard/internal/processgroup"
+	"github.com/edocsss/agent-whiteboard/internal/provider"
 	"github.com/stretchr/testify/require"
 )
 
@@ -816,4 +821,166 @@ func TestM1PiMaliciousToolAttemptHasNoAuthorityOrSideEffect(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(environment.workspace, "M1_MALICIOUS_SIDE_EFFECT"))
 	require.NoFileExists(t, filepath.Join(environment.workspace, "M1_EXTENSION_SIDE_EFFECT"))
 	process.stop(t)
+}
+
+func TestPiAdapterRealCLILifecycleThroughProviderContract(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), processTimeout)
+	defer cancel()
+	model := newM1ModelServer(t)
+	environment := newM1PiEnvironment(t, model.URL())
+	environment.requireIsolated(t)
+	workspace, err := filepath.EvalSymlinks(environment.workspace)
+	require.NoError(t, err)
+	home, err := filepath.EvalSymlinks(environment.home)
+	require.NoError(t, err)
+	providerRoot := filepath.Join(home, "provider")
+	require.NoError(t, os.Mkdir(providerRoot, 0o700))
+	driver, err := piadapter.NewDriver(piadapter.Config{
+		Executable: m1PinnedPiPath(t), Environment: environment.env, ProviderRoot: providerRoot,
+		Launcher: processgroup.NewLauncher(), IDs: common.CryptoIDGenerator{}, Clock: common.SystemClock{},
+	})
+	require.NoError(t, err)
+	require.Equal(t, provider.Ready, driver.Readiness(ctx).State)
+
+	session, err := driver.Create(ctx, provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace})
+	require.NoError(t, err)
+	require.NoError(t, session.NativeSession().Validate())
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), processTimeout)
+		defer cleanupCancel()
+		_ = session.Shutdown(cleanupCtx)
+		_ = driver.Delete(cleanupCtx, provider.DeleteRequest{Provider: provider.NamePi, NativeSession: session.NativeSession().Ref})
+	})
+	turnID, err := (common.CryptoIDGenerator{}).NewID()
+	require.NoError(t, err)
+	messageID, err := (common.CryptoIDGenerator{}).NewID()
+	require.NoError(t, err)
+	resourceID, err := (common.CryptoIDGenerator{}).NewID()
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	markdown := []byte("# Adapter integration\nExact context marker.")
+	creator := []byte("Creator context marker.")
+	turn := provider.TurnRequest{
+		TurnID: turnID, MessageID: messageID, Message: "Answer from this exact board.",
+		Context: &provider.PageContext{
+			Revision: provider.ContextInitial, Markdown: markdown, CreatorContext: creator,
+			Title: "Adapter board", URL: "https://example.test/adapter", Digest: contextdigest.Calculate(markdown, creator),
+			Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: resourceID, CreatedAt: now, UpdatedAt: now},
+		},
+	}
+	preflight, err := session.Preflight(ctx, provider.PreflightRequest{Turn: turn})
+	require.NoError(t, err)
+	require.NoError(t, preflight.Validate())
+
+	model.enqueue(m1ModelScript{kind: m1StreamText, chunks: []string{"adapter ", "answer"}})
+	accepted, err := session.Submit(ctx, turn)
+	require.NoError(t, err)
+	require.NoError(t, accepted.Validate())
+	var delta strings.Builder
+	var userText, assistantText string
+	var userCount, assistantCount, completionCount int
+	for {
+		select {
+		case event, open := <-session.Events():
+			require.True(t, open)
+			require.NoError(t, event.Validate())
+			switch event.Kind {
+			case provider.EventUserMessage:
+				userCount++
+				userText = event.Text
+			case provider.EventAssistantDelta:
+				delta.WriteString(event.Text)
+			case provider.EventAssistantMessage:
+				assistantCount++
+				assistantText = event.Text
+			case provider.EventCompletion:
+				completionCount++
+				goto settled
+			case provider.EventTerminalFailure:
+				require.FailNow(t, "unexpected adapter terminal failure", "%s", event.Failure.Error())
+			case provider.EventBlocked, provider.EventInterruption:
+				require.FailNow(t, "unexpected adapter terminal event", "%s", event.Kind)
+			}
+			require.NotContains(t, event.Text, "agent-whiteboard-turn-v1")
+			require.NotContains(t, event.Text, environment.configDir)
+		case <-ctx.Done():
+			require.FailNow(t, "adapter turn did not settle", "%v", ctx.Err())
+		}
+	}
+
+settled:
+	require.Equal(t, 1, userCount)
+	require.Equal(t, 1, assistantCount)
+	require.Equal(t, 1, completionCount)
+	require.Equal(t, turn.Message, userText)
+	require.Equal(t, "adapter answer", delta.String())
+	require.Equal(t, "adapter answer", assistantText)
+	request := model.waitRequest(t)
+	requireM1ContentOnlyRequest(t, environment, request)
+	expectedEnvelope, err := piadapter.BuildEnvelope(turn)
+	require.NoError(t, err)
+	var requestMessages []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(request.Fields["messages"], &requestMessages))
+	exactPrompt := false
+	for _, message := range requestMessages {
+		if message.Role != "user" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(message.Content, &text) != nil {
+			var parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(message.Content, &parts) == nil {
+				var combined strings.Builder
+				for _, part := range parts {
+					if part.Type == "text" {
+						combined.WriteString(part.Text)
+					}
+				}
+				text = combined.String()
+			}
+		}
+		if text == string(expectedEnvelope) {
+			exactPrompt = true
+		}
+	}
+	require.True(t, exactPrompt, "model request did not contain the exact canonical envelope")
+
+	state, err := session.Reconcile(ctx, provider.TurnReference{TurnID: turnID})
+	require.NoError(t, err)
+	require.Equal(t, provider.TurnCompleted, state)
+	history, err := session.History(ctx, provider.HistoryRequest{Limit: 10})
+	require.NoError(t, err)
+	require.NoError(t, history.Validate())
+	require.Len(t, history.Items, 2)
+	require.Equal(t, provider.HistoryAssistant, history.Items[0].Role)
+	require.Equal(t, "adapter answer", history.Items[0].Text)
+	require.Equal(t, provider.HistoryUser, history.Items[1].Role)
+	require.Equal(t, turn.Message, history.Items[1].Text)
+
+	native := session.NativeSession()
+	require.NoError(t, session.Shutdown(ctx))
+	resumed, err := driver.Resume(ctx, provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: native.Ref, Workspace: workspace})
+	require.NoError(t, err)
+	require.Equal(t, native.Ref, resumed.NativeSession().Ref)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), processTimeout)
+		defer cleanupCancel()
+		_ = resumed.Shutdown(cleanupCtx)
+	})
+	resumedHistory, err := resumed.History(ctx, provider.HistoryRequest{Limit: 10})
+	require.NoError(t, err)
+	require.Equal(t, history.Items, resumedHistory.Items)
+	require.NoError(t, resumed.Shutdown(ctx))
+	require.NoError(t, driver.Delete(ctx, provider.DeleteRequest{Provider: provider.NamePi, NativeSession: native.Ref}))
+	_, err = driver.Inspect(ctx, provider.InspectRequest{Provider: provider.NamePi, NativeSession: native.Ref})
+	var missing provider.ProviderError
+	require.ErrorAs(t, err, &missing)
+	require.Equal(t, provider.ErrorNativeSessionMissing, missing.Code())
+	require.NoFileExists(t, filepath.Join(environment.workspace, "M1_EXTENSION_SIDE_EFFECT"))
 }
