@@ -246,6 +246,9 @@ type Session interface {
 	// Submit returns only after the native provider has accepted the turn. If
 	// acceptance cannot be determined, it returns ErrorAcceptanceUnknown.
 	Submit(context.Context, TurnRequest) (AcceptedTurn, error)
+	// Events returns the stable event channel for this session. It has one
+	// broker consumer, and the provider closes it after no further events are
+	// possible; callers must not replace or multiplex the channel.
 	Events() <-chan Event
 	Interrupt(context.Context, AcceptedTurn) error
 	// Reconcile determines native acceptance from the durable broker turn ID.

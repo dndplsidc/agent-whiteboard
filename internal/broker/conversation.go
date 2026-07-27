@@ -17,7 +17,7 @@ type conversation struct {
 	identity          agentstate.Identity
 	mapping           agentstate.Mapping
 	state             StateStore
-	session           provider.Session
+	session           *sessionHandle
 	factory           *EventFactory
 	replay            *ReplayLog
 	requests          chan any
@@ -193,8 +193,8 @@ type shutdownWorkerResult struct {
 	err      error
 }
 
-func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session, state StateStore, ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
-	if mapping.Validate(identity) != nil || mapping.Current == nil || common.IsNil(state) || common.IsNil(session) || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
+func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session *sessionHandle, state StateStore, ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
+	if mapping.Validate(identity) != nil || mapping.Current == nil || session == nil || common.IsNil(session.session) || common.IsNil(state) || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
 		return nil, errors.New("invalid conversation actor")
 	}
 	factory, err := NewEventFactory(mapping.Current.ConversationID, ids, clock)
@@ -221,7 +221,7 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 }
 
 func (actor *conversation) run() {
-	providerEvents := actor.session.Events()
+	providerEvents := actor.session.events
 	attachments := make(map[*attachment]struct{})
 	shutdownResults := make(chan shutdownWorkerResult, 1)
 	turnResults := make(chan turnWorkerResult, 1)

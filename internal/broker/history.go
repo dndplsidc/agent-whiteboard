@@ -19,7 +19,7 @@ func (actor *conversation) startHistoryWorker(results chan<- historyWorkerResult
 	limit := agentprotocol.NormalizePageSize(payload.Limit)
 	actor.workerSettled = make(chan struct{})
 	go func() {
-		page, err := actor.session.History(actor.lifecycleCtx, provider.HistoryRequest{BeforeMessageID: payload.Before, Limit: limit})
+		page, err := actor.session.session.History(actor.lifecycleCtx, provider.HistoryRequest{BeforeMessageID: payload.Before, Limit: limit})
 		if err == nil {
 			err = page.Validate()
 		}

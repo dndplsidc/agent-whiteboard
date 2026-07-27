@@ -12,6 +12,7 @@ import (
 
 type actorShutdown struct {
 	session       provider.Session
+	child         provider.ManagedChild
 	workerSettled <-chan struct{}
 	shutdownDone  chan error
 	startOnce     sync.Once
@@ -20,9 +21,14 @@ type actorShutdown struct {
 	shutdownErr   error
 }
 
-func newActorShutdown(session provider.Session, workerSettled <-chan struct{}) *actorShutdown {
+func newActorShutdown(handle *sessionHandle, workerSettled <-chan struct{}) *actorShutdown {
+	var session provider.Session
+	var child provider.ManagedChild
+	if handle != nil {
+		session, child = handle.session, handle.child
+	}
 	return &actorShutdown{
-		session: session, workerSettled: workerSettled,
+		session: session, child: child, workerSettled: workerSettled,
 		shutdownDone: make(chan error, 1), workerDone: workerSettled == nil,
 	}
 }
@@ -63,7 +69,7 @@ func (attempt *actorShutdown) run(ctx context.Context, timeout time.Duration) er
 	}
 
 escalate:
-	child := attempt.session.Child()
+	child := attempt.child
 	if common.IsNil(child) {
 		return errors.New("provider shutdown failed without a managed child")
 	}

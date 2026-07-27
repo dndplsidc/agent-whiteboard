@@ -52,17 +52,17 @@ func (broker *Broker) promoteAccepted(identity agentstate.Identity, before agent
 	return agentstate.Mapping{}, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 }
 
-func (broker *Broker) reconcilePrepared(ctx context.Context, identity agentstate.Identity, before agentstate.Mapping, session provider.Session) (*conversation, error) {
+func (broker *Broker) reconcilePrepared(ctx context.Context, identity agentstate.Identity, before agentstate.Mapping, handle *sessionHandle) (*conversation, error) {
 	prepared := before.Current.PreparedCommit
 	if prepared == nil || prepared.Phase != agentstate.CommitPrepared {
-		broker.retainStop(identity, session)
+		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
-	drainer := startTemporaryDrainer(session.Events())
-	state, reconcileErr := session.Reconcile(ctx, provider.TurnReference{TurnID: prepared.TurnID})
+	drainer := startTemporaryDrainer(handle.events)
+	state, reconcileErr := handle.session.Reconcile(ctx, provider.TurnReference{TurnID: prepared.TurnID})
 	if reconcileErr != nil {
 		drainer.stop()
-		broker.retainStop(identity, session)
+		broker.retainStop(identity, handle)
 		if ctx.Err() != nil {
 			return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 		}
@@ -70,19 +70,19 @@ func (broker *Broker) reconcilePrepared(ctx context.Context, identity agentstate
 	}
 	if state == provider.TurnUnknown {
 		drainer.stop()
-		broker.retainStop(identity, session)
+		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorAcceptanceOutcomeUnknown)
 	}
 	if !state.Valid() || !state.Definitive() {
 		drainer.stop()
-		broker.retainStop(identity, session)
+		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	accepted := state != provider.TurnNotAccepted
 	at, ok := broker.mutationTime()
 	if !ok {
 		drainer.stop()
-		broker.retainStop(identity, session)
+		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	expected := reconciledMapping(before, accepted, at)
@@ -94,13 +94,13 @@ func (broker *Broker) reconcilePrepared(ctx context.Context, identity agentstate
 		loaded, class := broker.classifyLoaded(identity, before, expected)
 		if class != mappingTarget || !knownCommitOutcome(outcome) {
 			drainer.stop()
-			broker.retainStop(identity, session)
+			broker.retainStop(identity, handle)
 			return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 		}
 		repaired = loaded
 	}
 	drainer.stop()
-	return broker.newConversation(identity, repaired, session)
+	return broker.newConversation(identity, repaired, handle)
 }
 
 type temporaryDrainer struct {

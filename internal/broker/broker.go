@@ -62,12 +62,32 @@ type Broker struct {
 	closeMu   sync.Mutex
 }
 
+// sessionHandle owns the resources exposed by one provider session. Accessors
+// that return process-owned resources are called only while capturing the
+// handle; all later broker paths use these captured values.
+type sessionHandle struct {
+	session provider.Session
+	native  provider.NativeSession
+	events  <-chan provider.Event
+	child   provider.ManagedChild
+}
+
+func captureSession(session provider.Session) *sessionHandle {
+	if common.IsNil(session) {
+		return nil
+	}
+	return &sessionHandle{
+		session: session,
+		native:  session.NativeSession(),
+		events:  session.Events(),
+		child:   session.Child(),
+	}
+}
+
 type pendingCleanup struct {
 	mu             sync.Mutex
 	identity       agentstate.Identity
-	session        provider.Session
-	child          provider.ManagedChild
-	events         <-chan provider.Event
+	handle         *sessionHandle
 	ref            provider.NativeSessionRef
 	conversationID string
 	processStopped bool
@@ -275,31 +295,31 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	session, createErr := broker.driver.Create(ctx, request)
+	handle := captureSession(session)
 	if createErr != nil {
-		if common.IsNil(session) {
+		if handle == nil {
 			broker.cleanupWorkspace(identity, conversationID)
 		} else {
-			native := session.NativeSession()
-			broker.compensateCreate(identity, session, native.Ref, conversationID)
+			broker.compensateCreate(identity, handle, handle.native.Ref, conversationID)
 		}
 		if ctx.Err() != nil {
 			return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 		}
 		return nil, MapError(createErr)
 	}
-	native, err := validateProviderSession(session, nil)
+	native, err := validateProviderSession(handle, nil)
 	if err != nil {
-		broker.compensateCreate(identity, session, native.Ref, conversationID)
+		broker.compensateCreate(identity, handle, native.Ref, conversationID)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 	}
 	ref, err := agentstate.NativeSessionRef(native.Ref.Value())
 	if err != nil || ref != native.Ref {
-		broker.compensateCreate(identity, session, native.Ref, conversationID)
+		broker.compensateCreate(identity, handle, native.Ref, conversationID)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 	}
 	at := broker.clock.Now().UTC()
 	if at.IsZero() {
-		broker.compensateCreate(identity, session, native.Ref, conversationID)
+		broker.compensateCreate(identity, handle, native.Ref, conversationID)
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	current := agentstate.Session{
@@ -309,30 +329,30 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 	outcome, commitErr := broker.state.Create(identity, current, at)
 	if outcome == agentstate.CommitApplied && commitErr == nil {
 		mapping := agentstate.Mapping{SchemaVersion: agentstate.SchemaVersion, Identity: identity, Current: &current, Archives: []agentstate.Session{}, CreatedAt: at, UpdatedAt: at}
-		return broker.newConversation(identity, mapping, session)
+		return broker.newConversation(identity, mapping, handle)
 	}
 	if outcome == agentstate.CommitApplied || outcome == agentstate.CommitUncertain {
 		loaded, loadErr := broker.state.Load(identity)
 		if loadErr == nil && loaded.Validate(identity) == nil && mappingHasCurrent(loaded, identity, current) {
-			return broker.newConversation(identity, loaded, session)
+			return broker.newConversation(identity, loaded, handle)
 		}
 		if outcome == agentstate.CommitUncertain && errors.Is(loadErr, os.ErrNotExist) {
-			broker.compensateCreate(identity, session, native.Ref, conversationID)
+			broker.compensateCreate(identity, handle, native.Ref, conversationID)
 			return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 		}
 		// A present mismatched record, or a failed inspection, cannot prove that
 		// publishing was unapplied. Stop only the live process; deleting native
 		// state or the workspace would be destructive.
-		broker.retainStop(identity, session)
+		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	if outcome == agentstate.CommitNotApplied {
-		broker.compensateCreate(identity, session, native.Ref, conversationID)
+		broker.compensateCreate(identity, handle, native.Ref, conversationID)
 	}
 	// Unknown outcomes cannot authorize destructive compensation. The live
 	// process is still stopped so its unread event stream cannot be stranded.
 	if outcome != agentstate.CommitNotApplied {
-		broker.retainStop(identity, session)
+		broker.retainStop(identity, handle)
 	}
 	return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 }
@@ -363,31 +383,32 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity agentstat
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	session, err := broker.driver.Resume(ctx, request)
+	handle := captureSession(session)
 	if err != nil {
-		if !common.IsNil(session) {
-			broker.retainStop(identity, session)
+		if handle != nil {
+			broker.retainStop(identity, handle)
 		}
 		if ctx.Err() != nil {
 			return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 		}
 		return nil, MapError(err)
 	}
-	if _, err := validateProviderSession(session, &mapping.Current.NativeSession); err != nil {
-		broker.retainStop(identity, session)
+	if _, err := validateProviderSession(handle, &mapping.Current.NativeSession); err != nil {
+		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 	}
 	if mapping.Current.PreparedCommit != nil {
-		return broker.reconcilePrepared(ctx, identity, mapping, session)
+		return broker.reconcilePrepared(ctx, identity, mapping, handle)
 	}
-	return broker.newConversation(identity, mapping, session)
+	return broker.newConversation(identity, mapping, handle)
 }
 
-func validateProviderSession(session provider.Session, expected *provider.NativeSessionRef) (provider.NativeSession, error) {
-	if common.IsNil(session) {
+func validateProviderSession(handle *sessionHandle, expected *provider.NativeSessionRef) (provider.NativeSession, error) {
+	if handle == nil || common.IsNil(handle.session) {
 		return provider.NativeSession{}, errors.New("nil provider session")
 	}
-	native := session.NativeSession()
-	if native.Validate() != nil || session.Model() != native.Model || common.IsNil(session.Child()) || session.Events() == nil {
+	native := handle.native
+	if native.Validate() != nil || handle.session.Model() != native.Model || common.IsNil(handle.child) || handle.events == nil {
 		return native, errors.New("invalid provider session")
 	}
 	ref, err := agentstate.NativeSessionRef(native.Ref.Value())
@@ -418,30 +439,22 @@ func (broker *Broker) cleanupWorkspace(identity agentstate.Identity, conversatio
 	broker.retainCleanup(cleanup)
 }
 
-func (broker *Broker) retainStop(identity agentstate.Identity, session provider.Session) {
-	if common.IsNil(session) {
+func (broker *Broker) retainStop(identity agentstate.Identity, handle *sessionHandle) {
+	if handle == nil || common.IsNil(handle.session) {
 		return
 	}
-	cleanup := &pendingCleanup{identity: identity, session: session, events: session.Events()}
-	if child := session.Child(); !common.IsNil(child) {
-		cleanup.child = child
-	}
-	broker.retainCleanup(cleanup)
+	broker.retainCleanup(&pendingCleanup{identity: identity, handle: handle})
 }
 
-func (broker *Broker) compensateCreate(identity agentstate.Identity, session provider.Session, ref provider.NativeSessionRef, conversationID string) {
-	if common.IsNil(session) {
+func (broker *Broker) compensateCreate(identity agentstate.Identity, handle *sessionHandle, ref provider.NativeSessionRef, conversationID string) {
+	if handle == nil || common.IsNil(handle.session) {
 		broker.cleanupWorkspace(identity, conversationID)
 		return
 	}
-	cleanup := &pendingCleanup{
-		identity: identity, session: session, events: session.Events(), ref: ref, conversationID: conversationID,
+	broker.retainCleanup(&pendingCleanup{
+		identity: identity, handle: handle, ref: ref, conversationID: conversationID,
 		deleteRequired: true, workspaceOwned: true,
-	}
-	if child := session.Child(); !common.IsNil(child) {
-		cleanup.child = child
-	}
-	broker.retainCleanup(cleanup)
+	})
 }
 
 func (broker *Broker) retryIdentityCleanups(ctx context.Context, identity agentstate.Identity) bool {
@@ -482,7 +495,7 @@ func (broker *Broker) runCleanup(ctx context.Context, cleanup *pendingCleanup) b
 	cleanup.mu.Lock()
 	defer cleanup.mu.Unlock()
 	if !cleanup.processStopped {
-		cleanup.processStopped = stopPreActor(ctx, cleanup.session, cleanup.events, cleanup.child)
+		cleanup.processStopped = stopPreActor(ctx, cleanup.handle)
 	}
 	if !cleanup.processStopped {
 		return false
@@ -508,10 +521,11 @@ func (broker *Broker) runCleanup(ctx context.Context, cleanup *pendingCleanup) b
 	return (!cleanup.deleteRequired || cleanup.deleteDone) && (!cleanup.workspaceOwned || cleanup.workspaceDone)
 }
 
-func stopPreActor(ctx context.Context, session provider.Session, events <-chan provider.Event, child provider.ManagedChild) bool {
-	if common.IsNil(session) {
+func stopPreActor(ctx context.Context, handle *sessionHandle) bool {
+	if handle == nil || common.IsNil(handle.session) {
 		return true
 	}
+	session, events, child := handle.session, handle.events, handle.child
 	stopDrain := make(chan struct{})
 	drainDone := make(chan struct{})
 	go func() {
@@ -541,10 +555,10 @@ func stopPreActor(ctx context.Context, session provider.Session, events <-chan p
 	return stopped
 }
 
-func (broker *Broker) newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session) (*conversation, error) {
-	actor, err := newConversation(identity, mapping, session, broker.state, broker.ids, broker.clock, broker.timers, broker.lifecycleCtx, broker.idleTimeout, broker.shutdownTimeout)
+func (broker *Broker) newConversation(identity agentstate.Identity, mapping agentstate.Mapping, handle *sessionHandle) (*conversation, error) {
+	actor, err := newConversation(identity, mapping, handle, broker.state, broker.ids, broker.clock, broker.timers, broker.lifecycleCtx, broker.idleTimeout, broker.shutdownTimeout)
 	if err != nil {
-		broker.retainStop(identity, session)
+		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 	}
 	return actor, nil

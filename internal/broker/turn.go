@@ -188,7 +188,7 @@ func (actor *conversation) prepareTurn(request provider.TurnRequest) agentprotoc
 func (actor *conversation) startSubmitWorker(results chan<- turnWorkerResult, request provider.TurnRequest) {
 	actor.workerSettled = make(chan struct{})
 	go func() {
-		preflight, err := actor.session.Preflight(actor.lifecycleCtx, provider.PreflightRequest{Turn: request})
+		preflight, err := actor.session.session.Preflight(actor.lifecycleCtx, provider.PreflightRequest{Turn: request})
 		if err == nil {
 			err = preflight.Validate()
 		}
@@ -196,7 +196,7 @@ func (actor *conversation) startSubmitWorker(results chan<- turnWorkerResult, re
 			results <- turnWorkerResult{kind: turnWorkerSubmit, turnID: request.TurnID, err: err}
 			return
 		}
-		accepted, err := actor.session.Submit(actor.lifecycleCtx, request)
+		accepted, err := actor.session.session.Submit(actor.lifecycleCtx, request)
 		if err == nil {
 			if accepted.Validate() != nil || accepted.TurnID != request.TurnID {
 				err = errors.New("invalid provider accepted turn")
@@ -223,7 +223,7 @@ func (actor *conversation) startInterruptWorker(results chan<- turnWorkerResult,
 	actor.active.phase = turnInterrupting
 	actor.workerSettled = make(chan struct{})
 	go func() {
-		err := actor.session.Interrupt(actor.lifecycleCtx, accepted)
+		err := actor.session.session.Interrupt(actor.lifecycleCtx, accepted)
 		results <- turnWorkerResult{kind: turnWorkerInterrupt, turnID: accepted.TurnID, commandID: commandID, clientID: clientID, err: err}
 	}()
 }

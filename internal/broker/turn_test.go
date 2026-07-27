@@ -528,6 +528,7 @@ func TestActorShutdownEscalatesAndJoinsNonCooperativeTurnWorker(t *testing.T) {
 	connection.actor.shutdownTimeout = 40 * time.Millisecond
 	child := &hardeningChild{killSignal: make(chan struct{}), killFailures: 1}
 	session.child = child
+	connection.actor.session.child = child
 	session.shutdownFunc = func(context.Context) error {
 		<-child.killSignal
 		return nil
