@@ -21,16 +21,20 @@ type fileIdentity struct {
 }
 
 type fileOps struct {
-	rename  func(string, string) error
-	remove  func(string) error
-	syncDir func() error
+	publish                  func(string, string, *fileIdentity, fileIdentity) error
+	removeExpected           func(string, fileIdentity) error
+	syncDir                  func() error
+	beforePathReturn         func()
+	beforeWorkspaceTombstone func()
 }
 
 func defaultFileOps(directory *secureDirectory) fileOps {
 	return fileOps{
-		rename:  directory.rename,
-		remove:  directory.remove,
-		syncDir: directory.sync,
+		publish:                  directory.publish,
+		removeExpected:           directory.removeExpected,
+		syncDir:                  directory.sync,
+		beforePathReturn:         func() {},
+		beforeWorkspaceTombstone: func() {},
 	}
 }
 
@@ -94,6 +98,9 @@ func encodeMapping(mapping Mapping) ([]byte, error) {
 
 func decodeMapping(encoded []byte, expected Identity) (Mapping, error) {
 	if err := rejectDuplicateJSONFields(encoded); err != nil {
+		return Mapping{}, fmt.Errorf("decode conversation mapping: %w", err)
+	}
+	if err := validateDurableShape(encoded); err != nil {
 		return Mapping{}, fmt.Errorf("decode conversation mapping: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
@@ -190,6 +197,101 @@ func decodePrepared(prepared *durablePrepared) *PreparedCommit {
 	}
 	return &PreparedCommit{Revision: Revision{Digest: prepared.Digest, Revision: prepared.Revision, SourceUpdatedAt: prepared.SourceUpdatedAt}, TurnID: prepared.TurnID, Phase: prepared.Phase}
 }
+
+func validateDurableShape(encoded []byte) error {
+	mapping, err := exactJSONObject(encoded, "schema_version", "identity", "current", "archives", "created_at", "updated_at")
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"schema_version", "created_at", "updated_at"} {
+		if isJSONNull(mapping[name]) {
+			return fmt.Errorf("field %q must not be null", name)
+		}
+	}
+	identity, err := exactJSONObject(mapping["identity"], "origin", "kind", "capability_id", "provider")
+	if err != nil {
+		return fmt.Errorf("field %q: %w", "identity", err)
+	}
+	for name, value := range identity {
+		if isJSONNull(value) {
+			return fmt.Errorf("identity field %q must not be null", name)
+		}
+	}
+	if !isJSONNull(mapping["current"]) {
+		if err := validateDurableSessionShape(mapping["current"]); err != nil {
+			return fmt.Errorf("field %q: %w", "current", err)
+		}
+	}
+	if isJSONNull(mapping["archives"]) {
+		return errors.New("field \"archives\" must be an array")
+	}
+	var archives []json.RawMessage
+	if err := json.Unmarshal(mapping["archives"], &archives); err != nil || archives == nil {
+		return errors.New("field \"archives\" must be an array")
+	}
+	for index, archive := range archives {
+		if err := validateDurableSessionShape(archive); err != nil {
+			return fmt.Errorf("archive %d: %w", index, err)
+		}
+	}
+	return nil
+}
+
+func validateDurableSessionShape(encoded []byte) error {
+	session, err := exactJSONObject(encoded, "conversation_id", "native_session_ref", "created_at", "updated_at", "provider_label", "model_label", "committed", "observed", "prepared_commit")
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"conversation_id", "native_session_ref", "created_at", "updated_at", "provider_label", "model_label"} {
+		if isJSONNull(session[name]) {
+			return fmt.Errorf("field %q must not be null", name)
+		}
+	}
+	for _, name := range []string{"committed", "observed"} {
+		if isJSONNull(session[name]) {
+			continue
+		}
+		revision, err := exactJSONObject(session[name], "digest", "revision", "source_updated_at")
+		if err != nil {
+			return fmt.Errorf("field %q: %w", name, err)
+		}
+		for field, value := range revision {
+			if isJSONNull(value) {
+				return fmt.Errorf("field %q.%s must not be null", name, field)
+			}
+		}
+	}
+	if !isJSONNull(session["prepared_commit"]) {
+		prepared, err := exactJSONObject(session["prepared_commit"], "digest", "revision", "source_updated_at", "turn_id", "phase")
+		if err != nil {
+			return fmt.Errorf("field %q: %w", "prepared_commit", err)
+		}
+		for field, value := range prepared {
+			if isJSONNull(value) {
+				return fmt.Errorf("field %q.%s must not be null", "prepared_commit", field)
+			}
+		}
+	}
+	return nil
+}
+
+func exactJSONObject(encoded []byte, names ...string) (map[string]json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &object); err != nil || object == nil {
+		return nil, errors.New("value must be an object")
+	}
+	if len(object) != len(names) {
+		return nil, errors.New("object has missing or unexpected fields")
+	}
+	for _, name := range names {
+		if _, exists := object[name]; !exists {
+			return nil, fmt.Errorf("required field %q is missing", name)
+		}
+	}
+	return object, nil
+}
+
+func isJSONNull(encoded []byte) bool { return bytes.Equal(bytes.TrimSpace(encoded), []byte("null")) }
 
 func rejectDuplicateJSONFields(encoded []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(encoded))

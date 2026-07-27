@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
@@ -26,6 +27,11 @@ var (
 	ErrLocked      = errors.New("agent state is locked by another broker")
 	ErrUnsupported = errors.New("agent state is supported only on macOS and Linux")
 	ErrClosed      = errors.New("agent state store is closed")
+
+	openHomes = struct {
+		sync.Mutex
+		active map[string]struct{}
+	}{active: make(map[string]struct{})}
 )
 
 type Store struct {
@@ -38,6 +44,8 @@ type Store struct {
 	locks         keyedLocks
 	lifecycle     sync.RWMutex
 	closed        bool
+	homeGuardKey  string
+	invalidLayout atomic.Bool
 }
 
 type keyedLocks struct {
@@ -53,7 +61,9 @@ type keyedLock struct {
 // Open opens the fixed .agent-whiteboard/state tree beneath home. Passing an
 // empty home uses the current user's home directory; home is injectable so
 // callers and tests can isolate the fixed layout without adding a state-root
-// configuration surface.
+// configuration surface. The lifetime lock coordinates cooperating brokers.
+// A hostile same-UID process that ignores locks and replaces pathnames remains
+// outside the guarantee; detected replacement makes this Store fail closed.
 func Open(home string) (*Store, error) {
 	if home == "" {
 		resolved, err := os.UserHomeDir()
@@ -62,21 +72,53 @@ func Open(home string) (*Store, error) {
 		}
 		home = resolved
 	}
-	layout, err := openStateLayout(home)
+	absolute, err := filepath.Abs(home)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("resolve canonical home: %w", err)
+	}
+	openHomes.Lock()
+	if _, exists := openHomes.active[canonical]; exists {
+		openHomes.Unlock()
+		return nil, ErrLocked
+	}
+	openHomes.active[canonical] = struct{}{}
+	openHomes.Unlock()
+	releaseHome := true
+	defer func() {
+		if releaseHome {
+			releaseOpenHome(canonical)
+		}
+	}()
+	layout, err := openStateLayout(canonical)
 	if err != nil {
 		return nil, err
 	}
 	store := &Store{
 		rootPath: layout.rootPath, layout: layout, conversations: layout.conversations,
 		workspaces: layout.workspaces, providers: layout.providers,
-		locks: keyedLocks{entries: make(map[string]*keyedLock)},
+		locks: keyedLocks{entries: make(map[string]*keyedLock)}, homeGuardKey: canonical,
 	}
 	store.ops = defaultFileOps(store.conversations)
 	if err := cleanTemporaryMappings(store.conversations); err != nil {
 		_ = layout.close()
 		return nil, fmt.Errorf("clean temporary mappings: %w", err)
 	}
+	if err := layout.verify(); err != nil {
+		_ = layout.close()
+		return nil, fmt.Errorf("verify canonical state layout: %w", err)
+	}
+	releaseHome = false
 	return store, nil
+}
+
+func releaseOpenHome(key string) {
+	openHomes.Lock()
+	delete(openHomes.active, key)
+	openHomes.Unlock()
 }
 
 func (store *Store) Root() string { return store.rootPath }
@@ -88,7 +130,10 @@ func (store *Store) Close() error {
 		return nil
 	}
 	store.closed = true
-	return store.layout.close()
+	err := store.layout.close()
+	releaseOpenHome(store.homeGuardKey)
+	store.homeGuardKey = ""
+	return err
 }
 
 func (store *Store) Load(identity Identity) (Mapping, error) {
@@ -102,6 +147,9 @@ func (store *Store) Load(identity Identity) (Mapping, error) {
 	}
 	defer release()
 	mapping, _, err := store.loadLocked(identity, key)
+	if err == nil {
+		err = store.verifyLayout()
+	}
 	return mapping, err
 }
 
@@ -149,7 +197,12 @@ func (store *Store) updateAt(identity Identity, at time.Time, update func(*Mappi
 	}
 	originalIdentity := mapping.Identity
 	originalCreatedAt := mapping.CreatedAt
+	before := snapshotSessions(mapping)
 	if err := update(&mapping); err != nil {
+		return CommitNotApplied, err
+	}
+	clampSessionTimes(&mapping, before)
+	if err := validateSessionTransitions(mapping, before); err != nil {
 		return CommitNotApplied, err
 	}
 	mapping.SchemaVersion = SchemaVersion
@@ -236,7 +289,7 @@ func (store *Store) RemoveSession(identity Identity, conversationID string, at t
 	if mapping.Current == nil && len(mapping.Archives) == 0 {
 		return store.removeLocked(key, original)
 	}
-	mapping.UpdatedAt = at
+	mapping.UpdatedAt = laterTime(mapping.UpdatedAt, at)
 	return store.commitLocked(key, mapping, &original)
 }
 
@@ -265,9 +318,12 @@ func (store *Store) ObserveRevision(identity Identity, revision Revision, at tim
 		if mapping.Current == nil {
 			return os.ErrNotExist
 		}
+		if prepared := mapping.Current.PreparedCommit; prepared != nil && prepared.Revision != revision {
+			return errors.New("cannot replace an unresolved prepared revision")
+		}
 		observed := revision
 		mapping.Current.Observed = &observed
-		mapping.Current.UpdatedAt = at
+		mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
 		return nil
 	})
 }
@@ -281,26 +337,55 @@ func (store *Store) PrepareCommit(identity Identity, revision Revision, turnID s
 		if mapping.Current == nil {
 			return os.ErrNotExist
 		}
+		if mapping.Current.Committed != nil && *mapping.Current.Committed == revision {
+			return errors.New("revision is already committed")
+		}
+		if existing := mapping.Current.PreparedCommit; existing != nil {
+			if *existing == prepared {
+				return nil
+			}
+			return errors.New("cannot overwrite an unresolved prepared revision")
+		}
 		observed := revision
 		mapping.Current.Observed = &observed
 		mapping.Current.PreparedCommit = &prepared
-		mapping.Current.UpdatedAt = at
+		mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
 		return nil
 	})
 }
 
 func (store *Store) PromotePrepared(identity Identity, turnID string, at time.Time) (CommitOutcome, error) {
-	return store.reconcilePrepared(identity, turnID, true, at)
-}
-
-func (store *Store) MarkPreparedAccepted(identity Identity, turnID string, at time.Time) (CommitOutcome, error) {
+	if common.ValidateID(turnID) != nil {
+		return CommitNotApplied, errors.New("invalid turn ID")
+	}
 	return store.updateAt(identity, at, func(mapping *Mapping) error {
 		prepared, err := expectedPrepared(mapping, turnID)
 		if err != nil {
 			return err
 		}
-		prepared.Phase = CommitAccepted
-		mapping.Current.UpdatedAt = at
+		if prepared.Phase != CommitAccepted {
+			return errors.New("prepared commit has not been accepted")
+		}
+		promotePrepared(mapping, prepared, at)
+		return nil
+	})
+}
+
+func (store *Store) MarkPreparedAccepted(identity Identity, turnID string, at time.Time) (CommitOutcome, error) {
+	if common.ValidateID(turnID) != nil {
+		return CommitNotApplied, errors.New("invalid turn ID")
+	}
+	return store.updateAt(identity, at, func(mapping *Mapping) error {
+		prepared, err := expectedPrepared(mapping, turnID)
+		if err != nil {
+			return err
+		}
+		if prepared.Phase == CommitPrepared {
+			prepared.Phase = CommitAccepted
+		} else if prepared.Phase != CommitAccepted {
+			return errors.New("invalid prepared commit phase")
+		}
+		mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
 		return nil
 	})
 }
@@ -319,17 +404,26 @@ func (store *Store) reconcilePrepared(identity Identity, turnID string, accepted
 			return err
 		}
 		if accepted {
-			committed := prepared.Revision
-			mapping.Current.Committed = &committed
-			mapping.Current.Observed = nil
-		} else {
-			observed := prepared.Revision
-			mapping.Current.Observed = &observed
+			promotePrepared(mapping, prepared, at)
+			return nil
 		}
+		if prepared.Phase != CommitPrepared {
+			return errors.New("accepted prepared commit cannot be rejected")
+		}
+		observed := prepared.Revision
+		mapping.Current.Observed = &observed
 		mapping.Current.PreparedCommit = nil
-		mapping.Current.UpdatedAt = at
+		mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
 		return nil
 	})
+}
+
+func promotePrepared(mapping *Mapping, prepared *PreparedCommit, at time.Time) {
+	committed := prepared.Revision
+	mapping.Current.Committed = &committed
+	mapping.Current.Observed = nil
+	mapping.Current.PreparedCommit = nil
+	mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
 }
 
 func expectedPrepared(mapping *Mapping, turnID string) (*PreparedCommit, error) {
@@ -352,8 +446,13 @@ func (store *Store) EnsureWorkspace(conversationID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("ensure workspace: %w", err)
 	}
-	if err := directory.close(); err != nil {
+	defer directory.close()
+	store.ops.beforePathReturn()
+	if err := store.verifyLayout(); err != nil {
 		return "", err
+	}
+	if err := store.workspaces.verifyChild(conversationID, directory, true); err != nil {
+		return "", fmt.Errorf("verify canonical workspace path: %w", err)
 	}
 	return filepath.Join(store.rootPath, "workspaces", conversationID), nil
 }
@@ -367,10 +466,10 @@ func (store *Store) RemoveWorkspace(conversationID string) error {
 		return err
 	}
 	defer release()
-	if err := store.workspaces.removeDirectory(conversationID); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := store.workspaces.removeDirectoryWithHook(conversationID, store.ops.beforeWorkspaceTombstone); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return nil
+	return store.verifyLayout()
 }
 
 func (store *Store) EnsureProviderDirectory(name provider.Name) (string, error) {
@@ -386,8 +485,13 @@ func (store *Store) EnsureProviderDirectory(name provider.Name) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("ensure provider directory: %w", err)
 	}
-	if err := directory.close(); err != nil {
+	defer directory.close()
+	store.ops.beforePathReturn()
+	if err := store.verifyLayout(); err != nil {
 		return "", err
+	}
+	if err := store.providers.verifyChild(string(name), directory, true); err != nil {
+		return "", fmt.Errorf("verify canonical provider path: %w", err)
 	}
 	return filepath.Join(store.rootPath, "providers", string(name)), nil
 }
@@ -402,6 +506,9 @@ func (store *Store) loadLocked(identity Identity, key string) (Mapping, fileIden
 }
 
 func (store *Store) commitLocked(key string, mapping Mapping, original *fileIdentity) (outcome CommitOutcome, resultErr error) {
+	if err := store.verifyLayout(); err != nil {
+		return CommitNotApplied, err
+	}
 	encoded, err := encodeMapping(mapping)
 	if err != nil {
 		return CommitNotApplied, err
@@ -410,11 +517,11 @@ func (store *Store) commitLocked(key string, mapping Mapping, original *fileIden
 	if err != nil {
 		return CommitNotApplied, err
 	}
-	committed := false
+	var temporaryID fileIdentity
 	defer func() {
 		_ = temporary.Close()
-		if !committed {
-			_ = store.conversations.remove(temporaryName)
+		if temporaryID != (fileIdentity{}) {
+			_ = store.conversations.removeExpected(temporaryName, temporaryID)
 		}
 	}()
 	for remaining := encoded; len(remaining) > 0; {
@@ -430,34 +537,48 @@ func (store *Store) commitLocked(key string, mapping Mapping, original *fileIden
 	if err := temporary.Sync(); err != nil {
 		return CommitNotApplied, err
 	}
+	temporaryID, err = fileIdentityForFile(temporary, 0o600)
+	if err != nil {
+		return CommitNotApplied, err
+	}
 	if err := temporary.Close(); err != nil {
 		return CommitNotApplied, err
 	}
 	name := mappingName(key)
-	if err := store.verifyTarget(name, original); err != nil {
-		return CommitNotApplied, err
-	}
-	if err := store.ops.rename(temporaryName, name); err != nil {
+	if err := store.ops.publish(temporaryName, name, original, temporaryID); err != nil {
 		outcome := inspectExpected(store.conversations, name, encoded)
 		if outcome == CommitApplied {
-			committed = true
+			if syncErr := store.ops.syncDir(); syncErr != nil {
+				return CommitUncertain, errors.Join(fmt.Errorf("publish conversation mapping: %w", err), fmt.Errorf("sync conversation directory: %w", syncErr))
+			}
+			if verifyErr := store.verifyLayout(); verifyErr != nil {
+				return CommitUncertain, errors.Join(fmt.Errorf("publish conversation mapping: %w", err), verifyErr)
+			}
 		}
 		return outcome, fmt.Errorf("publish conversation mapping: %w", err)
 	}
-	committed = true
 	if err := store.ops.syncDir(); err != nil {
 		return CommitUncertain, fmt.Errorf("sync conversation directory: %w", err)
+	}
+	if err := store.verifyLayout(); err != nil {
+		return CommitUncertain, err
 	}
 	return CommitApplied, nil
 }
 
 func (store *Store) removeLocked(key string, original fileIdentity) (CommitOutcome, error) {
-	name := mappingName(key)
-	if err := store.verifyTarget(name, &original); err != nil {
+	if err := store.verifyLayout(); err != nil {
 		return CommitNotApplied, err
 	}
-	if err := store.ops.remove(name); err != nil {
+	name := mappingName(key)
+	if err := store.ops.removeExpected(name, original); err != nil {
 		if _, inspectErr := store.conversations.targetIdentity(name); errors.Is(inspectErr, os.ErrNotExist) {
+			if syncErr := store.ops.syncDir(); syncErr != nil {
+				return CommitUncertain, errors.Join(fmt.Errorf("remove conversation mapping: %w", err), fmt.Errorf("sync conversation directory: %w", syncErr))
+			}
+			if verifyErr := store.verifyLayout(); verifyErr != nil {
+				return CommitUncertain, errors.Join(fmt.Errorf("remove conversation mapping: %w", err), verifyErr)
+			}
 			return CommitApplied, fmt.Errorf("remove conversation mapping: %w", err)
 		} else if inspectErr != nil {
 			return CommitUncertain, fmt.Errorf("remove conversation mapping: %w", err)
@@ -467,22 +588,19 @@ func (store *Store) removeLocked(key string, original fileIdentity) (CommitOutco
 	if err := store.ops.syncDir(); err != nil {
 		return CommitUncertain, fmt.Errorf("sync conversation directory: %w", err)
 	}
+	if err := store.verifyLayout(); err != nil {
+		return CommitUncertain, err
+	}
 	return CommitApplied, nil
 }
 
-func (store *Store) verifyTarget(name string, original *fileIdentity) error {
-	current, err := store.conversations.targetIdentity(name)
-	if original == nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return os.ErrExist
+func (store *Store) verifyLayout() error {
+	if store.invalidLayout.Load() {
+		return errors.New("agent state canonical layout previously changed")
 	}
-	if err != nil || current != *original {
-		return errors.New("conversation mapping changed during update")
+	if err := store.layout.verify(); err != nil {
+		store.invalidLayout.Store(true)
+		return fmt.Errorf("agent state canonical layout changed: %w", err)
 	}
 	return nil
 }
@@ -492,6 +610,10 @@ func (store *Store) begin(key string) (func(), error) {
 	if store.closed {
 		store.lifecycle.RUnlock()
 		return nil, ErrClosed
+	}
+	if err := store.verifyLayout(); err != nil {
+		store.lifecycle.RUnlock()
+		return nil, err
 	}
 	store.locks.mu.Lock()
 	entry := store.locks.entries[key]
@@ -512,6 +634,107 @@ func (store *Store) begin(key string) (func(), error) {
 		store.locks.mu.Unlock()
 		store.lifecycle.RUnlock()
 	}, nil
+}
+
+type sessionSnapshot struct {
+	updatedAt time.Time
+	committed *Revision
+	prepared  *PreparedCommit
+}
+
+func snapshotSessions(mapping Mapping) map[string]sessionSnapshot {
+	snapshots := make(map[string]sessionSnapshot, len(mapping.Archives)+1)
+	add := func(session Session) {
+		snapshot := sessionSnapshot{updatedAt: session.UpdatedAt}
+		if session.Committed != nil {
+			committed := *session.Committed
+			snapshot.committed = &committed
+		}
+		if session.PreparedCommit != nil {
+			prepared := *session.PreparedCommit
+			snapshot.prepared = &prepared
+		}
+		snapshots[session.ConversationID] = snapshot
+	}
+	if mapping.Current != nil {
+		add(*mapping.Current)
+	}
+	for _, session := range mapping.Archives {
+		add(session)
+	}
+	return snapshots
+}
+
+func clampSessionTimes(mapping *Mapping, before map[string]sessionSnapshot) {
+	clamp := func(session *Session) {
+		if snapshot, exists := before[session.ConversationID]; exists {
+			session.UpdatedAt = laterTime(snapshot.updatedAt, session.UpdatedAt)
+		}
+	}
+	if mapping.Current != nil {
+		clamp(mapping.Current)
+	}
+	for index := range mapping.Archives {
+		clamp(&mapping.Archives[index])
+	}
+}
+
+func validateSessionTransitions(mapping Mapping, before map[string]sessionSnapshot) error {
+	after := make(map[string]Session, len(mapping.Archives)+1)
+	if mapping.Current != nil {
+		after[mapping.Current.ConversationID] = *mapping.Current
+	}
+	for _, session := range mapping.Archives {
+		after[session.ConversationID] = session
+	}
+	for id, previous := range before {
+		current, exists := after[id]
+		if !exists {
+			if previous.prepared != nil {
+				return errors.New("cannot remove a session with an unresolved prepared revision")
+			}
+			continue
+		}
+		if previous.prepared != nil {
+			switch {
+			case current.PreparedCommit != nil:
+				unchanged := *current.PreparedCommit == *previous.prepared
+				accepted := previous.prepared.Phase == CommitPrepared && current.PreparedCommit.Phase == CommitAccepted && current.PreparedCommit.Revision == previous.prepared.Revision && current.PreparedCommit.TurnID == previous.prepared.TurnID
+				if !unchanged && !accepted {
+					return errors.New("cannot overwrite or downgrade an unresolved prepared revision")
+				}
+			case current.Committed != nil && *current.Committed == previous.prepared.Revision && current.Observed == nil:
+				// Provider acceptance proof or promotion resolved the record.
+			case previous.prepared.Phase == CommitPrepared && current.Observed != nil && *current.Observed == previous.prepared.Revision:
+				// A provider rejection may clear only an unaccepted prepared record.
+			default:
+				return errors.New("cannot discard an unresolved prepared revision")
+			}
+		}
+		if !equalRevisionPointers(previous.committed, current.Committed) {
+			if current.Committed == nil {
+				return errors.New("cannot discard a committed revision")
+			}
+			if previous.prepared == nil || current.PreparedCommit != nil || current.Observed != nil || *current.Committed != previous.prepared.Revision {
+				return errors.New("cannot change a committed revision without resolving its prepared record")
+			}
+		}
+	}
+	return nil
+}
+
+func equalRevisionPointers(left, right *Revision) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func laterTime(left, right time.Time) time.Time {
+	if right.Before(left) {
+		return left
+	}
+	return right
 }
 
 func archiveIndex(archives []Session, conversationID string) int {

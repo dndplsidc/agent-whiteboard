@@ -103,7 +103,9 @@ func TestRevisionPreparePromoteAndReconcile(t *testing.T) {
 	require.Equal(t, []string{"digest", "phase", "revision", "source_updated_at", "turn_id"}, sortedKeys(currentDocument["prepared_commit"].(map[string]any)))
 	require.Equal(t, []string{"digest", "revision", "source_updated_at"}, sortedKeys(currentDocument["observed"].(map[string]any)))
 
-	outcome, err = store.PromotePrepared(testIdentity(), testID, now.Add(2*time.Second))
+	_, err = store.MarkPreparedAccepted(testIdentity(), testID, now.Add(2*time.Second))
+	require.NoError(t, err)
+	outcome, err = store.PromotePrepared(testIdentity(), testID, now.Add(3*time.Second))
 	require.NoError(t, err)
 	require.Equal(t, CommitApplied, outcome)
 	loaded, err := store.Load(testIdentity())
@@ -112,20 +114,115 @@ func TestRevisionPreparePromoteAndReconcile(t *testing.T) {
 	require.Nil(t, loaded.Current.Observed)
 	require.Nil(t, loaded.Current.PreparedCommit)
 
-	_, err = store.PrepareCommit(testIdentity(), revision, testID, now.Add(3*time.Second))
+	replacement := Revision{Digest: strings.Repeat("b", 64), Revision: RevisionReplacement, SourceUpdatedAt: now.Add(time.Second)}
+	_, err = store.PrepareCommit(testIdentity(), replacement, testID, now.Add(4*time.Second))
 	require.NoError(t, err)
-	_, err = store.MarkPreparedAccepted(testIdentity(), testID, now.Add(4*time.Second))
+	_, err = store.MarkPreparedAccepted(testIdentity(), testID, now.Add(5*time.Second))
 	require.NoError(t, err)
 	loaded, err = store.Load(testIdentity())
 	require.NoError(t, err)
 	require.Equal(t, CommitAccepted, loaded.Current.PreparedCommit.Phase)
-	outcome, err = store.ReconcilePrepared(testIdentity(), testID, false, now.Add(5*time.Second))
+	outcome, err = store.ReconcilePrepared(testIdentity(), testID, false, now.Add(6*time.Second))
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+	loaded, err = store.Load(testIdentity())
+	require.NoError(t, err)
+	require.Equal(t, CommitAccepted, loaded.Current.PreparedCommit.Phase)
+
+	outcome, err = store.PromotePrepared(testIdentity(), testID, now.Add(7*time.Second))
 	require.NoError(t, err)
 	require.Equal(t, CommitApplied, outcome)
 	loaded, err = store.Load(testIdentity())
 	require.NoError(t, err)
 	require.Nil(t, loaded.Current.PreparedCommit)
-	require.NotNil(t, loaded.Current.Observed)
+	require.Nil(t, loaded.Current.Observed)
+	require.Equal(t, replacement, *loaded.Current.Committed)
+}
+
+func TestPreparedCommitTransitionTable(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	revision := Revision{Digest: strings.Repeat("a", 64), Revision: RevisionInitial, SourceUpdatedAt: now}
+	other := Revision{Digest: strings.Repeat("b", 64), Revision: RevisionReplacement, SourceUpdatedAt: now.Add(time.Second)}
+	_, err := store.Create(testIdentity(), testSession(t, testID, "sessions/current", now), now)
+	require.NoError(t, err)
+	_, err = store.PrepareCommit(testIdentity(), revision, testID, now.Add(time.Second))
+	require.NoError(t, err)
+
+	outcome, err := store.PrepareCommit(testIdentity(), other, "MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1u", now.Add(2*time.Second))
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+	outcome, err = store.PromotePrepared(testIdentity(), testID, now.Add(3*time.Second))
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+
+	_, err = store.MarkPreparedAccepted(testIdentity(), testID, now.Add(4*time.Second))
+	require.NoError(t, err)
+	_, err = store.MarkPreparedAccepted(testIdentity(), testID, now.Add(5*time.Second))
+	require.NoError(t, err, "acceptance is idempotent for the same turn")
+	outcome, err = store.PrepareCommit(testIdentity(), revision, testID, now.Add(6*time.Second))
+	require.Error(t, err, "prepare must not downgrade accepted to prepared")
+	require.Equal(t, CommitNotApplied, outcome)
+	outcome, err = store.ReconcilePrepared(testIdentity(), testID, false, now.Add(7*time.Second))
+	require.Error(t, err, "provider rejection cannot discard recorded acceptance")
+	require.Equal(t, CommitNotApplied, outcome)
+
+	_, err = store.PromotePrepared(testIdentity(), testID, now.Add(8*time.Second))
+	require.NoError(t, err)
+	outcome, err = store.PrepareCommit(testIdentity(), revision, testID, now.Add(9*time.Second))
+	require.Error(t, err, "a committed revision cannot be prepared for reinjection")
+	require.Equal(t, CommitNotApplied, outcome)
+}
+
+func TestGenericUpdateCannotOverwriteUnresolvedOrCommittedRevision(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	revision := Revision{Digest: strings.Repeat("a", 64), Revision: RevisionInitial, SourceUpdatedAt: now}
+	other := Revision{Digest: strings.Repeat("b", 64), Revision: RevisionReplacement, SourceUpdatedAt: now.Add(time.Second)}
+	_, err := store.Create(testIdentity(), testSession(t, testID, "sessions/current", now), now)
+	require.NoError(t, err)
+	outcome, err := store.Update(testIdentity(), func(mapping *Mapping) error {
+		mapping.Current.Committed = &other
+		return nil
+	})
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+
+	_, err = store.PrepareCommit(testIdentity(), revision, testID, now.Add(time.Second))
+	require.NoError(t, err)
+	outcome, err = store.Update(testIdentity(), func(mapping *Mapping) error {
+		mapping.Current.PreparedCommit.Revision = other
+		return nil
+	})
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+	_, err = store.MarkPreparedAccepted(testIdentity(), testID, now.Add(2*time.Second))
+	require.NoError(t, err)
+	_, err = store.PromotePrepared(testIdentity(), testID, now.Add(3*time.Second))
+	require.NoError(t, err)
+
+	outcome, err = store.Update(testIdentity(), func(mapping *Mapping) error {
+		mapping.Current.Committed = nil
+		return nil
+	})
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+}
+
+func TestReconcileProviderProofMayPromotePrepared(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	revision := Revision{Digest: strings.Repeat("a", 64), Revision: RevisionInitial, SourceUpdatedAt: now}
+	_, err := store.Create(testIdentity(), testSession(t, testID, "sessions/current", now), now)
+	require.NoError(t, err)
+	_, err = store.PrepareCommit(testIdentity(), revision, testID, now.Add(time.Second))
+	require.NoError(t, err)
+	_, err = store.ReconcilePrepared(testIdentity(), testID, true, now.Add(2*time.Second))
+	require.NoError(t, err)
+	loaded, err := store.Load(testIdentity())
+	require.NoError(t, err)
+	require.Equal(t, revision, *loaded.Current.Committed)
+	require.Nil(t, loaded.Current.PreparedCommit)
 }
 
 func TestArchiveTransitionsAndDeletion(t *testing.T) {
@@ -193,6 +290,75 @@ func TestStrictDecoderRejectsDuplicateJSONFields(t *testing.T) {
 	identity := testIdentity()
 	_, err := decodeMapping([]byte(`{"schema_version":1,"schema_version":1}`), identity)
 	require.Error(t, err)
+}
+
+func TestStrictDecoderRequiresExactNamesAndCanonicalNullability(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	_, err := store.Create(testIdentity(), testSession(t, testID, "sessions/current", now), now)
+	require.NoError(t, err)
+	key, err := ConversationKey(testIdentity())
+	require.NoError(t, err)
+	encoded, err := os.ReadFile(filepath.Join(store.Root(), "conversations", key+".json"))
+	require.NoError(t, err)
+
+	var canonical map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &canonical))
+	for name, mutate := range map[string]func(map[string]any){
+		"case alias": func(document map[string]any) {
+			identity := document["identity"].(map[string]any)
+			identity["ORIGIN"] = identity["origin"]
+			delete(identity, "origin")
+		},
+		"null archives": func(document map[string]any) { document["archives"] = nil },
+		"missing required nullable field": func(document map[string]any) {
+			delete(document["current"].(map[string]any), "observed")
+		},
+		"null required scalar": func(document map[string]any) {
+			document["current"].(map[string]any)["provider_label"] = nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			copyEncoded, marshalErr := json.Marshal(canonical)
+			require.NoError(t, marshalErr)
+			var document map[string]any
+			require.NoError(t, json.Unmarshal(copyEncoded, &document))
+			mutate(document)
+			corrupt, marshalErr := json.Marshal(document)
+			require.NoError(t, marshalErr)
+			_, decodeErr := decodeMapping(corrupt, testIdentity())
+			require.Error(t, decodeErr)
+		})
+	}
+}
+
+func TestNewConversationRejectsDuplicateNativeReferenceWithoutChangingMapping(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	current := testSession(t, testID, "sessions/current", now)
+	_, err := store.Create(testIdentity(), current, now)
+	require.NoError(t, err)
+	duplicate := testSession(t, "MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1u", "sessions/current", now.Add(time.Minute))
+	outcome, err := store.NewConversation(testIdentity(), duplicate, now.Add(time.Minute))
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+	loaded, err := store.Load(testIdentity())
+	require.NoError(t, err)
+	require.Equal(t, testID, loaded.Current.ConversationID)
+	require.Empty(t, loaded.Archives)
+}
+
+func TestSessionUpdatedAtDoesNotRegress(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	_, err := store.Create(testIdentity(), testSession(t, testID, "sessions/current", now), now)
+	require.NoError(t, err)
+	revision := Revision{Digest: strings.Repeat("a", 64), Revision: RevisionInitial, SourceUpdatedAt: now}
+	_, err = store.ObserveRevision(testIdentity(), revision, now.Add(-time.Hour))
+	require.NoError(t, err)
+	loaded, err := store.Load(testIdentity())
+	require.NoError(t, err)
+	require.Equal(t, now, loaded.Current.UpdatedAt)
 }
 
 func TestNewConversationRejectsDuplicateIDWithoutChangingMapping(t *testing.T) {

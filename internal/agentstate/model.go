@@ -131,21 +131,31 @@ func (mapping Mapping) validate(expected *Identity) error {
 	if expected != nil && mapping.Identity != *expected {
 		return errors.New("conversation mapping identity mismatch")
 	}
-	seen := make(map[string]struct{}, len(mapping.Archives)+1)
-	if mapping.Current != nil {
-		if err := mapping.Current.validate(); err != nil {
+	seenIDs := make(map[string]struct{}, len(mapping.Archives)+1)
+	seenNative := make(map[string]struct{}, len(mapping.Archives)+1)
+	validateUnique := func(session Session) error {
+		if err := session.validate(); err != nil {
 			return err
 		}
-		seen[mapping.Current.ConversationID] = struct{}{}
-	}
-	for index := range mapping.Archives {
-		if err := mapping.Archives[index].validate(); err != nil {
-			return err
-		}
-		if _, duplicate := seen[mapping.Archives[index].ConversationID]; duplicate {
+		if _, duplicate := seenIDs[session.ConversationID]; duplicate {
 			return errors.New("duplicate broker conversation ID")
 		}
-		seen[mapping.Archives[index].ConversationID] = struct{}{}
+		if _, duplicate := seenNative[session.NativeSession.Value()]; duplicate {
+			return errors.New("duplicate native session reference")
+		}
+		seenIDs[session.ConversationID] = struct{}{}
+		seenNative[session.NativeSession.Value()] = struct{}{}
+		return nil
+	}
+	if mapping.Current != nil {
+		if err := validateUnique(*mapping.Current); err != nil {
+			return err
+		}
+	}
+	for index := range mapping.Archives {
+		if err := validateUnique(mapping.Archives[index]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
