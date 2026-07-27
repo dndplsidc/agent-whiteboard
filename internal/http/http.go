@@ -22,6 +22,7 @@ const (
 	APIImages                     = "/api/v1/images"
 	PublicMarkdown                = "/whiteboards/markdown/"
 	PublicHTML                    = "/whiteboards/html/"
+	PublicHTMLContentSuffix       = "/content"
 	PublicImages                  = "/images/"
 
 	MultipartOverheadBytes  int64 = 64 << 10

@@ -52,6 +52,38 @@ func TestResolveServiceConfigHonorsExplicitZerosAndJSONLogging(t *testing.T) {
 	require.IsType(t, &slog.JSONHandler{}, resolved.logger.Handler())
 }
 
+func TestNewServiceWiresResolvedViewerLocalAgentFlag(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
+			whiteboards := &serviceConfigWhiteboardStore{board: whiteboard.Whiteboard{
+				ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", Kind: whiteboard.KindMarkdown,
+				Source: []byte("# source"), Context: []byte("creator context"),
+			}}
+			service, err := NewService(ServiceConfig{
+				WhiteboardStore: whiteboards, ImageStore: &serviceConfigImageStore{},
+				ViewerLocalAgentEnabled: enabled,
+			}, WithViewerAssets([]byte("body{}"), []byte("void 0")))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+			response := httptest.NewRecorder()
+			service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet,
+				httpx.PublicMarkdown+whiteboards.board.ID, nil))
+
+			require.Equal(t, http.StatusOK, response.Code)
+			if enabled {
+				require.Contains(t, response.Body.String(), `"context":"creator context"`)
+				require.Contains(t, response.Body.String(), `"local_agent":{"enabled":true}`)
+				require.Contains(t, response.Header().Get("Content-Security-Policy"), "connect-src http://127.0.0.1:* ws://127.0.0.1:*")
+			} else {
+				require.NotContains(t, response.Body.String(), `"context"`)
+				require.NotContains(t, response.Body.String(), `"local_agent"`)
+				require.Contains(t, response.Header().Get("Content-Security-Policy"), "connect-src 'none'")
+			}
+		})
+	}
+}
+
 func TestNewServicePassesIndependentWhiteboardAndContextLimitsToHTTPHandler(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -123,11 +155,14 @@ func TestNewServiceResolvesHomeOnlyWhenFilesystemStorageIsNeeded(t *testing.T) {
 	require.Zero(t, customWhiteboards.closeCalls)
 }
 
-type serviceConfigWhiteboardStore struct{ closeCalls int }
+type serviceConfigWhiteboardStore struct {
+	closeCalls int
+	board      whiteboard.Whiteboard
+}
 
 func (*serviceConfigWhiteboardStore) Create(context.Context, whiteboard.Whiteboard) error { return nil }
-func (*serviceConfigWhiteboardStore) Get(context.Context, string) (whiteboard.Whiteboard, error) {
-	return whiteboard.Whiteboard{}, nil
+func (store *serviceConfigWhiteboardStore) Get(context.Context, string) (whiteboard.Whiteboard, error) {
+	return store.board, nil
 }
 func (*serviceConfigWhiteboardStore) Replace(context.Context, whiteboard.Whiteboard) error {
 	return nil

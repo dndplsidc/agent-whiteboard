@@ -152,6 +152,7 @@ func TestRouteConstants(t *testing.T) {
 	require.Equal(t, "/api/v1/images", httpx.APIImages)
 	require.Equal(t, "/whiteboards/markdown/", httpx.PublicMarkdown)
 	require.Equal(t, "/whiteboards/html/", httpx.PublicHTML)
+	require.Equal(t, "/content", httpx.PublicHTMLContentSuffix)
 	require.Equal(t, "/images/", httpx.PublicImages)
 }
 

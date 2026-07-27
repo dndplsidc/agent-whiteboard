@@ -64,6 +64,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE "+httpx.APIWhiteboardHTML+"/{id}", h.deleteHTML)
 	mux.HandleFunc("GET "+httpx.PublicMarkdown+"{id}", h.viewMarkdown)
 	mux.HandleFunc("GET "+httpx.PublicHTML+"{id}", h.viewHTML)
+	mux.HandleFunc("GET "+httpx.PublicHTML+"{id}"+httpx.PublicHTMLContentSuffix, h.viewHTMLContent)
 }
 
 func (h *Handler) getMarkdown(w http.ResponseWriter, r *http.Request) {
@@ -95,19 +96,52 @@ func (h *Handler) getMarkdown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) viewMarkdown(w http.ResponseWriter, r *http.Request) {
-	h.view(w, r, KindMarkdown)
+	h.setMarkdownHeaders(w)
+	board, ok := h.loadPublicWhiteboard(w, r, KindMarkdown)
+	if !ok {
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_ = h.viewer.Render(w, board)
+	}
 }
 
 func (h *Handler) viewHTML(w http.ResponseWriter, r *http.Request) {
-	h.view(w, r, KindHTML)
+	setStandaloneOuterHeaders(w)
+	_, ok := h.loadPublicWhiteboard(w, r, KindHTML)
+	if !ok {
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_ = RenderStandaloneWrapper(w, r.PathValue("id"))
+	}
 }
 
-func (h *Handler) view(w http.ResponseWriter, r *http.Request, kind Kind) {
-	httpx.SetPublicHeaders(w, false)
+func (h *Handler) viewHTMLContent(w http.ResponseWriter, r *http.Request) {
+	setStandaloneInnerHeaders(w)
+	board, ok := h.loadPublicWhiteboard(w, r, KindHTML)
+	if !ok {
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(board.Source)
+	}
+}
+
+func (h *Handler) loadPublicWhiteboard(w http.ResponseWriter, r *http.Request, kind Kind) (Whiteboard, bool) {
 	id := r.PathValue("id")
 	if err := common.ValidateID(id); err != nil {
 		httpx.WriteError(w, notFound())
-		return
+		return Whiteboard{}, false
 	}
 
 	board, err := h.operations.Get(r.Context(), id)
@@ -116,20 +150,37 @@ func (h *Handler) view(w http.ResponseWriter, r *http.Request, kind Kind) {
 			err = notFound()
 		}
 		httpx.WriteError(w, err)
-		return
+		return Whiteboard{}, false
 	}
 	if board.Kind != kind {
 		httpx.WriteError(w, notFound())
-		return
+		return Whiteboard{}, false
 	}
+	return board, true
+}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if kind == KindMarkdown {
-		_ = h.viewer.Render(w, board)
-		return
-	}
-	_, _ = w.Write(board.Source)
+func (h *Handler) setMarkdownHeaders(w http.ResponseWriter) {
+	setPresentationHeaders(w)
+	w.Header().Set("Content-Security-Policy", h.viewer.ContentSecurityPolicy())
+	w.Header().Set("X-Frame-Options", "DENY")
+}
+
+func setStandaloneOuterHeaders(w http.ResponseWriter) {
+	setPresentationHeaders(w)
+	w.Header().Set("Content-Security-Policy", StandaloneOuterContentSecurityPolicy)
+	w.Header().Set("X-Frame-Options", "DENY")
+}
+
+func setStandaloneInnerHeaders(w http.ResponseWriter) {
+	setPresentationHeaders(w)
+	w.Header().Set("Content-Security-Policy", StandaloneInnerContentSecurityPolicy)
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+}
+
+func setPresentationHeaders(w http.ResponseWriter) {
+	httpx.SetPublicHeaders(w, false)
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Permissions-Policy", RestrictivePermissionsPolicy)
 }
 
 func (h *Handler) createMarkdown(w http.ResponseWriter, r *http.Request) {

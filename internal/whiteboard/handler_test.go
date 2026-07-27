@@ -273,7 +273,9 @@ func TestHandlerViewMarkdownRendersShellWithExactContextAndPublicHeaders(t *test
 	require.Contains(t, rr.Body.String(), testViewerCSS)
 	require.Contains(t, rr.Body.String(), testViewerJS)
 	require.Contains(t, rr.Body.String(), `{"markdown":"# Public whiteboard"}`)
-	assertPublicWhiteboardHeaders(t, rr)
+	require.NotContains(t, rr.Body.String(), `"context"`)
+	require.NotContains(t, rr.Body.String(), `"local_agent"`)
+	assertMarkdownHeaders(t, rr, newViewer(t).ContentSecurityPolicy())
 }
 
 func TestHandlerGetMarkdownReturnsExactPublicResourceMarkdownAndContext(t *testing.T) {
@@ -386,31 +388,87 @@ func TestHandlerGetMarkdownHidesMalformedMissingExpiredAndWrongKindAsSameNotFoun
 	}
 }
 
-func TestHandlerViewHTMLServesStoredDocumentBytesUnchanged(t *testing.T) {
+func TestHandlerViewHTMLOuterServesStaticSandboxWrapperWithoutStoredBytes(t *testing.T) {
+	source := []byte(`<!doctype html><script>globalThis.SUBMITTED_SECRET = "private"</script>`)
+	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
+	operations := mocks.NewMockOperations(t)
+	operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
+		ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: source,
+	}, nil).Once()
+	rr := httptest.NewRecorder()
+
+	handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr,
+		httptest.NewRequest(http.MethodGet, httpx.PublicHTML+testWhiteboardID, nil).WithContext(ctx))
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "text/html; charset=utf-8", rr.Header().Get("Content-Type"))
+	require.NotEqual(t, source, rr.Body.Bytes())
+	require.NotContains(t, rr.Body.String(), "SUBMITTED_SECRET")
+	require.Contains(t, rr.Body.String(), `src="`+httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLContentSuffix+`"`)
+	require.Contains(t, rr.Body.String(), `sandbox="allow-scripts"`)
+	require.Contains(t, rr.Body.String(), `referrerpolicy="no-referrer"`)
+	require.Contains(t, rr.Body.String(), ` credentialless`)
+	assertHTMLOuterHeaders(t, rr)
+}
+
+func TestHandlerViewHTMLInnerServesStoredDocumentBytesUnchanged(t *testing.T) {
 	source := []byte("<!DOCTYPE html>\n<html><head><style>body { color: red; }</style></head>\n<body><script>globalThis.answer = 42;</script></body></html>\n")
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
 	operations := mocks.NewMockOperations(t)
 	operations.EXPECT().Get(
 		mock.MatchedBy(func(got context.Context) bool {
 			return got == ctx && got.Value(handlerContextKey{}) == "sentinel"
-		}),
-		testWhiteboardID,
-	).Return(whiteboard.Whiteboard{
-		ID:     testWhiteboardID,
-		Kind:   whiteboard.KindHTML,
-		Source: source,
-	}, nil).Once()
-	req := httptest.NewRequest(http.MethodGet, httpx.PublicHTML+testWhiteboardID, nil).WithContext(ctx)
+		}), testWhiteboardID,
+	).Return(whiteboard.Whiteboard{ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: source}, nil).Once()
 	rr := httptest.NewRecorder()
 
-	handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr, req)
+	handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr,
+		httptest.NewRequest(http.MethodGet, httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLContentSuffix, nil).WithContext(ctx))
 
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Equal(t, "text/html; charset=utf-8", rr.Header().Get("Content-Type"))
 	require.Equal(t, source, rr.Body.Bytes())
-	require.NotContains(t, rr.Body.String(), testViewerCSS)
-	require.NotContains(t, rr.Body.String(), testViewerJS)
-	assertPublicWhiteboardHeaders(t, rr)
+	assertHTMLInnerHeaders(t, rr)
+}
+
+func TestHandlerHTMLOuterAndInnerErrorsHaveSecurityHeadersAndIndistinguishableBodies(t *testing.T) {
+	wantBody := "{\"error\":{\"code\":\"not_found\",\"message\":\"resource not found\"}}\n"
+	paths := []struct {
+		name          string
+		assertHeaders func(*testing.T, *httptest.ResponseRecorder)
+	}{
+		{name: "outer", assertHeaders: assertHTMLOuterHeaders},
+		{name: "inner", assertHeaders: assertHTMLInnerHeaders},
+	}
+	for _, route := range paths {
+		t.Run(route.name, func(t *testing.T) {
+			for _, condition := range []string{"malformed", "missing", "expired", "wrong kind"} {
+				t.Run(condition, func(t *testing.T) {
+					id := testWhiteboardID
+					operations := mocks.NewMockOperations(t)
+					switch condition {
+					case "malformed":
+						id = "malformed"
+					case "wrong kind":
+						operations.EXPECT().Get(mock.Anything, id).Return(whiteboard.Whiteboard{Kind: whiteboard.KindMarkdown}, nil).Once()
+					default:
+						operations.EXPECT().Get(mock.Anything, id).Return(whiteboard.Whiteboard{},
+							common.NewError(common.CodeNotFound, "resource not found", errors.New("private "+condition))).Once()
+					}
+					path := httpx.PublicHTML + id
+					if route.name == "inner" {
+						path += httpx.PublicHTMLContentSuffix
+					}
+					rr := httptest.NewRecorder()
+					handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+					require.Equal(t, http.StatusNotFound, rr.Code)
+					require.Equal(t, wantBody, rr.Body.String())
+					require.NotContains(t, rr.Body.String(), "private")
+					route.assertHeaders(t, rr)
+				})
+			}
+		})
+	}
 }
 
 func TestHandlerPublicViewsHideMalformedMissingExpiredAndWrongKindAsSameNotFound(t *testing.T) {
@@ -483,7 +541,11 @@ func TestHandlerPublicViewsHideMalformedMissingExpiredAndWrongKindAsSameNotFound
 					require.Equal(t, wantBody, rr.Body.String())
 					require.NotContains(t, rr.Body.String(), tt.name)
 					require.NotContains(t, rr.Body.String(), "private")
-					assertPublicWhiteboardHeaders(t, rr)
+					if route.kind == whiteboard.KindMarkdown {
+						assertMarkdownHeaders(t, rr, newViewer(t).ContentSecurityPolicy())
+					} else {
+						assertHTMLOuterHeaders(t, rr)
+					}
 				})
 			}
 		})
@@ -794,6 +856,51 @@ func TestHandlerRegistersOnlyExactMutationAndPublicViewRoutes(t *testing.T) {
 			require.Equal(t, http.StatusNotFound, rr.Code)
 		})
 	}
+
+	for _, path := range []string{
+		httpx.PublicHTML + testWhiteboardID + httpx.PublicHTMLContentSuffix + "/extra",
+		httpx.PublicHTML + testWhiteboardID + "/raw",
+	} {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		require.Equal(t, http.StatusNotFound, rr.Code)
+	}
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost,
+		httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLContentSuffix, nil))
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+	require.Equal(t, "GET, HEAD", rr.Header().Get("Allow"))
+}
+
+func TestHandlerPublicHeadResponsesUseExactRoutesHeadersAndNoBody(t *testing.T) {
+	paths := []struct {
+		name          string
+		path          string
+		kind          whiteboard.Kind
+		assertHeaders func(*testing.T, *httptest.ResponseRecorder)
+	}{
+		{name: "markdown", path: httpx.PublicMarkdown + testWhiteboardID, kind: whiteboard.KindMarkdown,
+			assertHeaders: func(t *testing.T, rr *httptest.ResponseRecorder) {
+				assertMarkdownHeaders(t, rr, newViewer(t).ContentSecurityPolicy())
+			}},
+		{name: "html outer", path: httpx.PublicHTML + testWhiteboardID, kind: whiteboard.KindHTML, assertHeaders: assertHTMLOuterHeaders},
+		{name: "html inner", path: httpx.PublicHTML + testWhiteboardID + httpx.PublicHTMLContentSuffix,
+			kind: whiteboard.KindHTML, assertHeaders: assertHTMLInnerHeaders},
+	}
+	for _, tt := range paths {
+		t.Run(tt.name, func(t *testing.T) {
+			operations := mocks.NewMockOperations(t)
+			operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
+				ID: testWhiteboardID, Kind: tt.kind, Source: []byte("must not be served"),
+			}, nil).Once()
+			rr := httptest.NewRecorder()
+			handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr,
+				httptest.NewRequest(http.MethodHead, tt.path, nil))
+			require.Equal(t, http.StatusOK, rr.Code)
+			require.Empty(t, rr.Body.String())
+			tt.assertHeaders(t, rr)
+		})
+	}
 }
 
 func TestHandlerDoesNotLogRequestBodiesOrCapabilityIDs(t *testing.T) {
@@ -918,4 +1025,33 @@ func assertPublicWhiteboardHeaders(t *testing.T, rr *httptest.ResponseRecorder) 
 	require.Equal(t, "no-store", rr.Header().Get("Cache-Control"))
 	require.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"))
 	require.Equal(t, "noindex, nofollow, noarchive", rr.Header().Get("X-Robots-Tag"))
+}
+
+func assertMarkdownHeaders(t *testing.T, rr *httptest.ResponseRecorder, csp string) {
+	t.Helper()
+	assertPublicWhiteboardHeaders(t, rr)
+	require.Equal(t, "DENY", rr.Header().Get("X-Frame-Options"))
+	require.Equal(t, "no-referrer", rr.Header().Get("Referrer-Policy"))
+	require.Equal(t, whiteboard.RestrictivePermissionsPolicy, rr.Header().Get("Permissions-Policy"))
+	require.Equal(t, csp, rr.Header().Get("Content-Security-Policy"))
+	require.Contains(t, csp, "frame-ancestors 'none'")
+}
+
+func assertHTMLOuterHeaders(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	assertPublicWhiteboardHeaders(t, rr)
+	require.Equal(t, "DENY", rr.Header().Get("X-Frame-Options"))
+	require.Equal(t, "no-referrer", rr.Header().Get("Referrer-Policy"))
+	require.Equal(t, whiteboard.RestrictivePermissionsPolicy, rr.Header().Get("Permissions-Policy"))
+	require.Equal(t, whiteboard.StandaloneOuterContentSecurityPolicy, rr.Header().Get("Content-Security-Policy"))
+}
+
+func assertHTMLInnerHeaders(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	assertPublicWhiteboardHeaders(t, rr)
+	require.Equal(t, "SAMEORIGIN", rr.Header().Get("X-Frame-Options"))
+	require.Equal(t, "no-referrer", rr.Header().Get("Referrer-Policy"))
+	require.Equal(t, whiteboard.RestrictivePermissionsPolicy, rr.Header().Get("Permissions-Policy"))
+	require.Equal(t, whiteboard.StandaloneInnerContentSecurityPolicy, rr.Header().Get("Content-Security-Policy"))
+	require.NotContains(t, rr.Header().Get("Content-Security-Policy"), "navigate-to")
 }
