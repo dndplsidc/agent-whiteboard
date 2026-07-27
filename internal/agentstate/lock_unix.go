@@ -15,7 +15,8 @@ import (
 )
 
 type secureDirectory struct {
-	file *os.File
+	file          *os.File
+	mutationGuard func() error
 }
 
 type stateLayout struct {
@@ -142,7 +143,7 @@ func openDirectoryAt(parent *secureDirectory, name string, private bool) (*secur
 	if err != nil {
 		return nil, err
 	}
-	directory := &secureDirectory{file: os.NewFile(uintptr(fd), name)}
+	directory := &secureDirectory{file: os.NewFile(uintptr(fd), name), mutationGuard: parent.mutationGuard}
 	if directory.file == nil {
 		_ = unix.Close(fd)
 		return nil, errors.New("open state directory")
@@ -216,6 +217,9 @@ func (directory *secureDirectory) verifyChild(name string, opened *secureDirecto
 
 func (directory *secureDirectory) ensureDirectory(name string, private bool) (*secureDirectory, bool, error) {
 	created := false
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return nil, false, err
+	}
 	if err := unix.Mkdirat(directory.fd(), name, 0o700); err == nil {
 		created = true
 	} else if !errors.Is(err, unix.EEXIST) {
@@ -230,6 +234,10 @@ func (directory *secureDirectory) ensureDirectory(name string, private bool) (*s
 		return nil, false, err
 	}
 	if created {
+		if err := child.verifyMutationAllowed(); err != nil {
+			_ = child.close()
+			return nil, false, err
+		}
 		if err := unix.Fchmod(child.fd(), 0o700); err != nil {
 			_ = child.close()
 			return nil, false, err
@@ -310,6 +318,9 @@ func randomStateName(prefix string) (string, error) {
 
 func (directory *secureDirectory) createTemporary() (*os.File, string, error) {
 	for attempt := 0; attempt < 128; attempt++ {
+		if err := directory.verifyMutationAllowed(); err != nil {
+			return nil, "", err
+		}
 		name, err := randomStateName(".mapping.tmp-")
 		if err != nil {
 			return nil, "", err
@@ -326,6 +337,10 @@ func (directory *secureDirectory) createTemporary() (*os.File, string, error) {
 			_ = unix.Close(fd)
 			_ = unix.Unlinkat(directory.fd(), name, 0)
 			return nil, "", errors.New("create temporary mapping")
+		}
+		if err := directory.verifyMutationAllowed(); err != nil {
+			_ = file.Close()
+			return nil, "", err
 		}
 		if err := file.Chmod(0o600); err != nil {
 			_ = file.Close()
@@ -450,6 +465,10 @@ func (directory *secureDirectory) names() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := unix.Seek(duplicate, 0, 0); err != nil {
+		_ = unix.Close(duplicate)
+		return nil, err
+	}
 	file := os.NewFile(uintptr(duplicate), "state-directory")
 	if file == nil {
 		_ = unix.Close(duplicate)
@@ -468,6 +487,9 @@ func (directory *secureDirectory) publish(oldName, newName string, original *fil
 		return errors.New("invalid state filename")
 	}
 	if original == nil {
+		if err := directory.verifyMutationAllowed(); err != nil {
+			return err
+		}
 		if err := atomicRenameNoReplace(directory.fd(), oldName, directory.fd(), newName); err != nil {
 			return err
 		}
@@ -477,12 +499,18 @@ func (directory *secureDirectory) publish(oldName, newName string, original *fil
 		}
 		return nil
 	}
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
 	if err := atomicRenameExchange(directory.fd(), oldName, directory.fd(), newName); err != nil {
 		return err
 	}
 	oldCurrent, oldErr := directory.targetIdentity(oldName)
 	newCurrent, newErr := directory.targetIdentity(newName)
 	if oldErr != nil || newErr != nil || oldCurrent != *original || newCurrent != replacement {
+		if err := directory.verifyMutationAllowed(); err != nil {
+			return fmt.Errorf("mapping target changed and rollback was blocked: %w", err)
+		}
 		rollbackErr := atomicRenameExchange(directory.fd(), oldName, directory.fd(), newName)
 		if rollbackErr != nil {
 			return fmt.Errorf("mapping target changed and rollback failed: %w", rollbackErr)
@@ -496,30 +524,54 @@ func (directory *secureDirectory) publish(oldName, newName string, original *fil
 }
 
 func (directory *secureDirectory) removeExpected(name string, expected fileIdentity) error {
+	return directory.removeExpectedWithUnlink(name, expected, func(parent *secureDirectory, tombstone string) error {
+		return parent.unlinkFile(tombstone)
+	})
+}
+
+func (directory *secureDirectory) removeExpectedWithUnlink(name string, expected fileIdentity, unlink func(*secureDirectory, string) error) error {
 	if !validName(name) {
 		return errors.New("invalid state filename")
 	}
-	for attempt := 0; attempt < 128; attempt++ {
-		tombstone, err := randomStateName(".mapping.tomb-")
-		if err != nil {
-			return err
-		}
-		if err := atomicRenameNoReplace(directory.fd(), name, directory.fd(), tombstone); errors.Is(err, unix.EEXIST) {
-			continue
-		} else if err != nil {
-			return err
-		}
-		current, inspectErr := directory.targetIdentity(tombstone)
-		if inspectErr != nil || current != expected {
-			restoreErr := atomicRenameNoReplace(directory.fd(), tombstone, directory.fd(), name)
-			if restoreErr != nil {
-				return fmt.Errorf("target identity changed and restore failed: %w", restoreErr)
-			}
-			return errors.New("target identity changed before removal")
-		}
-		return unix.Unlinkat(directory.fd(), tombstone, 0)
+	tombstone := mappingTombstoneName(name)
+	if !validName(tombstone) {
+		return errors.New("invalid mapping tombstone name")
 	}
-	return errors.New("tombstone collision limit exceeded")
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
+	if err := atomicRenameNoReplace(directory.fd(), name, directory.fd(), tombstone); err != nil {
+		return err
+	}
+	current, inspectErr := directory.targetIdentity(tombstone)
+	if inspectErr != nil || current != expected {
+		restoreErr := directory.restoreTombstone(tombstone, name)
+		if restoreErr != nil {
+			return fmt.Errorf("target identity changed and restore failed: %w", restoreErr)
+		}
+		return errors.New("target identity changed before removal")
+	}
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
+	if err := unlink(directory, tombstone); err != nil {
+		restoreErr := directory.restoreTombstone(tombstone, name)
+		if restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restore mapping after failed unlink: %w", restoreErr))
+		}
+		return err
+	}
+	return nil
+}
+
+func (directory *secureDirectory) restoreTombstone(tombstone, name string) error {
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
+	if err := atomicRenameNoReplace(directory.fd(), tombstone, directory.fd(), name); err != nil {
+		return err
+	}
+	return directory.sync()
 }
 
 func (directory *secureDirectory) remove(name string) error {
@@ -531,14 +583,36 @@ func (directory *secureDirectory) remove(name string) error {
 }
 
 func (directory *secureDirectory) removeDirectory(name string) error {
-	return directory.removeDirectoryWithHook(name, func() {})
+	return directory.removeDirectoryWithHook(
+		name,
+		func() {},
+		func(workspace *secureDirectory) error { return workspace.close() },
+		func(parent *secureDirectory, tombstone string) error { return parent.unlinkDirectory(tombstone) },
+	)
 }
 
-func (directory *secureDirectory) removeDirectoryWithHook(name string, beforeTombstone func()) error {
+func (directory *secureDirectory) removeDirectoryWithHook(
+	name string,
+	beforeTombstone func(),
+	closeWorkspace func(*secureDirectory) error,
+	unlinkWorkspace func(*secureDirectory, string) error,
+) error {
 	if !validName(name) {
 		return errors.New("invalid state directory name")
 	}
+	tombstone := workspaceTombstoneName(name)
+	if !validName(tombstone) {
+		return errors.New("invalid workspace tombstone name")
+	}
+
 	child, err := openDirectoryAt(directory, name, true)
+	fromCanonical := err == nil
+	if errors.Is(err, unix.ENOENT) {
+		child, err = openDirectoryAt(directory, tombstone, true)
+		if errors.Is(err, unix.ENOENT) {
+			return os.ErrNotExist
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -547,27 +621,29 @@ func (directory *secureDirectory) removeDirectoryWithHook(name string, beforeTom
 		_ = child.close()
 		return err
 	}
-	beforeTombstone()
-	var tombstone string
-	for attempt := 0; attempt < 128; attempt++ {
-		tombstone, err = randomStateName(".workspace.tomb-")
-		if err != nil {
+
+	if fromCanonical {
+		if _, tombErr := directory.childIdentity(tombstone); tombErr == nil {
+			_ = child.close()
+			return errors.New("workspace has a pending tombstone")
+		} else if !errors.Is(tombErr, unix.ENOENT) {
+			_ = child.close()
+			return tombErr
+		}
+		beforeTombstone()
+		if err := directory.verifyMutationAllowed(); err != nil {
 			_ = child.close()
 			return err
 		}
-		err = atomicRenameNoReplace(directory.fd(), name, directory.fd(), tombstone)
-		if errors.Is(err, unix.EEXIST) {
-			continue
+		if err := atomicRenameNoReplace(directory.fd(), name, directory.fd(), tombstone); err != nil {
+			_ = child.close()
+			return err
 		}
-		break
 	}
-	if err != nil {
-		_ = child.close()
-		return err
-	}
+
 	current, inspectErr := directory.childIdentity(tombstone)
 	if inspectErr != nil || current != expected {
-		restoreErr := atomicRenameNoReplace(directory.fd(), tombstone, directory.fd(), name)
+		restoreErr := directory.restoreWorkspaceTombstone(tombstone, name)
 		_ = child.close()
 		if restoreErr != nil {
 			return fmt.Errorf("workspace identity changed and restore failed: %w", restoreErr)
@@ -575,17 +651,38 @@ func (directory *secureDirectory) removeDirectoryWithHook(name string, beforeTom
 		return errors.New("workspace identity changed before removal")
 	}
 	if err := child.removeContents(); err != nil {
-		restoreErr := atomicRenameNoReplace(directory.fd(), tombstone, directory.fd(), name)
+		restoreErr := directory.restoreWorkspaceTombstone(tombstone, name)
 		_ = child.close()
 		if restoreErr != nil {
 			return errors.Join(err, fmt.Errorf("restore workspace after failed cleanup: %w", restoreErr))
 		}
 		return err
 	}
-	if err := child.close(); err != nil {
+	if err := closeWorkspace(child); err != nil {
+		restoreErr := directory.restoreWorkspaceTombstone(tombstone, name)
+		if restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restore workspace after failed close: %w", restoreErr))
+		}
 		return err
 	}
-	if err := unix.Unlinkat(directory.fd(), tombstone, unix.AT_REMOVEDIR); err != nil {
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
+	if err := unlinkWorkspace(directory, tombstone); err != nil {
+		restoreErr := directory.restoreWorkspaceTombstone(tombstone, name)
+		if restoreErr != nil {
+			return errors.Join(err, fmt.Errorf("restore workspace after failed unlink: %w", restoreErr))
+		}
+		return err
+	}
+	return directory.sync()
+}
+
+func (directory *secureDirectory) restoreWorkspaceTombstone(tombstone, name string) error {
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
+	if err := atomicRenameNoReplace(directory.fd(), tombstone, directory.fd(), name); err != nil {
 		return err
 	}
 	return directory.sync()
@@ -617,14 +714,14 @@ func (directory *secureDirectory) removeContents() error {
 			if err := child.close(); err != nil {
 				return err
 			}
-			if err := unix.Unlinkat(directory.fd(), name, unix.AT_REMOVEDIR); err != nil {
+			if err := directory.unlinkDirectory(name); err != nil {
 				return err
 			}
 		case unix.S_IFREG:
 			if err := validateRegularStat(&stat, 0o600); err != nil {
 				return err
 			}
-			if err := unix.Unlinkat(directory.fd(), name, 0); err != nil {
+			if err := directory.unlinkFile(name); err != nil {
 				return err
 			}
 		default:
@@ -632,6 +729,31 @@ func (directory *secureDirectory) removeContents() error {
 		}
 	}
 	return directory.sync()
+}
+
+func (directory *secureDirectory) setMutationGuard(guard func() error) {
+	directory.mutationGuard = guard
+}
+
+func (directory *secureDirectory) verifyMutationAllowed() error {
+	if directory.mutationGuard == nil {
+		return nil
+	}
+	return directory.mutationGuard()
+}
+
+func (directory *secureDirectory) unlinkFile(name string) error {
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
+	return unix.Unlinkat(directory.fd(), name, 0)
+}
+
+func (directory *secureDirectory) unlinkDirectory(name string) error {
+	if err := directory.verifyMutationAllowed(); err != nil {
+		return err
+	}
+	return unix.Unlinkat(directory.fd(), name, unix.AT_REMOVEDIR)
 }
 
 func (directory *secureDirectory) sync() error  { return unix.Fsync(directory.fd()) }

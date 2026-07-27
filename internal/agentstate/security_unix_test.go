@@ -317,6 +317,133 @@ func TestWorkspaceTombstonePreservesSwappedTarget(t *testing.T) {
 	require.Equal(t, []byte("safe"), actual)
 }
 
+func TestRootSwapHooksCannotMutateDetachedState(t *testing.T) {
+	t.Run("mapping publish", func(t *testing.T) {
+		store := openTestStore(t)
+		root, moved := store.Root(), store.Root()+".moved"
+		realPublish := store.conversations.publish
+		store.ops.publish = func(oldName, newName string, original *fileIdentity, replacement fileIdentity) error {
+			require.NoError(t, os.Rename(root, moved))
+			require.NoError(t, os.MkdirAll(filepath.Join(root, "conversations"), 0o700))
+			return realPublish(oldName, newName, original, replacement)
+		}
+		now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+		outcome, err := store.Create(testIdentity(), testSession(t, testID, "sessions/current", now), now)
+		require.Error(t, err)
+		require.Equal(t, CommitNotApplied, outcome)
+		key, keyErr := ConversationKey(testIdentity())
+		require.NoError(t, keyErr)
+		_, err = os.Stat(filepath.Join(moved, "conversations", mappingName(key)))
+		require.ErrorIs(t, err, os.ErrNotExist, "the detached conversation directory must not be published through")
+	})
+
+	t.Run("workspace tombstone", func(t *testing.T) {
+		store := openTestStore(t)
+		workspace, err := store.EnsureWorkspace(testID)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(workspace, "original"), []byte("safe"), 0o600))
+		root, moved := store.Root(), store.Root()+".moved"
+		store.ops.beforeWorkspaceTombstone = func() {
+			require.NoError(t, os.Rename(root, moved))
+			require.NoError(t, os.MkdirAll(filepath.Join(root, "workspaces"), 0o700))
+		}
+		require.Error(t, store.RemoveWorkspace(testID))
+		actual, readErr := os.ReadFile(filepath.Join(moved, "workspaces", testID, "original"))
+		require.NoError(t, readErr)
+		require.Equal(t, []byte("safe"), actual)
+		_, err = os.Stat(filepath.Join(moved, "workspaces", workspaceTombstoneName(testID)))
+		require.ErrorIs(t, err, os.ErrNotExist, "the detached workspace must not be tombstoned")
+	})
+}
+
+func TestWorkspaceRemovalFailuresRemainRetryable(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		inject func(*Store)
+	}{
+		{name: "close", inject: func(store *Store) {
+			realClose := store.ops.closeWorkspace
+			store.ops.closeWorkspace = func(directory *secureDirectory) error {
+				require.NoError(t, realClose(directory))
+				return errors.New("injected close failure")
+			}
+		}},
+		{name: "final unlink", inject: func(store *Store) {
+			store.ops.unlinkWorkspace = func(*secureDirectory, string) error { return errors.New("injected unlink failure") }
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := openTestStore(t)
+			workspace, err := store.EnsureWorkspace(testID)
+			require.NoError(t, err)
+			test.inject(store)
+			require.Error(t, store.RemoveWorkspace(testID))
+			info, statErr := os.Stat(workspace)
+			require.NoError(t, statErr, "failed removal must restore the canonical workspace")
+			require.True(t, info.IsDir())
+			store.ops = defaultFileOps(store.conversations)
+			require.NoError(t, store.RemoveWorkspace(testID))
+			_, err = os.Stat(workspace)
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func TestWorkspaceUnlinkRestoreConflictRetainsDeterministicTombstone(t *testing.T) {
+	store := openTestStore(t)
+	workspace, err := store.EnsureWorkspace(testID)
+	require.NoError(t, err)
+	store.ops.unlinkWorkspace = func(_ *secureDirectory, _ string) error {
+		require.NoError(t, os.Mkdir(workspace, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(workspace, "substitution"), []byte("keep"), 0o600))
+		return errors.New("injected unlink failure")
+	}
+	require.Error(t, store.RemoveWorkspace(testID))
+	tombstone := filepath.Join(store.Root(), "workspaces", workspaceTombstoneName(testID))
+	info, err := os.Stat(tombstone)
+	require.NoError(t, err, "the failed workspace must retain a name derived from its conversation ID")
+	require.True(t, info.IsDir())
+	actual, err := os.ReadFile(filepath.Join(workspace, "substitution"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), actual)
+
+	store.ops = defaultFileOps(store.conversations)
+	require.Error(t, store.RemoveWorkspace(testID), "a canonical substitution must block tombstone cleanup")
+	require.NoError(t, os.RemoveAll(workspace))
+	require.NoError(t, store.RemoveWorkspace(testID), "retry must discover and remove the deterministic tombstone")
+	_, err = os.Stat(tombstone)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestMappingTombstoneCleanupPreservesCanonicalSubstitution(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	_, err := store.Create(testIdentity(), testSession(t, testID, "sessions/current", now), now)
+	require.NoError(t, err)
+	key, err := ConversationKey(testIdentity())
+	require.NoError(t, err)
+	name := mappingName(key)
+	expected, err := store.conversations.targetIdentity(name)
+	require.NoError(t, err)
+	canonical := filepath.Join(store.Root(), "conversations", name)
+	replacement := []byte(`{"substitution":true}`)
+	err = store.conversations.removeExpectedWithUnlink(name, expected, func(_ *secureDirectory, _ string) error {
+		require.NoError(t, os.WriteFile(canonical, replacement, 0o600))
+		return errors.New("injected unlink failure")
+	})
+	require.Error(t, err)
+	tombstone := filepath.Join(store.Root(), "conversations", mappingTombstoneName(name))
+	_, err = os.Stat(tombstone)
+	require.NoError(t, err)
+
+	require.NoError(t, cleanTemporaryMappings(store.conversations))
+	actual, err := os.ReadFile(canonical)
+	require.NoError(t, err)
+	require.Equal(t, replacement, actual, "cleanup must not delete the canonical substitution")
+	_, err = os.Stat(tombstone)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestWorkspaceRemovalIsRecursiveButRejectsUnsafeEntries(t *testing.T) {
 	store := openTestStore(t)
 	workspace, err := store.EnsureWorkspace(testID)

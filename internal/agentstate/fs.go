@@ -26,6 +26,8 @@ type fileOps struct {
 	syncDir                  func() error
 	beforePathReturn         func()
 	beforeWorkspaceTombstone func()
+	closeWorkspace           func(*secureDirectory) error
+	unlinkWorkspace          func(*secureDirectory, string) error
 }
 
 func defaultFileOps(directory *secureDirectory) fileOps {
@@ -35,8 +37,13 @@ func defaultFileOps(directory *secureDirectory) fileOps {
 		syncDir:                  directory.sync,
 		beforePathReturn:         func() {},
 		beforeWorkspaceTombstone: func() {},
+		closeWorkspace:           func(workspace *secureDirectory) error { return workspace.close() },
+		unlinkWorkspace:          func(parent *secureDirectory, name string) error { return parent.unlinkDirectory(name) },
 	}
 }
+
+func mappingTombstoneName(name string) string   { return ".mapping.tomb-" + name }
+func workspaceTombstoneName(name string) string { return ".workspace.tomb-" + name }
 
 type durableIdentity struct {
 	Origin       string        `json:"origin"`
@@ -370,13 +377,14 @@ func cleanTemporaryMappings(directory *secureDirectory) error {
 		return err
 	}
 	for _, name := range names {
-		if !strings.HasPrefix(name, ".mapping.tmp-") {
+		if !strings.HasPrefix(name, ".mapping.tmp-") && !strings.HasPrefix(name, ".mapping.tomb-") {
 			continue
 		}
-		if _, _, err := directory.readVerified(name, maxMappingBytes); err != nil {
+		_, expected, err := directory.readVerified(name, maxMappingBytes)
+		if err != nil {
 			return fmt.Errorf("unsafe temporary mapping %q: %w", name, err)
 		}
-		if err := directory.remove(name); err != nil {
+		if err := directory.removeExpected(name, expected); err != nil {
 			return err
 		}
 	}

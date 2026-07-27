@@ -44,7 +44,9 @@ func (directory *secureDirectory) publish(string, string, *fileIdentity, fileIde
 func (directory *secureDirectory) removeExpected(string, fileIdentity) error { return ErrUnsupported }
 func (directory *secureDirectory) remove(string) error                       { return ErrUnsupported }
 func (directory *secureDirectory) removeDirectory(string) error              { return ErrUnsupported }
-func (directory *secureDirectory) removeDirectoryWithHook(string, func()) error {
+func (directory *secureDirectory) removeDirectoryWithHook(string, func(), func(*secureDirectory) error, func(*secureDirectory, string) error) error {
 	return ErrUnsupported
 }
-func (directory *secureDirectory) sync() error { return ErrUnsupported }
+func (directory *secureDirectory) setMutationGuard(func() error) {}
+func (directory *secureDirectory) unlinkDirectory(string) error  { return ErrUnsupported }
+func (directory *secureDirectory) sync() error                   { return ErrUnsupported }

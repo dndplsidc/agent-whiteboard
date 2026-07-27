@@ -103,6 +103,9 @@ func Open(home string) (*Store, error) {
 		locks: keyedLocks{entries: make(map[string]*keyedLock)}, homeGuardKey: canonical,
 	}
 	store.ops = defaultFileOps(store.conversations)
+	for _, directory := range []*secureDirectory{store.conversations, store.workspaces, store.providers} {
+		directory.setMutationGuard(store.verifyLayout)
+	}
 	if err := cleanTemporaryMappings(store.conversations); err != nil {
 		_ = layout.close()
 		return nil, fmt.Errorf("clean temporary mappings: %w", err)
@@ -466,7 +469,7 @@ func (store *Store) RemoveWorkspace(conversationID string) error {
 		return err
 	}
 	defer release()
-	if err := store.workspaces.removeDirectoryWithHook(conversationID, store.ops.beforeWorkspaceTombstone); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := store.workspaces.removeDirectoryWithHook(conversationID, store.ops.beforeWorkspaceTombstone, store.ops.closeWorkspace, store.ops.unlinkWorkspace); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return store.verifyLayout()
