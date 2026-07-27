@@ -1,0 +1,444 @@
+//go:build darwin || linux
+
+package agentstate
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"golang.org/x/sys/unix"
+)
+
+type secureDirectory struct {
+	file *os.File
+}
+
+type stateLayout struct {
+	rootPath      string
+	state         *secureDirectory
+	conversations *secureDirectory
+	workspaces    *secureDirectory
+	providers     *secureDirectory
+	lock          *os.File
+}
+
+func openStateLayout(home string) (*stateLayout, error) {
+	homePath, err := filepath.Abs(home)
+	if err != nil {
+		return nil, err
+	}
+	homeDir, err := openAbsoluteDirectory(homePath, false)
+	if err != nil {
+		return nil, fmt.Errorf("open home directory: %w", err)
+	}
+	agentDir, _, err := homeDir.ensureDirectory(".agent-whiteboard", false)
+	_ = homeDir.close()
+	if err != nil {
+		return nil, fmt.Errorf("open agent-whiteboard directory: %w", err)
+	}
+	stateDir, _, err := agentDir.ensureDirectory("state", true)
+	if err != nil {
+		_ = agentDir.close()
+		return nil, fmt.Errorf("open state directory: %w", err)
+	}
+	_ = agentDir.close()
+
+	layout := &stateLayout{rootPath: filepath.Join(homePath, ".agent-whiteboard", "state"), state: stateDir}
+	failed := true
+	defer func() {
+		if failed {
+			_ = layout.close()
+		}
+	}()
+	if layout.conversations, _, err = stateDir.ensureDirectory("conversations", true); err != nil {
+		return nil, fmt.Errorf("open conversations directory: %w", err)
+	}
+	if layout.workspaces, _, err = stateDir.ensureDirectory("workspaces", true); err != nil {
+		return nil, fmt.Errorf("open workspaces directory: %w", err)
+	}
+	if layout.providers, _, err = stateDir.ensureDirectory("providers", true); err != nil {
+		return nil, fmt.Errorf("open providers directory: %w", err)
+	}
+	layout.lock, err = acquireBrokerLock(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	failed = false
+	return layout, nil
+}
+
+func (layout *stateLayout) close() error {
+	if layout == nil {
+		return nil
+	}
+	var errs []error
+	if layout.lock != nil {
+		_ = unix.Flock(int(layout.lock.Fd()), unix.LOCK_UN)
+		errs = append(errs, layout.lock.Close())
+		layout.lock = nil
+	}
+	for _, directory := range []*secureDirectory{layout.providers, layout.workspaces, layout.conversations, layout.state} {
+		if directory != nil {
+			errs = append(errs, directory.close())
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func openAbsoluteDirectory(path string, private bool) (*secureDirectory, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	directory := &secureDirectory{file: os.NewFile(uintptr(fd), path)}
+	if directory.file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open directory")
+	}
+	if err := directory.validate(private); err != nil {
+		_ = directory.close()
+		return nil, err
+	}
+	return directory, nil
+}
+
+func openDirectoryAt(parent *secureDirectory, name string, private bool) (*secureDirectory, error) {
+	if !validName(name) {
+		return nil, errors.New("invalid state path name")
+	}
+	fd, err := unix.Openat(parent.fd(), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	directory := &secureDirectory{file: os.NewFile(uintptr(fd), name)}
+	if directory.file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open state directory")
+	}
+	if err := directory.validate(private); err != nil {
+		_ = directory.close()
+		return nil, err
+	}
+	return directory, nil
+}
+
+func (directory *secureDirectory) validate(private bool) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(directory.fd(), &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("state directory must be an owner-controlled directory")
+	}
+	permissions := os.FileMode(stat.Mode & 0o777)
+	if private {
+		if permissions != 0o700 {
+			return errors.New("state directory must have mode 0700")
+		}
+	} else if permissions&0o022 != 0 {
+		return errors.New("state parent must not be writable by group or others")
+	}
+	return nil
+}
+
+func (directory *secureDirectory) ensureDirectory(name string, private bool) (*secureDirectory, bool, error) {
+	created := false
+	if err := unix.Mkdirat(directory.fd(), name, 0o700); err == nil {
+		created = true
+	} else if !errors.Is(err, unix.EEXIST) {
+		return nil, false, err
+	}
+	child, err := openDirectoryAt(directory, name, private)
+	if err != nil {
+		return nil, false, err
+	}
+	if created {
+		if err := unix.Fchmod(child.fd(), 0o700); err != nil {
+			_ = child.close()
+			return nil, false, err
+		}
+		if err := directory.sync(); err != nil {
+			_ = child.close()
+			return nil, false, err
+		}
+	}
+	return child, created, nil
+}
+
+func acquireBrokerLock(directory *secureDirectory) (*os.File, error) {
+	fd, created, err := -1, false, error(nil)
+	for attempt := 0; attempt < 128; attempt++ {
+		fd, created, err = openOrCreateFile(directory, "broker.lock", 0o600)
+		if !errors.Is(err, unix.EEXIST) && !errors.Is(err, unix.ENOENT) {
+			break
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open broker lock: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), "broker.lock")
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open broker lock")
+	}
+	failed := true
+	defer func() {
+		if failed {
+			_ = file.Close()
+		}
+	}()
+	if created {
+		if err := file.Chmod(0o600); err != nil {
+			return nil, err
+		}
+		if err := directory.sync(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := verifiedFileStat(directory, "broker.lock", file, 0o600); err != nil {
+		return nil, fmt.Errorf("inspect broker lock: %w", err)
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, ErrLocked
+		}
+		return nil, fmt.Errorf("acquire broker lock: %w", err)
+	}
+	failed = false
+	return file, nil
+}
+
+func openOrCreateFile(directory *secureDirectory, name string, mode uint32) (fd int, created bool, err error) {
+	fd, err = unix.Openat(directory.fd(), name, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err == nil {
+		return fd, false, nil
+	}
+	if !errors.Is(err, unix.ENOENT) {
+		return -1, false, err
+	}
+	fd, err = unix.Openat(directory.fd(), name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, mode)
+	if err != nil {
+		return -1, false, err
+	}
+	return fd, true, nil
+}
+
+func (directory *secureDirectory) createTemporary() (*os.File, string, error) {
+	for attempt := 0; attempt < 128; attempt++ {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, "", err
+		}
+		name := ".mapping.tmp-" + hex.EncodeToString(random[:])
+		fd, err := unix.Openat(directory.fd(), name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		file := os.NewFile(uintptr(fd), name)
+		if file == nil {
+			_ = unix.Close(fd)
+			_ = unix.Unlinkat(directory.fd(), name, 0)
+			return nil, "", errors.New("create temporary mapping")
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			_ = unix.Unlinkat(directory.fd(), name, 0)
+			return nil, "", err
+		}
+		return file, name, nil
+	}
+	return nil, "", errors.New("temporary mapping collision limit exceeded")
+}
+
+func (directory *secureDirectory) readVerified(name string, limit int64) ([]byte, fileIdentity, error) {
+	if !validName(name) {
+		return nil, fileIdentity{}, errors.New("invalid state filename")
+	}
+	var before unix.Stat_t
+	if err := unix.Fstatat(directory.fd(), name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, fileIdentity{}, err
+	}
+	if err := validateRegularStat(&before, 0o600); err != nil {
+		return nil, fileIdentity{}, err
+	}
+	fd, err := unix.Openat(directory.fd(), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fileIdentity{}, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fileIdentity{}, errors.New("open state file")
+	}
+	defer file.Close()
+	openedIdentity, err := verifiedFileStat(directory, name, file, 0o600)
+	if err != nil {
+		return nil, fileIdentity{}, err
+	}
+	if openedIdentity != identityFromStat(&before) {
+		return nil, fileIdentity{}, errors.New("state file identity changed while opening")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, fileIdentity{}, err
+	}
+	if int64(len(content)) > limit {
+		return nil, fileIdentity{}, errors.New("conversation mapping exceeds size limit")
+	}
+	return content, identityFromStat(&before), nil
+}
+
+func verifiedFileStat(directory *secureDirectory, name string, file *os.File, mode os.FileMode) (fileIdentity, error) {
+	var opened unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &opened); err != nil {
+		return fileIdentity{}, err
+	}
+	if err := validateRegularStat(&opened, mode); err != nil {
+		return fileIdentity{}, err
+	}
+	var current unix.Stat_t
+	if err := unix.Fstatat(directory.fd(), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fileIdentity{}, err
+	}
+	if err := validateRegularStat(&current, mode); err != nil || identityFromStat(&current) != identityFromStat(&opened) {
+		return fileIdentity{}, errors.New("state file identity changed while opening")
+	}
+	return identityFromStat(&opened), nil
+}
+
+func validateRegularStat(stat *unix.Stat_t, mode os.FileMode) error {
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || uint64(stat.Nlink) != 1 {
+		return errors.New("state file must be an owner-controlled, singly-linked regular file")
+	}
+	if os.FileMode(stat.Mode&0o777) != mode {
+		return fmt.Errorf("state file must have mode %04o", mode)
+	}
+	return nil
+}
+
+func (directory *secureDirectory) targetIdentity(name string) (fileIdentity, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(directory.fd(), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fileIdentity{}, err
+	}
+	if err := validateRegularStat(&stat, 0o600); err != nil {
+		return fileIdentity{}, err
+	}
+	return identityFromStat(&stat), nil
+}
+
+func identityFromStat(stat *unix.Stat_t) fileIdentity {
+	return fileIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino)}
+}
+
+func (directory *secureDirectory) names() ([]string, error) {
+	duplicate, err := unix.Dup(directory.fd())
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(duplicate), "state-directory")
+	if file == nil {
+		_ = unix.Close(duplicate)
+		return nil, errors.New("read state directory")
+	}
+	names, readErr := file.Readdirnames(-1)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	return names, closeErr
+}
+
+func (directory *secureDirectory) rename(oldName, newName string) error {
+	if !validName(oldName) || !validName(newName) {
+		return errors.New("invalid state filename")
+	}
+	return unix.Renameat(directory.fd(), oldName, directory.fd(), newName)
+}
+
+func (directory *secureDirectory) remove(name string) error {
+	if !validName(name) {
+		return errors.New("invalid state filename")
+	}
+	return unix.Unlinkat(directory.fd(), name, 0)
+}
+
+func (directory *secureDirectory) removeDirectory(name string) error {
+	if !validName(name) {
+		return errors.New("invalid state directory name")
+	}
+	child, err := openDirectoryAt(directory, name, true)
+	if err != nil {
+		return err
+	}
+	if err := child.removeContents(); err != nil {
+		_ = child.close()
+		return err
+	}
+	if err := child.close(); err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(directory.fd(), name, unix.AT_REMOVEDIR); err != nil {
+		return err
+	}
+	return directory.sync()
+}
+
+func (directory *secureDirectory) removeContents() error {
+	names, err := directory.names()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if !validName(name) {
+			return errors.New("invalid workspace entry")
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstatat(directory.fd(), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		switch stat.Mode & unix.S_IFMT {
+		case unix.S_IFDIR:
+			child, err := openDirectoryAt(directory, name, true)
+			if err != nil {
+				return err
+			}
+			if err := child.removeContents(); err != nil {
+				_ = child.close()
+				return err
+			}
+			if err := child.close(); err != nil {
+				return err
+			}
+			if err := unix.Unlinkat(directory.fd(), name, unix.AT_REMOVEDIR); err != nil {
+				return err
+			}
+		case unix.S_IFREG:
+			if err := validateRegularStat(&stat, 0o600); err != nil {
+				return err
+			}
+			if err := unix.Unlinkat(directory.fd(), name, 0); err != nil {
+				return err
+			}
+		default:
+			return errors.New("workspace entry must be a real regular file or directory")
+		}
+	}
+	return directory.sync()
+}
+
+func (directory *secureDirectory) sync() error  { return unix.Fsync(directory.fd()) }
+func (directory *secureDirectory) fd() int      { return int(directory.file.Fd()) }
+func (directory *secureDirectory) close() error { return directory.file.Close() }
+
+func validName(name string) bool {
+	return name != "" && name != "." && name != ".." && filepath.Base(name) == name
+}
