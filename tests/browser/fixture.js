@@ -425,6 +425,55 @@ function createLoopbackStub() {
   return { server, requests };
 }
 
+function createStandaloneCaptureServer(upstreamURL, captureSelfNavigation = false) {
+  const upstream = new URL(upstreamURL);
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    const record = requestRecord(request);
+    requests.push(record);
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      record.body = Buffer.concat(chunks).toString("utf8");
+      if (captureSelfNavigation && request.url?.startsWith("/self-navigation?")) {
+        record.status = 200;
+        record.responseHeaders = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
+        response.writeHead(record.status, record.responseHeaders);
+        response.end("<!doctype html><meta charset=utf-8><title>capture received</title><p>capture received</p>");
+        return;
+      }
+      const proxyRequest = http.request(
+        {
+          hostname: upstream.hostname,
+          port: upstream.port,
+          method: request.method,
+          path: request.url,
+          headers: { ...request.headers, host: upstream.host },
+        },
+        (proxyResponse) => {
+          record.status = proxyResponse.statusCode;
+          record.responseHeaders = { ...proxyResponse.headers };
+          response.writeHead(proxyResponse.statusCode ?? 502, proxyResponse.headers);
+          proxyResponse.pipe(response);
+        },
+      );
+      proxyRequest.once("error", (error) => {
+        record.status = 502;
+        if (!response.headersSent) response.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end(`capture proxy failed: ${error.message}`);
+      });
+      proxyRequest.end(record.body);
+    });
+  });
+  server.on("upgrade", (request, socket) => {
+    const record = requestRecord(request);
+    record.status = 426;
+    requests.push(record);
+    socket.end("HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  });
+  return { server, requests };
+}
+
 export const test = base.extend({
   server: [
     async ({}, use) => {
@@ -517,6 +566,53 @@ export const test = base.extend({
       return envelope.resource;
     });
   },
+
+  publishHTML: async ({ server }, use) => {
+    let sequence = 0;
+    await use(async (html) => {
+      const fixturePath = path.join(server.root, `standalone-${sequence++}.html`);
+      await fs.writeFile(fixturePath, html, { mode: 0o600 });
+      const { stdout, stderr } = await runProcess(
+        server.binary,
+        ["--server", server.url, "--json", "create", "html", "--expires-in", "0", fixturePath],
+        { env: server.env, timeout: processTimeout },
+      );
+      if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);
+      const envelope = JSON.parse(stdout);
+      if (envelope.schema_version !== 1 || typeof envelope.resource?.url !== "string") {
+        throw new Error(`invalid CLI JSON: ${stdout}`);
+      }
+      return envelope.resource;
+    });
+  },
+
+  standaloneCapture: [
+    async ({ server }, use) => {
+      const publishingOrigin = createStandaloneCaptureServer(server.url, true);
+      const publishingSockets = trackConnections(publishingOrigin.server);
+      const crossOrigin = createStandaloneCaptureServer(server.url);
+      const crossSockets = trackConnections(crossOrigin.server);
+      try {
+        const publishingPort = await listen(publishingOrigin.server, "127.0.0.1");
+        const crossPort = await listen(crossOrigin.server, "127.0.0.1");
+        await use({
+          origin: `http://127.0.0.1:${publishingPort}`,
+          requests: publishingOrigin.requests,
+          reset: () => publishingOrigin.requests.splice(0),
+          crossOrigin: {
+            origin: `http://127.0.0.1:${crossPort}`,
+            requests: crossOrigin.requests,
+          },
+        });
+      } finally {
+        await Promise.all([
+          closeNodeServer(crossOrigin.server, crossSockets),
+          closeNodeServer(publishingOrigin.server, publishingSockets),
+        ]);
+      }
+    },
+    { scope: "worker" },
+  ],
 
   browserRequestInterception: [true, { option: true }],
 

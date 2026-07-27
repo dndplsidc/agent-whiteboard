@@ -33,7 +33,7 @@ func TestDocumentationContracts(t *testing.T) {
 		"GET /healthz", "GET /readyz",
 		"POST /api/v1/whiteboards/markdown", "PUT /api/v1/whiteboards/markdown/{id}", "DELETE /api/v1/whiteboards/markdown/{id}",
 		"POST /api/v1/whiteboards/html", "PUT /api/v1/whiteboards/html/{id}", "DELETE /api/v1/whiteboards/html/{id}",
-		"GET /whiteboards/markdown/{id}", "GET /whiteboards/html/{id}",
+		"GET /whiteboards/markdown/{id}", "GET /whiteboards/html/{id}", "GET /whiteboards/html/{id}/content",
 		"POST /api/v1/images", "PUT /api/v1/images/{id}", "DELETE /api/v1/images/{id}", "GET /images/{id}",
 	}
 	for _, route := range routes {
@@ -60,9 +60,13 @@ func TestDocumentationContracts(t *testing.T) {
 	require.Equal(t, 200, markdownResponse.StatusCode)
 	htmlResponse, htmlBody := fetch(t, html.Resource.URL)
 	require.Equal(t, 200, htmlResponse.StatusCode)
+	require.NotContains(t, htmlBody, "Agent Whiteboard Example")
+	require.Contains(t, htmlBody, `src="/whiteboards/html/`+html.Resource.ID+`/content" sandbox="allow-scripts"`)
 	wantHTML, err := os.ReadFile(htmlPath)
 	require.NoError(t, err)
-	require.Equal(t, wantHTML, []byte(htmlBody))
+	htmlContentResponse, htmlContentBody := fetch(t, html.Resource.URL+"/content")
+	require.Equal(t, 200, htmlContentResponse.StatusCode)
+	require.Equal(t, wantHTML, []byte(htmlContentBody))
 }
 
 func readDocumentation(t *testing.T, path string) string {

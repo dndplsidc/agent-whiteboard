@@ -139,29 +139,86 @@ func TestLegacyMarkdownReadMigratesOnFirstPairedUpdateAndDeletesBothArtifacts(t 
 
 func TestHTMLLifecycleAndValidation(t *testing.T) {
 	server := startServer(t)
-	firstSource := []byte(`<!doctype html><html><head><style>body{color:#123}</style><script>window.inline=true</script></head><body><p>exact ✓</p></body></html>`)
+	firstSource := []byte(`<!doctype html><html><head><style>body{color:#123}</style><script>window.inline="HOSTILE_EXACT_BYTES_8f03"</script></head><body><p>exact ✓</p></body></html>`)
 	firstFile := writeFixture(t, "first.html", firstSource)
 	created := runCLIResource(t, server, "--json", "create", "html", firstFile)
 	require.True(t, strings.HasPrefix(created.Resource.URL, server.URL+"/whiteboards/html/"))
+	contentURL := created.Resource.URL + "/content"
 
-	response, body := fetch(t, created.Resource.URL)
+	response, outer := fetch(t, created.Resource.URL)
 	require.Equal(t, http.StatusOK, response.StatusCode)
-	require.Equal(t, firstSource, []byte(body))
 	require.Equal(t, "text/html; charset=utf-8", response.Header.Get("Content-Type"))
-	require.Equal(t, "no-store", response.Header.Get("Cache-Control"))
-	require.Equal(t, "noindex, nofollow, noarchive", response.Header.Get("X-Robots-Tag"))
-	require.Equal(t, "nosniff", response.Header.Get("X-Content-Type-Options"))
+	assertStandaloneOuterResponse(t, response)
+	require.NotContains(t, outer, "HOSTILE_EXACT_BYTES_8f03")
+	require.NotContains(t, outer, string(firstSource))
+	require.Equal(t, 1, strings.Count(outer, "<iframe "))
+	require.Contains(t, outer, `src="/whiteboards/html/`+created.Resource.ID+`/content" sandbox="allow-scripts" referrerpolicy="no-referrer" credentialless`)
+	stableOuter := outer
+
+	response, body := fetch(t, contentURL)
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.Equal(t, "text/html; charset=utf-8", response.Header.Get("Content-Type"))
+	assertStandaloneInnerResponse(t, response)
+	require.Equal(t, firstSource, []byte(body))
+
+	for _, endpoint := range []string{created.Resource.URL, contentURL} {
+		response, body = fetchMethod(t, http.MethodHead, endpoint)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.Empty(t, body)
+		if endpoint == contentURL {
+			assertStandaloneInnerResponse(t, response)
+		} else {
+			assertStandaloneOuterResponse(t, response)
+		}
+	}
 
 	secondSource := []byte(`<!doctype html><html><head><style>p{font-weight:bold}</style></head><body><script>window.updated=true</script><p>replacement</p></body></html>`)
 	secondFile := writeFixture(t, "second.html", secondSource)
 	updated := runCLIResource(t, server, "--json", "update", "html", "--", created.Resource.ID, secondFile)
 	require.Equal(t, created.Resource.URL, updated.Resource.URL)
-	_, body = fetch(t, created.Resource.URL)
+	_, outer = fetch(t, created.Resource.URL)
+	require.Equal(t, stableOuter, outer)
+	_, body = fetch(t, contentURL)
 	require.Equal(t, secondSource, []byte(body))
+	require.NotContains(t, body, "HOSTILE_EXACT_BYTES_8f03")
+
+	for _, endpoint := range []string{created.Resource.URL + "/raw", contentURL + "/extra", created.Resource.URL + "/source"} {
+		response, body = fetch(t, endpoint)
+		require.Equal(t, http.StatusNotFound, response.StatusCode)
+		require.NotContains(t, body, "window.updated")
+	}
+	for _, endpoint := range []string{
+		server.URL + "/whiteboards/html/malformed/content",
+		server.URL + "/whiteboards/html/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/content",
+	} {
+		response, _ = fetch(t, endpoint)
+		require.Equal(t, http.StatusNotFound, response.StatusCode)
+		assertStandaloneInnerResponse(t, response)
+	}
 
 	runCLIDelete(t, server, "--json", "delete", "html", "--", created.Resource.ID)
 	response, _ = fetch(t, created.Resource.URL)
 	require.Equal(t, http.StatusNotFound, response.StatusCode)
+	assertStandaloneOuterResponse(t, response)
+	response, _ = fetch(t, contentURL)
+	require.Equal(t, http.StatusNotFound, response.StatusCode)
+	assertStandaloneInnerResponse(t, response)
+	requireCategoryEmpty(t, server.Root, "whiteboards")
+
+	expiring := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "1", firstFile)
+	expiringContentURL := expiring.Resource.URL + "/content"
+	response, body = fetch(t, expiringContentURL)
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.Equal(t, firstSource, []byte(body))
+	require.Eventually(t, func() bool {
+		outerResponse, _ := fetch(t, expiring.Resource.URL)
+		innerResponse, _ := fetch(t, expiringContentURL)
+		return outerResponse.StatusCode == http.StatusNotFound && innerResponse.StatusCode == http.StatusNotFound
+	}, 3*time.Second, 25*time.Millisecond)
+	response, _ = fetch(t, expiring.Resource.URL)
+	assertStandaloneOuterResponse(t, response)
+	response, _ = fetch(t, expiringContentURL)
+	assertStandaloneInnerResponse(t, response)
 	requireCategoryEmpty(t, server.Root, "whiteboards")
 
 	invalid := []struct {
@@ -281,6 +338,34 @@ func readMetadataFixture(t *testing.T, resourceDir string) map[string]any {
 	var metadata map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &metadata))
 	return metadata
+}
+
+const (
+	standaloneOuterCSP = "default-src 'none'; base-uri 'none'; connect-src 'none'; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'self'; img-src 'none'; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'none'; style-src 'sha256-Tn/hKQI0ISMV0qjQCZd0Gif536vvizgJ1ukIP+PYoJ8='; worker-src 'none'"
+	standaloneInnerCSP = "sandbox allow-scripts; default-src 'none'; base-uri 'none'; connect-src 'none'; font-src 'none'; form-action 'none'; frame-ancestors 'self'; frame-src 'none'; img-src data: blob:; manifest-src 'none'; media-src data: blob:; object-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; worker-src 'none'"
+)
+
+func assertStandaloneOuterResponse(t *testing.T, response *http.Response) {
+	t.Helper()
+	assertStandaloneResponseHeaders(t, response)
+	require.Equal(t, standaloneOuterCSP, response.Header.Get("Content-Security-Policy"))
+	require.Equal(t, "DENY", response.Header.Get("X-Frame-Options"))
+}
+
+func assertStandaloneInnerResponse(t *testing.T, response *http.Response) {
+	t.Helper()
+	assertStandaloneResponseHeaders(t, response)
+	require.Equal(t, standaloneInnerCSP, response.Header.Get("Content-Security-Policy"))
+	require.Equal(t, "SAMEORIGIN", response.Header.Get("X-Frame-Options"))
+}
+
+func assertStandaloneResponseHeaders(t *testing.T, response *http.Response) {
+	t.Helper()
+	require.Equal(t, "no-store", response.Header.Get("Cache-Control"))
+	require.Equal(t, "noindex, nofollow, noarchive", response.Header.Get("X-Robots-Tag"))
+	require.Equal(t, "nosniff", response.Header.Get("X-Content-Type-Options"))
+	require.Equal(t, "no-referrer", response.Header.Get("Referrer-Policy"))
+	require.NotEmpty(t, response.Header.Get("Permissions-Policy"))
 }
 
 func assertNoExternalReferences(t *testing.T, body string) {

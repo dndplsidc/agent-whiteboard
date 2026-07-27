@@ -353,9 +353,14 @@ func writeConfigFixture(t *testing.T, content string) string {
 
 func fetch(t *testing.T, endpoint string) (*http.Response, string) {
 	t.Helper()
+	return fetchMethod(t, http.MethodGet, endpoint)
+}
+
+func fetchMethod(t *testing.T, method, endpoint string) (*http.Response, string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
 	require.NoError(t, err)
 	response, err := (&http.Client{Timeout: integrationTimeout}).Do(request)
 	require.NoError(t, err)

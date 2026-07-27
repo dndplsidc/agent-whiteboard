@@ -46,7 +46,7 @@ agent-whiteboard create html --expires-in 3600 docs/examples/standalone.html
 
 Creator context should summarize goals, decisions, assumptions, and open questions. Do not put hidden reasoning, credentials, sensitive data, unrelated personal data, private source, or raw tool output in it. The context shares the board's bearer capability and lifecycle and is returned by machine retrieval.
 
-Markdown is rendered in the browser by bundled markdown-it, DOMPurify, highlight.js, and Mermaid assets. Add diagrams with ordinary fenced `mermaid` blocks. Standalone HTML is served unchanged and must be treated as trusted active content.
+Markdown is rendered in the browser by bundled markdown-it, DOMPurify, highlight.js, and Mermaid assets. Add diagrams with ordinary fenced `mermaid` blocks. Standalone HTML remains trusted active content: its stable public URL now returns an opaque-origin sandbox wrapper, while exact stored bytes are served only to that wrapper at `/content`. Trusted scripts may still disclose the capability through permitted child self-navigation, so never use standalone HTML for untrusted code.
 
 Images are validated from their bytes. PNG, JPEG, GIF, and WebP are supported; SVG is rejected. Publish images before publishing Markdown that references their returned URLs.
 

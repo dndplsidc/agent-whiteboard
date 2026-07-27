@@ -16,13 +16,18 @@ The API is versioned under `/api/v1`. Successful mutation responses contain path
 | `PUT /api/v1/whiteboards/html/{id}` | same multipart fields; `200` resource |
 | `DELETE /api/v1/whiteboards/html/{id}` | `204` |
 | `GET /whiteboards/markdown/{id}` | browser-rendering HTML shell for Markdown |
-| `GET /whiteboards/html/{id}` | trusted HTML bytes unchanged |
+| `GET /whiteboards/html/{id}` | application-controlled sandbox wrapper for trusted HTML |
+| `GET /whiteboards/html/{id}/content` | exact trusted HTML bytes with an independent opaque-origin CSP sandbox |
 | `POST /api/v1/images` | one or more multipart `images`, optional `expires_in_seconds`; `201` images |
 | `PUT /api/v1/images/{id}` | exactly one multipart `file`, optional `expires_in_seconds`; `200` resource |
 | `DELETE /api/v1/images/{id}` | `204` |
 | `GET /images/{id}` | validated raster bytes with detected media type |
 
 `HEAD` is supported by Go's GET routing for public and API retrieval routes. Health endpoints require `GET`. Unsupported methods return `405` with `Allow`.
+
+The stable HTML capability URL is the supported browser entry point. It returns one `credentialless` iframe with exactly `sandbox="allow-scripts"`, `referrerpolicy="no-referrer"`, and the exact relative `/content` route. Submitted bytes never appear in that outer response. The `/content` response preserves exact stored bytes while headers impose an opaque-origin CSP sandbox that blocks origin storage, parent access, connections, forms, popups, downloads, child frames, top navigation, and remote subresources. Malformed, missing, expired, and wrong-kind `/content` requests retain the same security headers while returning `404`; no `/raw`, `/source`, or nested alternate route serves submitted bytes.
+
+A script-capable sandbox may navigate its own child. The wrapper's outer `frame-src 'self'` currently limits that navigation to the publishing origin, and the iframe's credentialless/no-referrer attributes strip publishing-origin cookies and Referer. Trusted HTML can nevertheless encode its capability URL into such a permitted request. Direct top-level `/content` navigation remains independently opaque and network/storage restricted, but bypasses the wrapper's destination restriction and is not the supported entry point.
 
 ## Paired Markdown multipart
 
