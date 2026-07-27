@@ -14,6 +14,7 @@ agent-whiteboard [global flags] delete html -- ID
 agent-whiteboard [global flags] image upload [--expires-in SECONDS] FILE...
 agent-whiteboard [global flags] image update [--expires-in SECONDS] -- ID FILE
 agent-whiteboard [global flags] image delete -- ID
+agent-whiteboard [global flags] agent serve [--port PORT] [--provider-idle-timeout DURATION] [--shutdown-timeout DURATION] [--pi-executable PATH]
 agent-whiteboard [global flags] agent trust add ORIGIN
 agent-whiteboard [global flags] agent trust remove ORIGIN
 agent-whiteboard [global flags] agent trust list
@@ -67,4 +68,6 @@ If a create error leaves persistence uncertain, the CLI prints the generated res
 
 Trust commands add, remove, and list canonical exact HTTPS origins in the selected YAML. Add/remove are idempotent and silent in human mode; list prints one origin per line in insertion order. JSON mutations return `{"schema_version":1}` and list returns `{"schema_version":1,"origins":[...]}`. Trust operations are available only on macOS and Linux and enforce regular-file, non-writable parent/file, no-symlink, and atomic-edit safeguards.
 
-The current CLI has no local broker, sidebar, `agent serve`, or daemon lifecycle commands. Do not invent `publish`, authentication, asset bundling, broker commands, or a `--permanent` flag. The supported operations above are the complete current publication and trust surface.
+`agent serve` runs the foreground local agent API and provider broker. It resolves `pi` from `PATH` unless `--pi-executable` or `AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE` selects another executable. Authenticate beforehand with Pi itself; the adapter uses Pi's provider-native `~/.pi/agent/auth.json`. It deliberately does not pass ambient provider API-key or auth-token environment variables to Pi. There are no agent-whiteboard authentication commands.
+
+The command does not manage a daemon or open a browser. The supported operations above are the complete current publication, trust, and foreground-agent surface; do not invent `publish`, authentication commands, asset bundling, broker commands, or a `--permanent` flag.

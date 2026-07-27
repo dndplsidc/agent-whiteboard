@@ -39,12 +39,13 @@ type Application interface {
 }
 
 type Dependencies struct {
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Getenv         func(string) string
-	LoadConfig     func(string) (generalconfig.Config, error)
-	NewClient      func(httpx.ClientConfig) (Client, error)
-	NewApplication func(app.ServiceConfig, ...app.Option) (Application, error)
+	Stdout              io.Writer
+	Stderr              io.Writer
+	Getenv              func(string) string
+	LoadConfig          func(string) (generalconfig.Config, error)
+	NewClient           func(httpx.ClientConfig) (Client, error)
+	NewApplication      func(app.ServiceConfig, ...app.Option) (Application, error)
+	NewAgentApplication func(app.AgentServiceConfig) (Application, error)
 }
 
 type rootOptions struct {
@@ -107,6 +108,11 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 	}
 	if common.IsNil(deps.NewApplication) {
 		return nil, invalidCommand("application factory is required")
+	}
+	if deps.NewAgentApplication == nil {
+		deps.NewAgentApplication = func(config app.AgentServiceConfig) (Application, error) {
+			return app.NewAgentService(config)
+		}
 	}
 
 	options := &rootOptions{}

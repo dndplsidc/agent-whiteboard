@@ -88,7 +88,17 @@ agent-whiteboard agent trust list
 agent-whiteboard agent trust remove https://whiteboard.example
 ```
 
-Add and remove are idempotent; human list output contains one canonical origin per line, and `--json` uses schema version 1. These trust operations are supported only on macOS and Linux. The current release edits the allowlist configuration but does not provide a local agent broker, sidebar, or daemon commands.
+Add and remove are idempotent; human list output contains one canonical origin per line, and `--json` uses schema version 1. These trust operations are supported only on macOS and Linux.
+
+Run the local agent API and broker in the foreground with:
+
+```sh
+# Authenticate with Pi first; Pi stores its provider-native login state.
+pi
+agent-whiteboard agent serve
+```
+
+`agent serve` resolves `pi` from `PATH`; use `--pi-executable PATH` or `AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE` to override it. The adapter uses Pi's `~/.pi/agent/auth.json` and deliberately excludes ambient provider API-key and auth-token variables from the Pi process environment. It binds only to literal IPv4 loopback and admits exact configured HTTPS origins. The browser sidebar and managed daemon commands are not yet available.
 
 ## Defaults
 

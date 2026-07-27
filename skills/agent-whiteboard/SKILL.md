@@ -75,6 +75,6 @@ Public URLs are bearer capabilities: anyone with one can read the resource, deri
 
 A failed create can still print a generated resource before returning an error when persistence is uncertain. Preserve the ID, check or delete the possibly live resource, and do not publish or log the full ID unnecessarily.
 
-The current CLI supports trust-list configuration but no local broker, sidebar, agent serve, or daemon commands. Do not invent those commands.
+The current CLI supports trust-list configuration and foreground `agent serve`; it does not provide a browser sidebar or daemon commands. `agent serve` uses Pi's provider-native login state rather than ambient API-key environment variables. Do not invent agent-whiteboard authentication or daemon commands.
 
 Read [CLI commands](references/cli.md) for exact syntax and output, [Mermaid guidance](references/mermaid.md) when authoring diagrams, and [security guidance](references/security.md) before publishing HTML or non-public material.

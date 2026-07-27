@@ -12,4 +12,6 @@ Markdown is rendered in the browser and sanitized. Standalone HTML is different:
 
 The CLI and server sanitize stable errors and do not echo source, context, request bodies, internal causes, or filesystem paths. A create error may still return a capability if rollback is uncertain; retain it privately and check or delete the possibly live resource.
 
-Trusted-origin configuration accepts exact HTTPS origins only, but the current release has no local broker or sidebar that consumes the allowlist. Trust commands do not make whiteboard content private or authenticated.
+Trusted-origin configuration accepts exact HTTPS origins only. The foreground local broker reloads this allowlist for each new admission; existing accepted connections keep their original trust decision. Trust commands do not make whiteboard content private or authenticated, and the browser sidebar is not yet available.
+
+The Pi adapter sends the exact reader message and approved Markdown context envelope to the model provider. It disables tools, extensions, skills, templates, project context files, themes, approval paths, retries, and online discovery. It uses Pi's provider-native login file and deliberately excludes ambient API-key and auth-token variables. Provider-native session files remain under the owner-only agent state directory; broker state does not copy transcripts or model output.

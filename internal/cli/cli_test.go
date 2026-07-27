@@ -561,7 +561,7 @@ func TestCommandTreeIsExact(t *testing.T) {
 	require.True(t, root.CompletionOptions.DisableDefaultCmd)
 	require.Equal(t, []string{"agent", "create", "delete", "get", "image", "serve", "update"}, commandNames(root))
 	agentCommand := findCommand(t, root, "agent")
-	require.Equal(t, []string{"trust"}, commandNames(agentCommand))
+	require.Equal(t, []string{"serve", "trust"}, commandNames(agentCommand))
 	require.Equal(t, []string{"add", "list", "remove"}, commandNames(findCommand(t, agentCommand, "trust")))
 	require.Equal(t, []string{"html", "markdown"}, commandNames(findCommand(t, root, "create")))
 	require.Equal(t, []string{"html", "markdown"}, commandNames(findCommand(t, root, "update")))

@@ -13,7 +13,7 @@ For client and server settings, resolution is:
 3. YAML;
 4. the built-in value.
 
-An empty environment value does not erase YAML. A supplied empty flag is still an explicit value and normally fails validation. The `viewer` and `agent` sections do not currently have environment or flag overrides.
+An empty environment value does not erase YAML. A supplied empty flag is still an explicit value and normally fails validation. The `viewer` section and agent trusted-origin/default-access settings do not have environment or flag overrides. Foreground `agent serve` supports the agent overrides listed below.
 
 | YAML | Environment | Flag |
 | --- | --- | --- |
@@ -30,6 +30,10 @@ An empty environment value does not erase YAML. A supplied empty flag is still a
 | `server.max_context_bytes` | `AGENT_WHITEBOARD_MAX_CONTEXT_BYTES` | `serve --max-context-bytes` |
 | `server.max_image_bytes` | `AGENT_WHITEBOARD_MAX_IMAGE_BYTES` | `serve --max-image-bytes` |
 | `server.max_image_request_bytes` | `AGENT_WHITEBOARD_MAX_IMAGE_REQUEST_BYTES` | `serve --max-image-request-bytes` |
+| `agent.port` | `AGENT_WHITEBOARD_AGENT_PORT` | `agent serve --port` |
+| `agent.provider_idle_timeout` | `AGENT_WHITEBOARD_PROVIDER_IDLE_TIMEOUT` | `agent serve --provider-idle-timeout` |
+| `agent.shutdown_timeout` | `AGENT_WHITEBOARD_AGENT_SHUTDOWN_TIMEOUT` | `agent serve --shutdown-timeout` |
+| — | `AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE` | `agent serve --pi-executable` |
 
 A relative YAML `server.storage` path is resolved against the directory containing that YAML file. Relative environment and flag storage paths are resolved by the server process from its current working directory.
 
@@ -70,9 +74,9 @@ agent:
   default_access: content-only
 ```
 
-The current release validates the complete schema, uses `client` and `server` for existing CLI/server behavior, and supports editing `agent.trusted_origins`. It does not provide a browser sidebar, local broker, `agent serve`, or daemon lifecycle commands. The remaining `viewer` and `agent` values establish configuration only and do not make those features available.
+The current release validates the complete schema, uses `client` and `server` for publication behavior, supports editing `agent.trusted_origins`, and provides foreground `agent serve` for the local agent API. It does not provide a browser sidebar or daemon lifecycle commands.
 
-Durations use Go duration syntax and must be positive. `server.port` accepts 0–65535; `agent.port` accepts 1–65535. `default_expires_in` and byte limits are nonnegative integers. Zero default expiration means permanent resources. A zero byte limit selects that limit's built-in value; it does not disable the limit. The effective image request limit cannot be smaller than the effective per-image limit. `log_mode` is `console` or `json`, and `default_access` is currently only `content-only`.
+Durations use Go duration syntax and must be positive. `server.port` accepts 0–65535; YAML `agent.port` accepts 1–65535, while `agent serve --port` also accepts 0 for an ephemeral listener. `default_expires_in` and byte limits are nonnegative integers. Zero default expiration means permanent resources. A zero byte limit selects that limit's built-in value; it does not disable the limit. The effective image request limit cannot be smaller than the effective per-image limit. `log_mode` is `console` or `json`, and `default_access` is currently only `content-only`.
 
 | Setting | Built-in |
 | --- | ---: |
