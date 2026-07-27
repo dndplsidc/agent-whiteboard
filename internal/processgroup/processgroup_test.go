@@ -125,14 +125,14 @@ func TestLaunchClassifiesStartFailureAndClosesPipes(t *testing.T) {
 	workspace := realPrivateTempDir(t)
 	badExecutable := filepath.Join(workspace, "bad-executable")
 	require.NoError(t, os.WriteFile(badExecutable, []byte("not an executable format"), 0o700))
-	before := openFileDescriptorCount(t)
+	before := openFileDescriptors(t)
 
 	child, err := NewLauncher().Launch(context.Background(), provider.LaunchRequest{
 		Executable: badExecutable, Arguments: []string{}, Environment: []string{}, WorkingDirectory: workspace,
 	})
 	require.Nil(t, child)
 	requireErrorKind(t, err, ErrorStart)
-	require.Eventually(t, func() bool { return openFileDescriptorCount(t) == before }, time.Second, 5*time.Millisecond)
+	requireNoNewFileDescriptors(t, before)
 }
 
 func TestCanceledLaunchDoesNotStart(t *testing.T) {
@@ -148,7 +148,7 @@ func TestPGIDVerificationFailureKillsPotentialGroupAndReaps(t *testing.T) {
 	request := helperRequest(t, "cancel-tree")
 	resultPath := filepath.Join(request.WorkingDirectory, "started-pids")
 	request.Arguments = append(request.Arguments, resultPath)
-	before := openFileDescriptorCount(t)
+	before := openFileDescriptors(t)
 
 	originalGetProcessGroupID := getProcessGroupID
 	getProcessGroupID = func(int) (int, error) {
@@ -173,16 +173,16 @@ func TestPGIDVerificationFailureKillsPotentialGroupAndReaps(t *testing.T) {
 	grandchildPID, conversionError := strconv.Atoi(fields[1])
 	require.NoError(t, conversionError)
 	requireProcessesGone(t, rootPID, grandchildPID)
-	require.Eventually(t, func() bool { return openFileDescriptorCount(t) == before }, time.Second, 5*time.Millisecond)
+	requireNoNewFileDescriptors(t, before)
 }
 
 func TestCancellationDuringLaunchReapsEntireStartedGroup(t *testing.T) {
 	request := helperRequest(t, "cancel-tree")
 	resultPath := filepath.Join(request.WorkingDirectory, "started-pids")
 	request.Arguments = append(request.Arguments, resultPath)
-	before := openFileDescriptorCount(t)
+	before := openFileDescriptors(t)
 
-	ctx := newCancelWhenFileExistsContext(resultPath)
+	ctx := newCancelWhenProcessTreeReadyContext(resultPath)
 	child, err := NewLauncher().Launch(ctx, request)
 	require.Nil(t, child)
 	require.ErrorIs(t, err, context.Canceled)
@@ -197,10 +197,10 @@ func TestCancellationDuringLaunchReapsEntireStartedGroup(t *testing.T) {
 	grandchildPID, conversionError := strconv.Atoi(fields[1])
 	require.NoError(t, conversionError)
 	requireProcessesGone(t, rootPID, grandchildPID)
-	require.Eventually(t, func() bool { return openFileDescriptorCount(t) == before }, time.Second, 5*time.Millisecond)
+	requireNoNewFileDescriptors(t, before)
 }
 
-type cancelWhenFileExistsContext struct {
+type cancelWhenProcessTreeReadyContext struct {
 	path  string
 	done  chan struct{}
 	once  sync.Once
@@ -208,14 +208,14 @@ type cancelWhenFileExistsContext struct {
 	calls int
 }
 
-func newCancelWhenFileExistsContext(path string) *cancelWhenFileExistsContext {
-	return &cancelWhenFileExistsContext{path: path, done: make(chan struct{})}
+func newCancelWhenProcessTreeReadyContext(path string) *cancelWhenProcessTreeReadyContext {
+	return &cancelWhenProcessTreeReadyContext{path: path, done: make(chan struct{})}
 }
 
-func (*cancelWhenFileExistsContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (ctx *cancelWhenFileExistsContext) Done() <-chan struct{}   { return ctx.done }
-func (*cancelWhenFileExistsContext) Value(any) any               { return nil }
-func (ctx *cancelWhenFileExistsContext) Err() error {
+func (*cancelWhenProcessTreeReadyContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (ctx *cancelWhenProcessTreeReadyContext) Done() <-chan struct{}   { return ctx.done }
+func (*cancelWhenProcessTreeReadyContext) Value(any) any               { return nil }
+func (ctx *cancelWhenProcessTreeReadyContext) Err() error {
 	ctx.mu.Lock()
 	ctx.calls++
 	calls := ctx.calls
@@ -225,7 +225,8 @@ func (ctx *cancelWhenFileExistsContext) Err() error {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(ctx.path); err == nil {
+		contents, err := os.ReadFile(ctx.path)
+		if err == nil && len(strings.Fields(string(contents))) == 2 {
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -284,6 +285,65 @@ func TestGracefulTerminateDoesNotRequireKill(t *testing.T) {
 	require.NoError(t, child.Wait())
 	requireProcessesGone(t, rootPID, grandchildPID)
 }
+
+func TestLeaderExitKillsSurvivingGrandchildBeforeWaitReturns(t *testing.T) {
+	child, rootPID, grandchildPID := launchTree(t, "tree-leader-exits")
+	require.NoError(t, child.Wait())
+	requireProcessesGone(t, rootPID, grandchildPID)
+}
+
+func TestMonitorFailureReportsFailedCleanupAndAllowsKillRetry(t *testing.T) {
+	monitorReady := make(chan struct{})
+	monitorRelease := make(chan struct{})
+	originalNewProcessIdentity := newProcessIdentity
+	newProcessIdentity = func(int) (processIdentity, error) {
+		return fakeProcessIdentity{
+			wait: func() error {
+				close(monitorReady)
+				<-monitorRelease
+				return syscall.EIO
+			},
+		}, nil
+	}
+	t.Cleanup(func() { newProcessIdentity = originalNewProcessIdentity })
+
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, "wait-stdin"))
+	require.NoError(t, err)
+	managed := child.(*managedChild)
+	<-monitorReady
+
+	managed.mu.Lock()
+	managed.signalFn = func(int, unix.Signal) error { return syscall.ESRCH }
+	managed.mu.Unlock()
+	close(monitorRelease)
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- child.Wait() }()
+	select {
+	case waitErr := <-waitDone:
+		requireErrorKinds(t, waitErr, ErrorStart, ErrorSignal)
+	case <-time.After(time.Second):
+		t.Fatal("Wait hung after identity monitoring and cleanup failed")
+	}
+
+	managed.mu.Lock()
+	require.Equal(t, managed.pid, managed.pgid, "failed cleanup must retain verified process-group ownership")
+	managed.mu.Unlock()
+	requireErrorKind(t, child.Kill(), ErrorSignal)
+	managed.mu.Lock()
+	require.Equal(t, managed.pid, managed.pgid, "a failed retry must retain verified process-group ownership")
+	managed.signalFn = unix.Kill
+	managed.mu.Unlock()
+	require.NoError(t, child.Kill(), "Kill must retry a previously failed cleanup signal")
+	requireProcessesGone(t, managed.pid)
+}
+
+type fakeProcessIdentity struct {
+	wait func() error
+}
+
+func (identity fakeProcessIdentity) waitForExit() error { return identity.wait() }
+func (fakeProcessIdentity) close() error                { return nil }
 
 func TestSignalGuardNeverTargetsBrokerGroup(t *testing.T) {
 	brokerGroup := unix.Getpgrp()
@@ -369,29 +429,42 @@ func testSignalEntireGroup(t *testing.T, force bool) {
 
 func launchTree(t *testing.T, mode string) (provider.ManagedChild, int, int) {
 	t.Helper()
-	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, mode))
+	var arguments []string
+	if mode == "tree-leader-exits" {
+		arguments = append(arguments, filepath.Join(realPrivateTempDir(t), "grandchild-ready"))
+	}
+	child, err := NewLauncher().Launch(context.Background(), helperRequest(t, mode, arguments...))
 	require.NoError(t, err)
 	scanner := bufio.NewScanner(child.Output())
-	pids := make(map[string]int, 2)
+	wantedPIDs := 2
+	if mode == "tree-leader-exits" {
+		wantedPIDs = 3
+	}
+	pids := make(map[string]int, wantedPIDs)
 	for scanner.Scan() {
 		label, value, ok := strings.Cut(scanner.Text(), ":")
 		require.True(t, ok)
 		pid, conversionError := strconv.Atoi(value)
 		require.NoError(t, conversionError)
 		pids[label] = pid
-		if len(pids) == 2 {
+		if len(pids) == wantedPIDs {
 			break
 		}
 	}
 	require.NoError(t, scanner.Err())
 	require.Contains(t, pids, "root")
 	require.Contains(t, pids, "grandchild")
-	rootGroup, err := unix.Getpgid(pids["root"])
-	require.NoError(t, err)
-	grandchildGroup, err := unix.Getpgid(pids["grandchild"])
-	require.NoError(t, err)
-	require.Equal(t, pids["root"], rootGroup)
-	require.Equal(t, rootGroup, grandchildGroup)
+	rootGroup := pids["root"]
+	if mode == "tree-leader-exits" {
+		require.Equal(t, rootGroup, pids["grandchild-group"])
+	} else {
+		actualRootGroup, err := unix.Getpgid(pids["root"])
+		require.NoError(t, err)
+		require.Equal(t, rootGroup, actualRootGroup)
+		grandchildGroup, err := unix.Getpgid(pids["grandchild"])
+		require.NoError(t, err)
+		require.Equal(t, rootGroup, grandchildGroup)
+	}
 	require.NotEqual(t, unix.Getpgrp(), rootGroup)
 	return child, pids["root"], pids["grandchild"]
 }
@@ -426,20 +499,75 @@ func requireErrorKind(t *testing.T, err error, kind ErrorKind) {
 	require.Equal(t, kind, processError.Kind)
 }
 
+func requireErrorKinds(t *testing.T, err error, kinds ...ErrorKind) {
+	t.Helper()
+	found := make(map[ErrorKind]bool, len(kinds))
+	var visit func(error)
+	visit = func(current error) {
+		if current == nil {
+			return
+		}
+		if processErr, ok := current.(*Error); ok {
+			found[processErr.Kind] = true
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, nested := range joined.Unwrap() {
+				visit(nested)
+			}
+			return
+		}
+		if nested := errors.Unwrap(current); nested != nil {
+			visit(nested)
+		}
+	}
+	visit(err)
+	for _, kind := range kinds {
+		require.True(t, found[kind], "missing process error kind %q in %v", kind, err)
+	}
+}
+
 func readAll(reader interface{ Read([]byte) (int, error) }) (string, error) {
 	result, err := io.ReadAll(reader)
 	return string(result), err
 }
 
-func openFileDescriptorCount(t *testing.T) int {
+type fileDescriptorIdentity struct {
+	device uint64
+	inode  uint64
+	mode   uint32
+	rdev   uint64
+}
+
+func openFileDescriptors(t *testing.T) map[fileDescriptorIdentity]int {
 	t.Helper()
-	count := 0
+	result := make(map[fileDescriptorIdentity]int)
 	for descriptor := 0; descriptor < 256; descriptor++ {
-		if _, err := unix.FcntlInt(uintptr(descriptor), unix.F_GETFD, 0); err == nil {
-			count++
+		var stat unix.Stat_t
+		if err := unix.Fstat(descriptor, &stat); err != nil {
+			continue
 		}
+		identity := fileDescriptorIdentity{
+			device: uint64(stat.Dev),
+			inode:  uint64(stat.Ino),
+			mode:   uint32(stat.Mode),
+			rdev:   uint64(stat.Rdev),
+		}
+		result[identity]++
 	}
-	return count
+	return result
+}
+
+func requireNoNewFileDescriptors(t *testing.T, before map[fileDescriptorIdentity]int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		after := openFileDescriptors(t)
+		for identity, count := range after {
+			if count > before[identity] {
+				return false
+			}
+		}
+		return true
+	}, time.Second, 5*time.Millisecond)
 }
 
 func requireProcessExists(t *testing.T, pid int) {
@@ -497,8 +625,8 @@ func TestProcessGroupHelper(t *testing.T) {
 	case "exit":
 		code, _ := strconv.Atoi(arguments[0])
 		os.Exit(code)
-	case "tree-wait", "tree-ignore-term", "tree-graceful-term":
-		runTreeHelper(mode)
+	case "tree-wait", "tree-ignore-term", "tree-graceful-term", "tree-leader-exits":
+		runTreeHelper(mode, arguments)
 	case "cancel-tree":
 		runCancellationTree(arguments[0])
 	default:
@@ -536,7 +664,7 @@ func runCancellationTree(resultPath string) {
 	select {}
 }
 
-func runTreeHelper(mode string) {
+func runTreeHelper(mode string, arguments []string) {
 	if os.Getenv("PROCESSGROUP_GRANDCHILD") == "1" {
 		if mode == "tree-ignore-term" {
 			signal.Ignore(syscall.SIGTERM)
@@ -550,16 +678,39 @@ func runTreeHelper(mode string) {
 			return
 		}
 		fmt.Printf("grandchild:%d\n", os.Getpid())
+		if mode == "tree-leader-exits" {
+			group, err := unix.Getpgid(0)
+			if err != nil {
+				os.Exit(97)
+			}
+			fmt.Printf("grandchild-group:%d\n", group)
+			if err := os.WriteFile(arguments[0], []byte("ready"), 0o600); err != nil {
+				os.Exit(97)
+				os.Exit(97)
+			}
+		}
 		select {}
 	}
 
-	command := exec.Command(os.Args[0], "-test.run=^TestProcessGroupHelper$", "--", mode)
+	commandArguments := append([]string{"-test.run=^TestProcessGroupHelper$", "--", mode}, arguments...)
+	command := exec.Command(os.Args[0], commandArguments...)
 	command.Env = []string{helperEnvironment, "PROCESSGROUP_GRANDCHILD=1"}
 	command.Stdin = nil
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {
 		os.Exit(93)
+	}
+	if mode == "tree-leader-exits" {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if contents, err := os.ReadFile(arguments[0]); err == nil && string(contents) == "ready" {
+				fmt.Printf("root:%d\n", os.Getpid())
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		os.Exit(98)
 	}
 	if mode == "tree-ignore-term" {
 		signal.Ignore(syscall.SIGTERM)

@@ -19,6 +19,15 @@ import (
 
 var getProcessGroupID = unix.Getpgid
 
+type processIdentity interface {
+	waitForExit() error
+	close() error
+}
+
+var newProcessIdentity = func(pid int) (processIdentity, error) {
+	return openProcessIdentity(pid)
+}
+
 type lifecyclePhase uint8
 
 const (
@@ -35,17 +44,19 @@ type managedChild struct {
 	errors  *eofReader
 	pid     int
 
-	mu         sync.Mutex
-	phase      lifecyclePhase
-	pgid       int
-	brokerPGID int
-	termDone   bool
-	killDone   bool
-	termErr    error
-	killErr    error
-	waitErr    error
-	done       chan struct{}
-	signalFn   func(int, unix.Signal) error
+	mu           sync.Mutex
+	phase        lifecyclePhase
+	pgid         int
+	brokerPGID   int
+	termDone     bool
+	killDone     bool
+	termErr      error
+	killErr      error
+	waitErr      error
+	done         chan struct{}
+	signalFn     func(int, unix.Signal) error
+	cleanupRetry bool
+	waitStarted  bool
 }
 
 type eofReader struct {
@@ -273,27 +284,59 @@ func (child *managedChild) cleanupCanceledLaunch() error {
 }
 
 func (child *managedChild) reap(identity processIdentity) {
-	// pidfd/kqueue reports this specific leader's exit without reaping it. The
-	// lifecycle lock can therefore retire group ownership before command.Wait
-	// permits PID reuse; signal methods hold the same lock across kill(2).
+	// pidfd/kqueue reports this specific leader's exit without reaping it. Keep
+	// the leader unreaped while the lifecycle lock protects the verified PGID,
+	// and kill any surviving members before numeric ownership is retired.
 	identityErr := identity.waitForExit()
-	_ = identity.close()
+	closeErr := identity.close()
+	if closeErr != nil {
+		identityErr = errors.Join(identityErr, closeErr)
+	}
 
 	child.mu.Lock()
-	if identityErr != nil && child.phase != lifecycleEnded {
-		// Identity monitoring failed while the leader remains unreaped. End the
-		// owned group before relinquishing its numeric identity.
-		_ = child.signalGroupLocked(unix.SIGKILL, "monitor child")
+	var cleanupErr error
+	if child.killDone && child.killErr == nil {
+		// A successful caller-issued SIGKILL already covered the whole group.
+	} else {
+		child.phase = lifecycleKilled
+		child.killDone = true
+		child.killErr = child.signalGroupLocked(unix.SIGKILL, "cleanup child process group", identityErr == nil)
+		if identityErr == nil && isExitedLeaderOnlyGroupError(child.killErr) {
+			child.killErr = nil
+		}
+		cleanupErr = child.killErr
+	}
+	if cleanupErr != nil {
+		// Do not reap the leader or clear the PGID: retaining the unreaped leader
+		// keeps the numeric identity safe so Kill can retry the failed cleanup.
+		child.cleanupRetry = true
+		child.waitErr = errors.Join(monitorProcessError(identityErr), cleanupErr)
+		close(child.done)
+		child.mu.Unlock()
+		return
 	}
 	child.phase = lifecycleEnded
 	child.pgid = 0
+	child.waitStarted = true
 	child.mu.Unlock()
 
+	child.finishWait(identityErr, true)
+}
+
+func monitorProcessError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return processError(ErrorStart, "monitor child", err)
+}
+
+func (child *managedChild) finishWait(identityErr error, publish bool) {
 	waitErr := child.command.Wait()
 	_ = child.input.Close()
-	if identityErr != nil {
-		waitErr = errors.Join(waitErr, processError(ErrorStart, "monitor child", identityErr))
+	if !publish {
+		return
 	}
+	waitErr = errors.Join(waitErr, monitorProcessError(identityErr))
 
 	child.mu.Lock()
 	child.waitErr = waitErr
@@ -327,31 +370,53 @@ func (child *managedChild) Terminate() error {
 		return nil
 	}
 	child.phase = lifecycleTerminated
-	child.termErr = child.signalGroupLocked(unix.SIGTERM, "terminate")
+	child.termErr = child.signalGroupLocked(unix.SIGTERM, "terminate", true)
 	return child.termErr
 }
 
 func (child *managedChild) Kill() error {
 	child.mu.Lock()
-	defer child.mu.Unlock()
-
-	if child.killDone {
-		return child.killErr
-	}
-	child.killDone = true
-	if child.phase == lifecycleEnded {
+	if child.killDone && child.killErr == nil {
+		child.mu.Unlock()
 		return nil
 	}
+	if child.phase == lifecycleEnded {
+		child.mu.Unlock()
+		return nil
+	}
+	child.killDone = true
 	child.phase = lifecycleKilled
-	child.killErr = child.signalGroupLocked(unix.SIGKILL, "kill")
-	return child.killErr
+	child.killErr = child.signalGroupLocked(unix.SIGKILL, "kill", !child.cleanupRetry)
+	if child.killErr != nil {
+		err := child.killErr
+		child.mu.Unlock()
+		return err
+	}
+
+	resumeCleanup := child.cleanupRetry && !child.waitStarted
+	if resumeCleanup {
+		// The successful retry makes it safe to retire numeric ownership before
+		// command.Wait releases the leader PID for reuse.
+		child.cleanupRetry = false
+		child.phase = lifecycleEnded
+		child.pgid = 0
+		child.waitStarted = true
+	}
+	child.mu.Unlock()
+	if resumeCleanup {
+		go child.finishWait(nil, false)
+	}
+	return nil
 }
 
-func (child *managedChild) signalGroupLocked(value unix.Signal, operation string) error {
+func (child *managedChild) signalGroupLocked(value unix.Signal, operation string, missingIsSuccess bool) error {
 	if child.pid <= 0 || child.pgid <= 0 || child.pgid != child.pid || child.pgid == child.brokerPGID || child.pgid == unix.Getpgrp() {
 		return processError(ErrorUnsafeProcessGroup, operation, errors.New("refusing to signal an unverified or broker process group"))
 	}
-	if err := child.signalFn(-child.pgid, value); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := child.signalFn(-child.pgid, value); err != nil {
+		if missingIsSuccess && errors.Is(err, unix.ESRCH) {
+			return nil
+		}
 		return processError(ErrorSignal, operation, err)
 	}
 	return nil
