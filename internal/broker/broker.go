@@ -56,10 +56,14 @@ type Broker struct {
 	stopping bool
 	closed   bool
 	registry map[agentstate.Identity]*conversationSlot
+	orphans  map[*conversation]struct{}
 
-	cleanupMu sync.Mutex
-	cleanups  map[*pendingCleanup]struct{}
-	closeMu   sync.Mutex
+	cleanupMu    sync.Mutex
+	cleanups     map[*pendingCleanup]struct{}
+	closeMu      sync.Mutex
+	handoffMu    sync.Mutex
+	handoffCount int
+	handoffIdle  chan struct{}
 }
 
 // sessionHandle owns the resources exposed by one provider session. Accessors
@@ -86,6 +90,8 @@ func captureSession(session provider.Session) *sessionHandle {
 
 type pendingCleanup struct {
 	mu             sync.Mutex
+	running        bool
+	done           chan struct{}
 	identity       agentstate.Identity
 	handle         *sessionHandle
 	ref            provider.NativeSessionRef
@@ -144,6 +150,7 @@ func New(config Config) (*Broker, error) {
 		shutdownTimeout: config.ShutdownTimeout,
 		lifecycleCtx:    lifecycleCtx, cancelLifecycle: cancelLifecycle,
 		registry: make(map[agentstate.Identity]*conversationSlot),
+		orphans:  make(map[*conversation]struct{}),
 		cleanups: make(map[*pendingCleanup]struct{}),
 	}, nil
 }
@@ -236,6 +243,10 @@ func (broker *Broker) initializeSlot(slot *conversationSlot, identity agentstate
 	close(slot.ready)
 	broker.mu.Unlock()
 	if actor != nil {
+		actor.startHandoff = func(request handoffRequest, results chan<- handoffResult) bool {
+			return broker.beginHandoff(slot, actor, request, results)
+		}
+		actor.activateRun()
 		go broker.watchActor(identity, slot, actor)
 	}
 }
@@ -246,6 +257,7 @@ func (broker *Broker) watchActor(identity agentstate.Identity, slot *conversatio
 	if broker.registry[identity] == slot && slot.actor == actor {
 		delete(broker.registry, identity)
 	}
+	delete(broker.orphans, actor)
 	broker.mu.Unlock()
 }
 
@@ -492,8 +504,39 @@ func (broker *Broker) retainCleanup(cleanup *pendingCleanup) {
 }
 
 func (broker *Broker) runCleanup(ctx context.Context, cleanup *pendingCleanup) bool {
+	if cleanup == nil {
+		return true
+	}
+	for {
+		cleanup.mu.Lock()
+		if !cleanup.running {
+			cleanup.running = true
+			cleanup.done = make(chan struct{})
+			cleanup.mu.Unlock()
+			break
+		}
+		done := cleanup.done
+		cleanup.mu.Unlock()
+		select {
+		case <-done:
+			continue
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	complete := broker.performCleanup(ctx, cleanup)
 	cleanup.mu.Lock()
-	defer cleanup.mu.Unlock()
+	cleanup.running = false
+	close(cleanup.done)
+	cleanup.mu.Unlock()
+	return complete
+}
+
+// performCleanup has one serialized caller, but it never holds cleanup.mu
+// across provider, child, filesystem, or state operations. Another Close can
+// therefore honor its context while a noncooperative cleanup remains owned.
+func (broker *Broker) performCleanup(ctx context.Context, cleanup *pendingCleanup) bool {
 	if !cleanup.processStopped {
 		cleanup.processStopped = stopPreActor(ctx, cleanup.handle)
 	}
@@ -593,6 +636,12 @@ func (broker *Broker) Close(ctx context.Context) error {
 	var errs []error
 	actors := make([]*conversation, 0, len(slots))
 	seen := make(map[*conversation]struct{}, len(slots))
+	broker.mu.Lock()
+	for actor := range broker.orphans {
+		seen[actor] = struct{}{}
+		actors = append(actors, actor)
+	}
+	broker.mu.Unlock()
 	for _, slot := range slots {
 		select {
 		case <-slot.ready:
@@ -609,6 +658,33 @@ func (broker *Broker) Close(ctx context.Context) error {
 	for _, actor := range actors {
 		if err := actor.close(closeCtx); err != nil {
 			errs = append(errs, err)
+		} else {
+			broker.mu.Lock()
+			delete(broker.orphans, actor)
+			broker.mu.Unlock()
+		}
+	}
+	// No handoff can start after stopping is published. Wait only within the
+	// caller's shutdown budget; a timed-out handoff remains actor-owned and
+	// makes Close retryable.
+	if err := broker.waitHandoffs(closeCtx); err != nil {
+		errs = append(errs, err)
+	}
+	// A handoff may have lost its registry CAS after the initial snapshot and
+	// retained an actor for retryable shutdown. Join that late orphan too.
+	broker.mu.Lock()
+	lateOrphans := make([]*conversation, 0, len(broker.orphans))
+	for actor := range broker.orphans {
+		lateOrphans = append(lateOrphans, actor)
+	}
+	broker.mu.Unlock()
+	for _, actor := range lateOrphans {
+		if err := actor.close(closeCtx); err != nil {
+			errs = append(errs, err)
+		} else {
+			broker.mu.Lock()
+			delete(broker.orphans, actor)
+			broker.mu.Unlock()
 		}
 	}
 	broker.cleanupMu.Lock()

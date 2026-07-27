@@ -55,10 +55,16 @@ type conversation struct {
 	dispatchBlocked        bool
 	dispatchPending        bool
 	shutdownTimeout        time.Duration
+	startHandoff           func(handoffRequest, chan<- handoffResult) bool
+	handoffActive          bool
+	handoffFailed          bool
+	closeRequested         bool
 
-	closeMu sync.Mutex
-	closed  atomic.Bool
-	retired atomic.Bool
+	closeMu  sync.Mutex
+	activate sync.Once
+	start    chan struct{}
+	closed   atomic.Bool
+	retired  atomic.Bool
 }
 
 type queuedAttachmentEvent struct {
@@ -78,6 +84,7 @@ type attachment struct {
 	queue    []queuedAttachmentEvent
 	bytes    int
 	stopped  bool
+	closing  bool
 	stopOnce sync.Once
 }
 
@@ -114,7 +121,7 @@ func (item *attachment) enqueue(event agentprotocol.Event) bool {
 		return false
 	}
 	item.mu.Lock()
-	if item.stopped || len(item.queue)+1 > MaxReplayEvents || item.bytes+len(encoded) > MaxReplayBytes {
+	if item.stopped || item.closing || len(item.queue)+1 > MaxReplayEvents || item.bytes+len(encoded) > MaxReplayBytes {
 		item.mu.Unlock()
 		return false
 	}
@@ -131,7 +138,7 @@ func (item *attachment) pump() {
 	defer close(item.events)
 	for {
 		item.mu.Lock()
-		if item.stopped {
+		if item.stopped || (item.closing && len(item.queue) == 0) {
 			item.mu.Unlock()
 			return
 		}
@@ -170,6 +177,27 @@ func (item *attachment) finish() {
 		close(item.stop)
 	})
 	<-item.pumpDone
+}
+
+// finishAfterDrain closes an attachment after already-published handoff events
+// have been delivered. A slow browser is forcibly detached after the bound.
+func (item *attachment) finishAfterDrain(timeout time.Duration) {
+	item.mu.Lock()
+	if !item.stopped {
+		item.closing = true
+	}
+	item.mu.Unlock()
+	item.signal()
+	go func() {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-item.pumpDone:
+			return
+		case <-timer.C:
+			item.finish()
+		}
+	}()
 }
 
 type attachRequest struct {
@@ -236,7 +264,7 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 		identity: identity, mapping: cloneMapping(mapping), state: state, driver: driver, retainSession: retainSession,
 		session: session, generation: 1,
 		factory: factory, replay: NewReplayLog(), requests: make(chan any),
-		done: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
+		done: make(chan struct{}), start: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
 		contextState: agentprotocol.ContextPending,
 		lifecycle:    agentprotocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(),
 		lifecycleCtx: lifecycleCtx, shutdownTimeout: shutdownTimeout,
@@ -252,13 +280,19 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 	return actor, nil
 }
 
+func (actor *conversation) activateRun() {
+	actor.activate.Do(func() { close(actor.start) })
+}
+
 func (actor *conversation) run() {
+	<-actor.start
 	providerEvents := actor.session.events
 	attachments := make(map[*attachment]struct{})
 	shutdownResults := make(chan shutdownWorkerResult, 1)
 	turnResults := make(chan turnWorkerResult, 1)
 	historyResults := make(chan historyWorkerResult, 1)
 	archiveResults := make(chan archiveWorkerResult, 1)
+	handoffResults := make(chan handoffResult, 1)
 	recoveryResults := make(chan recoveryWorkerResult, 1)
 	actor.recoveryResults = recoveryResults
 	shutdownActive := false
@@ -287,7 +321,7 @@ func (actor *conversation) run() {
 		close(actor.done)
 	}()
 	for {
-		idle := len(attachments) == 0 && actor.active == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !actor.dispatchBlocked && !actor.recoveryActive && !shutdownActive && !actor.stopping
+		idle := len(attachments) == 0 && actor.active == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !actor.dispatchBlocked && !actor.recoveryActive && !actor.handoffActive && !shutdownActive && !actor.stopping
 		if idle && idleTimer == nil {
 			idleTimer = actor.timers.NewTimer(actor.idleTimeout)
 		} else if !idle && idleTimer != nil {
@@ -307,8 +341,17 @@ func (actor *conversation) run() {
 				actor.detach(attachments, request.attachment)
 				close(request.ack)
 			case commandRequest:
-				actor.handleCommand(attachments, turnResults, historyResults, archiveResults, request)
+				actor.handleCommand(attachments, turnResults, historyResults, archiveResults, handoffResults, request)
 			case closeConversationRequest:
+				if actor.handoffActive {
+					shutdownWaiters = append(shutdownWaiters, request.response)
+					actor.closeRequested = true
+					actor.stopping = true
+					for item := range attachments {
+						actor.detach(attachments, item)
+					}
+					continue
+				}
 				if shutdownActive || actor.recoveryActive {
 					shutdownWaiters = append(shutdownWaiters, request.response)
 					actor.stopping = true
@@ -336,6 +379,29 @@ func (actor *conversation) run() {
 			actor.handleHistoryResult(attachments, turnResults, result)
 		case result := <-archiveResults:
 			actor.handleArchiveResult(attachments, recoveryResults, result)
+		case result := <-handoffResults:
+			exit, needsShutdown := actor.handleHandoffResult(attachments, result)
+			if exit {
+				actor.closed.Store(true)
+				for _, waiter := range shutdownWaiters {
+					waiter <- nil
+				}
+				return
+			}
+			if needsShutdown && !shutdownActive {
+				if actor.shutdownAttempt == nil {
+					actor.shutdownAttempt = newActorShutdown(actor.session, actor.workerSettled)
+				}
+				response := make(chan error, 1)
+				if len(shutdownWaiters) != 0 {
+					response = shutdownWaiters[0]
+					shutdownWaiters = shutdownWaiters[1:]
+				}
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), actor.shutdownTimeout)
+				request := &closeConversationRequest{ctx: shutdownCtx, response: response}
+				shutdownActive = true
+				startShutdown(request, actor.shutdownAttempt, cancel)
+			}
 		case result := <-shutdownResults:
 			shutdownActive = false
 			if result.cancel != nil {
@@ -427,7 +493,7 @@ func (actor *conversation) run() {
 			}
 		case <-idleChannel:
 			idleTimer = nil
-			if len(attachments) != 0 || actor.active != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.dispatchBlocked || actor.recoveryActive || shutdownActive || actor.stopping {
+			if len(attachments) != 0 || actor.active != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.dispatchBlocked || actor.recoveryActive || actor.handoffActive || shutdownActive || actor.stopping {
 				continue
 			}
 			actor.stopping = true
@@ -527,6 +593,10 @@ func (actor *conversation) applyDeferredObservation(attachments map[*attachment]
 }
 
 func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, request attachRequest) {
+	if actor.handoffActive {
+		request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorInvalidState)}
+		return
+	}
 	if actor.retired.Load() {
 		request.response <- attachResponse{err: errActorRetired}
 		return

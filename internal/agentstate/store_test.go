@@ -292,6 +292,103 @@ func TestArchiveTransitionsAndDeletion(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestArchiveHandoffsRequireExactAtomicMappingPrecondition(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	t.Run("new conversation", func(t *testing.T) {
+		store := openTestStore(t)
+		first := testSession(t, testID, "sessions/first", now)
+		second := testSession(t, "MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1u", "sessions/second", now.Add(time.Minute))
+		_, err := store.Create(testIdentity(), first, now)
+		require.NoError(t, err)
+		expected, err := store.Load(testIdentity())
+		require.NoError(t, err)
+		revision := Revision{Digest: strings.Repeat("d", 64), Revision: RevisionInitial, SourceUpdatedAt: now.Add(time.Second)}
+		_, err = store.ObserveRevision(testIdentity(), revision, now.Add(time.Second))
+		require.NoError(t, err)
+		outcome, err := store.NewConversationIfUnchanged(testIdentity(), expected, second, now.Add(2*time.Minute))
+		require.Equal(t, CommitNotApplied, outcome)
+		require.Error(t, err)
+		loaded, err := store.Load(testIdentity())
+		require.NoError(t, err)
+		require.Equal(t, first.ConversationID, loaded.Current.ConversationID)
+		require.Equal(t, revision, *loaded.Current.Observed)
+		require.Empty(t, loaded.Archives)
+	})
+
+	t.Run("accepted promotion", func(t *testing.T) {
+		store := openTestStore(t)
+		first := testSession(t, testID, "sessions/first", now)
+		_, err := store.Create(testIdentity(), first, now)
+		require.NoError(t, err)
+		revision := Revision{Digest: strings.Repeat("f", 64), Revision: RevisionInitial, SourceUpdatedAt: now.Add(time.Second)}
+		_, err = store.PrepareCommit(testIdentity(), revision, testID, now.Add(time.Second))
+		require.NoError(t, err)
+		_, err = store.MarkPreparedAccepted(testIdentity(), testID, now.Add(2*time.Second))
+		require.NoError(t, err)
+		expected, err := store.Load(testIdentity())
+		require.NoError(t, err)
+		_, err = store.Update(testIdentity(), func(mapping *Mapping) error {
+			mapping.Current.ModelLabel = "foreign"
+			return nil
+		})
+		require.NoError(t, err)
+		outcome, err := store.PromotePreparedIfUnchanged(testIdentity(), expected, testID, now.Add(3*time.Second))
+		require.Equal(t, CommitNotApplied, outcome)
+		require.Error(t, err)
+		loaded, err := store.Load(testIdentity())
+		require.NoError(t, err)
+		require.Equal(t, "foreign", loaded.Current.ModelLabel)
+		require.Equal(t, CommitAccepted, loaded.Current.PreparedCommit.Phase)
+	})
+
+	t.Run("prepared reconciliation", func(t *testing.T) {
+		store := openTestStore(t)
+		first := testSession(t, testID, "sessions/first", now)
+		_, err := store.Create(testIdentity(), first, now)
+		require.NoError(t, err)
+		revision := Revision{Digest: strings.Repeat("9", 64), Revision: RevisionInitial, SourceUpdatedAt: now.Add(time.Second)}
+		_, err = store.PrepareCommit(testIdentity(), revision, testID, now.Add(time.Second))
+		require.NoError(t, err)
+		expected, err := store.Load(testIdentity())
+		require.NoError(t, err)
+		_, err = store.Update(testIdentity(), func(mapping *Mapping) error {
+			mapping.Current.ModelLabel = "foreign"
+			return nil
+		})
+		require.NoError(t, err)
+		outcome, err := store.ReconcilePreparedIfUnchanged(testIdentity(), expected, testID, true, now.Add(3*time.Second))
+		require.Equal(t, CommitNotApplied, outcome)
+		require.Error(t, err)
+		loaded, err := store.Load(testIdentity())
+		require.NoError(t, err)
+		require.Equal(t, "foreign", loaded.Current.ModelLabel)
+		require.Equal(t, CommitPrepared, loaded.Current.PreparedCommit.Phase)
+	})
+
+	t.Run("restore archive", func(t *testing.T) {
+		store := openTestStore(t)
+		first := testSession(t, testID, "sessions/first", now)
+		second := testSession(t, "MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1u", "sessions/second", now.Add(time.Minute))
+		_, err := store.Create(testIdentity(), first, now)
+		require.NoError(t, err)
+		_, err = store.NewConversation(testIdentity(), second, now.Add(time.Minute))
+		require.NoError(t, err)
+		expected, err := store.Load(testIdentity())
+		require.NoError(t, err)
+		revision := Revision{Digest: strings.Repeat("e", 64), Revision: RevisionInitial, SourceUpdatedAt: now.Add(2 * time.Minute)}
+		_, err = store.ObserveRevision(testIdentity(), revision, now.Add(2*time.Minute))
+		require.NoError(t, err)
+		outcome, err := store.RestoreArchiveIfUnchanged(testIdentity(), expected, first.ConversationID, now.Add(3*time.Minute))
+		require.Equal(t, CommitNotApplied, outcome)
+		require.Error(t, err)
+		loaded, err := store.Load(testIdentity())
+		require.NoError(t, err)
+		require.Equal(t, second.ConversationID, loaded.Current.ConversationID)
+		require.Equal(t, revision, *loaded.Current.Observed)
+		require.Equal(t, first.ConversationID, loaded.Archives[0].ConversationID)
+	})
+}
+
 func TestLoadRejectsCorruptionAndEmbeddedIdentityMismatch(t *testing.T) {
 	for name, mutate := range map[string]func(map[string]any){
 		"unknown field": func(document map[string]any) { document["page_markdown"] = "forbidden" },

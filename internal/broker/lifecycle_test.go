@@ -321,7 +321,7 @@ func TestUnsupportedCommandIsTargetedAndConnectionCloseDoesNotShutdownProvider(t
 	receiveLifecycle(t, first.Events())
 	receiveLifecycle(t, second.Events())
 	conversation := first.ConversationID()
-	command := agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: sequenceID(80), ClientID: sequenceID(60), ConversationID: &conversation, Type: agentprotocol.CommandNew, Payload: agentprotocol.EmptyPayload{}}
+	command := agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: sequenceID(80), ClientID: sequenceID(60), ConversationID: &conversation, Type: agentprotocol.CommandRetry, Payload: agentprotocol.TurnReferencePayload{TurnID: sequenceID(81)}}
 	result, err := first.Command(context.Background(), command)
 	require.NoError(t, err)
 	require.Equal(t, agentprotocol.EventCommandResult, result.Type)

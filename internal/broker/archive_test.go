@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -16,10 +17,18 @@ import (
 
 type archiveTestStore struct {
 	*repairState
-	muArchive   sync.Mutex
-	operations  []string
-	removeSteps []repairMutation
-	removeCalls int
+	muArchive             sync.Mutex
+	operations            []string
+	removeSteps           []repairMutation
+	removeCalls           int
+	newCalls              int
+	restoreCalls          int
+	newSessions           []agentstate.Session
+	restoreIDs            []string
+	newSteps              []repairMutation
+	restoreSteps          []repairMutation
+	beforePromotePrepared func()
+	beforeReconcile       func()
 }
 
 func (store *archiveTestStore) RemoveWorkspace(string) error {
@@ -54,6 +63,94 @@ func (store *archiveTestStore) RemoveSession(_ agentstate.Identity, archiveID st
 	return step.outcome, step.err
 }
 
+func (store *archiveTestStore) NewConversationIfUnchanged(identity agentstate.Identity, expected agentstate.Mapping, current agentstate.Session, at time.Time) (agentstate.CommitOutcome, error) {
+	store.repairState.mu.Lock()
+	unchanged := store.mapping != nil && store.mapping.Validate(identity) == nil && reflect.DeepEqual(*store.mapping, expected)
+	store.repairState.mu.Unlock()
+	if !unchanged {
+		return agentstate.CommitNotApplied, errors.New("conversation mapping changed")
+	}
+	store.muArchive.Lock()
+	store.operations = append(store.operations, "new")
+	store.newCalls++
+	store.newSessions = append(store.newSessions, current)
+	step := repairMutation{outcome: agentstate.CommitApplied, apply: true}
+	if len(store.newSteps) != 0 {
+		step = store.newSteps[0]
+		store.newSteps = store.newSteps[1:]
+	}
+	store.muArchive.Unlock()
+	if step.apply {
+		store.repairState.mu.Lock()
+		updated := newCurrentMapping(*store.mapping, current, at)
+		store.mapping = &updated
+		store.repairState.mu.Unlock()
+	}
+	return step.outcome, step.err
+}
+func (store *archiveTestStore) RestoreArchiveIfUnchanged(identity agentstate.Identity, expected agentstate.Mapping, archiveID string, at time.Time) (agentstate.CommitOutcome, error) {
+	store.repairState.mu.Lock()
+	unchanged := store.mapping != nil && store.mapping.Validate(identity) == nil && reflect.DeepEqual(*store.mapping, expected)
+	store.repairState.mu.Unlock()
+	if !unchanged {
+		return agentstate.CommitNotApplied, errors.New("conversation mapping changed")
+	}
+	store.muArchive.Lock()
+	store.operations = append(store.operations, "restore")
+	store.restoreCalls++
+	store.restoreIDs = append(store.restoreIDs, archiveID)
+	step := repairMutation{outcome: agentstate.CommitApplied, apply: true}
+	if len(store.restoreSteps) != 0 {
+		step = store.restoreSteps[0]
+		store.restoreSteps = store.restoreSteps[1:]
+	}
+	store.muArchive.Unlock()
+	if step.apply {
+		store.repairState.mu.Lock()
+		updated, ok := restoredCurrentMapping(*store.mapping, archiveID, at)
+		if ok {
+			store.mapping = &updated
+		}
+		store.repairState.mu.Unlock()
+		if !ok {
+			return agentstate.CommitNotApplied, errors.New("archive missing")
+		}
+	}
+	return step.outcome, step.err
+}
+
+func (store *archiveTestStore) PromotePreparedIfUnchanged(identity agentstate.Identity, expected agentstate.Mapping, turnID string, at time.Time) (agentstate.CommitOutcome, error) {
+	store.muArchive.Lock()
+	hook := store.beforePromotePrepared
+	store.muArchive.Unlock()
+	if hook != nil {
+		hook()
+	}
+	store.repairState.mu.Lock()
+	unchanged := store.mapping != nil && store.mapping.Validate(identity) == nil && reflect.DeepEqual(*store.mapping, expected)
+	store.repairState.mu.Unlock()
+	if !unchanged {
+		return agentstate.CommitNotApplied, errors.New("conversation mapping changed")
+	}
+	return store.repairState.PromotePrepared(identity, turnID, at)
+}
+
+func (store *archiveTestStore) ReconcilePreparedIfUnchanged(identity agentstate.Identity, expected agentstate.Mapping, turnID string, accepted bool, at time.Time) (agentstate.CommitOutcome, error) {
+	store.muArchive.Lock()
+	hook := store.beforeReconcile
+	store.muArchive.Unlock()
+	if hook != nil {
+		hook()
+	}
+	store.repairState.mu.Lock()
+	unchanged := store.mapping != nil && store.mapping.Validate(identity) == nil && reflect.DeepEqual(*store.mapping, expected)
+	store.repairState.mu.Unlock()
+	if !unchanged {
+		return agentstate.CommitNotApplied, errors.New("conversation mapping changed")
+	}
+	return store.repairState.ReconcilePrepared(identity, turnID, accepted, at)
+}
+
 func (store *archiveTestStore) resetOperations() {
 	store.muArchive.Lock()
 	store.operations = nil
@@ -66,26 +163,65 @@ func (store *archiveTestStore) operationSnapshot() []string {
 }
 
 type archiveTestDriver struct {
-	mu             sync.Mutex
-	session        provider.Session
-	resumeSessions []provider.Session
-	deleteErr      error
-	deleteEntered  chan struct{}
-	deleteGate     chan struct{}
-	deletes        []provider.DeleteRequest
-	resumes        int
-	store          *archiveTestStore
+	mu                  sync.Mutex
+	session             provider.Session
+	resumeSessions      []provider.Session
+	createSessions      []provider.Session
+	createRequests      []provider.CreateRequest
+	createErr           error
+	resumeRequests      []provider.ResumeRequest
+	createEntered       chan struct{}
+	createGate          chan struct{}
+	createIgnoreContext bool
+	deleteErr           error
+	deleteEntered       chan struct{}
+	deleteGate          chan struct{}
+	deletes             []provider.DeleteRequest
+	resumes             int
+	store               *archiveTestStore
 }
 
 func (*archiveTestDriver) Readiness(context.Context) provider.Readiness {
 	return provider.Readiness{State: provider.Ready, Provider: provider.NamePi, Model: "model"}
 }
-func (*archiveTestDriver) Create(context.Context, provider.CreateRequest) (provider.Session, error) {
-	return nil, errors.New("create is not configured")
+func (driver *archiveTestDriver) Create(ctx context.Context, request provider.CreateRequest) (provider.Session, error) {
+	driver.mu.Lock()
+	driver.createRequests = append(driver.createRequests, request)
+	entered, gate := driver.createEntered, driver.createGate
+	if len(driver.createSessions) == 0 {
+		driver.mu.Unlock()
+		return nil, errors.New("create is not configured")
+	}
+	session := driver.createSessions[0]
+	driver.createSessions = driver.createSessions[1:]
+	createErr := driver.createErr
+	driver.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if gate != nil {
+		driver.mu.Lock()
+		ignoreContext := driver.createIgnoreContext
+		driver.mu.Unlock()
+		if ignoreContext {
+			<-gate
+		} else {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return session, ctx.Err()
+			}
+		}
+	}
+	return session, createErr
 }
-func (driver *archiveTestDriver) Resume(context.Context, provider.ResumeRequest) (provider.Session, error) {
+func (driver *archiveTestDriver) Resume(_ context.Context, request provider.ResumeRequest) (provider.Session, error) {
 	driver.mu.Lock()
 	defer driver.mu.Unlock()
+	driver.resumeRequests = append(driver.resumeRequests, request)
 	index := driver.resumes
 	driver.resumes++
 	if index < len(driver.resumeSessions) {
@@ -203,6 +339,7 @@ func TestArchiveListIsTargetedPagedAndContainsNoPreviewContent(t *testing.T) {
 	driver.mu.Lock()
 	require.Equal(t, 1, driver.resumes, "listing must not resume archives")
 	require.Empty(t, driver.deletes)
+	require.Zero(t, driver.session.(*turnSession).historyCalls.Load(), "listing must not read provider history")
 	driver.mu.Unlock()
 	state.muArchive.Lock()
 	require.Empty(t, state.operations)

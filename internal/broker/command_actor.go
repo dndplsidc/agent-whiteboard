@@ -6,7 +6,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 )
 
-func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, historyResults chan<- historyWorkerResult, archiveResults chan<- archiveWorkerResult, request commandRequest) {
+func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, historyResults chan<- historyWorkerResult, archiveResults chan<- archiveWorkerResult, handoffResults chan<- handoffResult, request commandRequest) {
 	if err := request.ctx.Err(); err != nil {
 		request.response <- commandResponse{err: err}
 		return
@@ -39,6 +39,21 @@ func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, t
 			request.response <- commandResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
 			return
 		}
+	}
+
+	if actor.handoffActive || actor.handoffFailed {
+		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
+		return
+	}
+	if request.command.Type == agentprotocol.CommandNew {
+		if _, ok := request.command.Payload.(agentprotocol.EmptyPayload); !ok {
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
+			return
+		}
+		if code := actor.commandHandoff(handoffResults, request.command, ""); code != "" {
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
+		}
+		return
 	}
 
 	switch payload := request.command.Payload.(type) {
@@ -89,6 +104,12 @@ func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, t
 		}
 		actor.startHistoryWorker(historyResults, request.command.CommandID, request.command.ClientID, payload)
 	case agentprotocol.ArchiveReferencePayload:
+		if request.command.Type == agentprotocol.CommandArchiveRestore {
+			if code := actor.commandHandoff(handoffResults, request.command, payload.ArchiveID); code != "" {
+				actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
+			}
+			return
+		}
 		if request.command.Type != agentprotocol.CommandArchiveDelete {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
 			return

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -185,6 +186,10 @@ func (store *Store) Update(identity Identity, update func(*Mapping) error) (Comm
 }
 
 func (store *Store) updateAt(identity Identity, at time.Time, update func(*Mapping) error) (CommitOutcome, error) {
+	return store.updateAtExpected(identity, nil, at, update)
+}
+
+func (store *Store) updateAtExpected(identity Identity, expected *Mapping, at time.Time, update func(*Mapping) error) (CommitOutcome, error) {
 	key, err := ConversationKey(identity)
 	if err != nil {
 		return CommitNotApplied, err
@@ -197,6 +202,9 @@ func (store *Store) updateAt(identity Identity, at time.Time, update func(*Mappi
 	mapping, original, err := store.loadLocked(identity, key)
 	if err != nil {
 		return CommitNotApplied, err
+	}
+	if expected != nil && !reflect.DeepEqual(mapping, *expected) {
+		return CommitNotApplied, errors.New("conversation mapping changed")
 	}
 	originalIdentity := mapping.Identity
 	originalCreatedAt := mapping.CreatedAt
@@ -228,11 +236,47 @@ func (store *Store) NewConversation(identity Identity, current Session, at time.
 	})
 }
 
+// NewConversationIfUnchanged atomically archives the expected current mapping
+// and installs current. A changed mapping is never mutated.
+func (store *Store) NewConversationIfUnchanged(identity Identity, expected Mapping, current Session, at time.Time) (CommitOutcome, error) {
+	if expected.Validate(identity) != nil {
+		return CommitNotApplied, errors.New("invalid expected conversation mapping")
+	}
+	return store.updateAtExpected(identity, &expected, at, func(mapping *Mapping) error {
+		if mapping.Current != nil {
+			mapping.Archives = append(mapping.Archives, *mapping.Current)
+		}
+		mapping.Current = &current
+		return nil
+	})
+}
+
 func (store *Store) RestoreArchive(identity Identity, conversationID string, at time.Time) (CommitOutcome, error) {
 	if common.ValidateID(conversationID) != nil {
 		return CommitNotApplied, errors.New("invalid archive ID")
 	}
 	return store.updateAt(identity, at, func(mapping *Mapping) error {
+		index := archiveIndex(mapping.Archives, conversationID)
+		if index < 0 {
+			return os.ErrNotExist
+		}
+		restored := mapping.Archives[index]
+		mapping.Archives = append(mapping.Archives[:index], mapping.Archives[index+1:]...)
+		if mapping.Current != nil {
+			mapping.Archives = append(mapping.Archives, *mapping.Current)
+		}
+		mapping.Current = &restored
+		return nil
+	})
+}
+
+// RestoreArchiveIfUnchanged atomically restores conversationID only when the
+// complete mapping still equals expected.
+func (store *Store) RestoreArchiveIfUnchanged(identity Identity, expected Mapping, conversationID string, at time.Time) (CommitOutcome, error) {
+	if common.ValidateID(conversationID) != nil || expected.Validate(identity) != nil {
+		return CommitNotApplied, errors.New("invalid archive restore precondition")
+	}
+	return store.updateAtExpected(identity, &expected, at, func(mapping *Mapping) error {
 		index := archiveIndex(mapping.Archives, conversationID)
 		if index < 0 {
 			return os.ErrNotExist
@@ -399,6 +443,25 @@ func (store *Store) PromotePrepared(identity Identity, turnID string, at time.Ti
 	})
 }
 
+// PromotePreparedIfUnchanged promotes only when the complete mapping still
+// equals expected.
+func (store *Store) PromotePreparedIfUnchanged(identity Identity, expected Mapping, turnID string, at time.Time) (CommitOutcome, error) {
+	if common.ValidateID(turnID) != nil || expected.Validate(identity) != nil {
+		return CommitNotApplied, errors.New("invalid prepared promotion precondition")
+	}
+	return store.updateAtExpected(identity, &expected, at, func(mapping *Mapping) error {
+		prepared, err := expectedPrepared(mapping, turnID)
+		if err != nil {
+			return err
+		}
+		if prepared.Phase != CommitAccepted {
+			return errors.New("prepared commit has not been accepted")
+		}
+		promotePrepared(mapping, prepared, at)
+		return nil
+	})
+}
+
 func (store *Store) MarkPreparedAccepted(identity Identity, turnID string, at time.Time) (CommitOutcome, error) {
 	if common.ValidateID(turnID) != nil {
 		return CommitNotApplied, errors.New("invalid turn ID")
@@ -427,6 +490,32 @@ func (store *Store) reconcilePrepared(identity Identity, turnID string, accepted
 		return CommitNotApplied, errors.New("invalid turn ID")
 	}
 	return store.updateAt(identity, at, func(mapping *Mapping) error {
+		prepared, err := expectedPrepared(mapping, turnID)
+		if err != nil {
+			return err
+		}
+		if accepted {
+			promotePrepared(mapping, prepared, at)
+			return nil
+		}
+		if prepared.Phase != CommitPrepared {
+			return errors.New("accepted prepared commit cannot be rejected")
+		}
+		observed := prepared.Revision
+		mapping.Current.Observed = &observed
+		mapping.Current.PreparedCommit = nil
+		mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
+		return nil
+	})
+}
+
+// ReconcilePreparedIfUnchanged reconciles only when the complete mapping still
+// equals expected.
+func (store *Store) ReconcilePreparedIfUnchanged(identity Identity, expected Mapping, turnID string, accepted bool, at time.Time) (CommitOutcome, error) {
+	if common.ValidateID(turnID) != nil || expected.Validate(identity) != nil {
+		return CommitNotApplied, errors.New("invalid prepared reconciliation precondition")
+	}
+	return store.updateAtExpected(identity, &expected, at, func(mapping *Mapping) error {
 		prepared, err := expectedPrepared(mapping, turnID)
 		if err != nil {
 			return err
