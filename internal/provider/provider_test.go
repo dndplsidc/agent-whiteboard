@@ -210,17 +210,23 @@ func TestNativeSessionReferencesAndMetadataAreValidated(t *testing.T) {
 func TestDriverLifecycleOperationsAreExplicitAndRejectZeroReferences(t *testing.T) {
 	ref, err := provider.NewNativeSessionRef("pi-session-reference")
 	require.NoError(t, err)
+	workspace := t.TempDir()
 
-	create := provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly}
+	create := provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}
 	require.NoError(t, create.Validate())
-	resume := provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: ref}
+	resume := provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: ref, Workspace: workspace}
 	require.NoError(t, resume.Validate())
 	inspect := provider.InspectRequest{Provider: provider.NamePi, NativeSession: ref}
 	require.NoError(t, inspect.Validate())
 	deleteRequest := provider.DeleteRequest{Provider: provider.NamePi, NativeSession: ref}
 	require.NoError(t, deleteRequest.Validate())
 
+	create.Workspace = "relative/workspace"
+	require.Error(t, create.Validate())
 	resume.NativeSession = provider.NativeSessionRef{}
+	require.Error(t, resume.Validate())
+	resume.NativeSession = ref
+	resume.Workspace = "relative/workspace"
 	require.Error(t, resume.Validate())
 	inspect.NativeSession = provider.NativeSessionRef{}
 	require.Error(t, inspect.Validate())
@@ -298,6 +304,10 @@ func TestProviderErrorTaxonomyIsClosedStaticAndRedacted(t *testing.T) {
 func TestAcceptedTurnAndReconciliationAreExplicit(t *testing.T) {
 	accepted := provider.AcceptedTurn{TurnID: idA, AcceptedAt: time.Now().UTC()}
 	require.NoError(t, accepted.Validate())
+	reference := provider.TurnReference{TurnID: idA}
+	require.NoError(t, reference.Validate())
+	reference.TurnID = "invalid"
+	require.Error(t, reference.Validate())
 	states := []provider.TurnState{provider.TurnAccepted, provider.TurnRunning, provider.TurnCompleted, provider.TurnInterrupted, provider.TurnUnknown}
 	for _, state := range states {
 		require.True(t, state.Valid())
@@ -335,10 +345,11 @@ type fakeSession struct {
 	metadata     provider.NativeSession
 	preflight    provider.PreflightResult
 	preflightErr error
+	child        provider.ManagedChild
 }
 
 func validFakeSession() *fakeSession {
-	return &fakeSession{events: make(chan provider.Event), metadata: validNativeSession()}
+	return &fakeSession{events: make(chan provider.Event), metadata: validNativeSession(), child: &fakeChild{}}
 }
 func (*fakeSession) Model() string                           { return "resolved-model" }
 func (f *fakeSession) NativeSession() provider.NativeSession { return f.metadata }
@@ -353,9 +364,10 @@ func (*fakeSession) Submit(context.Context, provider.TurnRequest) (provider.Acce
 }
 func (f *fakeSession) Events() <-chan provider.Event                        { return f.events }
 func (*fakeSession) Interrupt(context.Context, provider.AcceptedTurn) error { return nil }
-func (*fakeSession) Reconcile(context.Context, provider.AcceptedTurn) (provider.TurnState, error) {
+func (*fakeSession) Reconcile(context.Context, provider.TurnReference) (provider.TurnState, error) {
 	return provider.TurnUnknown, nil
 }
+func (f *fakeSession) Child() provider.ManagedChild { return f.child }
 func (*fakeSession) Shutdown(context.Context) error { return nil }
 
 type fakeLauncher struct{}
@@ -383,14 +395,19 @@ func TestCompileTimeFakesHaveBehaviorallyUsableSignatures(t *testing.T) {
 	readiness := driver.Readiness(context.Background())
 	require.NoError(t, readiness.Validate())
 
-	created, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly})
+	workspace := t.TempDir()
+	created, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace})
 	require.NoError(t, err)
 	require.NoError(t, created.NativeSession().Validate())
+	require.NotNil(t, created.Child())
 
 	ref := created.NativeSession().Ref
-	resumed, err := driver.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: ref})
+	resumed, err := driver.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: ref, Workspace: workspace})
 	require.NoError(t, err)
 	require.NoError(t, resumed.NativeSession().Validate())
+	state, err := resumed.Reconcile(context.Background(), provider.TurnReference{TurnID: idA})
+	require.NoError(t, err)
+	require.True(t, state.Valid())
 	metadata, err := driver.Inspect(context.Background(), provider.InspectRequest{Provider: provider.NamePi, NativeSession: ref})
 	require.NoError(t, err)
 	require.NoError(t, metadata.Validate())

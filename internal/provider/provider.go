@@ -176,20 +176,27 @@ func (NativeSession) MarshalJSON() ([]byte, error) {
 }
 
 type CreateRequest struct {
-	Provider Name
-	Access   AccessMode
+	Provider  Name
+	Access    AccessMode
+	Workspace string
 }
 
-func (r CreateRequest) Validate() error { return validateProviderAccess(r.Provider, r.Access) }
+func (r CreateRequest) Validate() error {
+	if validateProviderAccess(r.Provider, r.Access) != nil || !validAbsoluteCleanPath(r.Workspace) {
+		return errors.New("invalid provider create request")
+	}
+	return nil
+}
 
 type ResumeRequest struct {
 	Provider      Name
 	Access        AccessMode
 	NativeSession NativeSessionRef
+	Workspace     string
 }
 
 func (r ResumeRequest) Validate() error {
-	if validateProviderAccess(r.Provider, r.Access) != nil || !r.NativeSession.Valid() {
+	if validateProviderAccess(r.Provider, r.Access) != nil || !r.NativeSession.Valid() || !validAbsoluteCleanPath(r.Workspace) {
 		return errors.New("invalid provider resume request")
 	}
 	return nil
@@ -224,6 +231,7 @@ type Driver interface {
 	Create(context.Context, CreateRequest) (Session, error)
 	Resume(context.Context, ResumeRequest) (Session, error)
 	Inspect(context.Context, InspectRequest) (NativeSession, error)
+	// Delete is idempotent: an already-missing native session is success.
 	Delete(context.Context, DeleteRequest) error
 }
 
@@ -240,7 +248,10 @@ type Session interface {
 	Submit(context.Context, TurnRequest) (AcceptedTurn, error)
 	Events() <-chan Event
 	Interrupt(context.Context, AcceptedTurn) error
-	Reconcile(context.Context, AcceptedTurn) (TurnState, error)
+	// Reconcile determines native acceptance from the durable broker turn ID.
+	Reconcile(context.Context, TurnReference) (TurnState, error)
+	// Child exposes the dedicated process for broker-owned shutdown escalation.
+	Child() ManagedChild
 	Shutdown(context.Context) error
 }
 
@@ -407,6 +418,17 @@ type AcceptedTurn struct {
 func (a AcceptedTurn) Validate() error {
 	if !validID(a.TurnID) || a.AcceptedAt.IsZero() {
 		return errors.New("invalid accepted turn")
+	}
+	return nil
+}
+
+// TurnReference is the durable provider-neutral identity used to reconcile a
+// turn after broker restart without requiring an in-memory acceptance time.
+type TurnReference struct{ TurnID string }
+
+func (reference TurnReference) Validate() error {
+	if !validID(reference.TurnID) {
+		return errors.New("invalid turn reference")
 	}
 	return nil
 }
