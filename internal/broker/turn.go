@@ -44,12 +44,13 @@ type deferredInterrupt struct {
 }
 
 type turnWorkerResult struct {
-	kind      turnWorkerKind
-	turnID    string
-	accepted  provider.AcceptedTurn
-	commandID string
-	clientID  string
-	err       error
+	generation uint64
+	kind       turnWorkerKind
+	turnID     string
+	accepted   provider.AcceptedTurn
+	commandID  string
+	clientID   string
+	err        error
 }
 
 func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, command agentprotocol.Command, payload agentprotocol.SubmitPayload) (bool, agentprotocol.BrowserErrorCode) {
@@ -186,14 +187,15 @@ func (actor *conversation) prepareTurn(request provider.TurnRequest) agentprotoc
 }
 
 func (actor *conversation) startSubmitWorker(results chan<- turnWorkerResult, request provider.TurnRequest) {
-	actor.workerSettled = make(chan struct{})
+	actor.beginProviderWorker(providerWorkerSubmit, "", "")
+	generation := actor.generation
 	go func() {
 		preflight, err := actor.session.session.Preflight(actor.lifecycleCtx, provider.PreflightRequest{Turn: request})
 		if err == nil {
 			err = preflight.Validate()
 		}
 		if err != nil {
-			results <- turnWorkerResult{kind: turnWorkerSubmit, turnID: request.TurnID, err: err}
+			results <- turnWorkerResult{generation: generation, kind: turnWorkerSubmit, turnID: request.TurnID, err: err}
 			return
 		}
 		accepted, err := actor.session.session.Submit(actor.lifecycleCtx, request)
@@ -202,7 +204,7 @@ func (actor *conversation) startSubmitWorker(results chan<- turnWorkerResult, re
 				err = errors.New("invalid provider accepted turn")
 			}
 		}
-		results <- turnWorkerResult{kind: turnWorkerSubmit, turnID: request.TurnID, accepted: accepted, err: err}
+		results <- turnWorkerResult{generation: generation, kind: turnWorkerSubmit, turnID: request.TurnID, accepted: accepted, err: err}
 	}()
 }
 
@@ -221,20 +223,26 @@ func (actor *conversation) commandInterrupt(results chan<- turnWorkerResult, com
 func (actor *conversation) startInterruptWorker(results chan<- turnWorkerResult, commandID, clientID string) {
 	accepted := *actor.active.accepted
 	actor.active.phase = turnInterrupting
-	actor.workerSettled = make(chan struct{})
+	actor.beginProviderWorker(providerWorkerInterrupt, commandID, clientID)
+	generation := actor.generation
 	go func() {
 		err := actor.session.session.Interrupt(actor.lifecycleCtx, accepted)
-		results <- turnWorkerResult{kind: turnWorkerInterrupt, turnID: accepted.TurnID, commandID: commandID, clientID: clientID, err: err}
+		results <- turnWorkerResult{generation: generation, kind: turnWorkerInterrupt, turnID: accepted.TurnID, commandID: commandID, clientID: clientID, err: err}
 	}()
 }
 
 func (actor *conversation) handleTurnResult(attachments map[*attachment]struct{}, results chan<- turnWorkerResult, result turnWorkerResult) {
-	settled := actor.workerSettled
-	actor.workerSettled = nil
+	settled, resolved := actor.settleProviderWorker()
 	if settled != nil {
 		defer close(settled)
 	}
+	if result.generation != actor.generation || resolved {
+		return
+	}
 	if actor.active == nil || actor.active.request.TurnID != result.turnID {
+		if result.kind == turnWorkerInterrupt && result.commandID != "" {
+			actor.completePendingCommand(attachments, result.commandID, result.clientID, agentprotocol.ErrorTurnInterrupted)
+		}
 		return
 	}
 	if result.kind == turnWorkerInterrupt {

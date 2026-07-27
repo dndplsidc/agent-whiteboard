@@ -79,7 +79,7 @@ func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, t
 		}
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
 	case agentprotocol.PageRequestPayload:
-		if request.command.Type != agentprotocol.CommandHistoryPage || actor.workerSettled != nil || actor.stopping {
+		if request.command.Type != agentprotocol.CommandHistoryPage || actor.workerSettled != nil || actor.dispatchBlocked || actor.stopping {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
 			return
 		}

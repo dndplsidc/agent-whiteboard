@@ -8,30 +8,34 @@ import (
 )
 
 type historyWorkerResult struct {
-	commandID string
-	clientID  string
-	page      provider.HistoryPage
-	limit     int
-	err       error
+	generation uint64
+	commandID  string
+	clientID   string
+	page       provider.HistoryPage
+	limit      int
+	err        error
 }
 
 func (actor *conversation) startHistoryWorker(results chan<- historyWorkerResult, commandID, clientID string, payload agentprotocol.PageRequestPayload) {
 	limit := agentprotocol.NormalizePageSize(payload.Limit)
-	actor.workerSettled = make(chan struct{})
+	actor.beginProviderWorker(providerWorkerHistory, commandID, clientID)
+	generation := actor.generation
 	go func() {
 		page, err := actor.session.session.History(actor.lifecycleCtx, provider.HistoryRequest{BeforeMessageID: payload.Before, Limit: limit})
 		if err == nil {
 			err = page.Validate()
 		}
-		results <- historyWorkerResult{commandID: commandID, clientID: clientID, page: page, limit: limit, err: err}
+		results <- historyWorkerResult{generation: generation, commandID: commandID, clientID: clientID, page: page, limit: limit, err: err}
 	}()
 }
 
 func (actor *conversation) handleHistoryResult(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, result historyWorkerResult) {
-	settled := actor.workerSettled
-	actor.workerSettled = nil
+	settled, resolved := actor.settleProviderWorker()
 	if settled != nil {
 		defer close(settled)
+	}
+	if result.generation != actor.generation || resolved {
+		return
 	}
 	if result.err != nil {
 		actor.completePendingCommand(attachments, result.commandID, result.clientID, MapError(result.err).Code())

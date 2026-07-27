@@ -436,8 +436,8 @@ func TestProviderEventsRequireTheActiveTurnAndUseProviderUserMessageAuthority(t 
 	require.Equal(t, agentprotocol.LifecycleReady, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
 }
 
-func TestSessionWideTerminalFailureInterruptsActiveTurnAndPausesQueue(t *testing.T) {
-	broker, _, session, connection, clientID, identity, resource, page := turnFixture(t, 7136)
+func TestSessionWideTerminalFailureInterruptsActiveTurnAndRecoversQueuedWork(t *testing.T) {
+	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7136)
 	defer broker.Close(context.Background())
 	conversationID := connection.ConversationID()
 	turnID := sequenceID(7137)
@@ -451,6 +451,11 @@ func TestSessionWideTerminalFailureInterruptsActiveTurnAndPausesQueue(t *testing
 	_, err = connection.Command(context.Background(), queued)
 	require.NoError(t, err)
 	drainEvents(t, connection.Events(), 2)
+	secondQueuedTurnID := sequenceID(7200)
+	secondQueued := submitCommand(sequenceID(7201), clientID, conversationID, secondQueuedTurnID, sequenceID(7202), "second queued", nil)
+	_, err = connection.Command(context.Background(), secondQueued)
+	require.NoError(t, err)
+	drainEvents(t, connection.Events(), 2)
 
 	session.events <- provider.NewTerminalFailureEvent("", provider.NewProviderError(provider.ErrorChildExited))
 	failure := receiveLifecycle(t, connection.Events())
@@ -461,14 +466,17 @@ func TestSessionWideTerminalFailureInterruptsActiveTurnAndPausesQueue(t *testing
 	require.Equal(t, agentprotocol.InterruptionProviderExit, interrupted.Payload.(agentprotocol.InterruptionPayload).Reason)
 	require.Equal(t, turnID, interrupted.Payload.(agentprotocol.InterruptionPayload).TurnID)
 	require.Equal(t, agentprotocol.LifecycleUnavailable, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
-
-	reconnected, err := broker.Connect(context.Background(), identity.Origin, observationConnect(sequenceID(7143), identity.CapabilityID, page.Digest, resource, ""))
-	require.NoError(t, err)
-	defer reconnected.Close(context.Background())
-	snapshot := receiveLifecycle(t, reconnected.Events()).Payload.(agentprotocol.SnapshotPayload)
-	require.Equal(t, agentprotocol.LifecycleUnavailable, snapshot.Lifecycle)
-	require.Nil(t, snapshot.ActiveTurnID)
-	require.Equal(t, []agentprotocol.QueueItem{{TurnID: queuedTurnID, MessageID: sequenceID(7142), Message: "queued"}}, snapshot.Queue)
+	require.Equal(t, agentprotocol.EventQueue, receiveLifecycle(t, connection.Events()).Type)
+	require.Equal(t, agentprotocol.LifecycleConnecting, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
+	require.Equal(t, queuedTurnID, receiveLifecycle(t, session.submitted).TurnID)
+	require.Equal(t, agentprotocol.LifecycleResponding, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
+	session.events <- provider.NewCompletionEvent(queuedTurnID)
+	require.Equal(t, agentprotocol.EventCompletion, receiveLifecycle(t, connection.Events()).Type)
+	require.Equal(t, agentprotocol.EventQueue, receiveLifecycle(t, connection.Events()).Type)
+	require.Equal(t, agentprotocol.LifecycleConnecting, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
+	require.Equal(t, secondQueuedTurnID, receiveLifecycle(t, session.submitted).TurnID)
+	require.Equal(t, agentprotocol.LifecycleResponding, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
+	require.EqualValues(t, 3, session.submissions.Load())
 }
 
 func TestTurnScopedTerminalFailureDoesNotPromoteToSessionCrash(t *testing.T) {

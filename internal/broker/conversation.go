@@ -14,32 +14,45 @@ import (
 )
 
 type conversation struct {
-	identity          agentstate.Identity
-	mapping           agentstate.Mapping
-	state             StateStore
-	session           *sessionHandle
-	factory           *EventFactory
-	replay            *ReplayLog
-	requests          chan any
-	done              chan struct{}
-	clock             common.Clock
-	timers            TimerFactory
-	idleTimeout       time.Duration
-	resource          agentprotocol.Resource
-	contextDigest     string
-	contextState      agentprotocol.ContextState
-	lifecycle         agentprotocol.LifecycleState
-	queue             *Queue
-	commands          commandLedger
-	active            *activeTurn
-	workerSettled     chan struct{}
-	shutdownAttempt   *actorShutdown
-	deferredInterrupt *deferredInterrupt
-	lifecycleCtx      context.Context
-	stopping          bool
-	dispatchBlocked   bool
-	dispatchPending   bool
-	shutdownTimeout   time.Duration
+	identity            agentstate.Identity
+	mapping             agentstate.Mapping
+	state               StateStore
+	driver              provider.Driver
+	retainSession       func(*sessionHandle)
+	session             *sessionHandle
+	generation          uint64
+	factory             *EventFactory
+	replay              *ReplayLog
+	requests            chan any
+	done                chan struct{}
+	clock               common.Clock
+	timers              TimerFactory
+	idleTimeout         time.Duration
+	resource            agentprotocol.Resource
+	contextDigest       string
+	contextState        agentprotocol.ContextState
+	lifecycle           agentprotocol.LifecycleState
+	queue               *Queue
+	commands            commandLedger
+	active              *activeTurn
+	workerSettled       chan struct{}
+	workerKind          providerWorkerKind
+	workerCommandID     string
+	workerClientID      string
+	workerResolved      bool
+	shutdownAttempt     *actorShutdown
+	deferredInterrupt   *deferredInterrupt
+	lifecycleCtx        context.Context
+	recoveryCancel      context.CancelFunc
+	recoveryResults     chan<- recoveryWorkerResult
+	recoveryActive      bool
+	recoveryAttempted   uint64
+	recoveryUnavailable bool
+	deferredObserve     *deferredObservation
+	stopping            bool
+	dispatchBlocked     bool
+	dispatchPending     bool
+	shutdownTimeout     time.Duration
 
 	closeMu sync.Mutex
 	closed  atomic.Bool
@@ -187,14 +200,29 @@ type closeConversationRequest struct {
 	ctx      context.Context
 	response chan error
 }
-type shutdownWorkerResult struct {
-	response chan error
-	cancel   context.CancelFunc
-	err      error
+type deferredObservation struct {
+	resource agentprotocol.Resource
+	digest   string
 }
 
-func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session *sessionHandle, state StateStore, ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
-	if mapping.Validate(identity) != nil || mapping.Current == nil || session == nil || common.IsNil(session.session) || common.IsNil(state) || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
+type providerWorkerKind uint8
+
+const (
+	providerWorkerNone providerWorkerKind = iota
+	providerWorkerSubmit
+	providerWorkerInterrupt
+	providerWorkerHistory
+)
+
+type shutdownWorkerResult struct {
+	generation uint64
+	response   chan error
+	cancel     context.CancelFunc
+	err        error
+}
+
+func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session *sessionHandle, state StateStore, driver provider.Driver, retainSession func(*sessionHandle), ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
+	if mapping.Validate(identity) != nil || mapping.Current == nil || session == nil || common.IsNil(session.session) || common.IsNil(state) || common.IsNil(driver) || retainSession == nil || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
 		return nil, errors.New("invalid conversation actor")
 	}
 	factory, err := NewEventFactory(mapping.Current.ConversationID, ids, clock)
@@ -202,7 +230,8 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 		return nil, err
 	}
 	actor := &conversation{
-		identity: identity, mapping: cloneMapping(mapping), state: state, session: session,
+		identity: identity, mapping: cloneMapping(mapping), state: state, driver: driver, retainSession: retainSession,
+		session: session, generation: 1,
 		factory: factory, replay: NewReplayLog(), requests: make(chan any),
 		done: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
 		contextState: agentprotocol.ContextPending,
@@ -226,13 +255,16 @@ func (actor *conversation) run() {
 	shutdownResults := make(chan shutdownWorkerResult, 1)
 	turnResults := make(chan turnWorkerResult, 1)
 	historyResults := make(chan historyWorkerResult, 1)
+	recoveryResults := make(chan recoveryWorkerResult, 1)
+	actor.recoveryResults = recoveryResults
 	shutdownActive := false
 	var shutdownWaiters []chan error
 	var idleTimer Timer
 	startShutdown := func(request *closeConversationRequest, attempt *actorShutdown, cancel context.CancelFunc) {
+		generation := actor.generation
 		go func() {
 			err := attempt.run(request.ctx, actor.shutdownTimeout)
-			shutdownResults <- shutdownWorkerResult{response: request.response, cancel: cancel, err: err}
+			shutdownResults <- shutdownWorkerResult{generation: generation, response: request.response, cancel: cancel, err: err}
 		}()
 	}
 	defer func() {
@@ -251,7 +283,7 @@ func (actor *conversation) run() {
 		close(actor.done)
 	}()
 	for {
-		idle := len(attachments) == 0 && actor.active == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !shutdownActive && !actor.stopping
+		idle := len(attachments) == 0 && actor.active == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !actor.dispatchBlocked && !actor.recoveryActive && !shutdownActive && !actor.stopping
 		if idle && idleTimer == nil {
 			idleTimer = actor.timers.NewTimer(actor.idleTimeout)
 		} else if !idle && idleTimer != nil {
@@ -273,8 +305,15 @@ func (actor *conversation) run() {
 			case commandRequest:
 				actor.handleCommand(attachments, turnResults, historyResults, request)
 			case closeConversationRequest:
-				if shutdownActive {
+				if shutdownActive || actor.recoveryActive {
 					shutdownWaiters = append(shutdownWaiters, request.response)
+					actor.stopping = true
+					for item := range attachments {
+						actor.detach(attachments, item)
+					}
+					if actor.recoveryCancel != nil {
+						actor.recoveryCancel()
+					}
 					continue
 				}
 				actor.stopping = true
@@ -296,6 +335,10 @@ func (actor *conversation) run() {
 			if result.cancel != nil {
 				result.cancel()
 			}
+			if result.generation != actor.generation {
+				result.response <- NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
+				continue
+			}
 			if result.err != nil {
 				failure := NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 				result.response <- failure
@@ -311,9 +354,74 @@ func (actor *conversation) run() {
 				waiter <- nil
 			}
 			return
+		case result := <-recoveryResults:
+			if result.generation != actor.generation || !actor.recoveryActive {
+				if result.handle != nil {
+					actor.retainSession(result.handle)
+				}
+				continue
+			}
+			actor.recoveryActive = false
+			if actor.recoveryCancel != nil {
+				actor.recoveryCancel()
+				actor.recoveryCancel = nil
+			}
+			var deferredObservationErr error
+			if result.err == nil && result.handle != nil {
+				actor.session = result.handle
+				actor.mapping = result.mapping
+				actor.generation++
+				actor.shutdownAttempt = nil
+				providerEvents = result.handle.events
+				actor.refreshContextFromMapping()
+				if !actor.stopping {
+					deferredObservationErr = actor.applyDeferredObservation(attachments)
+				}
+			}
+			if actor.stopping {
+				if result.err != nil {
+					providerEvents = nil
+				}
+				if actor.shutdownAttempt == nil {
+					actor.shutdownAttempt = newActorShutdown(actor.session, actor.workerSettled)
+				}
+				if len(shutdownWaiters) != 0 {
+					response := shutdownWaiters[0]
+					shutdownWaiters = shutdownWaiters[1:]
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), actor.shutdownTimeout)
+					request := &closeConversationRequest{ctx: shutdownCtx, response: response}
+					shutdownActive = true
+					startShutdown(request, actor.shutdownAttempt, cancel)
+				}
+				continue
+			}
+			if result.err != nil {
+				providerEvents = nil
+				actor.deferredObserve = nil
+				actor.recoveryUnavailable = true
+				actor.lifecycle = agentprotocol.LifecycleUnavailable
+				actor.publishBrowserError(attachments, agentprotocol.ErrorProviderRecoveryFailed)
+				actor.publishShared(attachments, agentprotocol.LifecyclePayload{State: actor.lifecycle})
+				continue
+			}
+			if deferredObservationErr != nil {
+				actor.recoveryUnavailable = true
+				actor.lifecycle = agentprotocol.LifecycleUnavailable
+				actor.publishBrowserError(attachments, agentprotocol.ErrorProviderRecoveryFailed)
+				actor.publishShared(attachments, agentprotocol.LifecyclePayload{State: actor.lifecycle})
+				continue
+			}
+			actor.recoveryUnavailable = false
+			actor.dispatchBlocked = false
+			actor.lifecycle = agentprotocol.LifecycleReady
+			if actor.queue.Empty() {
+				actor.publishShared(attachments, agentprotocol.LifecyclePayload{State: actor.lifecycle})
+			} else {
+				actor.dispatchNext(attachments, turnResults)
+			}
 		case <-idleChannel:
 			idleTimer = nil
-			if len(attachments) != 0 || actor.active != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || shutdownActive || actor.stopping {
+			if len(attachments) != 0 || actor.active != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.dispatchBlocked || actor.recoveryActive || shutdownActive || actor.stopping {
 				continue
 			}
 			actor.stopping = true
@@ -328,11 +436,88 @@ func (actor *conversation) run() {
 		case event, open := <-providerEvents:
 			if !open {
 				providerEvents = nil
+				actor.startRecovery(attachments, recoveryResults, recoveryTriggerClosure)
+				continue
+			}
+			if actor.recoveryActive {
 				continue
 			}
 			actor.handleProviderEvent(attachments, turnResults, event)
 		}
 	}
+}
+
+func (actor *conversation) beginProviderWorker(kind providerWorkerKind, commandID, clientID string) {
+	actor.workerSettled = make(chan struct{})
+	actor.workerKind = kind
+	actor.workerCommandID = commandID
+	actor.workerClientID = clientID
+	actor.workerResolved = false
+}
+
+func (actor *conversation) settleProviderWorker() (chan struct{}, bool) {
+	settled := actor.workerSettled
+	resolved := actor.workerResolved
+	actor.workerSettled = nil
+	actor.workerKind = providerWorkerNone
+	actor.workerCommandID = ""
+	actor.workerClientID = ""
+	actor.workerResolved = false
+	return settled, resolved
+}
+
+func (actor *conversation) deferObservation(resource agentprotocol.Resource, digest string) error {
+	if validateProtocolResource(resource) != nil || !validDigest(digest) {
+		return NewBrokerError(agentprotocol.ErrorBoardRevisionMalformed)
+	}
+	var latestTime time.Time
+	var latestDigest string
+	if actor.mapping.Current != nil {
+		if latest := latestRevision(actor.mapping.Current); latest != nil {
+			latestTime = latest.SourceUpdatedAt
+			latestDigest = latest.Digest
+		}
+	}
+	if actor.deferredObserve != nil && (latestTime.IsZero() || actor.deferredObserve.resource.UpdatedAt.After(latestTime)) {
+		latestTime = actor.deferredObserve.resource.UpdatedAt
+		latestDigest = actor.deferredObserve.digest
+	}
+	switch {
+	case !latestTime.IsZero() && resource.UpdatedAt.Before(latestTime):
+		return NewBrokerError(agentprotocol.ErrorBoardRevisionUnavailable)
+	case !latestTime.IsZero() && resource.UpdatedAt.Equal(latestTime) && digest != latestDigest:
+		return NewBrokerError(agentprotocol.ErrorBoardRevisionMalformed)
+	}
+	if actor.deferredObserve == nil || resource.UpdatedAt.After(actor.deferredObserve.resource.UpdatedAt) || (resource.UpdatedAt.Equal(actor.deferredObserve.resource.UpdatedAt) && digest == actor.deferredObserve.digest) {
+		actor.deferredObserve = &deferredObservation{resource: cloneProtocolResource(resource), digest: digest}
+	}
+	// A queued context for an older revision must never cross the recovery
+	// boundary, even if durable observation of the replacement later fails.
+	actor.queue.discardContext()
+	return nil
+}
+
+func (actor *conversation) applyDeferredObservation(attachments map[*attachment]struct{}) error {
+	deferred := actor.deferredObserve
+	actor.deferredObserve = nil
+	if deferred == nil {
+		return nil
+	}
+	_, changed, event, err := actor.observeAttach(deferred.resource, deferred.digest)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	actor.queue.discardContext()
+	if err := actor.replay.Append(event); err != nil {
+		return NewBrokerError(agentprotocol.ErrorBrokerUnavailable)
+	}
+	for attached := range attachments {
+		actor.send(attachments, attached, event)
+	}
+	return nil
 }
 
 func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, request attachRequest) {
@@ -353,10 +538,30 @@ func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, re
 			return
 		}
 	}
-	contextState, contextChanged, contextEvent, err := actor.observeAttach(request.resource, request.contextDigest)
-	if err != nil {
-		request.response <- attachResponse{err: err}
-		return
+	contextState := actor.contextState
+	contextChanged := false
+	var contextEvent agentprotocol.Event
+	var err error
+	if actor.recoveryActive {
+		if err = actor.deferObservation(request.resource, request.contextDigest); err != nil {
+			request.response <- attachResponse{err: err}
+			return
+		}
+	} else if actor.recoveryUnavailable {
+		if validateProtocolResource(request.resource) != nil || !validDigest(request.contextDigest) {
+			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBoardRevisionMalformed)}
+			return
+		}
+		if actor.resource.ID == "" || request.contextDigest != actor.contextDigest || !request.resource.UpdatedAt.Equal(actor.resource.UpdatedAt) {
+			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorStateRepairFailed)}
+			return
+		}
+	} else {
+		contextState, contextChanged, contextEvent, err = actor.observeAttach(request.resource, request.contextDigest)
+		if err != nil {
+			request.response <- attachResponse{err: err}
+			return
+		}
 	}
 
 	initial := replayed
@@ -433,6 +638,10 @@ func (actor *conversation) handleProviderEvent(attachments map[*attachment]struc
 		return
 	}
 	terminal := providerEventTerminal(source)
+	if source.Kind == provider.EventTerminalFailure && source.TurnID == "" {
+		actor.publishProviderEvent(attachments, turnResults, source)
+		return
+	}
 	if actor.active != nil && ((actor.active.phase == turnStarting && actor.providerEventTargetsActive(source)) || (actor.active.phase == turnInterrupting && terminal)) {
 		actor.bufferProviderEvent(source)
 		return
@@ -453,7 +662,7 @@ func (actor *conversation) publishProviderEvent(attachments map[*attachment]stru
 		actor.send(attachments, item, event)
 	}
 	if source.Kind == provider.EventTerminalFailure && source.TurnID == "" {
-		actor.handleSessionTerminalFailure(attachments)
+		actor.startRecovery(attachments, actor.recoveryResults, recoveryTriggerTerminal)
 		return
 	}
 	if providerEventTerminal(source) && actor.active != nil {
@@ -523,18 +732,6 @@ func (actor *conversation) providerEventTargetsActive(source provider.Event) boo
 		return false
 	}
 	return source.TurnID == actor.active.request.TurnID || (source.Kind == provider.EventTerminalFailure && source.TurnID == "")
-}
-
-func (actor *conversation) handleSessionTerminalFailure(attachments map[*attachment]struct{}) {
-	actor.dispatchBlocked = true
-	if actor.active != nil {
-		turnID := actor.active.request.TurnID
-		actor.publishShared(attachments, agentprotocol.InterruptionPayload{TurnID: turnID, Reason: agentprotocol.InterruptionProviderExit})
-		zeroProviderContext(actor.active.request.Context)
-		actor.active = nil
-	}
-	actor.lifecycle = agentprotocol.LifecycleUnavailable
-	actor.publishShared(attachments, agentprotocol.LifecyclePayload{State: actor.lifecycle})
 }
 
 func (actor *conversation) send(attachments map[*attachment]struct{}, item *attachment, event agentprotocol.Event) {

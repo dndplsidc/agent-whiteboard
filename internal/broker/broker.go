@@ -556,7 +556,9 @@ func stopPreActor(ctx context.Context, handle *sessionHandle) bool {
 }
 
 func (broker *Broker) newConversation(identity agentstate.Identity, mapping agentstate.Mapping, handle *sessionHandle) (*conversation, error) {
-	actor, err := newConversation(identity, mapping, handle, broker.state, broker.ids, broker.clock, broker.timers, broker.lifecycleCtx, broker.idleTimeout, broker.shutdownTimeout)
+	actor, err := newConversation(identity, mapping, handle, broker.state, broker.driver, func(candidate *sessionHandle) {
+		broker.retainStop(identity, candidate)
+	}, broker.ids, broker.clock, broker.timers, broker.lifecycleCtx, broker.idleTimeout, broker.shutdownTimeout)
 	if err != nil {
 		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
