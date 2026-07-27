@@ -308,10 +308,13 @@ func TestAcceptedTurnAndReconciliationAreExplicit(t *testing.T) {
 	require.NoError(t, reference.Validate())
 	reference.TurnID = "invalid"
 	require.Error(t, reference.Validate())
-	states := []provider.TurnState{provider.TurnAccepted, provider.TurnRunning, provider.TurnCompleted, provider.TurnInterrupted, provider.TurnUnknown}
+	states := []provider.TurnState{provider.TurnNotAccepted, provider.TurnAccepted, provider.TurnRunning, provider.TurnCompleted, provider.TurnInterrupted, provider.TurnUnknown}
 	for _, state := range states {
 		require.True(t, state.Valid())
 	}
+	require.True(t, provider.TurnNotAccepted.Definitive())
+	require.True(t, provider.TurnAccepted.Definitive())
+	require.False(t, provider.TurnUnknown.Definitive())
 	require.False(t, provider.TurnState("native-state").Valid())
 }
 

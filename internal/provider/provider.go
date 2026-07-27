@@ -436,6 +436,9 @@ func (reference TurnReference) Validate() error {
 type TurnState string
 
 const (
+	// TurnNotAccepted means the provider definitively has no accepted turn for
+	// the reference. TurnUnknown means the provider cannot determine the result.
+	TurnNotAccepted TurnState = "not_accepted"
 	TurnAccepted    TurnState = "accepted"
 	TurnRunning     TurnState = "running"
 	TurnCompleted   TurnState = "completed"
@@ -445,11 +448,16 @@ const (
 
 func (state TurnState) Valid() bool {
 	switch state {
-	case TurnAccepted, TurnRunning, TurnCompleted, TurnInterrupted, TurnUnknown:
+	case TurnNotAccepted, TurnAccepted, TurnRunning, TurnCompleted, TurnInterrupted, TurnUnknown:
 		return true
 	default:
 		return false
 	}
+}
+
+// Definitive reports whether reconciliation can safely resolve prepared state.
+func (state TurnState) Definitive() bool {
+	return state.Valid() && state != TurnUnknown
 }
 
 type HistoryRole string
