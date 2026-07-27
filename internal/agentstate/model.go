@@ -93,6 +93,11 @@ type Session struct {
 	PreparedCommit *PreparedCommit
 }
 
+// Validate verifies that the session contains only valid durable bookkeeping.
+func (session Session) Validate() error {
+	return session.validate()
+}
+
 func (session Session) validate() error {
 	if common.ValidateID(session.ConversationID) != nil || !validStoredTime(session.CreatedAt) || !validStoredTime(session.UpdatedAt) || session.UpdatedAt.Before(session.CreatedAt) || !validDisplayLabel(session.ProviderLabel) || !validDisplayLabel(session.ModelLabel) {
 		return errors.New("invalid session bookkeeping")
@@ -122,6 +127,11 @@ type Mapping struct {
 	Archives      []Session
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+}
+
+// Validate verifies the complete mapping and its expected identity.
+func (mapping Mapping) Validate(expected Identity) error {
+	return mapping.validate(&expected)
 }
 
 func (mapping Mapping) validate(expected *Identity) error {

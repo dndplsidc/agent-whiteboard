@@ -38,6 +38,9 @@ func (connection *Connection) Command(ctx context.Context, command agentprotocol
 	if connection == nil || connection.actor == nil || connection.attachment == nil {
 		return agentprotocol.Event{}, NewBrokerError(agentprotocol.ErrorInvalidState)
 	}
+	if err := ctx.Err(); err != nil {
+		return agentprotocol.Event{}, err
+	}
 	if _, err := agentprotocol.EncodeCommand(command); err != nil || command.Type == agentprotocol.CommandConnect || command.ClientID != connection.clientID || command.ConversationID == nil || *command.ConversationID != connection.conversationID {
 		return agentprotocol.Event{}, NewBrokerError(agentprotocol.ErrorInvalidState)
 	}
@@ -68,6 +71,9 @@ func (connection *Connection) Close(ctx context.Context) error {
 	defer connection.closeMu.Unlock()
 	if connection.closed {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if connection.attachment == nil || connection.actor == nil {
 		connection.closed = true

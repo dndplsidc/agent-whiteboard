@@ -13,6 +13,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 	"github.com/edocsss/agent-whiteboard/internal/agentstate"
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/edocsss/agent-whiteboard/internal/localapi"
 	"github.com/edocsss/agent-whiteboard/internal/provider"
 	"github.com/stretchr/testify/require"
 )
@@ -46,7 +47,7 @@ func (s *lifecycleState) Create(identity agentstate.Identity, session agentstate
 		outcome = agentstate.CommitApplied
 	}
 	if outcome != agentstate.CommitNotApplied && !s.doNotPersist {
-		s.mappings[identity] = agentstate.Mapping{SchemaVersion: agentstate.SchemaVersion, Identity: identity, Current: &session, CreatedAt: at, UpdatedAt: at}
+		s.mappings[identity] = agentstate.Mapping{SchemaVersion: agentstate.SchemaVersion, Identity: identity, Current: &session, Archives: []agentstate.Session{}, CreatedAt: at, UpdatedAt: at}
 	}
 	return outcome, s.createErr
 }
@@ -196,21 +197,28 @@ func TestConcurrentConnectSingleFlightsIdentityAndAttachesSnapshots(t *testing.T
 	require.NoError(t, err)
 	defer broker.Close(context.Background())
 
-	connections := make(chan *Connection, 2)
+	type connectResult struct {
+		connection localapi.Connection
+		err        error
+	}
+	connections := make(chan connectResult, 2)
 	for _, client := range []string{sequenceID(20), sequenceID(21)} {
 		client := client
 		go func() {
 			connection, connectErr := broker.Connect(context.Background(), "https://example.com", lifecycleConnect(client, sequenceID(30)))
-			require.NoError(t, connectErr)
-			connections <- connection.(*Connection)
+			connections <- connectResult{connection: connection, err: connectErr}
 		}()
 	}
 	close(gate)
-	first := <-connections
-	second := <-connections
+	firstResult := receiveLifecycle(t, connections)
+	secondResult := receiveLifecycle(t, connections)
+	require.NoError(t, firstResult.err)
+	require.NoError(t, secondResult.err)
+	first := firstResult.connection.(*Connection)
+	second := secondResult.connection.(*Connection)
 	require.Equal(t, first.ConversationID(), second.ConversationID())
-	require.Equal(t, agentprotocol.EventSnapshot, (<-first.Events()).Type)
-	require.Equal(t, agentprotocol.EventSnapshot, (<-second.Events()).Type)
+	require.Equal(t, agentprotocol.EventSnapshot, receiveLifecycle(t, first.Events()).Type)
+	require.Equal(t, agentprotocol.EventSnapshot, receiveLifecycle(t, second.Events()).Type)
 	driver.mu.Lock()
 	require.Len(t, driver.creates, 1)
 	driver.mu.Unlock()
@@ -239,15 +247,15 @@ func TestUnsupportedCommandIsTargetedAndConnectionCloseDoesNotShutdownProvider(t
 	require.NoError(t, err)
 	first := firstRaw.(*Connection)
 	second := secondRaw.(*Connection)
-	<-first.Events()
-	<-second.Events()
+	receiveLifecycle(t, first.Events())
+	receiveLifecycle(t, second.Events())
 	conversation := first.ConversationID()
 	command := agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: sequenceID(80), ClientID: sequenceID(60), ConversationID: &conversation, Type: agentprotocol.CommandNew, Payload: agentprotocol.EmptyPayload{}}
 	result, err := first.Command(context.Background(), command)
 	require.NoError(t, err)
 	require.Equal(t, agentprotocol.EventCommandResult, result.Type)
 	require.Equal(t, agentprotocol.ErrorInvalidState, result.Payload.(agentprotocol.CommandResultPayload).Error.Code())
-	require.Equal(t, result.EventID, (<-first.Events()).EventID)
+	require.Equal(t, result.EventID, receiveLifecycle(t, first.Events()).EventID)
 	select {
 	case <-second.Events():
 		t.Fatal("result leaked to another client")
@@ -269,7 +277,7 @@ func TestReplayAfterLatestCreatesSnapshotCheckpointAndMissingCursorIsSafe(t *tes
 	firstRaw, err := broker.Connect(context.Background(), "https://example.com", lifecycleConnect(client, resource))
 	require.NoError(t, err)
 	first := firstRaw.(*Connection)
-	snapshot := <-first.Events()
+	snapshot := receiveLifecycle(t, first.Events())
 	require.NoError(t, first.Close(context.Background()))
 	connect := lifecycleConnect(client, resource)
 	payload := connect.Payload.(agentprotocol.ConnectPayload)
@@ -277,7 +285,7 @@ func TestReplayAfterLatestCreatesSnapshotCheckpointAndMissingCursorIsSafe(t *tes
 	connect.Payload = payload
 	replayedRaw, err := broker.Connect(context.Background(), "https://example.com", connect)
 	require.NoError(t, err)
-	require.Equal(t, agentprotocol.EventSnapshot, (<-replayedRaw.Events()).Type)
+	require.Equal(t, agentprotocol.EventSnapshot, receiveLifecycle(t, replayedRaw.Events()).Type)
 	require.NoError(t, replayedRaw.Close(context.Background()))
 	payload.ReplayAfter = sequenceID(999)
 	connect.Payload = payload
@@ -396,10 +404,10 @@ func TestSlowSubscriberIsEvictedWithoutAffectingFastSubscriber(t *testing.T) {
 	require.NoError(t, err)
 	slow := slowRaw.(*Connection)
 	fast := fastRaw.(*Connection)
-	<-slow.Events()
-	<-fast.Events()
+	receiveLifecycle(t, slow.Events())
+	receiveLifecycle(t, fast.Events())
 
-	const eventCount = attachmentEventCapacity + 1
+	const eventCount = MaxReplayEvents + 1
 	produced := make(chan struct{})
 	go func() {
 		for index := 0; index < eventCount; index++ {
@@ -408,11 +416,11 @@ func TestSlowSubscriberIsEvictedWithoutAffectingFastSubscriber(t *testing.T) {
 		close(produced)
 	}()
 	for index := 0; index < eventCount; index++ {
-		event, open := <-fast.Events()
+		event, open := receiveLifecycleOpen(t, fast.Events())
 		require.True(t, open)
 		require.Equal(t, agentprotocol.EventActivity, event.Type)
 	}
-	<-produced
+	waitLifecycle(t, produced)
 	select {
 	case <-slow.attachment.detached:
 	case <-time.After(time.Second):
@@ -429,7 +437,7 @@ func TestConnectionDetachAndBrokerShutdownAreRetrySafe(t *testing.T) {
 	raw, err := broker.Connect(context.Background(), "https://example.com", lifecycleConnect(sequenceID(510), sequenceID(520)))
 	require.NoError(t, err)
 	connection := raw.(*Connection)
-	<-connection.Events()
+	receiveLifecycle(t, connection.Events())
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	require.ErrorIs(t, connection.Close(canceled), context.Canceled)
@@ -457,22 +465,19 @@ func TestBrokerCloseWaitsForInflightStartupWithoutHoldingRegistryMutex(t *testin
 		_, connectErr := broker.Connect(context.Background(), "https://example.com", lifecycleConnect(sequenceID(610), sequenceID(620)))
 		connectDone <- connectErr
 	}()
-	<-entered
-	// Establish the same admission transition Close performs before releasing
-	// startup. This is a deterministic barrier, not a scheduler race.
-	broker.mu.Lock()
-	broker.stopping = true
-	broker.mu.Unlock()
+	waitLifecycle(t, entered)
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- broker.Close(context.Background()) }()
-	close(gate)
-	connectErr := <-connectDone
+	connectErr := receiveLifecycle(t, connectDone)
 	require.Error(t, connectErr)
 	var shuttingDown BrokerError
 	require.ErrorAs(t, connectErr, &shuttingDown)
 	require.Equal(t, agentprotocol.ErrorBrokerShuttingDown, shuttingDown.Code())
-	require.NoError(t, <-closeDone)
-	require.EqualValues(t, 1, driver.sessions[0].shutdownCalls.Load())
+	require.NoError(t, receiveLifecycle(t, closeDone))
+	driver.mu.Lock()
+	require.Empty(t, driver.sessions)
+	driver.mu.Unlock()
+	close(gate)
 }
 
 func TestCanceledConnectBeforeAdmissionCreatesNothing(t *testing.T) {

@@ -37,6 +37,8 @@ type Broker struct {
 	ids             *serializedIDs
 	clock           common.Clock
 	shutdownTimeout time.Duration
+	lifecycleCtx    context.Context
+	cancelLifecycle context.CancelFunc
 
 	// mu owns only admission state and the identity registry. No state, actor,
 	// or provider operation is performed while it is held.
@@ -44,7 +46,24 @@ type Broker struct {
 	stopping bool
 	closed   bool
 	registry map[agentstate.Identity]*conversationSlot
-	closeMu  sync.Mutex
+
+	cleanupMu sync.Mutex
+	cleanups  map[*pendingCleanup]struct{}
+	closeMu   sync.Mutex
+}
+
+type pendingCleanup struct {
+	mu             sync.Mutex
+	session        provider.Session
+	child          provider.ManagedChild
+	events         <-chan provider.Event
+	ref            provider.NativeSessionRef
+	conversationID string
+	processStopped bool
+	deleteRequired bool
+	deleteDone     bool
+	workspaceOwned bool
+	workspaceDone  bool
 }
 
 type conversationSlot struct {
@@ -80,11 +99,14 @@ func New(config Config) (*Broker, error) {
 	if config.ShutdownTimeout <= 0 {
 		return nil, errors.New("broker shutdown timeout must be positive")
 	}
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 	return &Broker{
 		state: config.State, driver: config.Driver,
 		ids: &serializedIDs{raw: config.IDs}, clock: config.Clock,
 		shutdownTimeout: config.ShutdownTimeout,
-		registry:        make(map[agentstate.Identity]*conversationSlot),
+		lifecycleCtx:    lifecycleCtx, cancelLifecycle: cancelLifecycle,
+		registry: make(map[agentstate.Identity]*conversationSlot),
+		cleanups: make(map[*pendingCleanup]struct{}),
 	}, nil
 }
 
@@ -118,21 +140,15 @@ func (broker *Broker) Connect(ctx context.Context, origin string, command agentp
 	broker.mu.Unlock()
 
 	if creator {
-		actor, startErr := broker.startConversation(ctx, identity)
-		broker.mu.Lock()
-		slot.actor = actor
-		slot.err = startErr
-		if startErr != nil && broker.registry[identity] == slot {
-			delete(broker.registry, identity)
+		go broker.initializeSlot(slot, identity)
+	}
+	select {
+	case <-slot.ready:
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		close(slot.ready)
-		broker.mu.Unlock()
-	} else {
-		select {
-		case <-slot.ready:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 	if slot.err != nil {
 		return nil, slot.err
@@ -153,9 +169,27 @@ func (broker *Broker) Connect(ctx context.Context, origin string, command agentp
 	return connection, nil
 }
 
+func (broker *Broker) initializeSlot(slot *conversationSlot, identity agentstate.Identity) {
+	actor, startErr := broker.startConversation(broker.lifecycleCtx, identity)
+	if startErr != nil && broker.lifecycleCtx.Err() != nil {
+		startErr = NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
+	}
+	broker.mu.Lock()
+	slot.actor = actor
+	slot.err = startErr
+	if startErr != nil && broker.registry[identity] == slot {
+		delete(broker.registry, identity)
+	}
+	close(slot.ready)
+	broker.mu.Unlock()
+}
+
 func (broker *Broker) startConversation(ctx context.Context, identity agentstate.Identity) (*conversation, error) {
 	mapping, err := broker.state.Load(identity)
 	if err == nil {
+		if mapping.Validate(identity) != nil {
+			return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
+		}
 		return broker.resumeConversation(ctx, identity, mapping)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
@@ -189,19 +223,19 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 	}
 	request := provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}
 	if request.Validate() != nil {
-		_ = broker.state.RemoveWorkspace(conversationID)
+		broker.cleanupWorkspace(conversationID)
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	session, createErr := broker.driver.Create(ctx, request)
 	if createErr != nil {
-		if !common.IsNil(session) {
+		if common.IsNil(session) {
+			broker.cleanupWorkspace(conversationID)
+		} else {
 			native := session.NativeSession()
 			broker.compensateCreate(session, native.Ref, conversationID)
-		} else {
-			_ = broker.state.RemoveWorkspace(conversationID)
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 		}
 		return nil, MapError(createErr)
 	}
@@ -231,7 +265,7 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 	}
 	if outcome == agentstate.CommitApplied || outcome == agentstate.CommitUncertain {
 		loaded, loadErr := broker.state.Load(identity)
-		if loadErr == nil && mappingHasCurrent(loaded, identity, current) {
+		if loadErr == nil && loaded.Validate(identity) == nil && mappingHasCurrent(loaded, identity, current) {
 			return broker.newConversation(identity, loaded, session)
 		}
 		if outcome == agentstate.CommitUncertain && errors.Is(loadErr, os.ErrNotExist) {
@@ -241,7 +275,7 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 		// A present mismatched record, or a failed inspection, cannot prove that
 		// publishing was unapplied. Stop only the live process; deleting native
 		// state or the workspace would be destructive.
-		broker.shutdownOnly(session)
+		broker.retainStop(session)
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	if outcome == agentstate.CommitNotApplied {
@@ -250,13 +284,13 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 	// Unknown outcomes cannot authorize destructive compensation. The live
 	// process is still stopped so its unread event stream cannot be stranded.
 	if outcome != agentstate.CommitNotApplied {
-		broker.shutdownOnly(session)
+		broker.retainStop(session)
 	}
 	return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 }
 
 func (broker *Broker) resumeConversation(ctx context.Context, identity agentstate.Identity, mapping agentstate.Mapping) (*conversation, error) {
-	if mapping.Identity != identity || mapping.Current == nil {
+	if mapping.Validate(identity) != nil || mapping.Current == nil {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
 	if mapping.Current.PreparedCommit != nil {
@@ -278,15 +312,16 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity agentstat
 	}
 	session, err := broker.driver.Resume(ctx, request)
 	if err != nil {
+		if !common.IsNil(session) {
+			broker.retainStop(session)
+		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, NewBrokerError(agentprotocol.ErrorBrokerShuttingDown)
 		}
 		return nil, MapError(err)
 	}
 	if _, err := validateProviderSession(session, &mapping.Current.NativeSession); err != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), broker.shutdownTimeout)
-		_ = session.Shutdown(shutdownCtx)
-		cancel()
+		broker.retainStop(session)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 	}
 	return broker.newConversation(identity, mapping, session)
@@ -311,37 +346,130 @@ func validateProviderSession(session provider.Session, expected *provider.Native
 }
 
 func mappingHasCurrent(mapping agentstate.Mapping, identity agentstate.Identity, current agentstate.Session) bool {
-	return mapping.Identity == identity && mapping.Current != nil &&
-		mapping.Current.ConversationID == current.ConversationID &&
-		mapping.Current.NativeSession == current.NativeSession &&
-		mapping.Current.PreparedCommit == nil
+	if mapping.Validate(identity) != nil || mapping.SchemaVersion != agentstate.SchemaVersion || mapping.Current == nil || mapping.Archives == nil || len(mapping.Archives) != 0 {
+		return false
+	}
+	loaded := mapping.Current
+	return mapping.Identity == identity && mapping.CreatedAt == current.CreatedAt && mapping.UpdatedAt == current.UpdatedAt &&
+		loaded.ConversationID == current.ConversationID && loaded.NativeSession == current.NativeSession &&
+		loaded.CreatedAt == current.CreatedAt && loaded.UpdatedAt == current.UpdatedAt &&
+		loaded.ProviderLabel == current.ProviderLabel && loaded.ModelLabel == current.ModelLabel &&
+		loaded.Committed == nil && loaded.Observed == nil && loaded.PreparedCommit == nil &&
+		current.Committed == nil && current.Observed == nil && current.PreparedCommit == nil
 }
 
-func (broker *Broker) shutdownOnly(session provider.Session) {
+func (broker *Broker) cleanupWorkspace(conversationID string) {
+	cleanup := &pendingCleanup{conversationID: conversationID, processStopped: true, deleteDone: true, workspaceOwned: true}
+	broker.retainCleanup(cleanup)
+}
+
+func (broker *Broker) retainStop(session provider.Session) {
 	if common.IsNil(session) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), broker.shutdownTimeout)
-	_ = session.Shutdown(ctx)
-	cancel()
+	cleanup := &pendingCleanup{session: session, events: session.Events()}
+	if child := session.Child(); !common.IsNil(child) {
+		cleanup.child = child
+	}
+	broker.retainCleanup(cleanup)
 }
 
 func (broker *Broker) compensateCreate(session provider.Session, ref provider.NativeSessionRef, conversationID string) {
-	broker.shutdownOnly(session)
-	if ref.Valid() {
-		ctx, cancel := context.WithTimeout(context.Background(), broker.shutdownTimeout)
-		_ = broker.driver.Delete(ctx, provider.DeleteRequest{Provider: provider.NamePi, NativeSession: ref})
-		cancel()
+	if common.IsNil(session) {
+		broker.cleanupWorkspace(conversationID)
+		return
 	}
-	_ = broker.state.RemoveWorkspace(conversationID)
+	cleanup := &pendingCleanup{
+		session: session, events: session.Events(), ref: ref, conversationID: conversationID,
+		deleteRequired: true, workspaceOwned: true,
+	}
+	if child := session.Child(); !common.IsNil(child) {
+		cleanup.child = child
+	}
+	broker.retainCleanup(cleanup)
+}
+
+func (broker *Broker) retainCleanup(cleanup *pendingCleanup) {
+	broker.cleanupMu.Lock()
+	broker.cleanups[cleanup] = struct{}{}
+	broker.cleanupMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), broker.shutdownTimeout)
+	complete := broker.runCleanup(ctx, cleanup)
+	cancel()
+	if complete {
+		broker.cleanupMu.Lock()
+		delete(broker.cleanups, cleanup)
+		broker.cleanupMu.Unlock()
+	}
+}
+
+func (broker *Broker) runCleanup(ctx context.Context, cleanup *pendingCleanup) bool {
+	cleanup.mu.Lock()
+	defer cleanup.mu.Unlock()
+	if !cleanup.processStopped {
+		cleanup.processStopped = stopPreActor(ctx, cleanup.session, cleanup.events, cleanup.child)
+	}
+	if !cleanup.processStopped {
+		return false
+	}
+	if cleanup.deleteRequired && !cleanup.deleteDone {
+		if !cleanup.ref.Valid() {
+			return false
+		}
+		if err := broker.driver.Delete(ctx, provider.DeleteRequest{Provider: provider.NamePi, NativeSession: cleanup.ref}); err != nil {
+			return false
+		}
+		cleanup.deleteDone = true
+	}
+	if cleanup.workspaceOwned && !cleanup.workspaceDone {
+		if cleanup.deleteRequired && !cleanup.deleteDone {
+			return false
+		}
+		if err := broker.state.RemoveWorkspace(cleanup.conversationID); err != nil {
+			return false
+		}
+		cleanup.workspaceDone = true
+	}
+	return (!cleanup.deleteRequired || cleanup.deleteDone) && (!cleanup.workspaceOwned || cleanup.workspaceDone)
+}
+
+func stopPreActor(ctx context.Context, session provider.Session, events <-chan provider.Event, child provider.ManagedChild) bool {
+	if common.IsNil(session) {
+		return true
+	}
+	stopDrain := make(chan struct{})
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			select {
+			case _, open := <-events:
+				if !open {
+					events = nil
+				}
+			case <-stopDrain:
+				return
+			}
+		}
+	}()
+	shutdownErr := session.Shutdown(ctx)
+	stopped := shutdownErr == nil
+	if !stopped && !common.IsNil(child) {
+		_ = child.Terminate()
+		if child.Kill() == nil {
+			_ = child.Wait()
+			stopped = true
+		}
+	}
+	close(stopDrain)
+	<-drainDone
+	return stopped
 }
 
 func (broker *Broker) newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session provider.Session) (*conversation, error) {
 	actor, err := newConversation(identity, mapping, session, broker.ids, broker.clock, broker.shutdownTimeout)
 	if err != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), broker.shutdownTimeout)
-		_ = session.Shutdown(ctx)
-		cancel()
+		broker.retainStop(session)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 	}
 	return actor, nil
@@ -362,6 +490,7 @@ func (broker *Broker) Close(ctx context.Context) error {
 		return nil
 	}
 	broker.stopping = true
+	broker.cancelLifecycle()
 	slots := make([]*conversationSlot, 0, len(broker.registry))
 	for _, slot := range broker.registry {
 		slots = append(slots, slot)
@@ -389,6 +518,21 @@ func (broker *Broker) Close(ctx context.Context) error {
 	for _, actor := range actors {
 		if err := actor.close(closeCtx); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	broker.cleanupMu.Lock()
+	cleanups := make([]*pendingCleanup, 0, len(broker.cleanups))
+	for cleanup := range broker.cleanups {
+		cleanups = append(cleanups, cleanup)
+	}
+	broker.cleanupMu.Unlock()
+	for _, cleanup := range cleanups {
+		if broker.runCleanup(closeCtx, cleanup) {
+			broker.cleanupMu.Lock()
+			delete(broker.cleanups, cleanup)
+			broker.cleanupMu.Unlock()
+		} else {
+			errs = append(errs, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure))
 		}
 	}
 	if len(errs) == 0 {
