@@ -57,8 +57,11 @@ func TestNativeAllocationFinalizeInspectAndDelete(t *testing.T) {
 	require.NoError(t, err)
 	info, err := os.Lstat(allocation.path)
 	require.NoError(t, err)
+	markerInfo, err := os.Lstat(allocation.markerPath)
+	require.NoError(t, err)
 	require.Zero(t, info.Size())
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	require.Equal(t, identityOf(info), identityOf(markerInfo))
 
 	writeNativeHeader(t, allocation, "pi-session")
 	state := startupState{SessionID: "pi-session", SessionFile: allocation.path, Workspace: workspace, ModelProvider: "p", ModelID: "m", Model: "p/m", ContextWindow: 10, MaxTokens: 5}
@@ -78,6 +81,7 @@ func TestNativeAllocationFinalizeInspectAndDelete(t *testing.T) {
 	require.NoError(t, manager.delete(allocation.Ref))
 	require.NoError(t, manager.delete(allocation.Ref))
 	require.NoFileExists(t, allocation.path)
+	require.NoFileExists(t, allocation.markerPath)
 }
 
 func TestNativeAllocationRejectsZeroClockBeforeCreatingFile(t *testing.T) {
@@ -174,6 +178,8 @@ func TestNativeAllocationCollisionRollbackAndReplacementFailClosed(t *testing.T)
 	allocation, err = manager.allocate(workspace)
 	require.NoError(t, err)
 	require.NoError(t, manager.rollbackAllocation(allocation))
+	require.NoFileExists(t, allocation.path)
+	require.NoFileExists(t, allocation.markerPath)
 }
 
 func TestNativeSessionHeaderRejectsDuplicateIdentityAndWrongVersion(t *testing.T) {

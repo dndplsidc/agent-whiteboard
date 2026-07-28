@@ -30,11 +30,12 @@ type nativeManager struct {
 type nativeFileIdentity struct{ device, inode uint64 }
 
 type nativeAllocation struct {
-	Ref       provider.NativeSessionRef
-	Workspace string
-	path      string
-	identity  nativeFileIdentity
-	createdAt time.Time
+	Ref        provider.NativeSessionRef
+	Workspace  string
+	path       string
+	markerPath string
+	identity   nativeFileIdentity
+	createdAt  time.Time
 }
 
 type nativeMetadata struct {
@@ -102,11 +103,17 @@ func (manager *nativeManager) allocate(workspace string) (nativeAllocation, erro
 		_ = os.Remove(path)
 		return nativeAllocation{}, errors.New("create Pi native session")
 	}
+	markerPath := manager.allocationMarkerPath(ref)
+	if err := os.Link(path, markerPath); err != nil {
+		_ = os.Remove(path)
+		return nativeAllocation{}, errors.New("protect Pi native session allocation")
+	}
 	if err := manager.syncDir(manager.sessions); err != nil {
 		_ = os.Remove(path)
+		_ = os.Remove(markerPath)
 		return nativeAllocation{}, errors.New("sync Pi native session")
 	}
-	return nativeAllocation{Ref: ref, Workspace: workspace, path: path, identity: identityOf(info), createdAt: createdAt}, nil
+	return nativeAllocation{Ref: ref, Workspace: workspace, path: path, markerPath: markerPath, identity: identityOf(info), createdAt: createdAt}, nil
 }
 
 func (manager *nativeManager) finalizeAllocation(allocation nativeAllocation, state startupState) (provider.NativeSession, error) {
@@ -148,14 +155,28 @@ func (manager *nativeManager) finalizeAllocation(allocation nativeAllocation, st
 }
 
 func (manager *nativeManager) rollbackAllocation(allocation nativeAllocation) error {
-	if manager == nil || manager.verifyAllocation(allocation) != nil {
+	if manager == nil || manager.verify() != nil || !validNativeRef(allocation.Ref) || allocation.path != manager.sessionPath(allocation.Ref) || allocation.markerPath != manager.allocationMarkerPath(allocation.Ref) || !validCanonicalPath(allocation.Workspace) || allocation.createdAt.IsZero() || allocation.createdAt.Location() != time.UTC {
 		return errors.New("invalid Pi native allocation rollback")
 	}
 	if _, err := os.Lstat(manager.metadataPath(allocation.Ref)); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return errors.New("Pi native allocation is finalized")
 	}
+	markerInfo, markerErr := os.Lstat(allocation.markerPath)
+	if markerErr != nil || !secureRegular(markerInfo) || identityOf(markerInfo) != allocation.identity {
+		return errors.New("invalid Pi native allocation marker")
+	}
+	info, pathErr := os.Lstat(allocation.path)
+	if pathErr != nil || !secureRegular(info) || identityOf(info) != allocation.identity {
+		if os.Remove(allocation.markerPath) != nil || manager.syncDir(manager.sessions) != nil {
+			return errors.New("rollback replaced Pi native allocation marker")
+		}
+		return errors.New("invalid Pi native allocation identity")
+	}
 	if err := os.Remove(allocation.path); err != nil {
 		return errors.New("rollback Pi native allocation")
+	}
+	if err := os.Remove(allocation.markerPath); err != nil {
+		return errors.New("rollback Pi native allocation marker")
 	}
 	if err := manager.syncDir(manager.sessions); err != nil {
 		return errors.New("sync Pi native allocation rollback")
@@ -179,10 +200,22 @@ func (manager *nativeManager) delete(ref provider.NativeSessionRef) error {
 		return provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
 	sessionPath, metadataPath := manager.sessionPath(ref), manager.metadataPath(ref)
+	markerPath := manager.allocationMarkerPath(ref)
 	sessionInfo, sessionErr := os.Lstat(sessionPath)
+	markerInfo, markerErr := os.Lstat(markerPath)
 	metadataInfo, metadataErr := os.Lstat(metadataPath)
-	sessionMissing, metadataMissing := errors.Is(sessionErr, os.ErrNotExist), errors.Is(metadataErr, os.ErrNotExist)
+	sessionMissing, markerMissing := errors.Is(sessionErr, os.ErrNotExist), errors.Is(markerErr, os.ErrNotExist)
+	metadataMissing := errors.Is(metadataErr, os.ErrNotExist)
+	if markerErr != nil && !markerMissing {
+		return provider.NewProviderError(provider.ErrorNativeSessionMissing)
+	}
 	if sessionMissing && metadataMissing {
+		if markerMissing {
+			return nil
+		}
+		if !secureRegular(markerInfo) || os.Remove(markerPath) != nil || manager.syncDir(manager.sessions) != nil {
+			return provider.NewProviderError(provider.ErrorNativeSessionMissing)
+		}
 		return nil
 	}
 	if metadataMissing {
@@ -195,11 +228,19 @@ func (manager *nativeManager) delete(ref provider.NativeSessionRef) error {
 	if err != nil {
 		return provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
+	if !markerMissing && (!secureRegular(markerInfo) || (!sessionMissing && identityOf(markerInfo) != identityOf(sessionInfo))) {
+		return provider.NewProviderError(provider.ErrorNativeSessionMissing)
+	}
 	if !sessionMissing {
 		if sessionErr != nil || !secureRegular(sessionInfo) || validateSessionFile(sessionPath, metadata.SessionID, metadata.Workspace) != nil {
 			return provider.NewProviderError(provider.ErrorNativeSessionMissing)
 		}
 		if err := os.Remove(sessionPath); err != nil || manager.syncDir(manager.sessions) != nil {
+			return provider.NewProviderError(provider.ErrorNativeSessionMissing)
+		}
+	}
+	if !markerMissing {
+		if err := os.Remove(markerPath); err != nil || manager.syncDir(manager.sessions) != nil {
 			return provider.NewProviderError(provider.ErrorNativeSessionMissing)
 		}
 	}
@@ -217,11 +258,12 @@ func (manager *nativeManager) verify() error {
 }
 
 func (manager *nativeManager) verifyAllocation(allocation nativeAllocation) error {
-	if manager.verify() != nil || !validNativeRef(allocation.Ref) || allocation.path != manager.sessionPath(allocation.Ref) || !validCanonicalPath(allocation.Workspace) || allocation.createdAt.IsZero() || allocation.createdAt.Location() != time.UTC {
+	if manager.verify() != nil || !validNativeRef(allocation.Ref) || allocation.path != manager.sessionPath(allocation.Ref) || allocation.markerPath != manager.allocationMarkerPath(allocation.Ref) || !validCanonicalPath(allocation.Workspace) || allocation.createdAt.IsZero() || allocation.createdAt.Location() != time.UTC {
 		return errors.New("invalid Pi native allocation")
 	}
 	info, err := os.Lstat(allocation.path)
-	if err != nil || !secureRegular(info) || identityOf(info) != allocation.identity {
+	markerInfo, markerErr := os.Lstat(allocation.markerPath)
+	if err != nil || markerErr != nil || !secureRegular(info) || !secureRegular(markerInfo) || identityOf(info) != allocation.identity || identityOf(markerInfo) != allocation.identity {
 		return errors.New("invalid Pi native allocation identity")
 	}
 	return nil
@@ -232,6 +274,9 @@ func (manager *nativeManager) sessionPath(ref provider.NativeSessionRef) string 
 }
 func (manager *nativeManager) metadataPath(ref provider.NativeSessionRef) string {
 	return filepath.Join(manager.sessions, ref.Value()+".json")
+}
+func (manager *nativeManager) allocationMarkerPath(ref provider.NativeSessionRef) string {
+	return filepath.Join(manager.sessions, ".allocation-"+ref.Value())
 }
 
 func (manager *nativeManager) writeMetadata(path string, metadata nativeMetadata) error {

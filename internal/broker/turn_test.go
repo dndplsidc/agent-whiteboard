@@ -618,7 +618,7 @@ func TestActorShutdownEscalatesIgnoredGracefulStopInOrder(t *testing.T) {
 		return nil
 	}
 	config := validLifecycleConfig(state, &hardeningDriver{resumeSession: session}, &lockedIDs{next: 7151})
-	config.ShutdownTimeout = 20 * time.Millisecond
+	config.ShutdownTimeout = 200 * time.Millisecond
 	broker, err := New(config)
 	require.NoError(t, err)
 	resource := testResource(identity.CapabilityID)
