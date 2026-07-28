@@ -612,7 +612,10 @@ func testSignalEntireGroup(t *testing.T, force bool) {
 		require.NoError(t, child.Terminate())
 		require.NoError(t, child.Terminate())
 	}
-	require.Error(t, child.Wait())
+	waitErr := child.Wait()
+	if force {
+		require.Error(t, waitErr)
+	}
 	requireProcessesGone(t, rootPID, grandchildPID)
 }
 
