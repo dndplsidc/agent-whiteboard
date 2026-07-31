@@ -1339,6 +1339,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let timelineScrollTop = 0;
   let followTimeline = true;
   let layoutWasModal = false;
+  let brokerState = "checking";
+  let brokerCode = "broker_unavailable";
+  let brokerGuidance = "Checking for a compatible local broker. No page content has been shared.";
   let showView = () => {};
 
   const toggle = doc.createElement("button");
@@ -1379,8 +1382,28 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   headerCopy.className = "agent-header-copy";
   const heading = doc.createElement("h2");
   heading.textContent = "Page agent";
-  const headerMeta = doc.createElement("div");
-  headerMeta.className = "agent-header-meta";
+  const headerSubtitle = doc.createElement("p");
+  headerSubtitle.className = "agent-header-subtitle";
+  headerSubtitle.textContent = "Content-only · Local Pi";
+  const backButton = doc.createElement("button");
+  backButton.type = "button";
+  backButton.className = "agent-back-button";
+  backButton.textContent = "Back to conversation";
+  backButton.hidden = true;
+  headerCopy.append(heading, headerSubtitle, backButton);
+  headerIdentity.append(agentGlyph, headerCopy);
+  const headerActions = doc.createElement("div");
+  headerActions.className = "agent-header-actions";
+  const close = doc.createElement("button");
+  close.type = "button";
+  close.className = "agent-icon-button agent-close-button";
+  close.setAttribute("aria-label", "Close local agent");
+  close.textContent = "×";
+
+  const statusBar = doc.createElement("div");
+  statusBar.className = "agent-status-bar";
+  const statusCopy = doc.createElement("div");
+  statusCopy.className = "agent-status-copy";
   const headerStatusDot = doc.createElement("span");
   headerStatusDot.className = "agent-status-dot";
   headerStatusDot.setAttribute("aria-hidden", "true");
@@ -1391,27 +1414,20 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   liveStatus.textContent = "Checking local broker…";
   const providerLabel = doc.createElement("span");
   providerLabel.className = "agent-provider-label";
-  providerLabel.textContent = "Pi";
-  const backButton = doc.createElement("button");
-  backButton.type = "button";
-  backButton.className = "agent-back-button";
-  backButton.textContent = "Back to conversation";
-  backButton.hidden = true;
-  headerMeta.append(headerStatusDot, liveStatus, providerLabel);
-  headerCopy.append(heading, headerMeta, backButton);
-  headerIdentity.append(agentGlyph, headerCopy);
-  const headerActions = doc.createElement("div");
-  headerActions.className = "agent-header-actions";
-  const close = doc.createElement("button");
-  close.type = "button";
-  close.className = "agent-icon-button agent-close-button";
-  close.setAttribute("aria-label", "Close local agent");
-  close.textContent = "×";
+  providerLabel.textContent = `Port ${port}`;
+  statusCopy.append(headerStatusDot, liveStatus);
+  statusBar.append(statusCopy, providerLabel);
 
   const setup = doc.createElement("section");
   setup.className = "agent-setup";
+  const setupBody = doc.createElement("div");
+  setupBody.className = "agent-setup-body";
+  const setupIcon = doc.createElement("span");
+  setupIcon.className = "agent-setup-icon";
+  setupIcon.setAttribute("aria-hidden", "true");
+  setupIcon.textContent = "⌁";
   const setupHeading = doc.createElement("h3");
-  setupHeading.textContent = "Connect to your local Pi";
+  setupHeading.textContent = "Checking local broker…";
 
   const settings = doc.createElement("section");
   settings.className = "agent-settings";
@@ -1430,17 +1446,53 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   portLabel.append(portInput);
   const consentDisclosure = doc.createElement("p");
   consentDisclosure.className = "agent-consent";
-  consentDisclosure.textContent = "Connect to your local Pi agent in content-only mode. No page content is sent when you connect. Your first message sends the complete Page Markdown and Creator context, and may resume a conversation saved by your local broker.";
+  consentDisclosure.textContent = brokerGuidance;
+  const consentList = doc.createElement("ul");
+  consentList.className = "agent-consent-list";
+  const contextListItem = doc.createElement("li");
+  contextListItem.textContent = "Complete Markdown and creator notes on the first message";
+  const accessListItem = doc.createElement("li");
+  accessListItem.textContent = "No tools, files, network, or project access";
+  consentList.append(contextListItem, accessListItem);
+  consentList.hidden = true;
   const guidance = doc.createElement("p");
   guidance.className = "agent-guidance";
   const checkButton = doc.createElement("button");
   checkButton.type = "button";
   checkButton.textContent = "Check again";
+  const setupCheckButton = doc.createElement("button");
+  setupCheckButton.type = "button";
+  setupCheckButton.textContent = "Check again";
+  const directSettingsButton = doc.createElement("button");
+  directSettingsButton.type = "button";
+  directSettingsButton.textContent = "Connection settings";
   const connectButton = doc.createElement("button");
   connectButton.type = "button";
   connectButton.className = "agent-primary";
-  connectButton.textContent = "Connect";
-  setup.append(setupHeading, consentDisclosure, connectButton);
+  connectButton.textContent = "Connect to Pi";
+  connectButton.hidden = true;
+  const setupButtons = doc.createElement("div");
+  setupButtons.className = "agent-setup-buttons";
+  setupButtons.append(setupCheckButton, directSettingsButton, connectButton);
+  setupBody.append(setupIcon, setupHeading, consentDisclosure, consentList, setupButtons);
+  const contextDisclosure = doc.createElement("div");
+  contextDisclosure.className = "agent-context-disclosure";
+  const contextDisclosureCopy = doc.createElement("div");
+  const contextDisclosureHeading = doc.createElement("strong");
+  contextDisclosureHeading.textContent = "Page context";
+  const contextDisclosureDescription = doc.createElement("span");
+  contextDisclosureDescription.textContent = "Full Markdown + creator notes";
+  contextDisclosureCopy.append(contextDisclosureHeading, contextDisclosureDescription);
+  const contextDisclosureActions = doc.createElement("div");
+  const contextShareStatus = doc.createElement("span");
+  contextShareStatus.className = "agent-context-share-status";
+  contextShareStatus.textContent = "Not shared";
+  const reviewContextButton = doc.createElement("button");
+  reviewContextButton.type = "button";
+  reviewContextButton.textContent = "Review";
+  contextDisclosureActions.append(contextShareStatus, reviewContextButton);
+  contextDisclosure.append(contextDisclosureCopy, contextDisclosureActions);
+  setup.append(setupBody, contextDisclosure);
   settings.append(settingsHeading, portLabel, guidance, checkButton);
 
   const actions = doc.createElement("div");
@@ -1558,7 +1610,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   separator.setAttribute("aria-valuenow", String(effectiveWidth));
   separator.setAttribute("aria-label", "Resize Page agent pane");
 
-  drawer.append(header, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
+  drawer.append(header, statusBar, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
   doc.body.append(overlay, drawer, toggle);
 
   const transport = transportFactory({
@@ -1587,6 +1639,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     onDisconnect(error) {
       state.connected = false;
       state.lifecycle = "unavailable";
+      brokerState = "offline";
+      brokerCode = error?.protocolViolation ? "protocol_violation" : "broker_unavailable";
+      brokerGuidance = error?.protocolViolation
+        ? "The local broker sent an incompatible event stream. Update or restart it before reconnecting. No page content has been shared again."
+        : "The local broker connection was interrupted. Check that it is running on this device, then try again.";
       pendingSubmitCommandID = null;
       if (contextCommandID !== null) {
         contextDeliveryUnknown = true;
@@ -1611,10 +1668,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         handoffCommandID = null;
       }
       render();
-      if (error?.protocolViolation) {
-        liveStatus.textContent = "The local broker sent an invalid event stream. Update or restart the broker before reconnecting.";
-        return;
-      }
+      if (error?.protocolViolation) return;
       if (transport.consented) scheduleReconnect();
     },
   });
@@ -1784,27 +1838,71 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function render() {
+    statusBar.removeAttribute("title");
     if (!timeline.hidden) {
       timelineScrollTop = timeline.scrollTop;
       followTimeline = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
     }
-    const statusState = state.connected ? state.lifecycle : "unavailable";
+    const statusState = state.connected
+      ? state.lifecycle
+      : brokerState === "ready"
+        ? "ready"
+        : brokerState === "connecting" ? "connecting" : "unavailable";
     statusDot.dataset.state = statusState;
     headerStatusDot.dataset.state = statusState;
+    statusBar.dataset.state = statusState;
     if (state.connected) {
-      providerLabel.textContent = state.provider.model || "";
-      providerLabel.hidden = !state.provider.model;
+      providerLabel.textContent = state.provider.model || "Pi";
+      providerLabel.hidden = false;
       liveStatus.textContent = state.lifecycle === "responding"
-        ? "Pi · Responding"
+        ? "Responding"
         : pendingSubmitCommandID !== null
-          ? "Pi · Sending"
-          : `Pi · ${state.lifecycle[0].toUpperCase()}${state.lifecycle.slice(1)}`;
+          ? "Sending"
+          : "Connected";
     } else {
-      providerLabel.textContent = "";
-      providerLabel.hidden = true;
-      if (transport.consented) liveStatus.textContent = "Pi · Unavailable";
+      providerLabel.hidden = false;
+      if (brokerState === "checking") {
+        liveStatus.textContent = "Checking local broker…";
+        providerLabel.textContent = `Port ${port}`;
+      } else if (brokerState === "connecting") {
+        liveStatus.textContent = "Connecting…";
+        providerLabel.textContent = "Local Pi";
+      } else if (brokerState === "ready") {
+        liveStatus.textContent = "Pi ready";
+        providerLabel.textContent = "Not connected";
+      } else {
+        const shortStatus = {
+          wrong_port: "Broker not found",
+          local_network_permission_denied: "Local access blocked",
+          untrusted_origin: "Origin not trusted",
+          incompatible_api: "Broker incompatible",
+          protocol_violation: "Broker incompatible",
+          broker_unavailable: "Broker unavailable",
+        };
+        liveStatus.textContent = shortStatus[brokerCode] ?? shortStatus.broker_unavailable;
+        providerLabel.textContent = `Port ${port}`;
+      }
     }
     setup.hidden = state.connected || activeView !== "conversation";
+    setup.dataset.state = brokerState;
+    if (!state.connected) {
+      const ready = brokerState === "ready" || brokerState === "connecting";
+      setupIcon.textContent = ready ? "✓" : "⌁";
+      setupHeading.textContent = ready
+        ? brokerState === "connecting" ? "Connecting to Pi…" : "Ready to connect"
+        : brokerState === "checking" ? "Checking local broker…" : "Pi isn’t available on this device";
+      consentDisclosure.textContent = ready
+        ? "Connecting starts or resumes a local Pi conversation and sends no page content. Complete context is included only with the next message that needs it."
+        : brokerGuidance;
+      consentList.hidden = !ready;
+      setupCheckButton.hidden = brokerState !== "offline";
+      directSettingsButton.hidden = ready;
+      connectButton.hidden = !ready;
+      connectButton.disabled = brokerState === "connecting";
+      contextShareStatus.textContent = contextDeliveryUnknown
+        ? "Uncertain"
+        : contextAccepted || ["accepted", "unchanged"].includes(state.contextState) ? "Shared previously" : "Not shared";
+    }
     settings.hidden = activeView !== "settings";
     newMenuButton.disabled = !state.connected;
     archivesMenuButton.disabled = !state.connected;
@@ -1814,6 +1912,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     queue.hidden = !state.connected || activeView !== "conversation" || state.queue.length === 0;
     actions.hidden = true;
     backButton.hidden = activeView === "conversation";
+    headerSubtitle.hidden = activeView !== "conversation";
     contextDetails.hidden = activeView !== "context";
     contextDetails.classList.toggle("agent-view-hidden", activeView !== "context");
     contextDetails.setAttribute("aria-hidden", String(activeView !== "context"));
@@ -1969,6 +2068,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
   }
 
+  function showTransientStatus(summary, detail, explanation) {
+    liveStatus.textContent = summary;
+    providerLabel.textContent = detail;
+    if (explanation) statusBar.title = explanation;
+  }
+
   async function sendCommand(type, commandPayload, { handoff = false, freshArchivePage = false } = {}) {
     const command = createAgentCommand({ type, payload: commandPayload, clientID: transport.clientID, conversationID: transport.conversationID });
     registerAgentCommand(state, command);
@@ -1981,7 +2086,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         state.freshArchiveCommandIDs.delete(command.command_id);
       }
       if (handoffCommandID === command.command_id) handoffCommandID = null;
-      liveStatus.textContent = `Agent error: ${browserErrorText(error.code, doc, "The local broker is unavailable.")}`;
+      showTransientStatus("Action failed", "Retry", browserErrorText(error.code, doc, "The local broker is unavailable."));
     }
     return command;
   }
@@ -1991,19 +2096,26 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   async function probe() {
-    liveStatus.textContent = "Checking local broker…";
+    brokerState = "checking";
+    brokerCode = "broker_unavailable";
+    brokerGuidance = "Checking for a compatible local broker. No page content has been shared.";
+    render();
     try {
       const result = await transport.probe();
       const messages = {
-        wrong_port: "No compatible broker was found. Check the port.",
-        local_network_permission_denied: "Allow Local Network Access in Chrome, then check again.",
-        untrusted_origin: `This whiteboard origin is not trusted. Run: agent-whiteboard agent trust add ${doc.location.origin}`,
-        incompatible_api: "The local broker version is incompatible.",
-        broker_unavailable: "The local broker is unavailable. Check the port and Local Network Access.",
+        wrong_port: "No compatible broker was found on this port. Check the connection settings, then try again. No page content has been shared.",
+        local_network_permission_denied: "Allow Local Network Access in Chrome, then check again. No page content has been shared.",
+        untrusted_origin: `This whiteboard origin is not trusted. Run agent-whiteboard agent trust add ${doc.location.origin}, then check again. No page content has been shared.`,
+        incompatible_api: "The local broker version is incompatible. Update or restart it, then check again. No page content has been shared.",
+        broker_unavailable: "Start the local broker on this device, then check again. No page content has been shared.",
       };
-      liveStatus.textContent = result.ok ? "Local broker available; connect when ready." : messages[result.code] ?? messages.broker_unavailable;
-      guidance.textContent = liveStatus.textContent;
-      connectButton.disabled = !result.ok;
+      brokerState = result.ok ? "ready" : "offline";
+      brokerCode = result.code ?? "broker_unavailable";
+      brokerGuidance = result.ok
+        ? "The local broker is available. Connect when you are ready."
+        : messages[result.code] ?? messages.broker_unavailable;
+      guidance.textContent = brokerGuidance;
+      render();
       return result;
     } catch {
       let permissionDenied = false;
@@ -2013,13 +2125,14 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       } catch {
         permissionDenied = false;
       }
-      const code = permissionDenied ? "local_network_permission_denied" : "broker_unavailable";
-      liveStatus.textContent = permissionDenied
-        ? "Allow Local Network Access for this site in Chrome, then check again."
-        : "The local broker is unavailable. Check the port and Local Network Access.";
-      guidance.textContent = liveStatus.textContent;
-      connectButton.disabled = true;
-      return { ok: false, code };
+      brokerCode = permissionDenied ? "local_network_permission_denied" : "broker_unavailable";
+      brokerState = "offline";
+      brokerGuidance = permissionDenied
+        ? "Allow Local Network Access for this site in Chrome, then check again. No page content has been shared."
+        : "Start the local broker on this device, then check again. No page content has been shared.";
+      guidance.textContent = brokerGuidance;
+      render();
+      return { ok: false, code: brokerCode };
     }
   }
 
@@ -2036,6 +2149,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   };
   backButton.addEventListener("click", () => showView("conversation"));
   contextChip.addEventListener("click", () => showView("context"));
+  reviewContextButton.addEventListener("click", () => showView("context"));
+  directSettingsButton.addEventListener("click", () => showView("settings"));
   queueChip.addEventListener("click", () => queue.querySelector("textarea")?.focus());
   function enabledOverflowItems() {
     return [...overflowMenu.querySelectorAll('[role="menuitem"]:not([disabled])')];
@@ -2064,14 +2179,21 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     void probe();
   });
   checkButton.addEventListener("click", () => void probe());
+  setupCheckButton.addEventListener("click", () => void probe());
   connectButton.addEventListener("click", async () => {
     transport.grantConsent();
-    liveStatus.textContent = "Connecting to Pi…";
+    brokerState = "connecting";
+    render();
     try {
       await transport.connect();
       render();
       void sendCommand("history_page", { limit: 50 });
-    } catch (error) { liveStatus.textContent = `Unable to connect: ${browserErrorText(error.code, doc, "check the broker, port, Local Network Access, and trust.")}`; }
+    } catch (error) {
+      brokerState = "offline";
+      brokerCode = error?.code ?? "broker_unavailable";
+      brokerGuidance = `Unable to connect: ${browserErrorText(error.code, doc, "check the broker, port, Local Network Access, and trust.")} No page content has been shared.`;
+      render();
+    }
   });
   function resizeComposer() {
     message.style.height = "auto";
@@ -2095,11 +2217,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     const text = message.value;
     if (!validText(text, MAX_AGENT_MESSAGE_BYTES)) { message.setCustomValidity("Enter a message no larger than 64 KiB."); message.reportValidity(); return; }
     if (state.contextState === "pending" && contextRevision === undefined) {
-      liveStatus.textContent = "Wait for the broker to determine whether this page context is initial or replacement.";
+      showTransientStatus("Context pending", "Please wait", "Wait for the broker to determine whether this page context is initial or replacement.");
       return;
     }
     if (contextCommandID !== null || contextDeliveryUnknown) {
-      liveStatus.textContent = "Wait for the complete context handoff to be confirmed before sending another message.";
+      showTransientStatus("Context pending", "Reconnect", "Wait for the complete context handoff to be confirmed before sending another message.");
       return;
     }
     message.setCustomValidity("");
@@ -2118,7 +2240,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         else contextDeliveryUnknown = true;
       }
       render();
-      liveStatus.textContent = `Unable to send: ${browserErrorText(error.code, doc, "the delivery outcome is unknown; reconnect before trying again.")}`;
+      showTransientStatus("Send failed", "Retry", browserErrorText(error.code, doc, "the delivery outcome is unknown; reconnect before trying again."));
     }
   });
   stopButton.addEventListener("click", () => { if (state.activeTurnID) void sendCommand("interrupt", { turn_id: state.activeTurnID }); });

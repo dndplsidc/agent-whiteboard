@@ -23,10 +23,10 @@ test("streams a consented Enter submission through the real broker and pinned Pi
   page.on("request", (request) => browserRequests.push(request.url()));
 
   await page.goto(resource.url);
-  await expect(page.locator(".agent-live-status")).toContainText("Local broker available");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
   expect(realAgentSidebar.modelRequests).toHaveLength(0);
   await page.getByRole("button", { name: "Open Page agent" }).click();
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled({ timeout: 15_000 });
   expect(realAgentSidebar.modelRequests).toHaveLength(0);
 
@@ -34,7 +34,7 @@ test("streams a consented Enter submission through the real broker and pinned Pi
   await composer.fill("Answer from the supplied content only.");
   await composer.press("Enter");
   await expect(page.locator(".agent-response-loading")).toHaveAccessibleName("Pi is responding", { timeout: 15_000 });
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Responding");
+  await expect(page.locator(".agent-live-status")).toHaveText("Responding");
 
   await realAgentSidebar.releaseModelFirstDelta();
   const assistant = page.locator(".agent-message-assistant .agent-message-body");
@@ -44,9 +44,9 @@ test("streams a consented Enter submission through the real broker and pinned Pi
 
   await realAgentSidebar.releaseModelLaterDelta();
   await expect(assistant).toContainText("Real Pi fixture reply");
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Responding");
+  await expect(page.locator(".agent-live-status")).toHaveText("Responding");
   await realAgentSidebar.releaseModelCompletion();
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Ready", { timeout: 15_000 });
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected", { timeout: 15_000 });
   await expect.poll(() => realAgentSidebar.modelRequests.length).toBe(1);
 
   const modelRequest = realAgentSidebar.modelRequests[0];
@@ -79,9 +79,9 @@ test("automatically connects a literal loopback HTTP Markdown viewer", async ({
   page.on("request", (request) => browserRequests.push(request.url()));
 
   await page.goto(resource.url);
-  await expect(page.locator(".agent-live-status")).toContainText("Local broker available");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled({ timeout: 15_000 });
 
   const composer = page.getByLabel("Message Pi about this whiteboard");
@@ -92,7 +92,7 @@ test("automatically connects a literal loopback HTTP Markdown viewer", async ({
   await expect(page.locator(".agent-message-assistant")).toContainText("Real Pi fixture");
   await realAgentSidebar.releaseModelLaterDelta();
   await realAgentSidebar.releaseModelCompletion();
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Ready", { timeout: 15_000 });
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected", { timeout: 15_000 });
   await expect.poll(() => realAgentSidebar.modelRequests.length).toBe(1);
 
   const modelRequest = realAgentSidebar.modelRequests[0];

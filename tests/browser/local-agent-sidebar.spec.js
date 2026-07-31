@@ -19,13 +19,13 @@ async function openSidebarPage({ context, page, fixture, markdown, creatorContex
   fixture.resetBrokerRequests();
   fixture.resetBrokerState();
   await page.goto(resource.url);
-  await expect(page.locator(".agent-live-status")).toContainText("Local broker available");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
   return resource;
 }
 
 async function connectSidebar(page) {
   await page.getByRole("button", { name: "Open Page agent" }).click();
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
 }
@@ -52,9 +52,14 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   expect(JSON.stringify(localAgentSidebar.brokerRequests)).not.toContain(creatorContext);
 
   await page.getByRole("button", { name: "Open Page agent" }).click();
-  await expect(page.locator(".agent-consent")).toContainText("No page content is sent when you connect");
-  await expect(page.locator(".agent-consent")).toContainText("complete Page Markdown and Creator context");
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.locator(".agent-drawer-header")).toContainText("Content-only · Local Pi");
+  await expect(page.locator(".agent-drawer-header")).not.toContainText("Pi ready");
+  await expect(page.locator(".agent-status-bar")).toContainText("Pi ready");
+  await expect(page.locator(".agent-status-bar")).toContainText("Not connected");
+  await expect(page.locator(".agent-consent")).toContainText("sends no page content");
+  await expect(page.locator(".agent-consent-list")).toContainText("Complete Markdown and creator notes");
+  await expect(page.locator(".agent-context-disclosure")).toContainText("Not shared");
+  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
 
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
@@ -183,7 +188,7 @@ test("keeps the ChatGPT-like header, transcript, context, and composer in stable
   await expect.poll(() => timeline.evaluate((element) => element.scrollTop)).toBe(readingPosition);
   localAgentSidebar.releaseResponsePhase("later_delta");
   localAgentSidebar.releaseResponsePhase("completion");
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Ready");
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected");
   await expect.poll(() => timeline.evaluate((element) => element.scrollTop)).toBe(readingPosition);
   const after = await composer.boundingBox();
   expect(Math.round(after.y + after.height)).toBe(Math.round(before.y + before.height));
@@ -295,7 +300,7 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
   await expect(page.locator(".agent-response-loading")).toHaveAccessibleName("Pi is responding");
   await expect(page.locator(".agent-response-dot")).toHaveCount(3);
   await expect(page.locator(".agent-response-dot").first()).not.toHaveCSS("animation-name", "none");
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Responding");
+  await expect(page.locator(".agent-live-status")).toHaveText("Responding");
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
 
   localAgentSidebar.releaseResponsePhase("first_delta");
@@ -306,7 +311,7 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
 
   localAgentSidebar.releaseResponsePhase("later_delta");
   await expect(assistant).toContainText("Fixture reply");
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Responding");
+  await expect(page.locator(".agent-live-status")).toHaveText("Responding");
   localAgentSidebar.emitActivity("visible_summary", "Checked the published headings.");
   localAgentSidebar.emitBlocked("tool");
   localAgentSidebar.emitBlocked("permission");
@@ -317,7 +322,7 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
   await expect(page.locator(".agent-timeline")).not.toContainText("thinking_delta");
 
   localAgentSidebar.releaseResponsePhase("completion");
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Ready");
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected");
   await page.getByRole("button", { name: "Open Page agent menu" }).click();
   await page.getByRole("menuitem", { name: "Inspect page context" }).click();
   await expect(page.locator(".agent-context")).toBeVisible();
@@ -359,9 +364,9 @@ test("sends exact initial context once and resumes without replaying it", async 
 
   localAgentSidebar.resetBrokerRequests();
   await page.reload();
-  await expect(page.locator(".agent-live-status")).toContainText("Local broker available");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
   await expect(page.locator(".agent-drawer")).toHaveClass(/is-open/u);
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
   await page.getByLabel("Message Pi about this whiteboard").fill("Continue without repeating context.");
   await page.getByLabel("Message Pi about this whiteboard").press("Enter");

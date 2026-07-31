@@ -635,6 +635,58 @@ describe("local agent transport and event state", () => {
 });
 
 describe("local agent rendering and controls", () => {
+  test("separates identity, concise status, and offline, ready, and connected bodies", async () => {
+    let options;
+    const transport = {
+      clientID: agentIDs.message,
+      conversationID: agentIDs.conversation,
+      consented: false,
+      probe: vi.fn()
+        .mockResolvedValueOnce({ ok: false, code: "broker_unavailable" })
+        .mockResolvedValueOnce({ ok: true, code: null }),
+      grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({
+      payload: agentPayload(), doc: document, storage: localStorage,
+      pageTitle: "Agent board", pageURL: "https://board.example/m/abc",
+      transportFactory: (input) => { options = input; return transport; },
+    });
+
+    const header = drawer.elements.drawer.querySelector(".agent-drawer-header");
+    const statusBar = drawer.elements.drawer.querySelector(".agent-status-bar");
+    const setup = drawer.elements.setup;
+    await vi.waitFor(() => expect(statusBar?.textContent).toContain("Broker unavailable"));
+    expect(header?.textContent).toContain("Page agent");
+    expect(header?.textContent).toContain("Content-only · Local Pi");
+    expect(header?.textContent).not.toContain("Broker unavailable");
+    expect(statusBar?.textContent).toContain("Port 8568");
+    expect(setup.querySelector("h3")?.textContent).toBe("Pi isn’t available on this device");
+    expect(setup.textContent).toContain("No page content has been shared");
+    expect(setup.querySelector(".agent-context-disclosure")?.textContent).toContain("Full Markdown + creator notes");
+    expect(setup.querySelector(".agent-context-disclosure")?.textContent).toContain("Not shared");
+    expect(drawer.elements.connectButton.hidden).toBe(true);
+    setup.querySelector(".agent-context-disclosure button").click();
+    expect(drawer.elements.contextDetails.hidden).toBe(false);
+    expect(document.activeElement).toBe(drawer.elements.backButton);
+    drawer.elements.backButton.click();
+
+    await drawer.probe();
+    expect(statusBar?.textContent).toContain("Pi ready");
+    expect(statusBar?.textContent).toContain("Not connected");
+    expect(setup.querySelector("h3")?.textContent).toBe("Ready to connect");
+    expect(setup.textContent).toContain("Complete Markdown and creator notes on the first message");
+    expect(drawer.elements.connectButton.textContent).toBe("Connect to Pi");
+    expect(drawer.elements.connectButton.hidden).toBe(false);
+
+    options.onEvent(snapshotEvent());
+    options.onEvent(agentEvent("provider", { provider: "pi", state: "ready", model: "fixture-model" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    expect(statusBar?.textContent).toContain("Connected");
+    expect(statusBar?.textContent).toContain("fixture-model");
+    expect(setup.hidden).toBe(true);
+    expect(drawer.elements.timeline.hidden).toBe(false);
+    drawer.destroy();
+  });
+
   test("builds the ChatGPT-like shell with context first and a visible processing indicator", () => {
     let options;
     const transport = {
@@ -685,7 +737,7 @@ describe("local agent rendering and controls", () => {
       pageTitle: "Agent board", pageURL: "https://board.example/m/abc",
       transportFactory: (input) => { options = input; return transport; },
     });
-    expect(document.querySelector(".agent-consent")?.textContent).toContain("No page content is sent when you connect");
+    await vi.waitFor(() => expect(document.querySelector(".agent-consent")?.textContent).toContain("sends no page content"));
     options.onEvent(snapshotEvent());
     expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(true);
 
@@ -1013,16 +1065,16 @@ describe("local agent rendering and controls", () => {
     options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
     drawer.elements.message.value = "first";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Pi · Sending"));
+    await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Sending"));
     const first = transport.send.mock.calls[0][0];
     options.onEvent(agentEvent("command_result", { command_id: first.command_id, status: "rejected", error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
-    expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Pi · Ready");
+    expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Connected");
 
     drawer.elements.message.value = "second";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
     options.onDisconnect(new Error("closed"));
-    expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Pi · Unavailable");
+    expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Broker unavailable");
     expect(drawer.elements.timeline.querySelector(".agent-response-loading")).toBeNull();
     drawer.destroy();
   });
