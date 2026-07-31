@@ -1483,15 +1483,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const contextDisclosureDescription = doc.createElement("span");
   contextDisclosureDescription.textContent = "Full Markdown + creator notes";
   contextDisclosureCopy.append(contextDisclosureHeading, contextDisclosureDescription);
-  const contextDisclosureActions = doc.createElement("div");
-  const contextShareStatus = doc.createElement("span");
-  contextShareStatus.className = "agent-context-share-status";
-  contextShareStatus.textContent = "Not shared";
   const reviewContextButton = doc.createElement("button");
   reviewContextButton.type = "button";
   reviewContextButton.textContent = "Review";
-  contextDisclosureActions.append(contextShareStatus, reviewContextButton);
-  contextDisclosure.append(contextDisclosureCopy, contextDisclosureActions);
+  contextDisclosure.append(contextDisclosureCopy, reviewContextButton);
   setup.append(setupBody, contextDisclosure);
   settings.append(settingsHeading, portLabel, guidance, checkButton);
 
@@ -1542,14 +1537,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const contextDetails = doc.createElement("details");
   contextDetails.className = "agent-context";
   const contextSummary = doc.createElement("summary"); contextSummary.textContent = "Page context";
-  const contextStatus = doc.createElement("p");
-  const contextMetadata = doc.createElement("p");
-  contextMetadata.textContent = `Markdown resource updated ${payload.local_agent.resource.updated_at}. Complete context is sent only with the next initial or replacement message.`;
   const markdownLabel = doc.createElement("h3"); markdownLabel.textContent = "Page Markdown";
   const markdownContext = doc.createElement("pre"); markdownContext.textContent = payload.markdown; markdownContext.setAttribute("aria-label", "Page Markdown");
   const creatorLabel = doc.createElement("h3"); creatorLabel.textContent = "Creator context";
   const creatorContext = doc.createElement("pre"); creatorContext.textContent = payload.context; creatorContext.setAttribute("aria-label", "Creator context");
-  contextDetails.append(contextSummary, contextStatus, contextMetadata, markdownLabel, markdownContext, creatorLabel, creatorContext);
+  contextDetails.append(contextSummary, markdownLabel, markdownContext, creatorLabel, creatorContext);
 
   const timeline = doc.createElement("section");
   timeline.className = "agent-timeline";
@@ -1899,9 +1891,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       directSettingsButton.hidden = ready;
       connectButton.hidden = !ready;
       connectButton.disabled = brokerState === "connecting";
-      contextShareStatus.textContent = contextDeliveryUnknown
-        ? "Uncertain"
-        : contextAccepted || ["accepted", "unchanged"].includes(state.contextState) ? "Shared previously" : "Not shared";
     }
     settings.hidden = activeView !== "settings";
     newMenuButton.disabled = !state.connected;
@@ -1917,7 +1906,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     contextDetails.classList.toggle("agent-view-hidden", activeView !== "context");
     contextDetails.setAttribute("aria-hidden", String(activeView !== "context"));
     archives.hidden = activeView !== "archives";
-    const awaitingContextDecision = state.contextState === "pending" && contextRevision === undefined;
     const contextAttached = state.contextState === "accepted" || state.contextState === "unchanged";
     sendButton.disabled = submitBlocked();
     stopButton.disabled = state.activeTurnID === null;
@@ -1925,13 +1913,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     contextChip.textContent = `Context · ${contextAttached ? "current" : "available"}`;
     queueChip.textContent = `Queue · ${state.queue.length}`;
     queueChip.hidden = state.queue.length === 0;
-    message.setAttribute("aria-describedby", "agent-whiteboard-context-status");
-    contextStatus.id = "agent-whiteboard-context-status";
-    contextStatus.textContent = contextDeliveryUnknown
-      ? `Digest ${state.contextDigest ?? payload.local_agent.context_digest}; delivery outcome unknown. Reconnect before sending another message.`
-      : awaitingContextDecision
-        ? `Digest ${state.contextDigest ?? payload.local_agent.context_digest}; checking whether complete context is initial or replacement.`
-        : `Digest ${state.contextDigest ?? payload.local_agent.context_digest}; context ${state.contextState}.`;
 
     timeline.replaceChildren();
     const contextSummary = doc.createElement("article");

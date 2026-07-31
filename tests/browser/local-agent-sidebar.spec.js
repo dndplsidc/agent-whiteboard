@@ -58,7 +58,8 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   await expect(page.locator(".agent-status-bar")).toContainText("Not connected");
   await expect(page.locator(".agent-consent")).toContainText("sends no page content");
   await expect(page.locator(".agent-consent-list")).toContainText("Complete Markdown and creator notes");
-  await expect(page.locator(".agent-context-disclosure")).toContainText("Not shared");
+  await expect(page.locator(".agent-context-disclosure")).toContainText("Full Markdown + creator notes");
+  await expect(page.locator(".agent-context-disclosure")).not.toContainText(/shared|uncertain/iu);
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
 
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");

@@ -662,11 +662,16 @@ describe("local agent rendering and controls", () => {
     expect(statusBar?.textContent).toContain("Port 8568");
     expect(setup.querySelector("h3")?.textContent).toBe("Pi isn’t available on this device");
     expect(setup.textContent).toContain("No page content has been shared");
-    expect(setup.querySelector(".agent-context-disclosure")?.textContent).toContain("Full Markdown + creator notes");
-    expect(setup.querySelector(".agent-context-disclosure")?.textContent).toContain("Not shared");
+    const contextDisclosure = setup.querySelector(".agent-context-disclosure");
+    expect(contextDisclosure?.textContent).toContain("Full Markdown + creator notes");
+    expect(contextDisclosure?.textContent).not.toMatch(/shared|uncertain/iu);
     expect(drawer.elements.connectButton.hidden).toBe(true);
-    setup.querySelector(".agent-context-disclosure button").click();
+    contextDisclosure.querySelector("button").click();
     expect(drawer.elements.contextDetails.hidden).toBe(false);
+    expect(drawer.elements.contextDetails.textContent).not.toContain("Digest");
+    expect(drawer.elements.contextDetails.textContent).not.toContain("initial or replacement");
+    expect(drawer.elements.contextDetails.textContent).toContain("Page Markdown");
+    expect(drawer.elements.contextDetails.textContent).toContain("Creator context");
     expect(document.activeElement).toBe(drawer.elements.backButton);
     drawer.elements.backButton.click();
 
@@ -760,7 +765,7 @@ describe("local agent rendering and controls", () => {
 
     options.onDisconnect(new Error("socket closed"));
     expect(transport.resetReplay).toHaveBeenCalledOnce();
-    expect(document.querySelector(".agent-context")?.textContent).toContain("delivery outcome unknown");
+    expect(document.querySelector(".agent-context")?.textContent).not.toMatch(/digest|delivery outcome|initial or replacement/iu);
     options.onEvent(snapshotEvent({ event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
     expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(false);
     drawer.destroy();

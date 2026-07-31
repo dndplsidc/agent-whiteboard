@@ -744,13 +744,6 @@ body.agent-drawer-modal-open .agent-toggle {
   min-width: 0;
 }
 
-.agent-context-disclosure > div:last-child {
-  align-items: center;
-  display: flex;
-  flex: none;
-  gap: 0.35rem;
-}
-
 .agent-context-disclosure strong,
 .agent-context-disclosure span {
   display: block;
@@ -769,17 +762,11 @@ body.agent-drawer-modal-open .agent-toggle {
   white-space: nowrap;
 }
 
-.agent-context-share-status {
-  color: color-mix(in srgb, var(--awb-muted) 72%, transparent);
-  font-size: 0.58rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
 .agent-context-disclosure button {
   background: transparent !important;
   border: 0 !important;
   color: var(--awb-link) !important;
+  flex: none;
   font-size: 0.68rem !important;
   font-weight: 650;
   padding: 0.35rem !important;
