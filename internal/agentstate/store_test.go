@@ -56,6 +56,13 @@ func TestConversationKeyCanonicalVector(t *testing.T) {
 	identity.Origin = "https://EXAMPLE.test"
 	_, err = ConversationKey(identity)
 	require.Error(t, err, "the key requires the exact canonical origin")
+
+	identity.Origin = "http://127.0.0.1:8080"
+	_, err = ConversationKey(identity)
+	require.NoError(t, err, "literal loopback HTTP is a valid durable conversation origin")
+	identity.Origin = "HTTP://127.0.0.1:8080"
+	_, err = ConversationKey(identity)
+	require.Error(t, err, "the loopback origin must also be exactly canonical")
 }
 
 func TestCreateLoadAndStrictDurableSchema(t *testing.T) {

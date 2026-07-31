@@ -439,7 +439,12 @@ function viewerContainer(doc) {
 
 export const AGENT_DRAWER_STORAGE_KEY = "agent-whiteboard-agent-drawer-open";
 export const AGENT_PORT_STORAGE_KEY = "agent-whiteboard-agent-port";
+export const AGENT_DRAWER_WIDTH_STORAGE_KEY = "agent-whiteboard-agent-drawer-width";
 export const DEFAULT_AGENT_PORT = 8568;
+export const DEFAULT_AGENT_DRAWER_WIDTH = 420;
+export const MIN_AGENT_DRAWER_WIDTH = 360;
+export const MAX_AGENT_DRAWER_WIDTH = 720;
+export const AGENT_DRAWER_DOCK_BREAKPOINT = 64 * 16;
 export const AGENT_API_VERSION = "1";
 export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v1";
 export const MAX_AGENT_MESSAGE_BYTES = 64 * 1024;
@@ -572,6 +577,30 @@ export function normalizeAgentPort(value) {
   return Number.isSafeInteger(port) && port <= 65535 ? port : DEFAULT_AGENT_PORT;
 }
 
+export function normalizeAgentDrawerWidth(value) {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= MIN_AGENT_DRAWER_WIDTH && value <= MAX_AGENT_DRAWER_WIDTH
+      ? value
+      : DEFAULT_AGENT_DRAWER_WIDTH;
+  }
+  if (typeof value !== "string" || !/^(?:3[6-9]\d|[4-6]\d\d|7[01]\d|720)$/u.test(value)) return DEFAULT_AGENT_DRAWER_WIDTH;
+  return Number(value);
+}
+
+export function maxAgentDrawerWidth(viewportWidth = globalThis.innerWidth) {
+  const viewport = Number.isFinite(viewportWidth) ? viewportWidth : 0;
+  return Math.max(MIN_AGENT_DRAWER_WIDTH, Math.min(MAX_AGENT_DRAWER_WIDTH, Math.floor(viewport * 0.55)));
+}
+
+export function clampAgentDrawerWidth(value, viewportWidth = globalThis.innerWidth) {
+  const baseWidth = normalizeAgentDrawerWidth(value);
+  return Math.min(baseWidth, maxAgentDrawerWidth(viewportWidth));
+}
+
+export function agentDrawerLayoutMode(viewportWidth = globalThis.innerWidth) {
+  return Number.isFinite(viewportWidth) && viewportWidth >= AGENT_DRAWER_DOCK_BREAKPOINT ? "docked" : "modal";
+}
+
 function readBoolean(storage, key) {
   try {
     const value = storage?.getItem(key);
@@ -583,17 +612,24 @@ function readBoolean(storage, key) {
 
 export function readAgentPreferences(storage) {
   let port;
+  let width;
   try {
     port = storage?.getItem(AGENT_PORT_STORAGE_KEY);
+    width = storage?.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY);
   } catch {
     port = undefined;
+    width = undefined;
   }
-  return { open: readBoolean(storage, AGENT_DRAWER_STORAGE_KEY), port: normalizeAgentPort(port) };
+  return { open: readBoolean(storage, AGENT_DRAWER_STORAGE_KEY), port: normalizeAgentPort(port), width: normalizeAgentDrawerWidth(width) };
 }
 
 export function persistAgentPreference(storage, key, value) {
-  if (key !== AGENT_DRAWER_STORAGE_KEY && key !== AGENT_PORT_STORAGE_KEY) throw new TypeError("unsupported agent preference");
-  const stored = key === AGENT_DRAWER_STORAGE_KEY ? String(value === true) : String(normalizeAgentPort(value));
+  if (key !== AGENT_DRAWER_STORAGE_KEY && key !== AGENT_PORT_STORAGE_KEY && key !== AGENT_DRAWER_WIDTH_STORAGE_KEY) throw new TypeError("unsupported agent preference");
+  const stored = key === AGENT_DRAWER_STORAGE_KEY
+    ? String(value === true)
+    : key === AGENT_PORT_STORAGE_KEY
+      ? String(normalizeAgentPort(value))
+      : String(normalizeAgentDrawerWidth(value));
   try {
     storage?.setItem(key, stored);
   } catch {
@@ -634,7 +670,9 @@ export function createConnectCommand({ payload, clientID, replayAfter, idFactory
 export function createPageContext(payload, { title, url, revision }) {
   let parsedURL;
   try { parsedURL = new URL(url); } catch { throw new TypeError("invalid page context"); }
-  if (!["initial", "replacement"].includes(revision) || !validText(title, 512) || !validText(url, 8 * 1024) || parsedURL.protocol !== "https:" || parsedURL.username || parsedURL.password || !parsedURL.hostname) throw new TypeError("invalid page context");
+  const rawHTTPOrigin = /^http:\/\/[^/?#]+/.exec(url)?.[0];
+  const allowedOrigin = parsedURL.protocol === "https:" || (parsedURL.protocol === "http:" && parsedURL.hostname === "127.0.0.1" && rawHTTPOrigin === parsedURL.origin);
+  if (!["initial", "replacement"].includes(revision) || !validText(title, 512) || !validText(url, 8 * 1024) || !allowedOrigin || parsedURL.username || parsedURL.password || !parsedURL.hostname) throw new TypeError("invalid page context");
   return {
     revision,
     markdown: payload.markdown,
@@ -877,6 +915,7 @@ export function createAgentState() {
     seenEventIDs: new Set(),
     pendingCommandIDs: new Set(),
     knownCommandIDs: new Set(),
+    freshArchiveCommandIDs: new Set(),
     connected: false,
   };
 }
@@ -910,6 +949,7 @@ export function applyAgentEvent(state, untrustedEvent) {
     seenEventIDs: new Set(state.seenEventIDs),
     pendingCommandIDs: new Set(state.pendingCommandIDs),
     knownCommandIDs: new Set(state.knownCommandIDs),
+    freshArchiveCommandIDs: new Set(state.freshArchiveCommandIDs),
   };
   const changed = applyAgentEventMutable(draft, untrustedEvent);
   if (changed) Object.assign(state, draft);
@@ -943,8 +983,12 @@ function applyAgentEventMutable(state, untrustedEvent) {
       break;
     }
     case "history": {
-      const known = new Set(state.archives.map((item) => item.archive_id));
-      state.archives = [...state.archives, ...payload.items.filter((item) => !known.has(item.archive_id)).map((item) => ({ ...item }))].slice(0, MAX_ARCHIVES);
+      if (state.freshArchiveCommandIDs.delete(payload.command_id)) {
+        state.archives = payload.items.map((item) => ({ ...item })).slice(0, MAX_ARCHIVES);
+      } else {
+        const known = new Set(state.archives.map((item) => item.archive_id));
+        state.archives = [...state.archives, ...payload.items.filter((item) => !known.has(item.archive_id)).map((item) => ({ ...item }))].slice(0, MAX_ARCHIVES);
+      }
       state.archiveCursor = payload.next_cursor;
       break;
     }
@@ -971,7 +1015,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
     case "provider": state.provider = { provider: payload.provider, state: payload.state, model: payload.model ?? "" }; break;
     case "context": state.contextDigest = payload.digest; state.contextState = payload.state; break;
     case "activity": appendTimeline(state, { kind: "activity", activity: payload.kind, text: payload.summary, created_at: event.timestamp, item_id: event.event_id }); break;
-    case "blocked": appendTimeline(state, { kind: "activity", activity: "blocked", text: payload.message, created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
+    case "blocked": appendTimeline(state, { kind: "activity", activity: "blocked", blockedKind: payload.kind, text: payload.message, created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
     case "error": state.errors.push({ ...payload.error }); state.errors = state.errors.slice(-20); appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
     case "completion": state.lifecycle = "ready"; state.activeTurnID = null; break;
     case "interruption": state.lifecycle = "interrupted"; state.activeTurnID = null; appendTimeline(state, { kind: "activity", activity: "interruption", text: "The active response was interrupted and was not replayed automatically.", created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
@@ -981,6 +1025,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
     case "command_result":
       state.pendingCommandIDs.delete(payload.command_id);
       if (payload.status === "rejected") {
+        state.freshArchiveCommandIDs.delete(payload.command_id);
         state.errors.push({ ...payload.error });
         appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true });
       }
@@ -1275,6 +1320,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const state = createAgentState();
   let open = preferences.open;
   let port = preferences.port;
+  let baseWidth = preferences.width;
+  let effectiveWidth = clampAgentDrawerWidth(baseWidth, doc.defaultView?.innerWidth);
+  let resizing = false;
+  let resizePointerID = null;
+  let resizeStartWidth = baseWidth;
+  let resizePreviousUserSelect = "";
   let restoreFocus;
   let contextRevision;
   let contextAccepted = false;
@@ -1283,18 +1334,25 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let reconnectTimer;
   let destroyed = false;
   let handoffCommandID = null;
+  let pendingSubmitCommandID = null;
+  let activeView = "conversation";
+  let timelineScrollTop = 0;
+  let followTimeline = true;
+  let layoutWasModal = false;
+  let showView = () => {};
 
   const toggle = doc.createElement("button");
   toggle.type = "button";
   toggle.className = "agent-toggle";
   toggle.setAttribute("aria-controls", "agent-whiteboard-agent-drawer");
-  toggle.setAttribute("aria-label", "Open local agent");
+  toggle.setAttribute("aria-label", "Open Page agent");
+  toggle.setAttribute("aria-expanded", "false");
 
   const statusDot = doc.createElement("span");
   statusDot.className = "agent-status-dot";
   statusDot.setAttribute("aria-hidden", "true");
   const toggleText = doc.createElement("span");
-  toggleText.textContent = "Agent";
+  toggleText.textContent = "Page agent";
   toggle.append(statusDot, toggleText);
 
   const overlay = doc.createElement("button");
@@ -1311,22 +1369,55 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
 
   const header = doc.createElement("header");
   header.className = "agent-drawer-header";
+  const headerIdentity = doc.createElement("div");
+  headerIdentity.className = "agent-header-identity";
+  const agentGlyph = doc.createElement("span");
+  agentGlyph.className = "agent-header-glyph";
+  agentGlyph.setAttribute("aria-hidden", "true");
+  agentGlyph.textContent = "P";
+  const headerCopy = doc.createElement("div");
+  headerCopy.className = "agent-header-copy";
   const heading = doc.createElement("h2");
-  heading.textContent = "Local agent";
+  heading.textContent = "Page agent";
+  const headerMeta = doc.createElement("div");
+  headerMeta.className = "agent-header-meta";
+  const headerStatusDot = doc.createElement("span");
+  headerStatusDot.className = "agent-status-dot";
+  headerStatusDot.setAttribute("aria-hidden", "true");
   const liveStatus = doc.createElement("p");
   liveStatus.className = "agent-live-status";
   liveStatus.setAttribute("role", "status");
   liveStatus.setAttribute("aria-live", "polite");
   liveStatus.textContent = "Checking local broker…";
+  const providerLabel = doc.createElement("span");
+  providerLabel.className = "agent-provider-label";
+  providerLabel.textContent = "Pi";
+  const backButton = doc.createElement("button");
+  backButton.type = "button";
+  backButton.className = "agent-back-button";
+  backButton.textContent = "Back to conversation";
+  backButton.hidden = true;
+  headerMeta.append(headerStatusDot, liveStatus, providerLabel);
+  headerCopy.append(heading, headerMeta, backButton);
+  headerIdentity.append(agentGlyph, headerCopy);
+  const headerActions = doc.createElement("div");
+  headerActions.className = "agent-header-actions";
   const close = doc.createElement("button");
   close.type = "button";
-  close.className = "agent-icon-button";
+  close.className = "agent-icon-button agent-close-button";
   close.setAttribute("aria-label", "Close local agent");
   close.textContent = "×";
-  header.append(heading, liveStatus, close);
 
   const setup = doc.createElement("section");
   setup.className = "agent-setup";
+  const setupHeading = doc.createElement("h3");
+  setupHeading.textContent = "Connect to your local Pi";
+
+  const settings = doc.createElement("section");
+  settings.className = "agent-settings";
+  settings.hidden = true;
+  const settingsHeading = doc.createElement("h3");
+  settingsHeading.textContent = "Connection settings";
   const portLabel = doc.createElement("label");
   portLabel.textContent = "Broker port";
   const portInput = doc.createElement("input");
@@ -1349,7 +1440,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   connectButton.type = "button";
   connectButton.className = "agent-primary";
   connectButton.textContent = "Connect";
-  setup.append(portLabel, consentDisclosure, guidance, checkButton, connectButton);
+  setup.append(setupHeading, consentDisclosure, connectButton);
+  settings.append(settingsHeading, portLabel, guidance, checkButton);
 
   const actions = doc.createElement("div");
   actions.className = "agent-actions";
@@ -1357,6 +1449,43 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const newButton = doc.createElement("button"); newButton.type = "button"; newButton.textContent = "New";
   const historyButton = doc.createElement("button"); historyButton.type = "button"; historyButton.textContent = "Archives";
   actions.append(reconnectButton, newButton, historyButton);
+  actions.hidden = true;
+
+  const overflow = doc.createElement("div");
+  overflow.className = "agent-overflow";
+  const overflowButton = doc.createElement("button");
+  overflowButton.type = "button";
+  overflowButton.className = "agent-icon-button agent-overflow-button";
+  overflowButton.setAttribute("aria-label", "Open Page agent menu");
+  overflowButton.setAttribute("aria-expanded", "false");
+  overflowButton.setAttribute("aria-haspopup", "menu");
+  overflowButton.textContent = "⋯";
+  const overflowMenu = doc.createElement("div");
+  overflowMenu.className = "agent-overflow-menu";
+  overflowMenu.setAttribute("role", "menu");
+  overflowMenu.hidden = true;
+  const menuButton = (label, action) => {
+    const button = doc.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("role", "menuitem");
+    button.addEventListener("click", () => {
+      overflowMenu.hidden = true;
+      overflowButton.setAttribute("aria-expanded", "false");
+      action();
+      if (doc.activeElement === button) overflowButton.focus();
+    });
+    overflowMenu.append(button);
+    return button;
+  };
+  const newMenuButton = menuButton("New conversation", () => newButton.click());
+  const archivesMenuButton = menuButton("Archives", () => historyButton.click());
+  const reconnectMenuButton = menuButton("Reconnect", () => reconnectButton.click());
+  const settingsMenuButton = menuButton("Connection settings", () => showView("settings"));
+  const contextMenuButton = menuButton("Inspect page context", () => showView("context"));
+  overflow.append(overflowButton, overflowMenu);
+  headerActions.append(close, overflow);
+  header.append(headerIdentity, headerActions);
 
   const contextDetails = doc.createElement("details");
   contextDetails.className = "agent-context";
@@ -1383,16 +1512,53 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   archives.setAttribute("aria-label", "Conversation archives");
   archives.hidden = true;
 
+  const composerWrap = doc.createElement("div");
+  composerWrap.className = "agent-composer-wrap";
   const composer = doc.createElement("form");
   composer.className = "agent-composer";
   const message = doc.createElement("textarea");
   message.maxLength = MAX_AGENT_MESSAGE_BYTES;
+  message.rows = 2;
+  message.placeholder = "Ask about this page…";
   message.setAttribute("aria-label", "Message Pi about this whiteboard");
-  const sendButton = doc.createElement("button"); sendButton.type = "submit"; sendButton.textContent = "Send";
-  const stopButton = doc.createElement("button"); stopButton.type = "button"; stopButton.textContent = "Stop";
-  composer.append(message, sendButton, stopButton);
+  const composerBar = doc.createElement("div");
+  composerBar.className = "agent-composer-bar";
+  const contextChip = doc.createElement("button");
+  contextChip.type = "button";
+  contextChip.className = "agent-composer-chip";
+  contextChip.textContent = "Context · available";
+  const queueChip = doc.createElement("button");
+  queueChip.type = "button";
+  queueChip.className = "agent-composer-chip";
+  queueChip.textContent = "Queue · 0";
+  queueChip.hidden = true;
+  const stopButton = doc.createElement("button");
+  stopButton.type = "button";
+  stopButton.className = "agent-stop-button";
+  stopButton.textContent = "Stop";
+  const sendButton = doc.createElement("button");
+  sendButton.type = "submit";
+  sendButton.className = "agent-send-button";
+  sendButton.setAttribute("aria-label", "Send");
+  sendButton.textContent = "↑";
+  composerBar.append(contextChip, queueChip, stopButton, sendButton);
+  composer.append(message, composerBar);
+  const composerFineprint = doc.createElement("p");
+  composerFineprint.className = "agent-composer-fineprint";
+  composerFineprint.textContent = "Pi can make mistakes. Review important details.";
+  composerWrap.append(composer, composerFineprint);
 
-  drawer.append(header, setup, actions, contextDetails, timeline, queue, archives, composer);
+  const separator = doc.createElement("div");
+  separator.className = "agent-drawer-separator";
+  separator.setAttribute("role", "separator");
+  separator.setAttribute("aria-orientation", "vertical");
+  separator.tabIndex = 0;
+  separator.setAttribute("aria-valuemin", String(MIN_AGENT_DRAWER_WIDTH));
+  separator.setAttribute("aria-valuemax", String(maxAgentDrawerWidth(doc.defaultView?.innerWidth)));
+  separator.setAttribute("aria-valuenow", String(effectiveWidth));
+  separator.setAttribute("aria-label", "Resize Page agent pane");
+
+  drawer.append(header, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
   doc.body.append(overlay, drawer, toggle);
 
   const transport = transportFactory({
@@ -1401,6 +1567,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     onEvent(event) {
       if (!applyAgentEvent(state, event)) return;
       if (event.type === "command_result" && event.payload.command_id === handoffCommandID && event.payload.status === "rejected") handoffCommandID = null;
+      if (event.type === "command_result" && event.payload.command_id === pendingSubmitCommandID) pendingSubmitCommandID = null;
       if (event.type === "command_result" && event.payload.command_id === contextCommandID && event.payload.status === "rejected") contextCommandID = null;
       if (event.type === "snapshot" && contextDeliveryUnknown) {
         if (contextCommandID !== null) state.pendingCommandIDs.delete(contextCommandID);
@@ -1420,6 +1587,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     onDisconnect(error) {
       state.connected = false;
       state.lifecycle = "unavailable";
+      pendingSubmitCommandID = null;
       if (contextCommandID !== null) {
         contextDeliveryUnknown = true;
         resetForFreshSnapshot({ preserveContextDelivery: true });
@@ -1433,6 +1601,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         state.timelineCursor = null;
         state.pendingCommandIDs.clear();
         state.knownCommandIDs.clear();
+        state.freshArchiveCommandIDs.clear();
         state.contextState = "pending";
         state.contextDigest = null;
         contextAccepted = false;
@@ -1458,6 +1627,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     state.timelineCursor = null;
     state.pendingCommandIDs.clear();
     state.knownCommandIDs.clear();
+    state.freshArchiveCommandIDs.clear();
     if (!preserveContextDelivery) {
       contextRevision = undefined;
       contextCommandID = null;
@@ -1479,37 +1649,183 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }, 1000);
   }
 
+  function viewportWidth() {
+    return Number.isFinite(doc.defaultView?.innerWidth) ? doc.defaultView.innerWidth : 0;
+  }
+
+  function isDockedViewport() {
+    const breakpoint = doc.defaultView?.matchMedia?.("(max-width: 63.999rem)");
+    return agentDrawerLayoutMode(viewportWidth()) === "docked" && breakpoint?.matches !== true;
+  }
+
+  function syncDrawerLayout() {
+    const docked = isDockedViewport();
+    const modal = open && !docked;
+    effectiveWidth = clampAgentDrawerWidth(baseWidth, viewportWidth());
+    doc.documentElement.style.setProperty("--agent-drawer-width", `${effectiveWidth}px`);
+    drawer.classList.toggle("is-docked", open && docked);
+    drawer.classList.toggle("is-modal", open && !docked);
+    drawer.setAttribute("role", open && !docked ? "dialog" : "complementary");
+    drawer.setAttribute("aria-modal", String(open && !docked));
+    overlay.classList.toggle("is-open", open && !docked);
+    doc.body.classList.toggle("agent-drawer-docked-open", open && docked);
+    doc.body.classList.toggle("agent-drawer-modal-open", open && !docked);
+    separator.hidden = !open || !docked;
+    separator.setAttribute("aria-valuemax", String(maxAgentDrawerWidth(viewportWidth())));
+    separator.setAttribute("aria-valuenow", String(effectiveWidth));
+    if (modal && !layoutWasModal && !drawer.contains(doc.activeElement)) close.focus();
+    layoutWasModal = modal;
+    if (!docked && resizing) finishResize({ persist: false });
+  }
+
+  function setDrawerWidth(value, { persist = false, userSelected = false } = {}) {
+    const absoluteWidth = typeof value === "number" && Number.isFinite(value)
+      ? Math.min(MAX_AGENT_DRAWER_WIDTH, Math.max(MIN_AGENT_DRAWER_WIDTH, Math.round(value)))
+      : normalizeAgentDrawerWidth(value);
+    const width = userSelected ? Math.min(absoluteWidth, maxAgentDrawerWidth(viewportWidth())) : absoluteWidth;
+    baseWidth = width;
+    effectiveWidth = clampAgentDrawerWidth(baseWidth, viewportWidth());
+    doc.documentElement.style.setProperty("--agent-drawer-width", `${effectiveWidth}px`);
+    separator.setAttribute("aria-valuemax", String(maxAgentDrawerWidth(viewportWidth())));
+    separator.setAttribute("aria-valuenow", String(effectiveWidth));
+    if (persist) persistAgentPreference(storage, AGENT_DRAWER_WIDTH_STORAGE_KEY, baseWidth);
+  }
+
+  function finishResize({ persist = true } = {}) {
+    if (!resizing) return;
+    resizing = false;
+    const shouldRestore = !persist;
+    const pointerID = resizePointerID;
+    resizePointerID = null;
+    if (pointerID !== null) {
+      try { separator.releasePointerCapture?.(pointerID); } catch { /* capture may already be gone */ }
+    }
+    doc.body.style.userSelect = resizePreviousUserSelect;
+    doc.body.classList.remove("agent-drawer-resizing");
+    if (shouldRestore) setDrawerWidth(resizeStartWidth);
+    else persistAgentPreference(storage, AGENT_DRAWER_WIDTH_STORAGE_KEY, baseWidth);
+  }
+
+  function onPointerMove(event) {
+    if (!resizing || (event.pointerId !== undefined && event.pointerId !== resizePointerID)) return;
+    const next = Math.round(viewportWidth() - event.clientX);
+    setDrawerWidth(next, { userSelected: true });
+  }
+
+  function onPointerFinish(event) {
+    if (!resizing || (event.pointerId !== undefined && event.pointerId !== resizePointerID)) return;
+    finishResize({ persist: event.type === "pointerup" });
+  }
+
+  function onPointerDown(event) {
+    if (!open || !isDockedViewport() || event.button !== 0) return;
+    resizing = true;
+    resizeStartWidth = baseWidth;
+    resizePointerID = event.pointerId;
+    separator.setPointerCapture?.(event.pointerId);
+    resizePreviousUserSelect = doc.body.style.userSelect;
+    doc.body.style.userSelect = "none";
+    doc.body.classList.add("agent-drawer-resizing");
+    event.preventDefault();
+  }
+
+  function onSeparatorKeydown(event) {
+    if (!open || !isDockedViewport()) return;
+    const step = event.shiftKey ? 32 : 8;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      setDrawerWidth(effectiveWidth + step, { persist: true, userSelected: true });
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      setDrawerWidth(effectiveWidth - step, { persist: true, userSelected: true });
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setDrawerWidth(DEFAULT_AGENT_DRAWER_WIDTH, { persist: true, userSelected: true });
+    }
+  }
+
+  function onViewportResize() {
+    syncDrawerLayout();
+  }
+
+  separator.addEventListener("pointerdown", onPointerDown);
+  separator.addEventListener("pointermove", onPointerMove);
+  separator.addEventListener("pointerup", onPointerFinish);
+  separator.addEventListener("pointercancel", onPointerFinish);
+  separator.addEventListener("keydown", onSeparatorKeydown);
+  function onSeparatorDoubleClick() {
+    if (isDockedViewport()) setDrawerWidth(DEFAULT_AGENT_DRAWER_WIDTH, { persist: true, userSelected: true });
+  }
+  separator.addEventListener("dblclick", onSeparatorDoubleClick);
+  doc.defaultView?.addEventListener("resize", onViewportResize);
+
   function setOpen(next, { focus = true } = {}) {
+    if (next && focus) restoreFocus = doc.activeElement;
+    if (!next && resizing) finishResize({ persist: false });
     open = next;
-    const modal = open && doc.defaultView?.matchMedia?.("(max-width: 40rem)").matches === true;
+    const modal = open && !isDockedViewport();
     drawer.classList.toggle("is-open", open);
-    overlay.classList.toggle("is-open", open);
+    overlay.classList.toggle("is-open", open && modal);
     drawer.setAttribute("role", modal ? "dialog" : "complementary");
     drawer.setAttribute("aria-modal", String(modal));
-    doc.body.classList.toggle("agent-drawer-modal-open", modal);
     toggle.setAttribute("aria-expanded", String(open));
-    toggle.setAttribute("aria-label", open ? "Close local agent" : "Open local agent");
+    toggle.setAttribute("aria-label", open ? "Close Page agent" : "Open Page agent");
     persistAgentPreference(storage, AGENT_DRAWER_STORAGE_KEY, open);
+    syncDrawerLayout();
     if (open && focus) {
-      restoreFocus = doc.activeElement;
       close.focus();
     } else if (!open && focus) {
       restoreFocus?.focus?.();
     }
   }
 
+  function submitBlocked() {
+    return state.contextState === "pending" && contextRevision === undefined || contextCommandID !== null || contextDeliveryUnknown;
+  }
+
   function render() {
-    statusDot.dataset.state = state.connected ? state.lifecycle : "unavailable";
-    if (state.connected) {
-      const model = state.provider.model ? ` (${state.provider.model})` : "";
-      liveStatus.textContent = `Pi ${state.provider.state}${model}; conversation ${state.lifecycle}.`;
+    if (!timeline.hidden) {
+      timelineScrollTop = timeline.scrollTop;
+      followTimeline = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
     }
-    setup.hidden = state.connected;
-    composer.hidden = !state.connected;
-    actions.hidden = !state.connected;
+    const statusState = state.connected ? state.lifecycle : "unavailable";
+    statusDot.dataset.state = statusState;
+    headerStatusDot.dataset.state = statusState;
+    if (state.connected) {
+      providerLabel.textContent = state.provider.model || "";
+      providerLabel.hidden = !state.provider.model;
+      liveStatus.textContent = state.lifecycle === "responding"
+        ? "Pi · Responding"
+        : pendingSubmitCommandID !== null
+          ? "Pi · Sending"
+          : `Pi · ${state.lifecycle[0].toUpperCase()}${state.lifecycle.slice(1)}`;
+    } else {
+      providerLabel.textContent = "";
+      providerLabel.hidden = true;
+      if (transport.consented) liveStatus.textContent = "Pi · Unavailable";
+    }
+    setup.hidden = state.connected || activeView !== "conversation";
+    settings.hidden = activeView !== "settings";
+    newMenuButton.disabled = !state.connected;
+    archivesMenuButton.disabled = !state.connected;
+    reconnectMenuButton.disabled = transport.consented !== true;
+    composerWrap.hidden = !state.connected || activeView !== "conversation";
+    timeline.hidden = !state.connected || activeView !== "conversation";
+    queue.hidden = !state.connected || activeView !== "conversation" || state.queue.length === 0;
+    actions.hidden = true;
+    backButton.hidden = activeView === "conversation";
+    contextDetails.hidden = activeView !== "context";
+    contextDetails.classList.toggle("agent-view-hidden", activeView !== "context");
+    contextDetails.setAttribute("aria-hidden", String(activeView !== "context"));
+    archives.hidden = activeView !== "archives";
     const awaitingContextDecision = state.contextState === "pending" && contextRevision === undefined;
-    sendButton.disabled = awaitingContextDecision || contextCommandID !== null || contextDeliveryUnknown;
+    const contextAttached = state.contextState === "accepted" || state.contextState === "unchanged";
+    sendButton.disabled = submitBlocked();
     stopButton.disabled = state.activeTurnID === null;
+    stopButton.hidden = state.activeTurnID === null;
+    contextChip.textContent = `Context · ${contextAttached ? "current" : "available"}`;
+    queueChip.textContent = `Queue · ${state.queue.length}`;
+    queueChip.hidden = state.queue.length === 0;
     message.setAttribute("aria-describedby", "agent-whiteboard-context-status");
     contextStatus.id = "agent-whiteboard-context-status";
     contextStatus.textContent = contextDeliveryUnknown
@@ -1517,27 +1833,93 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       : awaitingContextDecision
         ? `Digest ${state.contextDigest ?? payload.local_agent.context_digest}; checking whether complete context is initial or replacement.`
         : `Digest ${state.contextDigest ?? payload.local_agent.context_digest}; context ${state.contextState}.`;
+
     timeline.replaceChildren();
-    for (const item of state.timeline) {
-      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item);
-      else {
-        const details = doc.createElement("details");
-        details.className = `agent-activity agent-activity-${item.activity}`;
-        details.open = item.expanded === true;
-        const summary = doc.createElement("summary"); summary.textContent = item.activity === "blocked" ? "Blocked request" : item.activity === "error" ? "Error" : item.activity === "interruption" ? "Interrupted" : "Activity";
-        const content = doc.createElement("p");
-        const guidanceText = actionGuidance(item.action, doc);
-        content.textContent = guidanceText ? `${item.text} ${guidanceText}` : item.text;
-        details.append(summary, content); timeline.append(details);
-      }
-    }
+    const contextSummary = doc.createElement("article");
+    contextSummary.className = "agent-context-summary";
+    const contextSummaryCopy = doc.createElement("div");
+    contextSummaryCopy.className = "agent-context-summary-copy";
+    const contextEyebrow = doc.createElement("span");
+    contextEyebrow.className = "agent-context-eyebrow";
+    contextEyebrow.textContent = "Page context";
+    const contextTitle = doc.createElement("h3");
+    contextTitle.textContent = pageTitle;
+    const contextSummaryMeta = doc.createElement("p");
+    const contextStateLabel = contextDeliveryUnknown ? "Delivery uncertain" : contextAttached ? "Context attached" : "Context available";
+    contextSummaryMeta.textContent = `${contextStateLabel} · Updated ${payload.local_agent.resource.updated_at}`;
+    const inspectContext = doc.createElement("button");
+    inspectContext.type = "button";
+    inspectContext.textContent = "Inspect context";
+    inspectContext.addEventListener("click", () => showView("context"));
+    contextSummaryCopy.append(contextEyebrow, contextTitle, contextSummaryMeta);
+    contextSummary.append(contextSummaryCopy, inspectContext);
+    timeline.append(contextSummary);
+
     if (state.timelineCursor) {
       const older = doc.createElement("button");
       older.type = "button";
       older.className = "agent-page-button";
       older.textContent = "Load older messages";
       older.addEventListener("click", () => void sendCommand("history_page", { before: state.timelineCursor, limit: 50 }));
-      timeline.prepend(older);
+      timeline.append(older);
+    }
+    for (const item of state.timeline) {
+      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item);
+      else {
+        const details = doc.createElement("details");
+        details.className = `agent-activity agent-activity-${item.activity}`;
+        details.open = item.expanded === true;
+        const labels = {
+          visible_summary: "Work summary",
+          status: "Status",
+          retry: "Retrying",
+          compaction: "Compaction",
+          blocked_tool: "Tool request blocked",
+          blocked_permission: "Permission request blocked",
+          blocked: "Request blocked",
+          error: "Error",
+          interruption: "Interrupted",
+        };
+        const activityLabel = item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
+        const summary = doc.createElement("summary"); summary.textContent = activityLabel ?? "Activity";
+        const content = doc.createElement("p");
+        const guidanceText = actionGuidance(item.action, doc);
+        content.textContent = guidanceText ? `${item.text} ${guidanceText}` : item.text;
+        details.append(summary, content); timeline.append(details);
+      }
+    }
+    const hasActiveAssistant = state.activeTurnID !== null && state.timeline.some((item) => item.kind === "assistant" && item.turn_id === state.activeTurnID);
+    if (state.lifecycle === "responding" && !hasActiveAssistant) {
+      const loading = doc.createElement("div");
+      loading.className = "agent-response-loading";
+      loading.setAttribute("role", "status");
+      loading.setAttribute("aria-label", "Pi is responding");
+      const loadingGlyph = doc.createElement("span");
+      loadingGlyph.className = "agent-loading-glyph";
+      loadingGlyph.setAttribute("aria-hidden", "true");
+      loadingGlyph.textContent = "P";
+      const loadingCopy = doc.createElement("span");
+      loadingCopy.className = "agent-loading-copy";
+      const loadingLabel = doc.createElement("strong");
+      loadingLabel.textContent = "Pi";
+      const loadingText = doc.createElement("span");
+      loadingText.className = "agent-response-text";
+      loadingText.textContent = "Pi is responding";
+      const dots = doc.createElement("span");
+      dots.className = "agent-response-dots";
+      dots.setAttribute("aria-hidden", "true");
+      for (let index = 0; index < 3; index += 1) {
+        const dot = doc.createElement("span");
+        dot.className = "agent-response-dot";
+        dots.append(dot);
+      }
+      loadingCopy.append(loadingLabel, loadingText, dots);
+      loading.append(loadingGlyph, loadingCopy);
+      timeline.append(loading);
+    }
+    if (!timeline.hidden) {
+      timeline.scrollTop = followTimeline ? timeline.scrollHeight : timelineScrollTop;
+      timelineScrollTop = timeline.scrollTop;
     }
     queue.replaceChildren();
     if (state.queue.length) {
@@ -1561,6 +1943,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       row.append(input, save, remove); queue.append(row);
     }
     archives.replaceChildren();
+    const archivesHeading = doc.createElement("h3");
+    archivesHeading.textContent = "Archives";
+    archives.append(archivesHeading);
     for (const item of state.archives) {
       const row = doc.createElement("article");
       const preview = doc.createElement("p"); preview.textContent = `Updated ${item.updated_at}${item.model ? ` · ${item.model}` : ""}`;
@@ -1584,13 +1969,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
   }
 
-  async function sendCommand(type, commandPayload, { handoff = false } = {}) {
+  async function sendCommand(type, commandPayload, { handoff = false, freshArchivePage = false } = {}) {
     const command = createAgentCommand({ type, payload: commandPayload, clientID: transport.clientID, conversationID: transport.conversationID });
     registerAgentCommand(state, command);
     if (handoff) handoffCommandID = command.command_id;
+    if (freshArchivePage) state.freshArchiveCommandIDs.add(command.command_id);
     try { await transport.send(command); }
     catch (error) {
-      if (error?.code) state.pendingCommandIDs.delete(command.command_id);
+      if (error?.code) {
+        state.pendingCommandIDs.delete(command.command_id);
+        state.freshArchiveCommandIDs.delete(command.command_id);
+      }
       if (handoffCommandID === command.command_id) handoffCommandID = null;
       liveStatus.textContent = `Agent error: ${browserErrorText(error.code, doc, "The local broker is unavailable.")}`;
     }
@@ -1634,6 +2023,30 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
   }
 
+  showView = (view, { focus = true } = {}) => {
+    const previousView = activeView;
+    activeView = ["conversation", "settings", "context", "archives"].includes(view) ? view : "conversation";
+    if (activeView === "context") contextDetails.open = true;
+    if (activeView === "archives" && previousView !== "archives" && state.connected) void sendCommand("archive_list", { limit: 50 }, { freshArchivePage: true });
+    render();
+    if (!focus) return;
+    if (activeView !== "conversation") backButton.focus();
+    else if (state.connected) message.focus();
+    else overflowButton.focus();
+  };
+  backButton.addEventListener("click", () => showView("conversation"));
+  contextChip.addEventListener("click", () => showView("context"));
+  queueChip.addEventListener("click", () => queue.querySelector("textarea")?.focus());
+  function enabledOverflowItems() {
+    return [...overflowMenu.querySelectorAll('[role="menuitem"]:not([disabled])')];
+  }
+  overflowButton.addEventListener("click", () => {
+    const opening = overflowMenu.hidden;
+    overflowMenu.hidden = !opening;
+    overflowButton.setAttribute("aria-expanded", String(opening));
+    if (opening) enabledOverflowItems()[0]?.focus();
+    else overflowButton.focus();
+  });
   toggle.addEventListener("click", () => setOpen(!open));
   close.addEventListener("click", () => setOpen(false));
   overlay.addEventListener("click", () => setOpen(false));
@@ -1660,6 +2073,23 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       void sendCommand("history_page", { limit: 50 });
     } catch (error) { liveStatus.textContent = `Unable to connect: ${browserErrorText(error.code, doc, "check the broker, port, Local Network Access, and trust.")}`; }
   });
+  function resizeComposer() {
+    message.style.height = "auto";
+    const maximum = 160;
+    const height = Math.min(Math.max(message.scrollHeight, 48), maximum);
+    message.style.height = `${height}px`;
+    message.style.overflowY = message.scrollHeight > maximum ? "auto" : "hidden";
+  }
+  let composing = false;
+  message.addEventListener("compositionstart", () => { composing = true; });
+  message.addEventListener("compositionend", () => { composing = false; });
+  message.addEventListener("input", resizeComposer);
+  message.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || composing || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  resizeComposer();
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();
     const text = message.value;
@@ -1676,10 +2106,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     const revision = state.contextState === "pending" ? contextRevision : undefined;
     const command = createSubmitCommand({ message: text, payload, clientID: transport.clientID, conversationID: transport.conversationID, title: pageTitle, url: pageURL, revision });
     registerAgentCommand(state, command);
+    pendingSubmitCommandID = command.command_id;
     if (revision !== undefined) contextCommandID = command.command_id;
     render();
-    try { await transport.send(command); message.value = ""; }
+    try { await transport.send(command); message.value = ""; resizeComposer(); }
     catch (error) {
+      pendingSubmitCommandID = null;
       if (error?.code) state.pendingCommandIDs.delete(command.command_id);
       if (contextCommandID === command.command_id) {
         if (error?.code) contextCommandID = null;
@@ -1698,18 +2130,50 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     scheduleReconnect();
   });
   newButton.addEventListener("click", () => {
-    if (doc.defaultView?.confirm("Archive this conversation and start a new one?")) void forcedConversationCommand("new", {});
+    if (doc.defaultView?.confirm("Archive this conversation and start a new one?")) { showView("conversation"); void forcedConversationCommand("new", {}); }
   });
-  historyButton.addEventListener("click", () => { archives.hidden = !archives.hidden; if (!archives.hidden) void sendCommand("archive_list", { limit: 50 }); });
+  historyButton.addEventListener("click", () => { showView("archives"); });
+  function onOverflowOutsidePointerDown(event) {
+    if (!overflow.contains(event.target)) {
+      overflowMenu.hidden = true;
+      overflowButton.setAttribute("aria-expanded", "false");
+    }
+  }
+  doc.addEventListener("pointerdown", onOverflowOutsidePointerDown);
   doc.addEventListener("keydown", onKeydown);
   function onKeydown(event) {
+    if (!overflowMenu.hidden && event.target?.getAttribute?.("role") === "menuitem" && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      const items = enabledOverflowItems();
+      const current = items.indexOf(event.target);
+      if (items.length > 0) {
+        event.preventDefault();
+        const next = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? items.length - 1
+            : event.key === "ArrowDown"
+              ? (current + 1) % items.length
+              : (current - 1 + items.length) % items.length;
+        items[next].focus();
+      }
+      return;
+    }
+    if (event.key === "Escape" && !overflowMenu.hidden) {
+      overflowMenu.hidden = true;
+      overflowButton.setAttribute("aria-expanded", "false");
+      overflowButton.focus();
+      return;
+    }
     if (event.key === "Escape" && open) { setOpen(false); return; }
-    if (event.key !== "Tab" || !open || doc.defaultView?.matchMedia?.("(max-width: 40rem)").matches !== true) return;
+    if (event.key !== "Tab" || !open || isDockedViewport()) return;
     const focusable = [...drawer.querySelectorAll("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), summary")].filter((element) => element.closest("[hidden]") === null);
     if (focusable.length === 0) return;
     const first = focusable[0];
     const last = focusable.at(-1);
-    if (event.shiftKey && (doc.activeElement === first || !drawer.contains(doc.activeElement))) { event.preventDefault(); last.focus(); }
+    if (!drawer.contains(doc.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && doc.activeElement === first) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && doc.activeElement === last) { event.preventDefault(); first.focus(); }
   }
 
@@ -1720,7 +2184,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   return {
     state,
     transport,
-    elements: { toggle, drawer, close, overlay, portInput, connectButton, composer, message, timeline, queue, archives },
+    elements: { toggle, drawer, close, overlay, separator, overflowButton, overflowMenu, backButton, headerActions, setup, settings, contextDetails, portInput, connectButton, composerWrap, composer, message, sendButton, stopButton, timeline, queue, archives },
     get open() { return open; },
     setOpen,
     probe,
@@ -1728,9 +2192,19 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     destroy() {
       destroyed = true;
       clearTimeout(reconnectTimer);
+      finishResize({ persist: false });
       transport.close();
       doc.removeEventListener("keydown", onKeydown);
-      doc.body.classList.remove("agent-drawer-modal-open");
+      doc.removeEventListener("pointerdown", onOverflowOutsidePointerDown);
+      doc.defaultView?.removeEventListener("resize", onViewportResize);
+      separator.removeEventListener("pointerdown", onPointerDown);
+      separator.removeEventListener("pointermove", onPointerMove);
+      separator.removeEventListener("pointerup", onPointerFinish);
+      separator.removeEventListener("pointercancel", onPointerFinish);
+      separator.removeEventListener("keydown", onSeparatorKeydown);
+      separator.removeEventListener("dblclick", onSeparatorDoubleClick);
+      doc.body.classList.remove("agent-drawer-modal-open", "agent-drawer-docked-open");
+      doc.documentElement.style.removeProperty("--agent-drawer-width");
       toggle.remove(); overlay.remove(); drawer.remove();
     },
   };

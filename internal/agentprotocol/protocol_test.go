@@ -130,9 +130,14 @@ func TestConnectRejectsMalformedNestedSecurityValues(t *testing.T) {
 		})
 	}
 
-	badURL := strings.Replace(validSubmitJSON("initial"), "https://whiteboard.example/", "file:///", 1)
-	_, err := agentprotocol.DecodeCommand([]byte(badURL))
-	require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage)
+	loopbackURL := strings.Replace(validSubmitJSON("initial"), "https://whiteboard.example/", "http://127.0.0.1:8080/", 1)
+	_, err := agentprotocol.DecodeCommand([]byte(loopbackURL))
+	require.NoError(t, err)
+	for _, origin := range []string{"file://", "http://localhost:8080", "http://127.0.0.1:80", "http://127.0.0.1:080", "http://127.0.0.2:8080", "http://[::1]:8080", "http://user@127.0.0.1:8080"} {
+		badURL := strings.Replace(validSubmitJSON("initial"), "https://whiteboard.example", origin, 1)
+		_, err = agentprotocol.DecodeCommand([]byte(badURL))
+		require.ErrorIs(t, err, agentprotocol.ErrInvalidMessage, origin)
+	}
 }
 
 func TestCommandBoundsAreMeasuredInBytes(t *testing.T) {

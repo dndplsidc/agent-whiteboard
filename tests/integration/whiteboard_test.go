@@ -205,7 +205,9 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 	assertStandaloneInnerResponse(t, response)
 	requireCategoryEmpty(t, server.Root, "whiteboards")
 
-	expiring := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "1", firstFile)
+	expiring := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "2", firstFile)
+	require.NotNil(t, expiring.Resource.ExpiresAt)
+	require.Greater(t, *expiring.Resource.ExpiresAt, time.Now().Unix())
 	expiringContentURL := expiring.Resource.URL + "/content"
 	response, body = fetch(t, expiringContentURL)
 	require.Equal(t, http.StatusOK, response.StatusCode)

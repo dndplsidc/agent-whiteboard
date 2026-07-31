@@ -472,9 +472,19 @@ function createSidebarBroker(initialAllowedOrigin) {
   let contextState = "pending";
   let contextDigest = "0".repeat(64);
   let holdResponses = false;
+  let phaseResponses = false;
   let activeTurn = null;
+  let pendingResponse = null;
   const queue = [];
   const history = [];
+  const archive = {
+    archive_id: protocolID(220),
+    created_at: "2026-07-26T01:02:03Z",
+    updated_at: "2026-07-26T02:03:04Z",
+    provider: "pi",
+    model: "fixture-model",
+    preview: "",
+  };
 
   const nextEvent = (type, payload) => ({
     api_version: "1",
@@ -501,6 +511,30 @@ function createSidebarBroker(initialAllowedOrigin) {
   const commandResult = (command, error) => nextEvent("command_result", error
     ? { command_id: command.command_id, status: "rejected", error }
     : { command_id: command.command_id, status: "succeeded" });
+  const emitResponsePhase = (phase) => {
+    if (!pendingResponse) throw new Error(`no pending sidebar response for ${phase}`);
+    const response = pendingResponse;
+    if (phase === "first_delta" && response.phase === "responding") {
+      emit(nextEvent("assistant_delta", { turn_id: response.turnID, message_id: response.assistantID, text: "Fixture " }));
+      response.phase = "first_delta";
+      return;
+    }
+    if (phase === "later_delta" && response.phase === "first_delta") {
+      emit(nextEvent("assistant_delta", { turn_id: response.turnID, message_id: response.assistantID, text: "reply" }));
+      response.phase = "later_delta";
+      return;
+    }
+    if (phase === "completion" && response.phase === "later_delta") {
+      const assistant = { item_id: response.assistantID, kind: "assistant", turn_id: response.turnID, message_id: response.assistantID, text: "Fixture reply", created_at: response.createdAt };
+      history.push(assistant);
+      emit(nextEvent("assistant_message", { turn_id: assistant.turn_id, message_id: assistant.message_id, text: assistant.text, created_at: assistant.created_at }));
+      emit(nextEvent("completion", { turn_id: response.turnID }));
+      activeTurn = null;
+      pendingResponse = null;
+      return;
+    }
+    throw new Error(`sidebar response cannot release ${phase} from ${response.phase}`);
+  };
   const handleCommand = (command) => {
     if (command.type === "history_page") {
       emit(nextEvent("timeline", { command_id: command.command_id, items: [...history].reverse(), next_cursor: null }));
@@ -520,15 +554,14 @@ function createSidebarBroker(initialAllowedOrigin) {
         activeTurn = command.payload.turn_id;
         emit(nextEvent("user_message", { turn_id: user.turn_id, message_id: user.message_id, text: user.text, created_at: createdAt }));
         emit(nextEvent("lifecycle", { state: "responding", turn_id: command.payload.turn_id }));
-        if (!holdResponses) {
-          const assistantID = protocolID(150 + history.length);
-          emit(nextEvent("assistant_delta", { turn_id: command.payload.turn_id, message_id: assistantID, text: "Fixture " }));
-          emit(nextEvent("assistant_delta", { turn_id: command.payload.turn_id, message_id: assistantID, text: "reply" }));
-          const assistant = { item_id: assistantID, kind: "assistant", turn_id: command.payload.turn_id, message_id: assistantID, text: "Fixture reply", created_at: createdAt };
-          history.push(assistant);
-          emit(nextEvent("assistant_message", { turn_id: assistant.turn_id, message_id: assistant.message_id, text: assistant.text, created_at: createdAt }));
-          emit(nextEvent("completion", { turn_id: command.payload.turn_id }));
-          activeTurn = null;
+        const assistantID = protocolID(150 + history.length);
+        if (phaseResponses) {
+          pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
+        } else if (!holdResponses) {
+          pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
+          emitResponsePhase("first_delta");
+          emitResponsePhase("later_delta");
+          emitResponsePhase("completion");
         }
       }
     } else if (command.type === "queue_edit") {
@@ -542,6 +575,11 @@ function createSidebarBroker(initialAllowedOrigin) {
     } else if (command.type === "interrupt" && activeTurn === command.payload.turn_id) {
       emit(nextEvent("interruption", { turn_id: activeTurn, reason: "requested" }));
       activeTurn = null;
+      pendingResponse = null;
+    } else if (command.type === "archive_list") {
+      emit(nextEvent("history", { command_id: command.command_id, items: [{ ...archive }], next_cursor: null }));
+    } else if (command.type === "archive_restore" || command.type === "archive_delete") {
+      emit(nextEvent("archive", { action: command.type === "archive_restore" ? "restored" : "deleted", archive_id: command.payload.archive_id }));
     }
     const result = commandResult(command);
     emit(result);
@@ -650,11 +688,24 @@ function createSidebarBroker(initialAllowedOrigin) {
     setAllowedOrigin(origin) { allowedOrigin = origin; },
     setWebSocketEnabled(value) { webSocketEnabled = value; },
     setHoldResponses(value) { holdResponses = value; },
+    setPhaseResponses(value) { phaseResponses = value; },
+    releaseResponsePhase: emitResponsePhase,
+    emitBlocked(kind) {
+      const messages = {
+        tool: "A provider tool request was blocked by content-only policy.",
+        permission: "A provider permission request was blocked by content-only policy.",
+      };
+      if (!messages[kind]) throw new Error(`unsupported blocked fixture kind: ${kind}`);
+      emit(nextEvent("blocked", { kind, message: messages[kind] }));
+    },
+    emitActivity(kind, summary) { emit(nextEvent("activity", { kind, summary })); },
     resetState() {
       contextState = "pending";
       contextDigest = "0".repeat(64);
       holdResponses = false;
+      phaseResponses = false;
       activeTurn = null;
+      pendingResponse = null;
       queue.splice(0);
       history.splice(0);
       sequence = 1;
@@ -665,6 +716,43 @@ function createSidebarBroker(initialAllowedOrigin) {
 
 function createPiModelServer() {
   const requests = [];
+  let pendingStream = null;
+  let pendingWaiters = [];
+
+  const waitForPendingStream = () => {
+    if (pendingStream) return Promise.resolve(pendingStream);
+    return new Promise((resolve) => pendingWaiters.push(resolve));
+  };
+  const setPendingStream = (stream) => {
+    pendingStream = stream;
+    const waiters = pendingWaiters;
+    pendingWaiters = [];
+    for (const resolve of waiters) resolve(stream);
+  };
+  const releasePhase = async (phase) => {
+    const stream = await waitForPendingStream();
+    if (stream.phase === "closed") throw new Error(`model stream closed before ${phase}`);
+    if (phase === "first_delta" && stream.phase === "responding") {
+      stream.write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: { content: "Real Pi fixture " }, finish_reason: null }] });
+      stream.phase = "first_delta";
+      return;
+    }
+    if (phase === "later_delta" && stream.phase === "first_delta") {
+      stream.write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: { content: "reply" }, finish_reason: null }] });
+      stream.phase = "later_delta";
+      return;
+    }
+    if (phase === "completion" && stream.phase === "later_delta") {
+      stream.write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+      stream.write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [], usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } });
+      stream.phase = "completion";
+      stream.response.end("data: [DONE]\n\n");
+      pendingStream = null;
+      return;
+    }
+    throw new Error(`model stream cannot release ${phase} from ${stream.phase}`);
+  };
+
   const server = http.createServer((request, response) => {
     const chunks = [];
     request.on("data", (chunk) => chunks.push(chunk));
@@ -679,13 +767,26 @@ function createPiModelServer() {
       response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
       const write = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
       write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
-      write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: { content: "Real Pi fixture reply" }, finish_reason: null }] });
-      write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
-      write({ id: "chatcmpl-browser", object: "chat.completion.chunk", created: 1, model: "agent-whiteboard-browser", choices: [], usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } });
-      response.end("data: [DONE]\n\n");
+      const stream = { response, write, phase: "responding" };
+      response.once("close", () => {
+        stream.phase = "closed";
+        if (pendingStream === stream) pendingStream = null;
+      });
+      setPendingStream(stream);
     });
   });
-  return { server, requests };
+  return {
+    server,
+    requests,
+    releaseFirstDelta: () => releasePhase("first_delta"),
+    releaseLaterDelta: () => releasePhase("later_delta"),
+    releaseCompletion: () => releasePhase("completion"),
+    closePending() {
+      if (pendingStream && !pendingStream.response.writableEnded) pendingStream.response.end();
+      pendingStream = null;
+      pendingWaiters = [];
+    },
+  };
 }
 
 async function reserveLoopbackPort() {
@@ -868,8 +969,26 @@ export const test = base.extend({
         brokerSockets = trackConnections(broker.server);
         const brokerPort = await listen(broker.server, "127.0.0.1");
         let sequence = 0;
+        const publishAtOrigin = async (origin, markdown, creatorContext = "Creator context for the local Pi agent.\n") => {
+          const fixturePath = path.join(server.root, `sidebar-${sequence}.md`);
+          const contextPath = path.join(server.root, `sidebar-${sequence++}-context.md`);
+          await Promise.all([
+            fs.writeFile(fixturePath, markdown, { mode: 0o600 }),
+            fs.writeFile(contextPath, creatorContext, { mode: 0o600 }),
+          ]);
+          const { stdout, stderr } = await runProcess(
+            server.binary,
+            ["--server", listening.url, "--json", "create", "markdown", "--context", contextPath, "--expires-in", "0", fixturePath],
+            { env: server.env, timeout: processTimeout },
+          );
+          if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);
+          const envelope = JSON.parse(stdout);
+          const pathName = new URL(envelope.resource.url).pathname;
+          return { ...envelope.resource, url: `${origin}${pathName}`, markdown, context: creatorContext };
+        };
         await use({
           origin: sourceOrigin,
+          loopbackOrigin: listening.url,
           brokerPort,
           brokerRequests: broker.requests,
           webSocketCommands: broker.webSocketCommands,
@@ -877,23 +996,12 @@ export const test = base.extend({
           resetBrokerState: broker.resetState,
           setWebSocketEnabled: broker.setWebSocketEnabled,
           setHoldResponses: broker.setHoldResponses,
-          publish: async (markdown, creatorContext = "Creator context for the local Pi agent.\n") => {
-            const fixturePath = path.join(server.root, `sidebar-${sequence}.md`);
-            const contextPath = path.join(server.root, `sidebar-${sequence++}-context.md`);
-            await Promise.all([
-              fs.writeFile(fixturePath, markdown, { mode: 0o600 }),
-              fs.writeFile(contextPath, creatorContext, { mode: 0o600 }),
-            ]);
-            const { stdout, stderr } = await runProcess(
-              server.binary,
-              ["--server", listening.url, "--json", "create", "markdown", "--context", contextPath, "--expires-in", "0", fixturePath],
-              { env: server.env, timeout: processTimeout },
-            );
-            if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);
-            const envelope = JSON.parse(stdout);
-            const pathName = new URL(envelope.resource.url).pathname;
-            return { ...envelope.resource, url: `${sourceOrigin}${pathName}`, markdown, context: creatorContext };
-          },
+          setPhaseResponses: broker.setPhaseResponses,
+          releaseResponsePhase: broker.releaseResponsePhase,
+          emitBlocked: broker.emitBlocked,
+          emitActivity: broker.emitActivity,
+          publish: (markdown, creatorContext) => publishAtOrigin(sourceOrigin, markdown, creatorContext),
+          publishLoopback: (markdown, creatorContext) => publishAtOrigin(listening.url, markdown, creatorContext),
         });
       } finally {
         await Promise.all([
@@ -951,12 +1059,19 @@ export const test = base.extend({
         await waitForAgentStatus(agentPort, localAgentSidebar.origin, child, output);
         await use({
           origin: localAgentSidebar.origin,
+          loopbackOrigin: localAgentSidebar.loopbackOrigin,
           brokerPort: agentPort,
           publish: localAgentSidebar.publish,
+          publishLoopback: localAgentSidebar.publishLoopback,
           modelRequests: model.requests,
+          resetModelRequests: () => model.requests.splice(0),
+          releaseModelFirstDelta: model.releaseFirstDelta,
+          releaseModelLaterDelta: model.releaseLaterDelta,
+          releaseModelCompletion: model.releaseCompletion,
           agentOutput: output,
         });
       } finally {
+        model.closePending();
         await stopServer(child);
         await closeNodeServer(model.server, modelSockets);
       }

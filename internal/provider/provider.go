@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -645,8 +644,7 @@ func validURL(value string) bool {
 	if !validBoundedText(value, MaxURLBytes, true) {
 		return false
 	}
-	parsed, err := url.Parse(value)
-	return err == nil && parsed.Scheme == "https" && parsed.Hostname() != "" && parsed.User == nil
+	return common.ValidPageURL(value)
 }
 func validResource(resource Resource) bool {
 	return resource.Kind == ResourceMarkdown && validID(resource.ID) && !resource.CreatedAt.IsZero() && !resource.UpdatedAt.IsZero() && !resource.UpdatedAt.Before(resource.CreatedAt) && (resource.ExpiresAt == nil || !resource.ExpiresAt.Before(resource.CreatedAt))

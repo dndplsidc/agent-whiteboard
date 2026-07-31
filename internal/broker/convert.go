@@ -24,11 +24,11 @@ type ConnectIdentity struct {
 }
 
 func (identity ConnectIdentity) Validate(authorizedOrigin string) error {
-	canonical, err := config.CanonicalOrigin(identity.Origin)
+	canonical, err := config.CanonicalBrowserOrigin(identity.Origin)
 	if err != nil || canonical != identity.Origin {
 		return errors.New("invalid connect origin")
 	}
-	authorized, err := config.CanonicalOrigin(authorizedOrigin)
+	authorized, err := config.CanonicalBrowserOrigin(authorizedOrigin)
 	if err != nil || authorized != authorizedOrigin || authorized != identity.Origin {
 		return errors.New("connect origin is not the authorized canonical origin")
 	}
@@ -104,7 +104,7 @@ func PageContextToProvider(context agentprotocol.PageContext, identity ConnectId
 	if !equalProtocolResource(context.Resource, identity.Resource) || context.Digest != identity.ContextDigest {
 		return provider.PageContext{}, errors.New("page context does not match the connected revision")
 	}
-	if err := requireSameOriginHTTPS(context.URL, identity.Origin); err != nil {
+	if err := requireSamePageOrigin(context.URL, identity.Origin); err != nil {
 		return provider.PageContext{}, err
 	}
 	resource, err := ResourceToProvider(context.Resource)
@@ -140,7 +140,7 @@ func PageContextFromProvider(context provider.PageContext, identity ConnectIdent
 	if !equalProtocolResource(resource, identity.Resource) || context.Digest != identity.ContextDigest {
 		return agentprotocol.PageContext{}, errors.New("provider page context does not match the connected revision")
 	}
-	if err := requireSameOriginHTTPS(context.URL, identity.Origin); err != nil {
+	if err := requireSamePageOrigin(context.URL, identity.Origin); err != nil {
 		return agentprotocol.PageContext{}, err
 	}
 	converted := agentprotocol.PageContext{
@@ -234,14 +234,15 @@ func validDigest(value string) bool {
 	return true
 }
 
-func requireSameOriginHTTPS(pageURL, expectedOrigin string) error {
+func requireSamePageOrigin(pageURL, expectedOrigin string) error {
 	parsed, err := url.Parse(pageURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" {
-		return errors.New("page URL must be HTTPS and same-origin")
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" {
+		return errors.New("page URL must have an authorized same origin")
 	}
-	pageOrigin, err := config.CanonicalOrigin("https://" + parsed.Host)
-	if err != nil || pageOrigin != expectedOrigin {
-		return errors.New("page URL must be HTTPS and same-origin")
+	rawOrigin := parsed.Scheme + "://" + parsed.Host
+	pageOrigin, err := config.CanonicalBrowserOrigin(rawOrigin)
+	if err != nil || pageOrigin != expectedOrigin || (parsed.Scheme == "http" && pageOrigin != rawOrigin) {
+		return errors.New("page URL must have an authorized same origin")
 	}
 	return nil
 }

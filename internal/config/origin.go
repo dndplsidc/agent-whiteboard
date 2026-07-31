@@ -11,6 +11,47 @@ import (
 	"golang.org/x/net/idna"
 )
 
+// CanonicalBrowserOrigin canonicalizes origins that may identify a browser
+// conversation. Configured trust remains HTTPS-only through CanonicalOrigin;
+// this broader form additionally permits literal IPv4 loopback HTTP.
+func CanonicalBrowserOrigin(value string) (string, error) {
+	if canonical, err := CanonicalOrigin(value); err == nil {
+		return canonical, nil
+	}
+	const invalid = "browser origin must be an exact HTTPS or literal loopback HTTP origin"
+	if value == "" || strings.TrimSpace(value) != value {
+		return "", errors.New(invalid)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed == nil || !strings.EqualFold(parsed.Scheme, "http") || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", errors.New(invalid)
+	}
+
+	bracketed := strings.HasPrefix(parsed.Host, "[")
+	host, portText, err := splitOriginHost(parsed.Host)
+	if err != nil || host == "" || strings.ContainsAny(host, "*%") {
+		return "", errors.New(invalid)
+	}
+	canonicalHost, ipv6, err := canonicalOriginHost(host, bracketed)
+	if err != nil || ipv6 || canonicalHost != "127.0.0.1" {
+		return "", errors.New(invalid)
+	}
+
+	port := 0
+	if portText != "" {
+		parsedPort, parseErr := strconv.ParseUint(portText, 10, 16)
+		if parseErr != nil || parsedPort == 0 {
+			return "", errors.New("browser origin port must be between 1 and 65535")
+		}
+		port = int(parsedPort)
+	}
+	canonical := "http://127.0.0.1"
+	if port != 0 && port != 80 {
+		canonical += ":" + strconv.Itoa(port)
+	}
+	return canonical, nil
+}
+
 func CanonicalOrigin(value string) (string, error) {
 	if value == "" || strings.TrimSpace(value) != value {
 		return "", errors.New("trusted origin must be an exact HTTPS origin")

@@ -11,14 +11,19 @@ vi.mock("mermaid", () => ({
 
 import {
   AGENT_DRAWER_STORAGE_KEY,
+  AGENT_DRAWER_WIDTH_STORAGE_KEY,
   AGENT_PORT_STORAGE_KEY,
   AGENT_WEBSOCKET_PROTOCOL,
   DEFAULT_AGENT_PORT,
+  DEFAULT_AGENT_DRAWER_WIDTH,
   DEFAULT_TITLE,
   MAX_AGENT_MESSAGE_BYTES,
+  maxAgentDrawerWidth,
   THEME_STORAGE_KEY,
+  agentDrawerLayoutMode,
   applyAgentEvent,
   bootViewer,
+  clampAgentDrawerWidth,
   createAgentCommand,
   createAgentDrawer,
   createAgentState,
@@ -27,6 +32,7 @@ import {
   createSubmitCommand,
   decodeAgentEvent,
   generateAgentID,
+  normalizeAgentDrawerWidth,
   normalizeAgentPort,
   normalizeTheme,
   readAgentPreferences,
@@ -61,6 +67,7 @@ function setupDOM() {
   document.head.innerHTML = "";
   document.body.innerHTML = '<main id="viewer"></main>';
   document.documentElement.removeAttribute("data-theme");
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
   localStorage.clear();
   return document.querySelector("#viewer");
 }
@@ -335,11 +342,32 @@ describe("local agent source and commands", () => {
     expect(normalizeAgentPort(input)).toBe(expected);
   });
 
-  test("reads only boolean drawer state and decimal port preferences", () => {
+  test("reads only boolean drawer state, decimal port, and canonical width preferences", () => {
     localStorage.setItem(AGENT_DRAWER_STORAGE_KEY, "yes");
     localStorage.setItem(AGENT_PORT_STORAGE_KEY, "08080");
+    localStorage.setItem(AGENT_DRAWER_WIDTH_STORAGE_KEY, "0420");
     localStorage.setItem("conversation-id", agentIDs.conversation);
-    expect(readAgentPreferences(localStorage)).toEqual({ open: false, port: DEFAULT_AGENT_PORT });
+    expect(readAgentPreferences(localStorage)).toEqual({ open: false, port: DEFAULT_AGENT_PORT, width: DEFAULT_AGENT_DRAWER_WIDTH });
+
+    localStorage.setItem(AGENT_DRAWER_WIDTH_STORAGE_KEY, "720");
+    expect(readAgentPreferences(localStorage).width).toBe(720);
+  });
+
+  test("clamps effective width without changing the saved base preference", () => {
+    expect(agentDrawerLayoutMode(1024)).toBe("docked");
+    expect(agentDrawerLayoutMode(1023)).toBe("modal");
+    expect(maxAgentDrawerWidth(1024)).toBe(563);
+    expect(clampAgentDrawerWidth(720, 1024)).toBe(563);
+    expect(clampAgentDrawerWidth(360, 800)).toBe(360);
+  });
+
+  test.each([
+    ["360", 360], ["420", 420], ["720", 720],
+    ["", DEFAULT_AGENT_DRAWER_WIDTH], ["0420", DEFAULT_AGENT_DRAWER_WIDTH],
+    ["360.0", DEFAULT_AGENT_DRAWER_WIDTH], ["721", DEFAULT_AGENT_DRAWER_WIDTH],
+    ["359", DEFAULT_AGENT_DRAWER_WIDTH], ["-1", DEFAULT_AGENT_DRAWER_WIDTH], [420, DEFAULT_AGENT_DRAWER_WIDTH],
+  ])("normalizes saved drawer width %j", (input, expected) => {
+    expect(normalizeAgentDrawerWidth(input)).toBe(expected);
   });
 
   test("builds an exact context-free connect command", () => {
@@ -371,6 +399,20 @@ describe("local agent source and commands", () => {
     expect(continuation.payload).not.toHaveProperty("context");
     expect(initial.payload.turn_id).toHaveLength(32);
     expect(initial.payload.message_id).toHaveLength(32);
+  });
+
+  test("accepts only HTTPS or literal-loopback HTTP page context URLs", () => {
+    const common = { message: "Question", payload: agentPayload(), clientID: agentIDs.message, conversationID: agentIDs.conversation, title: "Agent board", revision: "initial", idFactory: fixedIDFactory };
+    expect(() => createSubmitCommand({ ...common, url: "http://127.0.0.1:8080/m/abc" })).not.toThrow();
+    for (const url of [
+      "http://localhost:8080/m/abc",
+      "http://127.0.0.1:80/m/abc",
+      "http://127.0.0.1:080/m/abc",
+      "http://127.0.0.2:8080/m/abc",
+      "http://[::1]:8080/m/abc",
+      "http://user@127.0.0.1:8080/m/abc",
+      "http://example.test/m/abc",
+    ]) expect(() => createSubmitCommand({ ...common, url })).toThrow(TypeError);
   });
 
   test("measures the message limit as UTF-8 bytes", () => {
@@ -593,6 +635,33 @@ describe("local agent transport and event state", () => {
 });
 
 describe("local agent rendering and controls", () => {
+  test("builds the ChatGPT-like shell with context first and a visible processing indicator", () => {
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({
+      payload: agentPayload(), doc: document, storage: localStorage,
+      pageTitle: "Agent board", pageURL: "https://board.example/m/abc",
+      transportFactory: (input) => { options = input; return transport; },
+    });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }));
+
+    const headerActions = drawer.elements.drawer.querySelector(".agent-header-actions");
+    expect(headerActions?.contains(drawer.elements.overflowButton)).toBe(true);
+    expect(headerActions?.contains(drawer.elements.close)).toBe(true);
+    expect(drawer.elements.timeline.firstElementChild?.classList.contains("agent-context-summary")).toBe(true);
+    expect(drawer.elements.timeline.firstElementChild?.textContent).toContain("Agent board");
+    expect(drawer.elements.timeline.firstElementChild?.textContent).toContain("Context attached");
+    expect(drawer.elements.timeline.firstElementChild?.querySelector("button")?.textContent).toBe("Inspect context");
+    expect(drawer.elements.timeline.querySelectorAll(".agent-response-dot")).toHaveLength(3);
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")?.getAttribute("aria-label")).toBe("Pi is responding");
+    expect(drawer.elements.composer.parentElement?.classList.contains("agent-composer-wrap")).toBe(true);
+    expect(drawer.elements.message.placeholder).toBe("Ask about this page…");
+    drawer.destroy();
+  });
+
   test("discloses authority and gates complete context until revision and delivery are known", async () => {
     let options;
     const sent = [];
@@ -723,19 +792,301 @@ describe("local agent rendering and controls", () => {
     try {
       const transport = { clientID: agentIDs.message, conversationID: null, consented: false, probe: vi.fn(async () => ({ ok: false, code: "broker_unavailable" })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
       const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: () => transport });
-      drawer.setOpen(true);
+      drawer.elements.toggle.focus();
+      drawer.elements.toggle.click();
       expect(document.querySelector(".agent-drawer")?.getAttribute("role")).toBe("dialog");
       expect(document.querySelector(".agent-drawer")?.getAttribute("aria-modal")).toBe("true");
       expect(document.body.classList.contains("agent-drawer-modal-open")).toBe(true);
-      const summary = document.querySelector(".agent-context summary");
-      summary.focus();
-      summary.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+      const outside = document.createElement("button");
+      document.querySelector("#viewer").append(outside);
+      outside.focus();
+      outside.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
       expect(document.activeElement).toBe(drawer.elements.close);
+      drawer.elements.close.click();
+      expect(document.activeElement).toBe(drawer.elements.toggle);
       drawer.destroy();
       expect(document.body.classList.contains("agent-drawer-modal-open")).toBe(false);
     } finally {
       window.matchMedia = previousMatchMedia;
     }
+  });
+
+  test("desktop separator resizes with pointer capture and persists once after cleanup", () => {
+    const transport = { clientID: agentIDs.message, conversationID: null, consented: false, probe: vi.fn(async () => ({ ok: false, code: "broker_unavailable" })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: () => transport });
+    drawer.setOpen(true);
+    const separator = drawer.elements.separator;
+    expect(separator.getAttribute("role")).toBe("separator");
+    expect(separator.getAttribute("aria-valuemin")).toBe("360");
+    expect(separator.getAttribute("aria-valuemax")).toBe("720");
+    expect(separator.getAttribute("aria-valuenow")).toBe("420");
+
+    separator.setPointerCapture = vi.fn();
+    separator.releasePointerCapture = vi.fn();
+    separator.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 7, clientX: 900 }));
+    expect(separator.setPointerCapture).toHaveBeenCalledWith(7);
+    separator.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 7, clientX: 760 }));
+    expect(localStorage.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY)).toBeNull();
+    separator.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 7, clientX: 760 }));
+    expect(localStorage.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY)).toBe("640");
+    expect(separator.releasePointerCapture).toHaveBeenCalledWith(7);
+    expect(document.body.style.userSelect).toBe("");
+    drawer.destroy();
+  });
+
+  test("keyboard separator controls use growth steps, reset, and never persist clamped viewport width", () => {
+    localStorage.setItem(AGENT_DRAWER_WIDTH_STORAGE_KEY, "720");
+    const transport = { clientID: agentIDs.message, conversationID: null, consented: false, probe: vi.fn(async () => ({ ok: false, code: "broker_unavailable" })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: () => transport });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    drawer.setOpen(true);
+    window.dispatchEvent(new Event("resize"));
+    expect(drawer.elements.separator.getAttribute("aria-valuenow")).toBe("563");
+    expect(localStorage.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY)).toBe("720");
+    drawer.elements.separator.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    expect(localStorage.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY)).toBe("563");
+    drawer.elements.separator.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", shiftKey: true, bubbles: true }));
+    expect(localStorage.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY)).toBe("531");
+    drawer.elements.separator.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(localStorage.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY)).toBe("420");
+    drawer.elements.separator.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    expect(localStorage.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY)).toBe("420");
+    drawer.destroy();
+  });
+
+  test("cancels pointer resize on cancellation, close, breakpoint change, and teardown", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
+    const transport = { clientID: agentIDs.message, conversationID: null, consented: false, probe: vi.fn(async () => ({ ok: false, code: "broker_unavailable" })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: () => transport });
+    drawer.setOpen(true);
+    const separator = drawer.elements.separator;
+    separator.setPointerCapture = vi.fn();
+    separator.releasePointerCapture = vi.fn();
+    const start = (pointerId) => {
+      separator.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId, button: 0, clientX: 980 }));
+      separator.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId, clientX: 820 }));
+      expect(document.body.style.userSelect).toBe("none");
+    };
+
+    start(1);
+    separator.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId: 1 }));
+    expect(document.body.style.userSelect).toBe("");
+    expect(separator.getAttribute("aria-valuenow")).toBe("420");
+    expect(localStorage.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY)).toBeNull();
+
+    start(2);
+    drawer.setOpen(false);
+    expect(document.body.style.userSelect).toBe("");
+    expect(separator.releasePointerCapture).toHaveBeenCalledWith(2);
+
+    drawer.setOpen(true);
+    start(3);
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+    window.dispatchEvent(new Event("resize"));
+    expect(document.body.style.userSelect).toBe("");
+    expect(drawer.elements.drawer.getAttribute("role")).toBe("dialog");
+
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
+    window.dispatchEvent(new Event("resize"));
+    start(4);
+    drawer.destroy();
+    expect(document.body.style.userSelect).toBe("");
+    expect(document.body.classList.contains("agent-drawer-resizing")).toBe(false);
+  });
+
+  test("keeps onboarding, settings, context, and refreshed archives as alternate views", async () => {
+    let options;
+    const sent = [];
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: false, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(async (command) => sent.push(command)), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    drawer.setOpen(true);
+    expect(drawer.elements.drawer.querySelector("header")?.contains(drawer.elements.overflowButton)).toBe(true);
+    expect(drawer.elements.setup.hidden).toBe(false);
+    expect(drawer.elements.settings.hidden).toBe(true);
+    expect(drawer.elements.contextDetails.hidden).toBe(true);
+
+    const chooseMenu = (label) => {
+      drawer.elements.overflowButton.click();
+      const button = [...drawer.elements.overflowMenu.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent === label);
+      button.focus();
+      button.click();
+    };
+    chooseMenu("Connection settings");
+    expect(drawer.elements.setup.hidden).toBe(true);
+    expect(drawer.elements.settings.hidden).toBe(false);
+    expect(document.activeElement).toBe(drawer.elements.backButton);
+    drawer.elements.backButton.click();
+    expect(document.activeElement).toBe(drawer.elements.overflowButton);
+    chooseMenu("Inspect page context");
+    expect(drawer.elements.contextDetails.hidden).toBe(false);
+    expect(drawer.elements.timeline.hidden).toBe(true);
+    expect(document.activeElement).toBe(drawer.elements.backButton);
+    drawer.elements.backButton.click();
+    expect(document.activeElement).toBe(drawer.elements.overflowButton);
+
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
+    chooseMenu("Archives");
+    await vi.waitFor(() => expect(sent.filter((command) => command.type === "archive_list")).toHaveLength(1));
+    const firstList = sent.filter((command) => command.type === "archive_list").at(-1);
+    options.onEvent(agentEvent("history", { command_id: firstList.command_id, items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider: "pi", model: "old-model", preview: "" }], next_cursor: null }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    expect(drawer.state.archives).toEqual([expect.objectContaining({ model: "old-model" })]);
+
+    drawer.elements.backButton.click();
+    expect(document.activeElement).toBe(drawer.elements.message);
+    chooseMenu("Archives");
+    await vi.waitFor(() => expect(sent.filter((command) => command.type === "archive_list")).toHaveLength(2));
+    const refreshedList = sent.filter((command) => command.type === "archive_list").at(-1);
+    options.onEvent(agentEvent("history", { command_id: refreshedList.command_id, items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T03:03:04Z", provider: "pi", model: "new-model", preview: "" }], next_cursor: null }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    expect(drawer.state.archives).toEqual([expect.objectContaining({ model: "new-model" })]);
+
+    drawer.elements.backButton.click();
+    chooseMenu("Archives");
+    await vi.waitFor(() => expect(sent.filter((command) => command.type === "archive_list")).toHaveLength(3));
+    const emptyList = sent.filter((command) => command.type === "archive_list").at(-1);
+    options.onEvent(agentEvent("history", { command_id: emptyList.command_id, items: [], next_cursor: null }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
+    expect(drawer.state.archives).toEqual([]);
+    drawer.destroy();
+  });
+
+  test("moves outside focus into a pane that becomes modal and tolerates storage failures", () => {
+    const previousMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn((query) => ({ matches: query.includes("63.999") && window.innerWidth < 1024 }));
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1200 });
+    const storage = { getItem: vi.fn(() => { throw new Error("disabled"); }), setItem: vi.fn(() => { throw new Error("disabled"); }) };
+    try {
+      const transport = { clientID: agentIDs.message, conversationID: null, consented: false, probe: vi.fn(async () => ({ ok: false, code: "broker_unavailable" })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+      const outside = document.createElement("button"); document.querySelector("#viewer").append(outside);
+      const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage, transportFactory: () => transport });
+      drawer.setOpen(true);
+      outside.focus();
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+      window.dispatchEvent(new Event("resize"));
+      expect(document.activeElement).toBe(drawer.elements.close);
+      expect(drawer.elements.drawer.getAttribute("aria-modal")).toBe("true");
+      outside.focus();
+      outside.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+      expect(document.activeElement).toBe(drawer.elements.close);
+      expect(() => drawer.setOpen(false)).not.toThrow();
+      drawer.destroy();
+    } finally {
+      window.matchMedia = previousMatchMedia;
+    }
+  });
+
+  test("enter submits without IME submission while Shift+Enter inserts a newline", async () => {
+    let options;
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
+    Object.defineProperty(drawer.elements.message, "scrollHeight", { configurable: true, value: 240 });
+    drawer.elements.message.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(drawer.elements.message.style.height).toBe("160px");
+    expect(drawer.elements.message.style.overflowY).toBe("auto");
+    drawer.elements.message.value = "hello";
+    drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    drawer.elements.message.value = "line";
+    const shift = new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true });
+    drawer.elements.message.dispatchEvent(shift);
+    expect(shift.defaultPrevented).toBe(false);
+    const composing = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    Object.defineProperty(composing, "isComposing", { value: true });
+    drawer.elements.message.dispatchEvent(composing);
+    expect(transport.send).toHaveBeenCalledOnce();
+
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    drawer.elements.message.value = "queue this";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
+    expect(drawer.elements.stopButton.disabled).toBe(false);
+    drawer.elements.stopButton.click();
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(3));
+    expect(transport.send.mock.calls.map(([command]) => command.type)).toEqual(["submit", "submit", "interrupt"]);
+    drawer.destroy();
+  });
+
+  test("shows Sending until correlated acceptance and clears it on rejection or disconnect", async () => {
+    let options;
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(() => new Promise(() => {})), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
+    drawer.elements.message.value = "first";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Pi · Sending"));
+    const first = transport.send.mock.calls[0][0];
+    options.onEvent(agentEvent("command_result", { command_id: first.command_id, status: "rejected", error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Pi · Ready");
+
+    drawer.elements.message.value = "second";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
+    options.onDisconnect(new Error("closed"));
+    expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Pi · Unavailable");
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")).toBeNull();
+    drawer.destroy();
+  });
+
+  test("renders authoritative loading and clears it for every terminal transition", () => {
+    let options;
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    const loading = () => drawer.elements.timeline.querySelector(".agent-response-loading");
+
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }));
+    expect(loading()?.textContent).toContain("Pi is responding");
+    options.onEvent(agentEvent("error", { error: { code: "provider_startup_failed", message: "Pi could not be started.", action: "try_again" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    expect(loading()).not.toBeNull();
+    options.onEvent(agentEvent("completion", { turn_id: agentIDs.turn }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    expect(loading()).toBeNull();
+
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
+    expect(loading()).not.toBeNull();
+    options.onEvent(agentEvent("interruption", { turn_id: agentIDs.turn, reason: "requested" }, { event_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK" }));
+    expect(loading()).toBeNull();
+
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
+    expect(loading()).not.toBeNull();
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
+    expect(loading()).toBeNull();
+
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }));
+    expect(loading()).not.toBeNull();
+    options.onDisconnect(new Error("closed"));
+    expect(loading()).toBeNull();
+
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO" }));
+    options.onEvent(agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "partial" }, { event_id: "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP" }));
+    expect(loading()).toBeNull();
+    options.onEvent(agentEvent("assistant_message", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "final answer", created_at: "2026-07-27T03:04:05Z" }, { event_id: "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ" }));
+    expect(drawer.elements.timeline.textContent).toContain("final answer");
+    expect(drawer.elements.timeline.textContent).not.toContain("partial");
+    drawer.destroy();
+  });
+
+  test("labels normalized activity with the approved disclosure defaults", () => {
+    let options;
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(snapshotEvent());
+    const events = [
+      agentEvent("activity", { kind: "visible_summary", summary: "Checked the page headings." }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }),
+      agentEvent("activity", { kind: "status", summary: "Working." }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }),
+      agentEvent("activity", { kind: "retry", summary: "Retrying safely." }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }),
+      agentEvent("activity", { kind: "compaction", summary: "Compacted context." }, { event_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK" }),
+      agentEvent("blocked", { kind: "tool", message: "A provider tool request was blocked by content-only policy." }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }),
+      agentEvent("blocked", { kind: "permission", message: "A provider permission request was blocked by content-only policy." }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }),
+      agentEvent("error", { error: { code: "provider_startup_failed", message: "Pi could not be started.", action: "try_again" } }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }),
+    ];
+    for (const event of events) options.onEvent(event);
+    const activities = [...drawer.elements.timeline.querySelectorAll(".agent-activity")];
+    expect(activities.map((activity) => activity.querySelector("summary")?.textContent)).toEqual([
+      "Work summary", "Status", "Retrying", "Compaction", "Tool request blocked", "Permission request blocked", "Error",
+    ]);
+    expect(activities.map((activity) => activity.open)).toEqual([false, false, false, false, true, true, true]);
+    expect(drawer.elements.timeline.textContent).not.toContain("thinking_delta");
+    expect(drawer.elements.timeline.textContent).not.toContain("tool_name");
+    drawer.destroy();
   });
 
   test("restores focus, handles Escape, and persists only open state and port", async () => {

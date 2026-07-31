@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"time"
 	"unicode/utf8"
 
@@ -409,8 +408,7 @@ func validPageURL(value string) bool {
 	if !validBoundedText(value, MaxURLBytes, true) {
 		return false
 	}
-	parsed, err := url.Parse(value)
-	return err == nil && parsed.Scheme == "https" && parsed.Hostname() != "" && parsed.User == nil
+	return common.ValidPageURL(value)
 }
 func validMessage(value string) bool { return validBoundedText(value, MaxMessageBytes, true) }
 func validBoundedText(value string, max int, nonempty bool) bool {

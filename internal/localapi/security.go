@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/edocsss/agent-whiteboard/internal/config"
 )
@@ -22,14 +23,29 @@ func (s *Server) requestOrigin(request *http.Request) (string, error) {
 	if len(values) != 1 || values[0] == "" || values[0] == "null" {
 		return "", errBadOrigin
 	}
-	canonical, err := config.CanonicalOrigin(values[0])
+	canonical, err := canonicalRequestOrigin(values[0])
 	if err != nil || canonical != values[0] {
 		return "", errBadOrigin
 	}
 	return canonical, nil
 }
 
+func canonicalRequestOrigin(value string) (string, error) {
+	return config.CanonicalBrowserOrigin(value)
+}
+
+func automaticLoopbackHTTPOrigin(origin string) bool {
+	if origin != "http://127.0.0.1" && !strings.HasPrefix(origin, "http://127.0.0.1:") {
+		return false
+	}
+	canonical, err := canonicalRequestOrigin(origin)
+	return err == nil && canonical == origin
+}
+
 func (s *Server) trusted(ctx context.Context, origin string) bool {
+	if automaticLoopbackHTTPOrigin(origin) {
+		return true
+	}
 	origins, err := s.trust.TrustedOrigins(ctx)
 	if err != nil {
 		return false

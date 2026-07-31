@@ -34,7 +34,7 @@ type Identity struct {
 }
 
 func (identity Identity) Validate() error {
-	canonical, err := config.CanonicalOrigin(identity.Origin)
+	canonical, err := config.CanonicalBrowserOrigin(identity.Origin)
 	if err != nil || canonical != identity.Origin || identity.Kind != ResourceMarkdown || common.ValidateID(identity.CapabilityID) != nil || identity.Provider != provider.NamePi {
 		return errors.New("invalid conversation identity")
 	}

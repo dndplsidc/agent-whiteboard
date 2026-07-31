@@ -153,4 +153,12 @@ func TestTrustSourceFailureFailsClosedButStatusRemainsMinimal(t *testing.T) {
 	response = running.request(t, http.MethodPost, agentprotocol.ConnectPath, trustedOrigin, encodeCommand(t, connectCommand()))
 	assert.Equal(t, http.StatusForbidden, response.StatusCode)
 	response.Body.Close()
+
+	loopbackOrigin := "http://127.0.0.1:4321"
+	response = running.request(t, http.MethodGet, agentprotocol.StatusPath, loopbackOrigin, nil)
+	assert.Equal(t, http.StatusOK, response.StatusCode)
+	assert.Equal(t, map[string]any{"available": true, "api_version": "1", "origin_trusted": true}, readJSON(t, response))
+	stream := running.request(t, http.MethodPost, agentprotocol.ConnectPath, loopbackOrigin, encodeCommand(t, connectCommand()))
+	assert.Equal(t, http.StatusOK, stream.StatusCode)
+	stream.Body.Close()
 }

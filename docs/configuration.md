@@ -119,7 +119,9 @@ agent-whiteboard --json agent trust list
 agent-whiteboard agent trust remove https://whiteboard.example
 ```
 
-Origins must be exact HTTPS origins: scheme, host, and optional port only. User information, paths (including `/`), queries, fragments, wildcards, and HTTP origins are rejected. Host names are canonicalized to lowercase ASCII, IP addresses are canonicalized, and explicit port 443 is removed. Add and remove are idempotent; list preserves insertion order. Human add/remove output is silent, while human list prints one canonical origin per line.
+Configured origins must be exact HTTPS origins: scheme, host, and optional port only. User information, paths (including `/`), queries, fragments, wildcards, and HTTP origins are rejected. Host names are canonicalized to lowercase ASCII, IP addresses are canonicalized, and explicit port 443 is removed. Add and remove are idempotent; list preserves insertion order. Human add/remove output is silent, while human list prints one canonical origin per line.
+
+The broker separately and automatically admits canonical browser origins on literal `http://127.0.0.1`, with an optional valid non-default port. This runtime exception is not stored in `agent.trusted_origins` and does not appear in `agent trust list`. It excludes `localhost`, other IPv4 loopback spellings and addresses, IPv6 loopback, explicit default port 80, and every non-loopback HTTP origin.
 
 JSON add/remove output is:
 

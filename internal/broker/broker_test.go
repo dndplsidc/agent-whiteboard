@@ -130,6 +130,27 @@ func TestConversionsRequireCanonicalAuthorizedOriginAndCopyContextBytes(t *testi
 	_, err = ConnectIdentityToState(ConnectIdentity{Origin: "https://EXAMPLE.com", Provider: agentprotocol.ProviderPi, Resource: resource, ContextDigest: page.Digest}, "https://example.com")
 	require.Error(t, err)
 
+	loopbackIdentity := identity
+	loopbackIdentity.Origin = "http://127.0.0.1:8080"
+	loopbackState, err := ConnectIdentityToState(loopbackIdentity, loopbackIdentity.Origin)
+	require.NoError(t, err)
+	require.Equal(t, loopbackIdentity.Origin, loopbackState.Origin)
+	require.NoError(t, loopbackState.Validate())
+	loopbackPage := page
+	loopbackPage.URL = "http://127.0.0.1:8080/board/readme"
+	_, err = PageContextToProvider(loopbackPage, loopbackIdentity, loopbackIdentity.Origin)
+	require.NoError(t, err)
+	loopbackPage.URL = "http://localhost:8080/board/readme"
+	_, err = PageContextToProvider(loopbackPage, loopbackIdentity, loopbackIdentity.Origin)
+	require.Error(t, err)
+	defaultPortIdentity := identity
+	defaultPortIdentity.Origin = "http://127.0.0.1"
+	for _, pageURL := range []string{"http://127.0.0.1:80/board/readme", "http://127.0.0.1:080/board/readme"} {
+		loopbackPage.URL = pageURL
+		_, err = PageContextToProvider(loopbackPage, defaultPortIdentity, defaultPortIdentity.Origin)
+		require.Error(t, err)
+	}
+
 	converted, err := PageContextToProvider(page, identity, identity.Origin)
 	require.NoError(t, err)
 	require.Equal(t, page.Digest, converted.Digest)

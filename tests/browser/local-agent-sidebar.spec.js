@@ -2,21 +2,32 @@ import { expect, test } from "./fixture.js";
 
 const drawerKey = "agent-whiteboard-agent-drawer-open";
 const portKey = "agent-whiteboard-agent-port";
+const widthKey = "agent-whiteboard-agent-drawer-width";
 
 test.use({ browserRequestInterception: false, ignoreHTTPSErrors: true });
 
-async function openSidebarPage({ context, page, fixture, markdown, creatorContext }) {
+async function openSidebarPage({ context, page, fixture, markdown, creatorContext, preferences = {} }) {
   const resource = await fixture.publish(markdown, creatorContext);
   await context.grantPermissions(["local-network-access"], { origin: fixture.origin });
   await page.addInitScript(
-    ({ key, port }) => localStorage.setItem(key, String(port)),
-    { key: portKey, port: fixture.brokerPort },
+    ({ port, preferences: initialPreferences }) => {
+      localStorage.setItem("agent-whiteboard-agent-port", String(port));
+      for (const [key, value] of Object.entries(initialPreferences)) localStorage.setItem(key, String(value));
+    },
+    { port: fixture.brokerPort, preferences },
   );
   fixture.resetBrokerRequests();
   fixture.resetBrokerState();
   await page.goto(resource.url);
   await expect(page.locator(".agent-live-status")).toContainText("Local broker available");
   return resource;
+}
+
+async function connectSidebar(page) {
+  await page.getByRole("button", { name: "Open Page agent" }).click();
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
+  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
 }
 
 function parsedCommands(requests) {
@@ -40,12 +51,12 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   expect(JSON.stringify(localAgentSidebar.brokerRequests)).not.toContain(markdown);
   expect(JSON.stringify(localAgentSidebar.brokerRequests)).not.toContain(creatorContext);
 
-  await page.getByRole("button", { name: "Open local agent" }).click();
+  await page.getByRole("button", { name: "Open Page agent" }).click();
   await expect(page.locator(".agent-consent")).toContainText("No page content is sent when you connect");
   await expect(page.locator(".agent-consent")).toContainText("complete Page Markdown and Creator context");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
 
-  await expect(page.locator(".agent-live-status")).toContainText("fixture-model");
+  await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
   const connect = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "connect");
   expect(connect).toBeDefined();
@@ -63,12 +74,10 @@ test("uses the versioned WebSocket for connect and subsequent commands", async (
 }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# WebSocket sidebar\n", creatorContext: "WebSocket context.\n" });
   localAgentSidebar.setWebSocketEnabled(true);
-  await page.getByRole("button", { name: "Open local agent" }).click();
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(page.locator(".agent-live-status")).toContainText("fixture-model");
+  await connectSidebar(page);
   const priorReplies = await page.locator(".agent-message-assistant").count();
   await page.getByLabel("Message Pi about this whiteboard").fill("Use the socket.");
-  await page.locator('.agent-composer button[type="submit"]').click();
+  await page.getByLabel("Message Pi about this whiteboard").press("Enter");
   await expect(page.locator(".agent-message-assistant")).toHaveCount(priorReplies + 1);
 
   expect(localAgentSidebar.brokerRequests.some((request) => request.status === 101)).toBe(true);
@@ -78,23 +87,182 @@ test("uses the versioned WebSocket for connect and subsequent commands", async (
   expect(localAgentSidebar.webSocketCommands[0].payload).not.toHaveProperty("context");
 });
 
-test("renders the shared queue and stops without replaying the active turn", async ({
+test("docks without covering the page and persists pointer and keyboard widths", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: "# Resizable workspace\n\n| Column | Value |\n| --- | --- |\n| wide | `abcdefghijklmnopqrstuvwxyz` |\n\n```text\nA deliberately long line that must remain inside the available whiteboard region without page-level overflow.\n```\n",
+    creatorContext: "Layout context.\n",
+  });
+
+  const launcher = page.getByRole("button", { name: "Open Page agent", exact: true });
+  await launcher.click();
+  const drawer = page.locator(".agent-drawer");
+  const content = page.locator("#agent-whiteboard-content");
+  await expect(drawer).toHaveAttribute("role", "complementary");
+  await expect(page.locator(".agent-drawer-separator")).toBeVisible();
+  await expect(launcher).toBeHidden();
+  await expect.poll(async () => Math.round((await drawer.boundingBox()).x)).toBe(1020);
+
+  const [drawerBox, contentBox] = await Promise.all([drawer.boundingBox(), content.boundingBox()]);
+  expect(contentBox.x + contentBox.width).toBeLessThanOrEqual(drawerBox.x + 1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  const separator = page.locator(".agent-drawer-separator");
+  const separatorBox = await separator.boundingBox();
+  await page.mouse.move(separatorBox.x + separatorBox.width / 2, separatorBox.y + 80);
+  await page.mouse.down();
+  await page.mouse.move(separatorBox.x - 96, separatorBox.y + 120);
+  await page.mouse.up();
+  const pointerWidth = Number(await page.evaluate((key) => localStorage.getItem(key), widthKey));
+  expect(pointerWidth).toBeGreaterThan(420);
+  await expect(drawer).toHaveCSS("width", `${pointerWidth}px`);
+
+  await page.reload();
+  await expect(drawer).toHaveClass(/is-open/u);
+  await expect(drawer).toHaveCSS("width", `${pointerWidth}px`);
+  await separator.focus();
+  await page.keyboard.press("ArrowLeft");
+  expect(Number(await page.evaluate((key) => localStorage.getItem(key), widthKey))).toBe(pointerWidth + 8);
+  await page.keyboard.press("Shift+ArrowRight");
+  expect(Number(await page.evaluate((key) => localStorage.getItem(key), widthKey))).toBe(pointerWidth - 24);
+  await page.keyboard.press("Home");
+  expect(await page.evaluate((key) => localStorage.getItem(key), widthKey)).toBe("420");
+});
+
+test("keeps the ChatGPT-like header, transcript, context, and composer in stable regions", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  await page.setViewportSize({ width: 1200, height: 700 });
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: "# Chat shell\n\nThe context summary belongs before the conversation.\n",
+    creatorContext: "Chat shell context.\n",
+  });
+  await connectSidebar(page);
+
+  const timeline = page.locator(".agent-timeline");
+  const contextSummary = timeline.locator(":scope > .agent-context-summary");
+  await expect(contextSummary).toHaveCount(1);
+  await expect(timeline.locator(":scope > *").first()).toHaveClass(/agent-context-summary/u);
+  await expect(contextSummary).toContainText("Chat shell");
+
+  const overflowBox = await page.locator(".agent-overflow-button").boundingBox();
+  const closeBox = await page.getByRole("button", { name: "Close local agent", exact: true }).boundingBox();
+  expect(overflowBox.x + overflowBox.width).toBeLessThanOrEqual(closeBox.x);
+
+  const longMessage = Array.from({ length: 32 }, (_, index) => `Paragraph ${index + 1} keeps the transcript tall enough to scroll independently.`).join("\n\n");
+  await page.getByLabel("Message Pi about this whiteboard").fill(longMessage);
+  await page.locator('.agent-composer button[type="submit"]').click();
+  await expect(page.locator(".agent-message-user")).toContainText("Paragraph 32");
+  await expect.poll(() => timeline.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+
+  localAgentSidebar.setPhaseResponses(true);
+  await page.getByLabel("Message Pi about this whiteboard").fill("Keep my reading position while this response streams.");
+  await page.getByLabel("Message Pi about this whiteboard").press("Enter");
+  await expect(page.locator(".agent-response-loading")).toBeVisible();
+
+  const composer = page.locator(".agent-composer-wrap");
+  const before = await composer.boundingBox();
+  const readingPosition = await timeline.evaluate((element) => {
+    element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) / 2);
+    return element.scrollTop;
+  });
+  localAgentSidebar.releaseResponsePhase("first_delta");
+  await expect(page.locator(".agent-message-assistant").last()).toContainText("Fixture");
+  await expect.poll(() => timeline.evaluate((element) => element.scrollTop)).toBe(readingPosition);
+  localAgentSidebar.releaseResponsePhase("later_delta");
+  localAgentSidebar.releaseResponsePhase("completion");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Ready");
+  await expect.poll(() => timeline.evaluate((element) => element.scrollTop)).toBe(readingPosition);
+  const after = await composer.boundingBox();
+  expect(Math.round(after.y + after.height)).toBe(Math.round(before.y + before.height));
+
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await expect(page.getByRole("menuitem", { name: "New conversation" })).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(page.getByRole("menuitem", { name: "Inspect page context" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Back to conversation" })).toBeFocused();
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  await expect(page.getByLabel("Message Pi about this whiteboard")).toBeFocused();
+  await expect.poll(() => timeline.evaluate((element) => element.scrollTop)).toBe(readingPosition);
+
+  await expect(page.locator(".agent-drawer")).toHaveCSS("overflow", "hidden");
+  await expect(timeline).toHaveCSS("overflow-y", "auto");
+  const drawerBox = await page.locator(".agent-drawer").boundingBox();
+  expect(after.y + after.height).toBeLessThanOrEqual(drawerBox.y + drawerBox.height + 1);
+});
+
+test("temporarily clamps a wider preference and switches every narrow layout to a modal", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: "# Responsive pane\n",
+    creatorContext: "Responsive context.\n",
+    preferences: { [widthKey]: 700 },
+  });
+  const launcher = page.getByRole("button", { name: "Open Page agent", exact: true });
+  await launcher.click();
+  await expect(page.locator(".agent-drawer")).toHaveCSS("width", "605px");
+  expect(await page.evaluate((key) => localStorage.getItem(key), widthKey)).toBe("700");
+
+  await page.setViewportSize({ width: 800, height: 800 });
+  const drawer = page.locator(".agent-drawer");
+  await expect(drawer).toHaveAttribute("role", "dialog");
+  await expect(drawer).toHaveAttribute("aria-modal", "true");
+  await expect(page.locator(".agent-overlay")).toBeVisible();
+  await expect(page.locator(".agent-drawer-separator")).toBeHidden();
+  await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
+  expect((await drawer.boundingBox()).width).toBeLessThan(800);
+
+  await page.setViewportSize({ width: 600, height: 800 });
+  expect(Math.round((await drawer.boundingBox()).width)).toBe(600);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(drawer).toHaveAttribute("role", "complementary");
+  await expect(page.locator(".agent-overlay")).toBeHidden();
+  await expect(page.locator(".agent-drawer-separator")).toBeVisible();
+
+  await page.setViewportSize({ width: 800, height: 800 });
+  await page.keyboard.press("Escape");
+  await expect(drawer).not.toHaveClass(/is-open/u);
+  await expect(launcher).toBeFocused();
+});
+
+test("keeps queue submission and Stop available with Enter and Shift+Enter", async ({
   context,
   page,
   localAgentSidebar,
 }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Queue controls\n", creatorContext: "Queue context.\n" });
   localAgentSidebar.setHoldResponses(true);
-  await page.getByRole("button", { name: "Open local agent" }).click();
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+  await connectSidebar(page);
 
   const composer = page.getByLabel("Message Pi about this whiteboard");
+  await composer.fill("Line one");
+  await composer.press("Shift+Enter");
+  await expect(composer).toHaveValue("Line one\n");
   await composer.fill("Keep this turn active.");
-  await page.locator('.agent-composer button[type="submit"]').click();
+  await composer.press("Enter");
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
   await composer.fill("Queued follow-up.");
-  await page.locator('.agent-composer button[type="submit"]').click();
+  await composer.press("Enter");
   const queued = page.getByLabel("Edit queued message");
   await expect(queued).toHaveValue("Queued follow-up.");
   await queued.fill("Edited follow-up.");
@@ -110,24 +278,62 @@ test("renders the shared queue and stops without replaying the active turn", asy
   expect(types.filter((type) => type === "submit")).toHaveLength(2);
 });
 
-test("uses modal focus and Escape restoration at the mobile viewport", async ({
+test("shows authoritative loading, progressive streaming, alternate views, and sanitized activity", async ({
   context,
   page,
   localAgentSidebar,
 }) => {
-  await page.setViewportSize({ width: 390, height: 800 });
-  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Mobile drawer\n", creatorContext: "Mobile context.\n" });
-  const toggle = page.getByRole("button", { name: "Open local agent" });
-  await toggle.click();
-  await expect(page.locator(".agent-drawer")).toHaveAttribute("role", "dialog");
-  await expect(page.locator(".agent-drawer")).toHaveAttribute("aria-modal", "true");
-  await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
-  await page.keyboard.press("Escape");
-  await expect(page.locator(".agent-drawer")).not.toHaveClass(/is-open/u);
-  await expect(toggle).toBeFocused();
+  const markdown = "# Controlled response\n\nExact Markdown for context inspection.\n";
+  const creatorContext = "Exact creator context for inspection.\n";
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown, creatorContext });
+  localAgentSidebar.setPhaseResponses(true);
+  await connectSidebar(page);
+
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  await composer.fill("Stream this response.");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-response-loading")).toHaveAccessibleName("Pi is responding");
+  await expect(page.locator(".agent-response-dot")).toHaveCount(3);
+  await expect(page.locator(".agent-response-dot").first()).not.toHaveCSS("animation-name", "none");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Responding");
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+
+  localAgentSidebar.releaseResponsePhase("first_delta");
+  const assistant = page.locator(".agent-message-assistant .agent-message-body");
+  await expect(assistant).toContainText("Fixture");
+  await expect(assistant).not.toContainText("reply");
+  await expect(page.locator(".agent-response-loading")).toHaveCount(0);
+
+  localAgentSidebar.releaseResponsePhase("later_delta");
+  await expect(assistant).toContainText("Fixture reply");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Responding");
+  localAgentSidebar.emitActivity("visible_summary", "Checked the published headings.");
+  localAgentSidebar.emitBlocked("tool");
+  localAgentSidebar.emitBlocked("permission");
+  await expect(page.locator(".agent-activity-visible_summary summary")).toHaveText("Work summary");
+  await expect(page.locator(".agent-activity-visible_summary")).not.toHaveAttribute("open", "");
+  await expect(page.locator(".agent-activity-blocked summary")).toHaveText(["Tool request blocked", "Permission request blocked"]);
+  await expect(page.locator(".agent-activity-blocked").first()).toContainText("content-only policy");
+  await expect(page.locator(".agent-timeline")).not.toContainText("thinking_delta");
+
+  localAgentSidebar.releaseResponsePhase("completion");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi · Ready");
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Inspect page context" }).click();
+  await expect(page.locator(".agent-context")).toBeVisible();
+  await expect(page.getByLabel("Page Markdown")).toHaveText(markdown);
+  await expect(page.getByLabel("Creator context")).toHaveText(creatorContext);
+  await expect(page.locator(".agent-timeline")).toBeHidden();
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await expect(page.locator(".agent-archives")).toBeVisible();
+  await expect(page.locator(".agent-archives article")).toContainText("fixture-model");
+  await expect(page.locator(".agent-archives article")).not.toContainText("Fixture reply");
 });
 
-test("sends exact initial context once, streams Pi output, and resumes without replaying it", async ({
+test("sends exact initial context once and resumes without replaying it", async ({
   context,
   page,
   localAgentSidebar,
@@ -135,14 +341,11 @@ test("sends exact initial context once, streams Pi output, and resumes without r
   const markdown = "# Exact context\n\nUTF-8: café\n";
   const creatorContext = "Creator says: preserve this exactly.\n";
   const resource = await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown, creatorContext });
-  await page.getByRole("button", { name: "Open local agent" }).click();
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+  await connectSidebar(page);
 
   await page.getByLabel("Message Pi about this whiteboard").fill("What does this page say?");
-  await page.locator('.agent-composer button[type="submit"]').click();
+  await page.getByLabel("Message Pi about this whiteboard").press("Enter");
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
-  await expect(page.locator(".agent-context")).toContainText("context accepted");
 
   const firstSubmit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
   expect(firstSubmit.payload.message).toBe("What does this page say?");
@@ -161,7 +364,7 @@ test("sends exact initial context once, streams Pi output, and resumes without r
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
   await page.getByLabel("Message Pi about this whiteboard").fill("Continue without repeating context.");
-  await page.locator('.agent-composer button[type="submit"]').click();
+  await page.getByLabel("Message Pi about this whiteboard").press("Enter");
   await expect(page.locator(".agent-message-assistant")).toHaveCount(2);
 
   const resumedSubmit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
@@ -170,6 +373,8 @@ test("sends exact initial context once, streams Pi output, and resumes without r
   const stored = await page.evaluate(() => Object.fromEntries(Object.entries(localStorage)));
   expect(stored[portKey]).toBe(String(localAgentSidebar.brokerPort));
   expect(stored[drawerKey]).toBe("true");
+  const allowedPreferenceKeys = new Set(["agent-whiteboard-theme", drawerKey, portKey, widthKey]);
+  expect(Object.keys(stored).every((key) => allowedPreferenceKeys.has(key))).toBe(true);
   expect(JSON.stringify(stored)).not.toContain("What does this page say?");
   expect(JSON.stringify(stored)).not.toContain(creatorContext);
 });

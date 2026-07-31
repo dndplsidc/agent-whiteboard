@@ -237,6 +237,78 @@ func TestListenerHostOriginAndMinimalStatus(t *testing.T) {
 	response.Body.Close()
 }
 
+func TestAutomaticLiteralLoopbackHTTPOrigin(t *testing.T) {
+	const origin = "http://127.0.0.1:4321"
+
+	t.Run("status preflight and fallback", func(t *testing.T) {
+		running := startServer(t)
+
+		response := running.request(t, http.MethodGet, agentprotocol.StatusPath, origin, nil)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		assert.Equal(t, origin, response.Header.Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, map[string]any{"available": true, "api_version": "1", "origin_trusted": true}, readJSON(t, response))
+
+		withoutPort := "http://127.0.0.1"
+		response = running.request(t, http.MethodGet, agentprotocol.StatusPath, withoutPort, nil)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		assert.Equal(t, withoutPort, response.Header.Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, map[string]any{"available": true, "api_version": "1", "origin_trusted": true}, readJSON(t, response))
+
+		preflight, err := http.NewRequest(http.MethodOptions, running.baseURL+agentprotocol.ConnectPath, nil)
+		require.NoError(t, err)
+		preflight.Header.Set("Origin", origin)
+		preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		preflight.Header.Set("Access-Control-Request-Headers", strings.Join(mutationHeaders, ", "))
+		preflight.Header.Set("Access-Control-Request-Private-Network", "true")
+		response, err = running.client.Do(preflight)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusNoContent, response.StatusCode)
+		assert.Equal(t, origin, response.Header.Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "true", response.Header.Get("Access-Control-Allow-Private-Network"))
+		response.Body.Close()
+
+		stream := running.request(t, http.MethodPost, agentprotocol.ConnectPath, origin, encodeCommand(t, connectCommand()))
+		require.Equal(t, http.StatusOK, stream.StatusCode)
+		_, err = bufio.NewReader(stream.Body).ReadBytes('\n')
+		require.NoError(t, err)
+		stream.Body.Close()
+	})
+
+	t.Run("websocket", func(t *testing.T) {
+		running := startServer(t)
+		wsURL := url.URL{Scheme: "ws", Host: running.server.Host(), Path: agentprotocol.ConnectPath}
+		dialer := websocket.Dialer{Subprotocols: []string{agentprotocol.WebSocketSubprotocol}}
+		socket, _, err := dialer.Dial(wsURL.String(), http.Header{"Origin": []string{origin}})
+		require.NoError(t, err)
+		defer socket.Close()
+		require.NoError(t, socket.WriteMessage(websocket.TextMessage, encodeCommand(t, connectCommand())))
+		_, _, err = socket.ReadMessage()
+		require.NoError(t, err)
+	})
+}
+
+func TestAutomaticLoopbackHTTPRejectsNearMatches(t *testing.T) {
+	running := startServer(t)
+	for _, origin := range []string{
+		"HTTP://127.0.0.1:4321",
+		"http://127.0.0.1:08080",
+		"http://127.0.0.1:80",
+		"http://127.0.0.1/",
+		"http://user@127.0.0.1:4321",
+		"http://localhost:4321",
+		"http://127.0.0.2:4321",
+		"http://127.1:4321",
+		"http://[::1]:4321",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			response := running.request(t, http.MethodGet, agentprotocol.StatusPath, origin, nil)
+			assert.Equal(t, http.StatusForbidden, response.StatusCode)
+			assert.Empty(t, response.Header.Get("Access-Control-Allow-Origin"))
+			response.Body.Close()
+		})
+	}
+}
+
 func TestCORSAndLegacyPNAExactMatrix(t *testing.T) {
 	running := startServer(t)
 

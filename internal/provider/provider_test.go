@@ -128,8 +128,10 @@ func TestProviderEventsRejectEveryFieldNotPermittedByKind(t *testing.T) {
 	}
 }
 
-func TestProviderPageContextDigestAndHTTPSHostnameAreValidated(t *testing.T) {
+func TestProviderPageContextDigestAndAuthorizedHostnameAreValidated(t *testing.T) {
 	request := validTurnRequest()
+	require.NoError(t, request.Context.Validate())
+	request.Context.URL = "http://127.0.0.1:8080/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
 	require.NoError(t, request.Context.Validate())
 
 	exactControlBytes := *request.Context
@@ -142,9 +144,16 @@ func TestProviderPageContextDigestAndHTTPSHostnameAreValidated(t *testing.T) {
 	require.Error(t, request.Context.Validate())
 
 	for name, value := range map[string]string{
-		"empty hostname":      "https://:443/path",
-		"credentials":         "https://user:pass@whiteboard.example/path",
-		"malformed authority": "https://[::1/path",
+		"empty hostname":       "https://:443/path",
+		"credentials":          "https://user:pass@whiteboard.example/path",
+		"malformed authority":  "https://[::1/path",
+		"localhost HTTP":       "http://localhost:8080/path",
+		"default HTTP port":    "http://127.0.0.1:80/path",
+		"noncanonical port":    "http://127.0.0.1:080/path",
+		"other loopback HTTP":  "http://127.0.0.2:8080/path",
+		"IPv6 loopback HTTP":   "http://[::1]:8080/path",
+		"remote HTTP":          "http://whiteboard.example/path",
+		"loopback credentials": "http://user@127.0.0.1:8080/path",
 	} {
 		t.Run(name, func(t *testing.T) {
 			context := *validTurnRequest().Context
