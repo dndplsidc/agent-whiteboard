@@ -840,7 +840,8 @@ body.agent-drawer-modal-open .agent-toggle {
 
 .agent-context pre {
   font-size: 0.72rem;
-  max-height: 10rem;
+  height: clamp(14rem, 34vh, 20rem);
+  overflow: auto;
   white-space: pre-wrap;
 }
 

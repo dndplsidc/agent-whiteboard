@@ -327,8 +327,15 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
   await page.getByRole("button", { name: "Open Page agent menu" }).click();
   await page.getByRole("menuitem", { name: "Inspect page context" }).click();
   await expect(page.locator(".agent-context")).toBeVisible();
-  await expect(page.getByLabel("Page Markdown")).toHaveText(markdown);
-  await expect(page.getByLabel("Creator context")).toHaveText(creatorContext);
+  const markdownContext = page.getByLabel("Page Markdown");
+  const creatorContextBlock = page.getByLabel("Creator context");
+  await expect(markdownContext).toHaveText(markdown);
+  await expect(creatorContextBlock).toHaveText(creatorContext);
+  const markdownContextBox = await markdownContext.boundingBox();
+  const creatorContextBox = await creatorContextBlock.boundingBox();
+  expect(markdownContextBox.height).toBeGreaterThanOrEqual(224);
+  expect(creatorContextBox.height).toBeGreaterThanOrEqual(224);
+  expect(Math.abs(markdownContextBox.height - creatorContextBox.height)).toBeLessThanOrEqual(1);
   await expect(page.locator(".agent-timeline")).toBeHidden();
   await page.getByRole("button", { name: "Back to conversation" }).click();
 
