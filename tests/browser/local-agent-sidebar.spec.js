@@ -251,6 +251,33 @@ test("temporarily clamps a wider preference and switches every narrow layout to 
   await expect(launcher).toBeFocused();
 });
 
+test("aligns the mobile viewer controls on one inset toolbar line", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: "# Mobile toolbar\n",
+    creatorContext: "Mobile toolbar context.\n",
+  });
+
+  const [themeControl, agentLauncher] = await Promise.all([
+    page.getByRole("button", { name: /^Appearance:/u }).boundingBox(),
+    page.getByRole("button", { name: "Open Page agent", exact: true }).boundingBox(),
+  ]);
+  const themeCenter = themeControl.y + themeControl.height / 2;
+  const agentCenter = agentLauncher.y + agentLauncher.height / 2;
+  const themeInset = themeControl.x;
+  const agentInset = 390 - agentLauncher.x - agentLauncher.width;
+
+  expect(Math.abs(themeCenter - agentCenter)).toBeLessThanOrEqual(1);
+  expect(Math.abs(themeInset - agentInset)).toBeLessThanOrEqual(1);
+});
+
 test("keeps queue submission and Stop available with Enter and Shift+Enter", async ({
   context,
   page,
