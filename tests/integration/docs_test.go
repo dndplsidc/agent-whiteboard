@@ -33,7 +33,7 @@ func TestDocumentationContracts(t *testing.T) {
 		"GET /healthz", "GET /readyz",
 		"POST /api/v1/whiteboards/markdown", "PUT /api/v1/whiteboards/markdown/{id}", "DELETE /api/v1/whiteboards/markdown/{id}",
 		"POST /api/v1/whiteboards/html", "PUT /api/v1/whiteboards/html/{id}", "DELETE /api/v1/whiteboards/html/{id}",
-		"GET /whiteboards/markdown/{id}", "GET /whiteboards/html/{id}",
+		"GET /whiteboards/markdown/{id}", "GET /whiteboards/html/{id}", "GET /whiteboards/html/{id}/content",
 		"POST /api/v1/images", "PUT /api/v1/images/{id}", "DELETE /api/v1/images/{id}", "GET /images/{id}",
 	}
 	for _, route := range routes {
@@ -53,15 +53,20 @@ func TestDocumentationContracts(t *testing.T) {
 	server := startServer(t)
 	markdownPath := filepath.Join(root, examplePaths[0])
 	htmlPath := filepath.Join(root, examplePaths[1])
-	markdown := runCLIResource(t, server, "--json", "create", "markdown", "--expires-in", "0", markdownPath)
+	creatorContext := writeContextFixture(t, "# Example context\n\nThe diagram documentation fixture is published for validation.\n")
+	markdown := runCLIResource(t, server, "--json", "create", "markdown", "--context", creatorContext, "--expires-in", "0", markdownPath)
 	html := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "0", htmlPath)
 	markdownResponse, _ := fetch(t, markdown.Resource.URL)
 	require.Equal(t, 200, markdownResponse.StatusCode)
 	htmlResponse, htmlBody := fetch(t, html.Resource.URL)
 	require.Equal(t, 200, htmlResponse.StatusCode)
+	require.NotContains(t, htmlBody, "Agent Whiteboard Example")
+	require.Contains(t, htmlBody, `src="/whiteboards/html/`+html.Resource.ID+`/content" sandbox="allow-scripts"`)
 	wantHTML, err := os.ReadFile(htmlPath)
 	require.NoError(t, err)
-	require.Equal(t, wantHTML, []byte(htmlBody))
+	htmlContentResponse, htmlContentBody := fetch(t, html.Resource.URL+"/content")
+	require.Equal(t, 200, htmlContentResponse.StatusCode)
+	require.Equal(t, wantHTML, []byte(htmlContentBody))
 }
 
 func readDocumentation(t *testing.T, path string) string {

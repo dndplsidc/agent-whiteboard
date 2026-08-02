@@ -45,7 +45,7 @@ func (s *Service) CreateHTML(ctx context.Context, input CreateInput) (Result, er
 }
 
 func (s *Service) create(ctx context.Context, kind Kind, input CreateInput) (Result, error) {
-	if err := validateSource(kind, input.Source); err != nil {
+	if err := validateWrite(kind, input.Source, input.Context); err != nil {
 		return Result{}, err
 	}
 
@@ -65,6 +65,7 @@ func (s *Service) create(ctx context.Context, kind Kind, input CreateInput) (Res
 			ID:        id,
 			Kind:      kind,
 			Source:    input.Source,
+			Context:   input.Context,
 			CreatedAt: now,
 			UpdatedAt: now,
 			ExpiresAt: expiresAt,
@@ -72,6 +73,9 @@ func (s *Service) create(ctx context.Context, kind Kind, input CreateInput) (Res
 		err = s.store.Create(ctx, record)
 		if err == nil {
 			return resultFrom(record), nil
+		}
+		if createMayHaveCommitted(err) {
+			return resultFrom(record), err
 		}
 		if !errors.Is(err, common.ErrIDCollision) {
 			return Result{}, err
@@ -100,7 +104,7 @@ func (s *Service) Update(ctx context.Context, input UpdateInput) (Result, error)
 	if err := common.ValidateID(input.ID); err != nil {
 		return Result{}, err
 	}
-	if err := validateSource(input.Kind, input.Source); err != nil {
+	if err := validateWrite(input.Kind, input.Source, input.Context); err != nil {
 		return Result{}, err
 	}
 
@@ -121,6 +125,7 @@ func (s *Service) Update(ctx context.Context, input UpdateInput) (Result, error)
 		ID:        current.ID,
 		Kind:      current.Kind,
 		Source:    input.Source,
+		Context:   input.Context,
 		CreatedAt: current.CreatedAt,
 		UpdatedAt: now,
 		ExpiresAt: expiresAt,
@@ -149,12 +154,21 @@ func (s *Service) Delete(ctx context.Context, kind Kind, id string) error {
 	return normalizeNotFound(s.store.Delete(ctx, id))
 }
 
-func validateSource(kind Kind, source []byte) error {
+func validateWrite(kind Kind, source, creatorContext []byte) error {
 	switch kind {
 	case KindMarkdown:
-		return validateMarkdown(source)
+		if err := validateMarkdown(source); err != nil {
+			return err
+		}
+		return validateMarkdownContext(creatorContext)
 	case KindHTML:
-		return validateHTML(source)
+		if err := validateHTML(source); err != nil {
+			return err
+		}
+		if len(creatorContext) != 0 {
+			return common.NewError(common.CodeInvalidRequest, "html must not include context", nil)
+		}
+		return nil
 	default:
 		return common.NewError(common.CodeInvalidRequest, "invalid whiteboard kind", nil)
 	}

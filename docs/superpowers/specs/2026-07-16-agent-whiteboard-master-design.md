@@ -472,15 +472,17 @@ Theme changes re-render diagrams from retained source.
 
 Allowed theme values are `light`, `dark`, and `system`. The localStorage key is `agent-whiteboard-theme`. Unknown values become `system`. System mode follows `prefers-color-scheme`, including live changes.
 
-Only this non-sensitive preference is stored. Uploaded same-origin HTML may read or modify it, which is acceptable and documented.
+Only this non-sensitive preference is stored. Standalone HTML cannot read or modify it because it runs with an opaque origin.
 
 ### 9.4 Standalone HTML
 
 HTML validation requires UTF-8 plus explicit doctype, `<html>`, `<head>`, and `<body>` tokens. External `<script src>` and stylesheet `<link rel="stylesheet">` elements are rejected. Inline CSS and JavaScript are allowed but not required when unnecessary.
 
-The original bytes are stored and served unchanged. The browser uses the document's `<title>`, with its normal fallback when absent.
+The original bytes are stored unchanged. The stable public capability URL returns an application-controlled document containing exactly one `credentialless` iframe with `sandbox="allow-scripts"`, `referrerpolicy="no-referrer"`, and a relative source at the capability's `/content` route. Submitted bytes never appear in the wrapper. The inner route returns exact stored bytes with an HTTP CSP sandbox that allows inline script and style but omits `allow-same-origin` and denies connections, forms, child frames, workers, objects, and remote subresources. The submitted document's title remains inside the child; the wrapper has an application title.
 
-Uploaded HTML is trusted same-origin active content. It may use browser APIs, access public same-origin whiteboards and images, and make outbound requests. The hosting origin must contain no authentication cookies or sensitive browser state. The server does not add a sandbox or restrictive CSP to uploaded HTML.
+Standalone HTML remains trusted active content. Inline JavaScript executes with an opaque origin and can communicate outward through `postMessage`, but cannot read the parent, publishing-origin cookies or storage, or authorized loopback-broker responses. It cannot submit forms, open popups, initiate downloads, navigate the top page, or use fetch, XHR, WebSocket, remote images, or child frames.
+
+A script-capable sandbox can still navigate its own child. The outer wrapper's `frame-src 'self'` currently restricts that navigation to the publishing origin; `credentialless` and `no-referrer` strip publishing-origin cookies and Referer. Trusted code may deliberately encode the inner capability URL into such a permitted request, disclosing it to publishing-origin handlers or logs. Cross-origin child navigation is additionally blocked by the wrapper CSP. Direct top-level `/content` navigation remains independently opaque and storage/network restricted, but is not the supported wrapper entry point and does not inherit the outer destination restriction. This accepted disclosure risk is why standalone HTML must never render untrusted code.
 
 ## 10. Image Domain
 
@@ -529,6 +531,7 @@ DELETE /api/v1/images/{id}
 
 GET    /whiteboards/markdown/{id}
 GET    /whiteboards/html/{id}
+GET    /whiteboards/html/{id}/content
 GET    /images/{id}
 
 GET    /healthz
@@ -763,7 +766,7 @@ Required documentation:
 - `docs/http-api.md`: routes, fields, limits, results, codes, and examples.
 - `docs/go-api.md`: facade, config, DI, service methods, handler, and lifecycle.
 - `docs/storage.md`: interfaces, custom backends, expiration duties, layout, locking, cleanup, and single-process ownership.
-- `docs/security.md`: capability IDs, public-but-non-indexed behavior, same-origin HTML, and prohibited data.
+- `docs/security.md`: capability IDs, public-but-non-indexed behavior, opaque-origin sandboxed HTML and its accepted self-navigation disclosure risk, and prohibited data.
 - `docs/cli-json.md`: schema version 1 contract.
 - Embedded third-party license notices.
 

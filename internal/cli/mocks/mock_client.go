@@ -112,6 +112,84 @@ func (_c *MockClient_CreateImages_Call) RunAndReturn(run func(context1 context.C
 	return _c
 }
 
+// CreateMarkdown provides a mock function for the type MockClient
+func (_mock *MockClient) CreateMarkdown(context1 context.Context, file http.File, file1 http.File, n *int64) (http.Resource, error) {
+	ret := _mock.Called(context1, file, file1, n)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateMarkdown")
+	}
+
+	var r0 http.Resource
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, http.File, http.File, *int64) (http.Resource, error)); ok {
+		return returnFunc(context1, file, file1, n)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, http.File, http.File, *int64) http.Resource); ok {
+		r0 = returnFunc(context1, file, file1, n)
+	} else {
+		r0 = ret.Get(0).(http.Resource)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, http.File, http.File, *int64) error); ok {
+		r1 = returnFunc(context1, file, file1, n)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_CreateMarkdown_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateMarkdown'
+type MockClient_CreateMarkdown_Call struct {
+	*mock.Call
+}
+
+// CreateMarkdown is a helper method to define mock.On call
+//   - context1 context.Context
+//   - file http.File
+//   - file1 http.File
+//   - n *int64
+func (_e *MockClient_Expecter) CreateMarkdown(context1 any, file any, file1 any, n any) *MockClient_CreateMarkdown_Call {
+	return &MockClient_CreateMarkdown_Call{Call: _e.mock.On("CreateMarkdown", context1, file, file1, n)}
+}
+
+func (_c *MockClient_CreateMarkdown_Call) Run(run func(context1 context.Context, file http.File, file1 http.File, n *int64)) *MockClient_CreateMarkdown_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 http.File
+		if args[1] != nil {
+			arg1 = args[1].(http.File)
+		}
+		var arg2 http.File
+		if args[2] != nil {
+			arg2 = args[2].(http.File)
+		}
+		var arg3 *int64
+		if args[3] != nil {
+			arg3 = args[3].(*int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_CreateMarkdown_Call) Return(resource http.Resource, err error) *MockClient_CreateMarkdown_Call {
+	_c.Call.Return(resource, err)
+	return _c
+}
+
+func (_c *MockClient_CreateMarkdown_Call) RunAndReturn(run func(context1 context.Context, file http.File, file1 http.File, n *int64) (http.Resource, error)) *MockClient_CreateMarkdown_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateWhiteboard provides a mock function for the type MockClient
 func (_mock *MockClient) CreateWhiteboard(context1 context.Context, whiteboardKind http.WhiteboardKind, file http.File, n *int64) (http.Resource, error) {
 	ret := _mock.Called(context1, whiteboardKind, file, n)
@@ -310,6 +388,72 @@ func (_c *MockClient_DeleteWhiteboard_Call) RunAndReturn(run func(context1 conte
 	return _c
 }
 
+// GetMarkdown provides a mock function for the type MockClient
+func (_mock *MockClient) GetMarkdown(context1 context.Context, s string) (http.MarkdownResponse, error) {
+	ret := _mock.Called(context1, s)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetMarkdown")
+	}
+
+	var r0 http.MarkdownResponse
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (http.MarkdownResponse, error)); ok {
+		return returnFunc(context1, s)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) http.MarkdownResponse); ok {
+		r0 = returnFunc(context1, s)
+	} else {
+		r0 = ret.Get(0).(http.MarkdownResponse)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(context1, s)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_GetMarkdown_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetMarkdown'
+type MockClient_GetMarkdown_Call struct {
+	*mock.Call
+}
+
+// GetMarkdown is a helper method to define mock.On call
+//   - context1 context.Context
+//   - s string
+func (_e *MockClient_Expecter) GetMarkdown(context1 any, s any) *MockClient_GetMarkdown_Call {
+	return &MockClient_GetMarkdown_Call{Call: _e.mock.On("GetMarkdown", context1, s)}
+}
+
+func (_c *MockClient_GetMarkdown_Call) Run(run func(context1 context.Context, s string)) *MockClient_GetMarkdown_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_GetMarkdown_Call) Return(markdownResponse http.MarkdownResponse, err error) *MockClient_GetMarkdown_Call {
+	_c.Call.Return(markdownResponse, err)
+	return _c
+}
+
+func (_c *MockClient_GetMarkdown_Call) RunAndReturn(run func(context1 context.Context, s string) (http.MarkdownResponse, error)) *MockClient_GetMarkdown_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // PublicURL provides a mock function for the type MockClient
 func (_mock *MockClient) PublicURL(s string) (string, error) {
 	ret := _mock.Called(s)
@@ -444,6 +588,90 @@ func (_c *MockClient_UpdateImage_Call) Return(resource http.Resource, err error)
 }
 
 func (_c *MockClient_UpdateImage_Call) RunAndReturn(run func(context1 context.Context, s string, file http.File, n *int64) (http.Resource, error)) *MockClient_UpdateImage_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateMarkdown provides a mock function for the type MockClient
+func (_mock *MockClient) UpdateMarkdown(context1 context.Context, s string, file http.File, file1 http.File, n *int64) (http.Resource, error) {
+	ret := _mock.Called(context1, s, file, file1, n)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateMarkdown")
+	}
+
+	var r0 http.Resource
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, http.File, http.File, *int64) (http.Resource, error)); ok {
+		return returnFunc(context1, s, file, file1, n)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, http.File, http.File, *int64) http.Resource); ok {
+		r0 = returnFunc(context1, s, file, file1, n)
+	} else {
+		r0 = ret.Get(0).(http.Resource)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, http.File, http.File, *int64) error); ok {
+		r1 = returnFunc(context1, s, file, file1, n)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_UpdateMarkdown_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateMarkdown'
+type MockClient_UpdateMarkdown_Call struct {
+	*mock.Call
+}
+
+// UpdateMarkdown is a helper method to define mock.On call
+//   - context1 context.Context
+//   - s string
+//   - file http.File
+//   - file1 http.File
+//   - n *int64
+func (_e *MockClient_Expecter) UpdateMarkdown(context1 any, s any, file any, file1 any, n any) *MockClient_UpdateMarkdown_Call {
+	return &MockClient_UpdateMarkdown_Call{Call: _e.mock.On("UpdateMarkdown", context1, s, file, file1, n)}
+}
+
+func (_c *MockClient_UpdateMarkdown_Call) Run(run func(context1 context.Context, s string, file http.File, file1 http.File, n *int64)) *MockClient_UpdateMarkdown_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 http.File
+		if args[2] != nil {
+			arg2 = args[2].(http.File)
+		}
+		var arg3 http.File
+		if args[3] != nil {
+			arg3 = args[3].(http.File)
+		}
+		var arg4 *int64
+		if args[4] != nil {
+			arg4 = args[4].(*int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_UpdateMarkdown_Call) Return(resource http.Resource, err error) *MockClient_UpdateMarkdown_Call {
+	_c.Call.Return(resource, err)
+	return _c
+}
+
+func (_c *MockClient_UpdateMarkdown_Call) RunAndReturn(run func(context1 context.Context, s string, file http.File, file1 http.File, n *int64) (http.Resource, error)) *MockClient_UpdateMarkdown_Call {
 	_c.Call.Return(run)
 	return _c
 }

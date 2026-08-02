@@ -34,6 +34,33 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache-dependency-path: go.sum
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+
+      - name: Activate pinned pnpm
+        run: |
+          npm install --global corepack@0.35.0
+          corepack enable
+          corepack prepare pnpm@11.4.0 --activate
+
+      - name: Resolve provider test dependency store
+        id: provider-pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore provider test dependency cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.provider-pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pi-provider-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pi-provider-
+
+      - name: Install pinned test dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Download Go modules
         run: go mod download
 

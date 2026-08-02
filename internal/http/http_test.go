@@ -147,10 +147,12 @@ func serveRequest(handler http.Handler, request *http.Request) *httptest.Respons
 
 func TestRouteConstants(t *testing.T) {
 	require.Equal(t, "/api/v1/whiteboards/markdown", httpx.APIWhiteboardMarkdown)
+	require.Equal(t, "/api/v1/whiteboards/markdown/", httpx.APIWhiteboardMarkdownResource)
 	require.Equal(t, "/api/v1/whiteboards/html", httpx.APIWhiteboardHTML)
 	require.Equal(t, "/api/v1/images", httpx.APIImages)
 	require.Equal(t, "/whiteboards/markdown/", httpx.PublicMarkdown)
 	require.Equal(t, "/whiteboards/html/", httpx.PublicHTML)
+	require.Equal(t, "/content", httpx.PublicHTMLContentSuffix)
 	require.Equal(t, "/images/", httpx.PublicImages)
 }
 
@@ -172,6 +174,29 @@ func TestWriteJSONUsesExactWireShapeAndTrailingNewline(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rr.Code)
 	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
 	require.Equal(t, "{\"resource\":{\"id\":\"resource-id\",\"type\":\"markdown\",\"path\":\"/whiteboards/markdown/resource-id\",\"created_at\":\"2026-07-16T12:00:00Z\",\"updated_at\":\"2026-07-16T12:00:00Z\",\"expires_at\":1784289600,\"permanent\":false}}\n", rr.Body.String())
+}
+
+func TestMarkdownResponseUsesExactPublicWireShape(t *testing.T) {
+	createdAt := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
+	rr := httptest.NewRecorder()
+
+	httpx.WriteJSON(rr, http.StatusOK, httpx.MarkdownResponse{
+		Resource: httpx.Resource{
+			ID:        "resource-id",
+			Type:      "markdown",
+			Path:      "/whiteboards/markdown/resource-id",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+			Permanent: true,
+		},
+		Markdown: "# Exact markdown\n",
+		Context:  "## Exact context\n",
+	})
+
+	require.Equal(t, "{\"resource\":{\"id\":\"resource-id\",\"type\":\"markdown\",\"path\":\"/whiteboards/markdown/resource-id\",\"created_at\":\"2026-07-16T12:00:00Z\",\"updated_at\":\"2026-07-16T12:00:00Z\",\"expires_at\":null,\"permanent\":true},\"markdown\":\"# Exact markdown\\n\",\"context\":\"## Exact context\\n\"}\n", rr.Body.String())
+	require.NotContains(t, rr.Body.String(), "source_path")
+	require.NotContains(t, rr.Body.String(), "context_path")
+	require.NotContains(t, rr.Body.String(), "generation")
 }
 
 func TestWriteError(t *testing.T) {
@@ -258,6 +283,80 @@ func TestSetPublicHeaders(t *testing.T) {
 			require.Equal(t, "no-store", rr.Header().Get("Cache-Control"))
 			require.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"))
 			require.Equal(t, test.robots, rr.Header().Get("X-Robots-Tag"))
+		})
+	}
+}
+
+func TestMultipartRequestLimitIncludesFixedOverheadAndRejectsOverflow(t *testing.T) {
+	limit, err := httpx.MultipartRequestLimit(7, 11)
+	require.NoError(t, err)
+	require.Equal(t, int64(7+11)+httpx.MultipartOverheadBytes, limit)
+
+	_, err = httpx.MultipartRequestLimit(1, -1)
+	require.Error(t, err)
+	require.True(t, common.HasCode(err, common.CodeInvalidRequest), "expected invalid_request, got %v", err)
+
+	_, err = httpx.MultipartRequestLimit(int64(^uint64(0)>>1), 1)
+	require.Error(t, err)
+	require.True(t, common.HasCode(err, common.CodeInvalidRequest), "expected invalid_request, got %v", err)
+}
+
+func TestReadMultipartFieldsAppliesIndependentLimitsInEitherOrder(t *testing.T) {
+	for _, values := range [][]multipartValue{
+		{
+			{fieldName: "file", filename: "board.md", content: "source"},
+			{fieldName: "context", filename: "context.md", content: "creator context"},
+		},
+		{
+			{fieldName: "context", filename: "context.md", content: "creator context"},
+			{fieldName: "file", filename: "board.md", content: "source"},
+		},
+	} {
+		body, contentType := multipartBody(t, values)
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+		req.Header.Set("Content-Type", contentType)
+
+		form, err := httpx.ReadMultipartFields(httptest.NewRecorder(), req, int64(len(body)),
+			httpx.MultipartFileLimit{FieldName: "file", MaxBytes: 6},
+			httpx.MultipartFileLimit{FieldName: "context", MaxBytes: 15},
+		)
+
+		require.NoError(t, err)
+		require.Len(t, form.Files, 2)
+		contents := make(map[string]string, 2)
+		for _, file := range form.Files {
+			contents[file.FieldName] = string(file.Content)
+		}
+		require.Equal(t, map[string]string{"file": "source", "context": "creator context"}, contents)
+	}
+}
+
+func TestReadMultipartFieldsRejectsEachIndependentOverflow(t *testing.T) {
+	tests := []struct {
+		name         string
+		fileLimit    int64
+		contextLimit int64
+	}{
+		{name: "file", fileLimit: 5, contextLimit: 15},
+		{name: "context", fileLimit: 6, contextLimit: 14},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, contentType := multipartBody(t, []multipartValue{
+				{fieldName: "file", filename: "board.md", content: "source"},
+				{fieldName: "context", filename: "context.md", content: "creator context"},
+			})
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+			req.Header.Set("Content-Type", contentType)
+
+			_, err := httpx.ReadMultipartFields(httptest.NewRecorder(), req, int64(len(body)),
+				httpx.MultipartFileLimit{FieldName: "file", MaxBytes: tt.fileLimit},
+				httpx.MultipartFileLimit{FieldName: "context", MaxBytes: tt.contextLimit},
+			)
+
+			require.Error(t, err)
+			require.True(t, common.HasCode(err, common.CodeContentTooLarge), "expected content_too_large, got %v", err)
 		})
 	}
 }

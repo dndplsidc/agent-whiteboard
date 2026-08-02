@@ -2,11 +2,39 @@
 
 `--json` selects machine output with `"schema_version":1`. Successful data is written only to stdout; errors and diagnostics are written only to stderr. Every envelope is one JSON object followed by a newline.
 
+Markdown create and update require `--context FILE`. Both the source and creator-context files must be non-empty UTF-8 Markdown. A runnable lifecycle starts with a temporary context artifact:
+
+```sh
+context_dir="$(mktemp -d)"
+trap 'rm -rf "$context_dir"' EXIT
+context_file="$context_dir/context.md"
+cat >"$context_file" <<'EOF'
+# Creator context
+
+- Goal: publish the accompanying board.
+- Decisions: use Markdown and bundled rendering assets.
+- Assumptions: no private data is included.
+- Open questions: none.
+EOF
+
+agent-whiteboard --json create markdown --context "$context_file" board.md
+agent-whiteboard --json update markdown --context "$context_file" -- CAPABILITY_ID board.md
+agent-whiteboard --json get markdown -- CAPABILITY_ID
+```
+
 Single create/update success:
 
 ```json
 {"schema_version":1,"resource":{"id":"CAPABILITY_ID","url":"https://whiteboard.example/whiteboards/markdown/CAPABILITY_ID","expires_at":1767229200,"permanent":false}}
 ```
+
+Markdown retrieval is JSON-only. Calling `get markdown` without `--json` is a usage error. Success includes the exact stored UTF-8 strings:
+
+```json
+{"schema_version":1,"resource":{"id":"CAPABILITY_ID","url":"https://whiteboard.example/whiteboards/markdown/CAPABILITY_ID","expires_at":1767229200,"permanent":false},"markdown":"# Board\n","context":"# Creator context\n"}
+```
+
+Legacy schema-1 Markdown returns `"context":""` until its first paired update.
 
 Image upload always uses the plural envelope, even for one image, and preserves input order:
 
@@ -14,7 +42,15 @@ Image upload always uses the plural envelope, even for one image, and preserves 
 {"schema_version":1,"resources":[{"id":"CAPABILITY_ID","url":"https://whiteboard.example/images/CAPABILITY_ID","expires_at":null,"permanent":true}]}
 ```
 
-Delete success is `{"schema_version":1}`. Error output is stable:
+Delete and trusted-origin add/remove success is `{"schema_version":1}`. Trusted-origin list preserves insertion order and contains canonical exact HTTPS origins:
+
+```json
+{"schema_version":1,"origins":["https://whiteboard.example"]}
+```
+
+An empty trusted-origin list is `{"schema_version":1,"origins":[]}`. Trust commands are supported only on macOS and Linux.
+
+Error output is stable:
 
 ```json
 {"schema_version":1,"error":{"code":"not_found","message":"resource not found"}}
@@ -24,6 +60,8 @@ Delete success is `{"schema_version":1}`. Error output is stable:
 
 Timeout produces stderr `{"schema_version":1,"error":{"code":"timeout","message":"request timed out"}}` and exit 4. Cancellation uses code `canceled`.
 
+A whiteboard create can fail after persistence becomes uncertain. In that case the CLI writes the generated resource envelope to stdout before writing the error envelope to stderr and exiting nonzero. Preserve that ID: the resource may exist and should be checked or deleted. Ordinary failed creates do not emit a resource.
+
 | Exit | Meaning |
 | ---: | --- |
 | 0 | success |
@@ -32,4 +70,6 @@ Timeout produces stderr `{"schema_version":1,"error":{"code":"timeout","message"
 | 3 | stable remote/domain error |
 | 4 | timeout or cancellation |
 
-Human mode prints URLs to stdout, one per line; successful delete prints nothing. Scripts should branch on `schema_version`, the top-level `resource`/`resources`/`error` member, and exit status. Version 1 will not change the meaning or type of existing fields; additive fields may be introduced. A breaking change requires a new schema version.
+Human mode prints URLs to stdout, one per line; successful delete and trust mutations print nothing. Scripts should branch on `schema_version`, the top-level `resource`/`resources`/`markdown`/`error` member, and exit status. Do not assume stdout is empty after an uncertain create error. Version 1 will not change the meaning or type of existing fields; additive fields may be introduced. A breaking change requires a new schema version.
+
+Creator context is not a private or hidden channel. Anyone with the capability ID can retrieve it. Do not include hidden reasoning, credentials, personal or sensitive data, private source, or raw tool output. Error envelopes do not echo Markdown or context.

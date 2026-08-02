@@ -52,3 +52,42 @@ test("sanitizes hostile Markdown and preserves ordinary code", async ({ page, pu
   expect(await page.locator("#agent-whiteboard-source").textContent()).not.toContain("</script>");
   expect(networkRequests.external).toEqual([]);
 });
+
+test("denies same-origin framing of a published Markdown viewer", async ({ page, publish, server }) => {
+  const marker = "MARKDOWN_FRAME_DENIAL_12c896cc";
+  const resource = await publish(`# Framing denied\n\n${marker}`);
+  const attemptedRequests = [];
+  page.on("request", (request) => {
+    if (request.url() === resource.url) attemptedRequests.push(request.url());
+  });
+
+  await page.goto(`${server.url}/healthz`);
+  expect(new URL(page.url()).origin).toBe(new URL(resource.url).origin);
+  const frameResponsePromise = page.waitForResponse((response) => response.url() === resource.url);
+  await page.evaluate(({ url }) => {
+    globalThis.__markdownFrameHostExecuted = true;
+    globalThis.__markdownFrameLoadEvents = 0;
+    const frame = document.createElement("iframe");
+    frame.id = "markdown-frame-attempt";
+    frame.addEventListener("load", () => globalThis.__markdownFrameLoadEvents++);
+    frame.src = url;
+    document.body.append(frame);
+  }, { url: resource.url });
+
+  const frameResponse = await frameResponsePromise;
+  expect(await page.evaluate(() => globalThis.__markdownFrameHostExecuted)).toBe(true);
+  expect(attemptedRequests).toEqual([resource.url]);
+  expect(frameResponse.headers()["x-frame-options"]).toBe("DENY");
+  expect(frameResponse.headers()["content-security-policy"]).toContain("frame-ancestors 'none'");
+  await expect.poll(() => page.evaluate(() => globalThis.__markdownFrameLoadEvents)).toBe(1);
+
+  const frameState = await page.locator("#markdown-frame-attempt").evaluate(
+    (frame, expectedMarker) => ({
+      contentDocumentAvailable: frame.contentDocument !== null,
+      markerReadable: frame.contentDocument?.body?.textContent?.includes(expectedMarker) ?? false,
+    }),
+    marker,
+  );
+  expect(frameState).toEqual({ contentDocumentAvailable: false, markerReadable: false });
+  expect(page.frames().map((frame) => frame.url())).not.toContain(resource.url);
+});

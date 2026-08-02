@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,15 @@ import (
 	"strings"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
 )
 
-const maxClientResponseBytes int64 = 1 << 20
+const (
+	maxClientResponseBytes int64 = 1 << 20
+	// Bound a default-size Markdown pair after worst-case JSON string escaping,
+	// with space for the public resource envelope.
+	maxMarkdownResponseBytes int64 = 6*(generalconfig.DefaultMaxWhiteboardBytes+generalconfig.DefaultMaxContextBytes) + MultipartOverheadBytes
+)
 
 type ClientConfig struct {
 	Server     string
@@ -25,6 +32,11 @@ type ClientConfig struct {
 type File struct {
 	Name   string
 	Reader io.Reader
+}
+
+type multipartFile struct {
+	fieldName string
+	file      File
 }
 
 type WhiteboardKind string
@@ -68,16 +80,39 @@ func (c *Client) CreateWhiteboard(
 	if err != nil {
 		return Resource{}, err
 	}
+	if kind == WhiteboardMarkdown {
+		return Resource{}, clientInvalidRequest("markdown context is required")
+	}
+	return c.createWhiteboard(ctx, endpoint, []multipartFile{{fieldName: "file", file: file}}, expiresInSeconds)
+}
 
+func (c *Client) CreateMarkdown(
+	ctx context.Context,
+	markdown File,
+	creatorContext File,
+	expiresInSeconds *int64,
+) (Resource, error) {
+	return c.createWhiteboard(ctx, APIWhiteboardMarkdown, []multipartFile{
+		{fieldName: "file", file: markdown},
+		{fieldName: "context", file: creatorContext},
+	}, expiresInSeconds)
+}
+
+func (c *Client) createWhiteboard(
+	ctx context.Context,
+	endpoint string,
+	files []multipartFile,
+	expiresInSeconds *int64,
+) (Resource, error) {
 	var response ResourceResponse
-	err = c.doMultipart(ctx, standardhttp.MethodPost, endpoint, "file", []File{file}, expiresInSeconds, standardhttp.StatusCreated, &response)
-	if err != nil {
+	err := c.doMultipart(ctx, standardhttp.MethodPost, endpoint, files, expiresInSeconds, standardhttp.StatusCreated, &response)
+	if err != nil && response.Resource.ID == "" {
 		return Resource{}, err
 	}
-	if err := c.validateResource(response.Resource, ""); err != nil {
-		return Resource{}, err
+	if validationErr := c.validateResource(response.Resource, ""); validationErr != nil {
+		return Resource{}, validationErr
 	}
-	return response.Resource, nil
+	return response.Resource, err
 }
 
 func (c *Client) UpdateWhiteboard(
@@ -91,12 +126,38 @@ func (c *Client) UpdateWhiteboard(
 	if err != nil {
 		return Resource{}, err
 	}
+	if kind == WhiteboardMarkdown {
+		return Resource{}, clientInvalidRequest("markdown context is required")
+	}
+	return c.updateWhiteboard(ctx, endpoint, id, []multipartFile{{fieldName: "file", file: file}}, expiresInSeconds)
+}
+
+func (c *Client) UpdateMarkdown(
+	ctx context.Context,
+	id string,
+	markdown File,
+	creatorContext File,
+	expiresInSeconds *int64,
+) (Resource, error) {
+	return c.updateWhiteboard(ctx, APIWhiteboardMarkdown, id, []multipartFile{
+		{fieldName: "file", file: markdown},
+		{fieldName: "context", file: creatorContext},
+	}, expiresInSeconds)
+}
+
+func (c *Client) updateWhiteboard(
+	ctx context.Context,
+	endpoint string,
+	id string,
+	files []multipartFile,
+	expiresInSeconds *int64,
+) (Resource, error) {
 	if err := common.ValidateID(id); err != nil {
 		return Resource{}, err
 	}
 
 	var response ResourceResponse
-	err = c.doMultipart(ctx, standardhttp.MethodPut, endpoint+"/"+url.PathEscape(id), "file", []File{file}, expiresInSeconds, standardhttp.StatusOK, &response)
+	err := c.doMultipart(ctx, standardhttp.MethodPut, endpoint+"/"+url.PathEscape(id), files, expiresInSeconds, standardhttp.StatusOK, &response)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -104,6 +165,52 @@ func (c *Client) UpdateWhiteboard(
 		return Resource{}, err
 	}
 	return response.Resource, nil
+}
+
+func (c *Client) GetMarkdown(ctx context.Context, id string) (MarkdownResponse, error) {
+	if err := common.ValidateID(id); err != nil {
+		return MarkdownResponse{}, err
+	}
+
+	var encoded markdownResponseEnvelope
+	if err := c.doWithResponseLimit(ctx, standardhttp.MethodGet, APIWhiteboardMarkdown+"/"+url.PathEscape(id), nil, "", standardhttp.StatusOK, &encoded, maxMarkdownResponseBytes); err != nil {
+		return MarkdownResponse{}, err
+	}
+	if encoded.Markdown == nil || *encoded.Markdown == "" || encoded.Context == nil {
+		return MarkdownResponse{}, clientInvalidResponse("server returned an invalid response")
+	}
+	if err := c.validateResource(encoded.Resource, id); err != nil {
+		return MarkdownResponse{}, err
+	}
+	if encoded.Resource.Type != string(WhiteboardMarkdown) || encoded.Resource.Path != PublicMarkdown+id {
+		return MarkdownResponse{}, clientInvalidResponse("server returned an invalid response")
+	}
+	return MarkdownResponse{Resource: encoded.Resource, Markdown: *encoded.Markdown, Context: *encoded.Context}, nil
+}
+
+type markdownResponseEnvelope struct {
+	Resource Resource
+	Markdown *string
+	Context  *string
+}
+
+func (response *markdownResponseEnvelope) UnmarshalJSON(encoded []byte) error {
+	type wireResponse struct {
+		Resource Resource `json:"resource"`
+		Markdown *string  `json:"markdown"`
+		Context  *string  `json:"context"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var wire wireResponse
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("invalid trailing JSON value")
+	}
+	*response = markdownResponseEnvelope(wire)
+	return nil
 }
 
 func (c *Client) DeleteWhiteboard(ctx context.Context, kind WhiteboardKind, id string) error {
@@ -123,7 +230,7 @@ func (c *Client) CreateImages(ctx context.Context, files []File, expiresInSecond
 	}
 
 	var response ImagesResponse
-	err := c.doMultipart(ctx, standardhttp.MethodPost, APIImages, "images", files, expiresInSeconds, standardhttp.StatusCreated, &response)
+	err := c.doMultipart(ctx, standardhttp.MethodPost, APIImages, multipartFiles("images", files), expiresInSeconds, standardhttp.StatusCreated, &response)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +261,7 @@ func (c *Client) UpdateImage(
 	}
 
 	var response ResourceResponse
-	err := c.doMultipart(ctx, standardhttp.MethodPut, APIImages+"/"+url.PathEscape(id), "file", []File{file}, expiresInSeconds, standardhttp.StatusOK, &response)
+	err := c.doMultipart(ctx, standardhttp.MethodPut, APIImages+"/"+url.PathEscape(id), []multipartFile{{fieldName: "file", file: file}}, expiresInSeconds, standardhttp.StatusOK, &response)
 	if err != nil {
 		return Resource{}, err
 	}
@@ -219,18 +326,17 @@ func (c *Client) doMultipart(
 	ctx context.Context,
 	method string,
 	endpoint string,
-	fieldName string,
-	files []File,
+	files []multipartFile,
 	expiresInSeconds *int64,
 	wantStatus int,
 	result any,
 ) error {
-	if fieldName == "" || len(files) == 0 {
+	if len(files) == 0 {
 		return clientInvalidRequest("multipart files are required")
 	}
-	for _, file := range files {
-		if file.Name == "" || common.IsNil(file.Reader) {
-			return clientInvalidRequest("file name and reader are required")
+	for _, upload := range files {
+		if upload.fieldName == "" || upload.file.Name == "" || common.IsNil(upload.file.Reader) {
+			return clientInvalidRequest("file field, name, and reader are required")
 		}
 	}
 
@@ -244,8 +350,8 @@ func (c *Client) doMultipart(
 	}
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 
-	go writeMultipart(writer, multipartWriter, fieldName, files, expiresInSeconds)
-	err = c.execute(request, wantStatus, result)
+	go writeMultipart(writer, multipartWriter, files, expiresInSeconds)
+	err = c.execute(request, wantStatus, result, maxClientResponseBytes)
 	_ = reader.CloseWithError(err)
 	return contextError(ctx, err)
 }
@@ -253,8 +359,7 @@ func (c *Client) doMultipart(
 func writeMultipart(
 	pipe *io.PipeWriter,
 	writer *multipart.Writer,
-	fieldName string,
-	files []File,
+	files []multipartFile,
 	expiresInSeconds *int64,
 ) {
 	var writeErr error
@@ -264,13 +369,13 @@ func writeMultipart(
 		}
 		_ = pipe.CloseWithError(writeErr)
 	}()
-	for _, file := range files {
-		part, err := writer.CreateFormFile(fieldName, file.Name)
+	for _, upload := range files {
+		part, err := writer.CreateFormFile(upload.fieldName, upload.file.Name)
 		if err != nil {
 			writeErr = clientStreamError()
 			break
 		}
-		if _, err := io.Copy(part, file.Reader); err != nil {
+		if _, err := io.Copy(part, upload.file.Reader); err != nil {
 			writeErr = clientStreamError()
 			break
 		}
@@ -287,6 +392,14 @@ func writeMultipart(
 	}
 }
 
+func multipartFiles(fieldName string, files []File) []multipartFile {
+	uploads := make([]multipartFile, 0, len(files))
+	for _, file := range files {
+		uploads = append(uploads, multipartFile{fieldName: fieldName, file: file})
+	}
+	return uploads
+}
+
 func (c *Client) do(
 	ctx context.Context,
 	method string,
@@ -296,6 +409,19 @@ func (c *Client) do(
 	wantStatus int,
 	result any,
 ) error {
+	return c.doWithResponseLimit(ctx, method, endpoint, body, contentType, wantStatus, result, maxClientResponseBytes)
+}
+
+func (c *Client) doWithResponseLimit(
+	ctx context.Context,
+	method string,
+	endpoint string,
+	body io.Reader,
+	contentType string,
+	wantStatus int,
+	result any,
+	successResponseLimit int64,
+) error {
 	request, err := c.newRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return err
@@ -303,7 +429,7 @@ func (c *Client) do(
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
-	return contextError(ctx, c.execute(request, wantStatus, result))
+	return contextError(ctx, c.execute(request, wantStatus, result, successResponseLimit))
 }
 
 func (c *Client) newRequest(ctx context.Context, method string, endpoint string, body io.Reader) (*standardhttp.Request, error) {
@@ -317,7 +443,7 @@ func (c *Client) newRequest(ctx context.Context, method string, endpoint string,
 	return request, nil
 }
 
-func (c *Client) execute(request *standardhttp.Request, wantStatus int, result any) error {
+func (c *Client) execute(request *standardhttp.Request, wantStatus int, result any, successResponseLimit int64) error {
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		err = contextError(request.Context(), err)
@@ -329,12 +455,25 @@ func (c *Client) execute(request *standardhttp.Request, wantStatus int, result a
 	}
 	defer response.Body.Close()
 
-	body, err := readClientResponse(response.Body)
+	responseLimit := maxClientResponseBytes
+	if response.StatusCode == wantStatus {
+		responseLimit = successResponseLimit
+	}
+	body, err := readClientResponse(response.Body, responseLimit)
 	if err != nil {
 		return contextError(request.Context(), err)
 	}
 	if response.StatusCode != wantStatus {
-		return decodeClientError(body)
+		decoded, protocolErr := decodeClientErrorResponse(body)
+		if protocolErr != nil {
+			return protocolErr
+		}
+		if decoded.Resource != nil {
+			if resourceResponse, ok := result.(*ResourceResponse); ok {
+				resourceResponse.Resource = *decoded.Resource
+			}
+		}
+		return common.NewError(decoded.Error.Code, decoded.Error.Message, nil)
 	}
 	if result == nil {
 		if len(strings.TrimSpace(string(body))) != 0 {
@@ -348,8 +487,8 @@ func (c *Client) execute(request *standardhttp.Request, wantStatus int, result a
 	return nil
 }
 
-func readClientResponse(reader io.Reader) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, maxClientResponseBytes+1))
+func readClientResponse(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil, context.Canceled
@@ -359,18 +498,18 @@ func readClientResponse(reader io.Reader) ([]byte, error) {
 		}
 		return nil, clientInvalidResponse("could not read server response")
 	}
-	if int64(len(body)) > maxClientResponseBytes {
+	if int64(len(body)) > limit {
 		return nil, clientInvalidResponse("server response is too large")
 	}
 	return body, nil
 }
 
-func decodeClientError(body []byte) error {
+func decodeClientErrorResponse(body []byte) (ErrorResponse, error) {
 	var response ErrorResponse
 	if err := json.Unmarshal(body, &response); err != nil || !knownClientErrorCode(response.Error.Code) || response.Error.Message == "" {
-		return clientInvalidResponse("server returned an invalid error response")
+		return ErrorResponse{}, clientInvalidResponse("server returned an invalid error response")
 	}
-	return common.NewError(response.Error.Code, response.Error.Message, nil)
+	return response, nil
 }
 
 func knownClientErrorCode(code common.ErrorCode) bool {

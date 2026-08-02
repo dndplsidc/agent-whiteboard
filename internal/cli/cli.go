@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,18 +16,18 @@ import (
 
 	"github.com/edocsss/agent-whiteboard/internal/app"
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
 	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/launchagent"
 	"github.com/spf13/cobra"
-)
-
-const (
-	defaultServer        = "http://127.0.0.1:8567"
-	defaultClientTimeout = 30 * time.Second
 )
 
 type Client interface {
 	CreateWhiteboard(context.Context, httpx.WhiteboardKind, httpx.File, *int64) (httpx.Resource, error)
+	CreateMarkdown(context.Context, httpx.File, httpx.File, *int64) (httpx.Resource, error)
 	UpdateWhiteboard(context.Context, httpx.WhiteboardKind, string, httpx.File, *int64) (httpx.Resource, error)
+	UpdateMarkdown(context.Context, string, httpx.File, httpx.File, *int64) (httpx.Resource, error)
+	GetMarkdown(context.Context, string) (httpx.MarkdownResponse, error)
 	DeleteWhiteboard(context.Context, httpx.WhiteboardKind, string) error
 	CreateImages(context.Context, []httpx.File, *int64) ([]httpx.Resource, error)
 	UpdateImage(context.Context, string, httpx.File, *int64) (httpx.Resource, error)
@@ -40,17 +41,22 @@ type Application interface {
 }
 
 type Dependencies struct {
-	Stdout         io.Writer
-	Stderr         io.Writer
-	Getenv         func(string) string
-	NewClient      func(httpx.ClientConfig) (Client, error)
-	NewApplication func(app.ServiceConfig, ...app.Option) (Application, error)
+	Stdout                io.Writer
+	Stderr                io.Writer
+	Getenv                func(string) string
+	LoadConfig            func(string) (generalconfig.Config, error)
+	NewClient             func(httpx.ClientConfig) (Client, error)
+	NewApplication        func(app.ServiceConfig, ...app.Option) (Application, error)
+	NewAgentApplication   func(app.AgentServiceConfig) (Application, error)
+	NewLaunchAgentManager func() (launchagent.Manager, error)
+	ExecutablePath        func() (string, error)
 }
 
 type rootOptions struct {
-	server  string
-	timeout string
-	json    bool
+	server     string
+	timeout    string
+	configPath string
+	json       bool
 }
 
 type clientSettings struct {
@@ -61,7 +67,8 @@ type clientSettings struct {
 type serverFlagValues struct {
 	host, port, storage, cleanupInterval, defaultExpiration string
 	shutdownTimeout, logMode                                string
-	maxWhiteboardBytes, maxImageBytes, maxImageRequestBytes string
+	maxWhiteboardBytes, maxContextBytes                     string
+	maxImageBytes, maxImageRequestBytes                     string
 }
 
 type resolvedServerSettings struct {
@@ -73,13 +80,21 @@ type resolvedServerSettings struct {
 	shutdownTimeout      time.Duration
 	logMode              string
 	maxWhiteboardBytes   int64
+	maxContextBytes      int64
 	maxImageBytes        int64
 	maxImageRequestBytes int64
+	localAgentEnabled    bool
+}
+
+type generalConfiguration struct {
+	loaded   generalconfig.Config
+	builtins generalconfig.BuiltinValues
 }
 
 type commandFactory struct {
-	deps Dependencies
-	root *rootOptions
+	deps    Dependencies
+	root    *rootOptions
+	general *generalConfiguration
 }
 
 func NewRoot(deps Dependencies) (*cobra.Command, error) {
@@ -97,6 +112,19 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 	}
 	if common.IsNil(deps.NewApplication) {
 		return nil, invalidCommand("application factory is required")
+	}
+	if deps.NewAgentApplication == nil {
+		deps.NewAgentApplication = func(config app.AgentServiceConfig) (Application, error) {
+			return app.NewAgentService(config)
+		}
+	}
+	if common.IsNil(deps.NewLaunchAgentManager) {
+		deps.NewLaunchAgentManager = func() (launchagent.Manager, error) {
+			return launchagent.NewManager(launchagent.ExecRunner{})
+		}
+	}
+	if common.IsNil(deps.ExecutablePath) {
+		deps.ExecutablePath = os.Executable
 	}
 
 	options := &rootOptions{}
@@ -116,11 +144,67 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.PersistentFlags().StringVar(&options.server, "server", "", "server origin")
 	root.PersistentFlags().StringVar(&options.timeout, "timeout", "", "client timeout")
+	root.PersistentFlags().StringVar(&options.configPath, "config", "", "configuration file")
 	root.PersistentFlags().BoolVar(&options.json, "json", false, "write versioned JSON output")
 
-	factory := commandFactory{deps: deps, root: options}
-	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newDeleteCommand(), factory.newImageCommand())
+	if deps.LoadConfig == nil {
+		deps.LoadConfig = generalconfig.Load
+	}
+	factory := commandFactory{deps: deps, root: options, general: &generalConfiguration{}}
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if cmd == root || isCompletionRequest(cmd) || commandHandlesConfiguration(cmd) || isDaemonServeRequest(cmd) {
+			return nil
+		}
+		return factory.loadGeneralConfiguration()
+	}
+	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newGetCommand(), factory.newDeleteCommand(), factory.newImageCommand(), factory.newAgentCommand())
 	return root, nil
+}
+
+func (factory commandFactory) loadGeneralConfiguration() error {
+	loaded, err := factory.deps.LoadConfig(factory.root.configPath)
+	if err != nil {
+		return invalidCommand(err.Error())
+	}
+	builtins, err := generalconfig.Builtins()
+	if err != nil {
+		return invalidCommand(err.Error())
+	}
+	factory.general.loaded = loaded
+	factory.general.builtins = builtins
+	return nil
+}
+
+func isCompletionRequest(cmd *cobra.Command) bool {
+	calledAs := cmd.CalledAs()
+	return calledAs == cobra.ShellCompRequestCmd || calledAs == cobra.ShellCompNoDescRequestCmd
+}
+
+func commandHandlesConfiguration(cmd *cobra.Command) bool {
+	return cmd.Annotations[handlesConfigurationAnnotation] == "true"
+}
+
+func isDaemonServeRequest(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Name() != "serve" || cmd.Parent() == nil || cmd.Parent().Name() != "agent" {
+		return false
+	}
+	flag := cmd.Flags().Lookup("daemon")
+	return flag != nil && flag.Value.String() == "true"
+}
+
+// selectedPiExecutableResolver records an explicit Pi selection without
+// copying any ambient environment into the LaunchAgent. Absolute selections
+// are returned as-is; names are resolved using the current PATH.
+type selectedPiExecutableResolver struct{ selected string }
+
+func (resolver selectedPiExecutableResolver) LookPath(name string) (string, error) {
+	if name != launchagent.ProviderPi {
+		return exec.LookPath(name)
+	}
+	if filepath.IsAbs(resolver.selected) {
+		return resolver.selected, nil
+	}
+	return exec.LookPath(resolver.selected)
 }
 
 func (factory commandFactory) newClient(cmd *cobra.Command) (Client, context.Context, context.CancelFunc, error) {
@@ -145,7 +229,10 @@ func (factory commandFactory) newClient(cmd *cobra.Command) (Client, context.Con
 }
 
 func (factory commandFactory) resolveClientSettings(cmd *cobra.Command) (clientSettings, error) {
-	server := defaultServer
+	server := factory.general.builtins.Client.Server
+	if value, set := factory.general.loaded.Client().Server(); set {
+		server = value
+	}
 	if value := factory.deps.Getenv("AGENT_WHITEBOARD_SERVER"); value != "" {
 		server = value
 	}
@@ -156,7 +243,10 @@ func (factory commandFactory) resolveClientSettings(cmd *cobra.Command) (clientS
 		return clientSettings{}, err
 	}
 
-	timeoutText := defaultClientTimeout.String()
+	timeoutText := factory.general.builtins.Client.Timeout.String()
+	if value, set := factory.general.loaded.Client().Timeout(); set {
+		timeoutText = value.String()
+	}
 	if value := factory.deps.Getenv("AGENT_WHITEBOARD_TIMEOUT"); value != "" {
 		timeoutText = value
 	}
@@ -188,40 +278,69 @@ func validateServerOrigin(value string) error {
 }
 
 func (factory commandFactory) resolveServerSettings(cmd *cobra.Command, flags *serverFlagValues) (resolvedServerSettings, error) {
-	get := func(flagName, envName, flagValue, defaultValue string) string {
+	builtins := factory.general.builtins.Server
+	configured := factory.general.loaded.Server()
+	yamlString := func(value string, set bool, fallback string) string {
+		if set {
+			return value
+		}
+		return fallback
+	}
+	get := func(flagName, envName, flagValue, yamlValue string) string {
 		if cmd.Flags().Changed(flagName) {
 			return flagValue
 		}
 		if value := factory.deps.Getenv(envName); value != "" {
 			return value
 		}
-		return defaultValue
+		return yamlValue
 	}
+
+	host, hostSet := configured.Host()
+	storage, storageSet := configured.Storage()
+	logMode, logModeSet := configured.LogMode()
+	port, portSet := configured.Port()
+	cleanup, cleanupSet := configured.CleanupInterval()
+	expires, expiresSet := configured.DefaultExpiresIn()
+	shutdown, shutdownSet := configured.ShutdownTimeout()
+	maxWhiteboard, maxWhiteboardSet := configured.MaxWhiteboardBytes()
+	maxContext, maxContextSet := configured.MaxContextBytes()
+	maxImage, maxImageSet := configured.MaxImageBytes()
+	maxImageRequest, maxImageRequestSet := configured.MaxImageRequestBytes()
+
 	settings := resolvedServerSettings{
-		host:    get("host", "AGENT_WHITEBOARD_HOST", flags.host, "127.0.0.1"),
-		storage: get("storage", "AGENT_WHITEBOARD_STORAGE", flags.storage, defaultStoragePath()),
-		logMode: get("log-mode", "AGENT_WHITEBOARD_LOG_MODE", flags.logMode, "console"),
+		host:    get("host", "AGENT_WHITEBOARD_HOST", flags.host, yamlString(host, hostSet, builtins.Host)),
+		storage: get("storage", "AGENT_WHITEBOARD_STORAGE", flags.storage, yamlString(storage, storageSet, builtins.Storage)),
+		logMode: get("log-mode", "AGENT_WHITEBOARD_LOG_MODE", flags.logMode, yamlString(logMode, logModeSet, builtins.LogMode)),
 	}
+	settings.localAgentEnabled = factory.general.builtins.Viewer.LocalAgent.Enabled
+	if enabled, set := factory.general.loaded.Viewer().LocalAgent().Enabled(); set {
+		settings.localAgentEnabled = enabled
+	}
+
 	var err error
-	if settings.port, err = parseInt(get("port", "AGENT_WHITEBOARD_PORT", flags.port, "8567"), "port"); err != nil {
+	if settings.port, err = parseInt(get("port", "AGENT_WHITEBOARD_PORT", flags.port, yamlString(strconv.Itoa(port), portSet, strconv.Itoa(builtins.Port))), "port"); err != nil {
 		return resolvedServerSettings{}, err
 	}
-	if settings.cleanupInterval, err = parsePositiveDuration(get("cleanup-interval", "AGENT_WHITEBOARD_CLEANUP_INTERVAL", flags.cleanupInterval, "15m"), "cleanup interval"); err != nil {
+	if settings.cleanupInterval, err = parsePositiveDuration(get("cleanup-interval", "AGENT_WHITEBOARD_CLEANUP_INTERVAL", flags.cleanupInterval, yamlString(cleanup.String(), cleanupSet, builtins.CleanupInterval.String())), "cleanup interval"); err != nil {
 		return resolvedServerSettings{}, err
 	}
-	if settings.defaultExpiration, err = parseNonnegativeInt64(get("default-expires-in", "AGENT_WHITEBOARD_DEFAULT_EXPIRES_IN", flags.defaultExpiration, "86400"), "default expiration"); err != nil {
+	if settings.defaultExpiration, err = parseNonnegativeInt64(get("default-expires-in", "AGENT_WHITEBOARD_DEFAULT_EXPIRES_IN", flags.defaultExpiration, yamlString(strconv.FormatInt(expires, 10), expiresSet, strconv.FormatInt(builtins.DefaultExpiresIn, 10))), "default expiration"); err != nil {
 		return resolvedServerSettings{}, err
 	}
-	if settings.shutdownTimeout, err = parsePositiveDuration(get("shutdown-timeout", "AGENT_WHITEBOARD_SHUTDOWN_TIMEOUT", flags.shutdownTimeout, "10s"), "shutdown timeout"); err != nil {
+	if settings.shutdownTimeout, err = parsePositiveDuration(get("shutdown-timeout", "AGENT_WHITEBOARD_SHUTDOWN_TIMEOUT", flags.shutdownTimeout, yamlString(shutdown.String(), shutdownSet, builtins.ShutdownTimeout.String())), "shutdown timeout"); err != nil {
 		return resolvedServerSettings{}, err
 	}
-	if settings.maxWhiteboardBytes, err = parseNonnegativeInt64(get("max-whiteboard-bytes", "AGENT_WHITEBOARD_MAX_WHITEBOARD_BYTES", flags.maxWhiteboardBytes, strconv.FormatInt(10<<20, 10)), "max whiteboard bytes"); err != nil {
+	if settings.maxWhiteboardBytes, err = parseNonnegativeInt64(get("max-whiteboard-bytes", "AGENT_WHITEBOARD_MAX_WHITEBOARD_BYTES", flags.maxWhiteboardBytes, yamlString(strconv.FormatInt(maxWhiteboard, 10), maxWhiteboardSet, strconv.FormatInt(builtins.MaxWhiteboardBytes, 10))), "max whiteboard bytes"); err != nil {
 		return resolvedServerSettings{}, err
 	}
-	if settings.maxImageBytes, err = parseNonnegativeInt64(get("max-image-bytes", "AGENT_WHITEBOARD_MAX_IMAGE_BYTES", flags.maxImageBytes, strconv.FormatInt(25<<20, 10)), "max image bytes"); err != nil {
+	if settings.maxContextBytes, err = parseNonnegativeInt64(get("max-context-bytes", "AGENT_WHITEBOARD_MAX_CONTEXT_BYTES", flags.maxContextBytes, yamlString(strconv.FormatInt(maxContext, 10), maxContextSet, strconv.FormatInt(builtins.MaxContextBytes, 10))), "max context bytes"); err != nil {
 		return resolvedServerSettings{}, err
 	}
-	if settings.maxImageRequestBytes, err = parseNonnegativeInt64(get("max-image-request-bytes", "AGENT_WHITEBOARD_MAX_IMAGE_REQUEST_BYTES", flags.maxImageRequestBytes, strconv.FormatInt(100<<20, 10)), "max image request bytes"); err != nil {
+	if settings.maxImageBytes, err = parseNonnegativeInt64(get("max-image-bytes", "AGENT_WHITEBOARD_MAX_IMAGE_BYTES", flags.maxImageBytes, yamlString(strconv.FormatInt(maxImage, 10), maxImageSet, strconv.FormatInt(builtins.MaxImageBytes, 10))), "max image bytes"); err != nil {
+		return resolvedServerSettings{}, err
+	}
+	if settings.maxImageRequestBytes, err = parseNonnegativeInt64(get("max-image-request-bytes", "AGENT_WHITEBOARD_MAX_IMAGE_REQUEST_BYTES", flags.maxImageRequestBytes, yamlString(strconv.FormatInt(maxImageRequest, 10), maxImageRequestSet, strconv.FormatInt(builtins.MaxImageRequestBytes, 10))), "max image request bytes"); err != nil {
 		return resolvedServerSettings{}, err
 	}
 
@@ -234,7 +353,7 @@ func (factory commandFactory) resolveServerSettings(cmd *cobra.Command, flags *s
 		return resolvedServerSettings{}, invalidCommand("storage path is required")
 	case settings.logMode != "console" && settings.logMode != "json":
 		return resolvedServerSettings{}, invalidCommand("log mode must be console or json")
-	case effectiveLimit(settings.maxImageRequestBytes, 100<<20) < effectiveLimit(settings.maxImageBytes, 25<<20):
+	case effectiveLimit(settings.maxImageRequestBytes, builtins.MaxImageRequestBytes) < effectiveLimit(settings.maxImageBytes, builtins.MaxImageBytes):
 		return resolvedServerSettings{}, invalidCommand("max image request bytes must not be less than max image bytes")
 	}
 	return settings, nil
@@ -245,14 +364,6 @@ func effectiveLimit(value, defaultValue int64) int64 {
 		return defaultValue
 	}
 	return value
-}
-
-func defaultStoragePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ".agent-whiteboard"
-	}
-	return filepath.Join(home, ".agent-whiteboard")
 }
 
 func parseInt(value, field string) (int, error) {

@@ -25,15 +25,17 @@ func buildApplicationArguments(settings resolvedServerSettings, logWriter io.Wri
 	}
 	return applicationArguments{
 		config: app.ServiceConfig{
-			RootDir:              settings.storage,
-			CleanupInterval:      settings.cleanupInterval,
-			Host:                 settings.host,
-			ShutdownTimeout:      settings.shutdownTimeout,
-			MaxWhiteboardBytes:   settings.maxWhiteboardBytes,
-			MaxImageBytes:        settings.maxImageBytes,
-			MaxImageRequestBytes: settings.maxImageRequestBytes,
-			LogMode:              app.LogMode(settings.logMode),
-			Logger:               slog.New(handler),
+			RootDir:                 settings.storage,
+			CleanupInterval:         settings.cleanupInterval,
+			Host:                    settings.host,
+			ShutdownTimeout:         settings.shutdownTimeout,
+			MaxWhiteboardBytes:      settings.maxWhiteboardBytes,
+			MaxContextBytes:         settings.maxContextBytes,
+			MaxImageBytes:           settings.maxImageBytes,
+			MaxImageRequestBytes:    settings.maxImageRequestBytes,
+			ViewerLocalAgentEnabled: settings.localAgentEnabled,
+			LogMode:                 app.LogMode(settings.logMode),
+			Logger:                  slog.New(handler),
 		},
 		port:              settings.port,
 		defaultExpiration: settings.defaultExpiration,
@@ -65,6 +67,7 @@ func (factory commandFactory) newServeCommand() *cobra.Command {
 	flags.StringVar(&values.shutdownTimeout, "shutdown-timeout", "", "shutdown timeout")
 	flags.StringVar(&values.logMode, "log-mode", "", "console or json logging")
 	flags.StringVar(&values.maxWhiteboardBytes, "max-whiteboard-bytes", "", "maximum whiteboard size")
+	flags.StringVar(&values.maxContextBytes, "max-context-bytes", "", "maximum Markdown context size")
 	flags.StringVar(&values.maxImageBytes, "max-image-bytes", "", "maximum image size")
 	flags.StringVar(&values.maxImageRequestBytes, "max-image-request-bytes", "", "maximum image request size")
 	return command

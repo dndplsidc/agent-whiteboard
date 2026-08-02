@@ -11,6 +11,7 @@ import (
 
 	"github.com/edocsss/agent-whiteboard/internal/assets"
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
 	"github.com/edocsss/agent-whiteboard/internal/image"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
 )
@@ -21,7 +22,8 @@ const (
 	defaultHost                       = "127.0.0.1"
 	defaultPort                       = 8567
 	defaultShutdownTimeout            = 10 * time.Second
-	defaultMaxWhiteboardBytes   int64 = 10 << 20
+	defaultMaxWhiteboardBytes   int64 = generalconfig.DefaultMaxWhiteboardBytes
+	defaultMaxContextBytes      int64 = generalconfig.DefaultMaxContextBytes
 	defaultMaxImageBytes        int64 = 25 << 20
 	defaultMaxImageRequestBytes int64 = 100 << 20
 )
@@ -48,8 +50,11 @@ type ServiceConfig struct {
 	ShutdownTimeout time.Duration
 
 	MaxWhiteboardBytes   int64
+	MaxContextBytes      int64
 	MaxImageBytes        int64
 	MaxImageRequestBytes int64
+
+	ViewerLocalAgentEnabled bool
 
 	LogMode LogMode
 	Logger  *slog.Logger
@@ -89,8 +94,11 @@ type resolvedServiceConfig struct {
 	listener        net.Listener
 
 	maxWhiteboardBytes   int64
+	maxContextBytes      int64
 	maxImageBytes        int64
 	maxImageRequestBytes int64
+
+	viewerLocalAgentEnabled bool
 
 	logMode LogMode
 	logger  *slog.Logger
@@ -201,6 +209,10 @@ func resolveServiceConfig(config ServiceConfig, options []Option) (resolvedServi
 	if maxWhiteboardBytes == 0 {
 		maxWhiteboardBytes = defaultMaxWhiteboardBytes
 	}
+	maxContextBytes := config.MaxContextBytes
+	if maxContextBytes == 0 {
+		maxContextBytes = defaultMaxContextBytes
+	}
 	maxImageBytes := config.MaxImageBytes
 	if maxImageBytes == 0 {
 		maxImageBytes = defaultMaxImageBytes
@@ -229,7 +241,7 @@ func resolveServiceConfig(config ServiceConfig, options []Option) (resolvedServi
 		viewerJS = bytes.Clone(values.viewerJS)
 	}
 
-	if err := validateResolvedServiceConfig(config, values, defaultExpiration, cleanupInterval, host, port, shutdownTimeout, maxWhiteboardBytes, maxImageBytes, maxImageRequestBytes, logMode, clock, ids, viewerCSS, viewerJS); err != nil {
+	if err := validateResolvedServiceConfig(config, values, defaultExpiration, cleanupInterval, host, port, shutdownTimeout, maxWhiteboardBytes, maxContextBytes, maxImageBytes, maxImageRequestBytes, logMode, clock, ids, viewerCSS, viewerJS); err != nil {
 		return resolvedServiceConfig{}, err
 	}
 
@@ -245,24 +257,26 @@ func resolveServiceConfig(config ServiceConfig, options []Option) (resolvedServi
 	}
 
 	return resolvedServiceConfig{
-		whiteboardStore:      config.WhiteboardStore,
-		imageStore:           config.ImageStore,
-		rootDir:              rootDir,
-		defaultExpiration:    defaultExpiration,
-		cleanupInterval:      cleanupInterval,
-		clock:                clock,
-		ids:                  ids,
-		host:                 host,
-		port:                 port,
-		shutdownTimeout:      shutdownTimeout,
-		listener:             values.listener,
-		maxWhiteboardBytes:   maxWhiteboardBytes,
-		maxImageBytes:        maxImageBytes,
-		maxImageRequestBytes: maxImageRequestBytes,
-		logMode:              logMode,
-		logger:               logger,
-		viewerCSS:            bytes.Clone(viewerCSS),
-		viewerJS:             bytes.Clone(viewerJS),
+		whiteboardStore:         config.WhiteboardStore,
+		imageStore:              config.ImageStore,
+		rootDir:                 rootDir,
+		defaultExpiration:       defaultExpiration,
+		cleanupInterval:         cleanupInterval,
+		clock:                   clock,
+		ids:                     ids,
+		host:                    host,
+		port:                    port,
+		shutdownTimeout:         shutdownTimeout,
+		listener:                values.listener,
+		maxWhiteboardBytes:      maxWhiteboardBytes,
+		maxContextBytes:         maxContextBytes,
+		maxImageBytes:           maxImageBytes,
+		maxImageRequestBytes:    maxImageRequestBytes,
+		viewerLocalAgentEnabled: config.ViewerLocalAgentEnabled,
+		logMode:                 logMode,
+		logger:                  logger,
+		viewerCSS:               bytes.Clone(viewerCSS),
+		viewerJS:                bytes.Clone(viewerJS),
 	}, nil
 }
 
@@ -275,6 +289,7 @@ func validateResolvedServiceConfig(
 	port int,
 	shutdownTimeout time.Duration,
 	maxWhiteboardBytes int64,
+	maxContextBytes int64,
 	maxImageBytes int64,
 	maxImageRequestBytes int64,
 	logMode LogMode,
@@ -302,6 +317,8 @@ func validateResolvedServiceConfig(
 		return invalidServiceConfig("shutdown timeout must be positive")
 	case config.MaxWhiteboardBytes < 0 || maxWhiteboardBytes < 0:
 		return invalidServiceConfig("max whiteboard bytes must not be negative")
+	case config.MaxContextBytes < 0 || maxContextBytes < 0:
+		return invalidServiceConfig("max context bytes must not be negative")
 	case config.MaxImageBytes < 0 || maxImageBytes < 0:
 		return invalidServiceConfig("max image bytes must not be negative")
 	case config.MaxImageRequestBytes < 0 || maxImageRequestBytes < 0:

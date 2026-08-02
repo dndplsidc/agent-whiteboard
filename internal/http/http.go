@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	standardhttp "net/http"
@@ -15,13 +16,16 @@ import (
 )
 
 const (
-	APIWhiteboardMarkdown = "/api/v1/whiteboards/markdown"
-	APIWhiteboardHTML     = "/api/v1/whiteboards/html"
-	APIImages             = "/api/v1/images"
-	PublicMarkdown        = "/whiteboards/markdown/"
-	PublicHTML            = "/whiteboards/html/"
-	PublicImages          = "/images/"
+	APIWhiteboardMarkdown         = "/api/v1/whiteboards/markdown"
+	APIWhiteboardMarkdownResource = APIWhiteboardMarkdown + "/"
+	APIWhiteboardHTML             = "/api/v1/whiteboards/html"
+	APIImages                     = "/api/v1/images"
+	PublicMarkdown                = "/whiteboards/markdown/"
+	PublicHTML                    = "/whiteboards/html/"
+	PublicHTMLContentSuffix       = "/content"
+	PublicImages                  = "/images/"
 
+	MultipartOverheadBytes  int64 = 64 << 10
 	maxExpirationFieldBytes int64 = 20
 )
 
@@ -31,7 +35,8 @@ type ErrorBody struct {
 }
 
 type ErrorResponse struct {
-	Error ErrorBody `json:"error"`
+	Error    ErrorBody `json:"error"`
+	Resource *Resource `json:"resource,omitempty"`
 }
 
 type Resource struct {
@@ -49,6 +54,12 @@ type Resource struct {
 
 type ResourceResponse struct {
 	Resource Resource `json:"resource"`
+}
+
+type MarkdownResponse struct {
+	Resource Resource `json:"resource"`
+	Markdown string   `json:"markdown"`
+	Context  string   `json:"context"`
 }
 
 type ImagesResponse struct {
@@ -72,6 +83,11 @@ type MultipartFile struct {
 type MultipartForm struct {
 	Files            []MultipartFile
 	ExpiresInSeconds *int64
+}
+
+type MultipartFileLimit struct {
+	FieldName string
+	MaxBytes  int64
 }
 
 func WriteJSON(w standardhttp.ResponseWriter, status int, value any) {
@@ -110,6 +126,11 @@ func WriteError(w standardhttp.ResponseWriter, err error) {
 	WriteJSON(w, status, ErrorResponse{Error: body})
 }
 
+func WriteErrorWithResource(w standardhttp.ResponseWriter, err error, resource Resource) {
+	status, body := publicError(err)
+	WriteJSON(w, status, ErrorResponse{Error: body, Resource: &resource})
+}
+
 func SetPublicHeaders(w standardhttp.ResponseWriter, image bool) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -118,6 +139,21 @@ func SetPublicHeaders(w standardhttp.ResponseWriter, image bool) {
 		robots += ", noimageindex"
 	}
 	w.Header().Set("X-Robots-Tag", robots)
+}
+
+func MultipartRequestLimit(partLimits ...int64) (int64, error) {
+	if len(partLimits) == 0 {
+		return 0, invalidRequest("multipart part limits are required", nil)
+	}
+
+	total := MultipartOverheadBytes
+	for _, limit := range partLimits {
+		if limit < 0 || limit > math.MaxInt64-total {
+			return 0, invalidRequest("invalid multipart aggregate limit", nil)
+		}
+		total += limit
+	}
+	return total, nil
 }
 
 func ReadMultipart(
@@ -131,6 +167,45 @@ func ReadMultipart(
 		return MultipartForm{}, invalidRequest("invalid multipart limits or fields", nil)
 	}
 
+	limits := make(map[string]int64, len(allowedFileFields))
+	for _, field := range allowedFileFields {
+		if field == "" || field == "expires_in_seconds" {
+			return MultipartForm{}, invalidRequest("invalid multipart file field", nil)
+		}
+		limits[field] = partLimit
+	}
+	return readMultipart(w, r, requestLimit, limits)
+}
+
+func ReadMultipartFields(
+	w standardhttp.ResponseWriter,
+	r *standardhttp.Request,
+	requestLimit int64,
+	fileLimits ...MultipartFileLimit,
+) (MultipartForm, error) {
+	if requestLimit < 0 || len(fileLimits) == 0 {
+		return MultipartForm{}, invalidRequest("invalid multipart limits or fields", nil)
+	}
+
+	limits := make(map[string]int64, len(fileLimits))
+	for _, field := range fileLimits {
+		if field.FieldName == "" || field.FieldName == "expires_in_seconds" || field.MaxBytes < 0 {
+			return MultipartForm{}, invalidRequest("invalid multipart file field", nil)
+		}
+		if _, exists := limits[field.FieldName]; exists {
+			return MultipartForm{}, invalidRequest("duplicate multipart file limit", nil)
+		}
+		limits[field.FieldName] = field.MaxBytes
+	}
+	return readMultipart(w, r, requestLimit, limits)
+}
+
+func readMultipart(
+	w standardhttp.ResponseWriter,
+	r *standardhttp.Request,
+	requestLimit int64,
+	fileLimits map[string]int64,
+) (MultipartForm, error) {
 	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
 		return MultipartForm{}, invalidRequest("invalid multipart form", err)
@@ -139,14 +214,6 @@ func ReadMultipart(
 	boundedBody := standardhttp.MaxBytesReader(w, r.Body, requestLimit)
 	r.Body = boundedBody
 	reader := multipart.NewReader(boundedBody, params["boundary"])
-	allowed := make(map[string]struct{}, len(allowedFileFields))
-	for _, field := range allowedFileFields {
-		if field == "" || field == "expires_in_seconds" {
-			return MultipartForm{}, invalidRequest("invalid multipart file field", nil)
-		}
-		allowed[field] = struct{}{}
-	}
-
 	form := MultipartForm{Files: make([]MultipartFile, 0)}
 	sawPart := false
 	for {
@@ -198,7 +265,8 @@ func ReadMultipart(
 			continue
 		}
 
-		if _, ok := allowed[fieldName]; !ok || filename == "" {
+		partLimit, ok := fileLimits[fieldName]
+		if !ok || filename == "" {
 			return MultipartForm{}, invalidRequest("unexpected multipart field", nil)
 		}
 		content, readErr := ReadPart(part, partLimit)

@@ -37,12 +37,18 @@ type recordingWhiteboardStore struct {
 	deletedID string
 	get       Whiteboard
 	close     int
+	createErr error
 }
 
 func (store *recordingWhiteboardStore) Create(ctx context.Context, value Whiteboard) error {
 	store.ctx, store.created = ctx, value
-	return nil
+	return store.createErr
 }
+
+type facadeUncertainCreateError struct{ error }
+
+func (facadeUncertainCreateError) ResourceMayExist() bool { return true }
+
 func (store *recordingWhiteboardStore) Get(ctx context.Context, id string) (Whiteboard, error) {
 	store.ctx, store.gotID = ctx, id
 	return store.get, nil
@@ -113,6 +119,7 @@ func TestNewRejectsInvalidConfigurationAndTypedNilDependencies(t *testing.T) {
 		{name: "large port", config: Config{Port: 65536}},
 		{name: "negative shutdown", config: Config{ShutdownTimeout: -time.Second}},
 		{name: "negative whiteboard limit", config: Config{MaxWhiteboardBytes: -1}},
+		{name: "negative context limit", config: Config{MaxContextBytes: -1}},
 		{name: "negative image limit", config: Config{MaxImageBytes: -1}},
 		{name: "negative request limit", config: Config{MaxImageRequestBytes: -1}},
 		{name: "request below image limit", config: Config{MaxImageBytes: 2, MaxImageRequestBytes: 1}},
@@ -135,6 +142,21 @@ func TestNewRejectsInvalidConfigurationAndTypedNilDependencies(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestNewDoesNotReadGeneralConfigurationOrEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AGENT_WHITEBOARD_MAX_CONTEXT_BYTES", "invalid")
+	require.NoError(t, os.Mkdir(filepath.Join(home, ".agent-whiteboard"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".agent-whiteboard", "config.yaml"), []byte("invalid: true\n"), 0o600))
+
+	service, err := New(Config{
+		WhiteboardStore: &recordingWhiteboardStore{},
+		ImageStore:      &recordingImageStore{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, service.Close())
 }
 
 func TestNewPreflightsServerConfigurationBeforeTouchingStorage(t *testing.T) {
@@ -197,11 +219,12 @@ func TestServiceForwardsExactContextsAndValues(t *testing.T) {
 	ctx := context.WithValue(context.Background(), facadeContextKey{}, "sentinel")
 	expires := int64(0)
 
-	createdMarkdown, err := service.CreateMarkdown(ctx, CreateWhiteboardInput{Source: []byte("# hello"), ExpiresInSeconds: &expires})
+	createdMarkdown, err := service.CreateMarkdown(ctx, CreateWhiteboardInput{Source: []byte("# hello"), Context: []byte("creator context"), ExpiresInSeconds: &expires})
 	require.NoError(t, err)
 	require.Same(t, ctx, whiteboards.ctx)
 	require.Equal(t, KindMarkdown, whiteboards.created.Kind)
 	require.Equal(t, []byte("# hello"), whiteboards.created.Source)
+	require.Equal(t, []byte("creator context"), whiteboards.created.Context)
 	require.Equal(t, facadeTestID, createdMarkdown.ID)
 
 	whiteboards.get = whiteboards.created
@@ -212,11 +235,12 @@ func TestServiceForwardsExactContextsAndValues(t *testing.T) {
 
 	whiteboards.get = whiteboards.created
 	updatedWhiteboard, err := service.UpdateWhiteboard(ctx, UpdateWhiteboardInput{
-		ID: facadeTestID, Kind: KindMarkdown, Source: []byte("# updated"), ExpiresInSeconds: &expires,
+		ID: facadeTestID, Kind: KindMarkdown, Source: []byte("# updated"), Context: []byte("updated context"), ExpiresInSeconds: &expires,
 	})
 	require.NoError(t, err)
 	require.Same(t, ctx, whiteboards.ctx)
 	require.Equal(t, []byte("# updated"), whiteboards.replaced.Source)
+	require.Equal(t, []byte("updated context"), whiteboards.replaced.Context)
 	require.Equal(t, facadeTestID, updatedWhiteboard.ID)
 
 	whiteboards.get = whiteboards.replaced
@@ -250,6 +274,27 @@ func TestServiceForwardsExactContextsAndValues(t *testing.T) {
 	require.Equal(t, facadeTestID, images.deletedID)
 }
 
+func TestPublicCreateReturnsCapabilityWithUncertainCreateError(t *testing.T) {
+	uncertain := facadeUncertainCreateError{error: errors.New("rollback durability uncertain")}
+	whiteboards := &recordingWhiteboardStore{createErr: uncertain}
+	service, err := New(Config{WhiteboardStore: whiteboards, ImageStore: &recordingImageStore{}},
+		WithClock(testClock{now: time.Unix(10, 0)}),
+		WithIDGenerator(testIDs{id: facadeTestID}),
+		WithViewerAssets([]byte("body{}"), []byte("void 0")),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	result, err := service.CreateMarkdown(context.Background(), CreateWhiteboardInput{
+		Source: []byte("# source"), Context: []byte("creator context"),
+	})
+
+	require.Equal(t, facadeTestID, result.ID)
+	var uncertainCreate UncertainCreateError
+	require.ErrorAs(t, err, &uncertainCreate)
+	require.True(t, uncertainCreate.ResourceMayExist())
+}
+
 func TestNewInjectsEachCustomStoreOnlyIntoItsDomain(t *testing.T) {
 	whiteboards := &recordingWhiteboardStore{}
 	service, err := New(Config{WhiteboardStore: whiteboards, RootDir: t.TempDir()},
@@ -260,7 +305,7 @@ func TestNewInjectsEachCustomStoreOnlyIntoItsDomain(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
-	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# custom")})
+	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# custom"), Context: []byte("creator context")})
 	require.NoError(t, err)
 	require.Equal(t, facadeTestID, whiteboards.created.ID)
 	_, err = service.CreateImages(context.Background(), CreateImagesInput{Images: []ImageUpload{{Content: validPNG(t)}}})
@@ -275,10 +320,12 @@ func TestDefaultFilesystemCompositionPersistsBothDomainsAndHandlerRoutes(t *test
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, service.Close()) })
 
-	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# stored")})
+	_, err = service.CreateMarkdown(context.Background(), CreateWhiteboardInput{Source: []byte("# stored"), Context: []byte("creator context")})
 	require.NoError(t, err)
-	_, err = service.GetWhiteboard(context.Background(), facadeTestID)
+	stored, err := service.GetWhiteboard(context.Background(), facadeTestID)
 	require.NoError(t, err)
+	require.Equal(t, []byte("# stored"), stored.Source)
+	require.Equal(t, []byte("creator context"), stored.Context)
 	_, err = service.CreateImages(context.Background(), CreateImagesInput{Images: []ImageUpload{{Content: validPNG(t)}}})
 	require.NoError(t, err)
 	_, err = service.GetImage(context.Background(), "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")

@@ -72,12 +72,17 @@ func NewService(config ServiceConfig, options ...Option) (*Service, error) {
 	if err != nil {
 		return fail(err)
 	}
-	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{CSS: resolved.viewerCSS, JS: resolved.viewerJS})
+	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
+		CSS:               resolved.viewerCSS,
+		JS:                resolved.viewerJS,
+		LocalAgentEnabled: resolved.viewerLocalAgentEnabled,
+	})
 	if err != nil {
 		return fail(err)
 	}
 	whiteboardHandler, err := whiteboard.NewHandler(whiteboardService, viewer, whiteboard.HandlerConfig{
-		MaxBytes: resolved.maxWhiteboardBytes,
+		MaxWhiteboardBytes: resolved.maxWhiteboardBytes,
+		MaxContextBytes:    resolved.maxContextBytes,
 	})
 	if err != nil {
 		return fail(err)

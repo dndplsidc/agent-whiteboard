@@ -13,6 +13,7 @@ type Whiteboard struct {
 	ID        string
 	Kind      Kind
 	Source    []byte
+	Context   []byte
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	ExpiresAt *time.Time
@@ -20,6 +21,7 @@ type Whiteboard struct {
 
 type CreateInput struct {
 	Source           []byte
+	Context          []byte
 	ExpiresInSeconds *int64
 }
 
@@ -27,6 +29,7 @@ type UpdateInput struct {
 	ID               string
 	Kind             Kind
 	Source           []byte
+	Context          []byte
 	ExpiresInSeconds *int64
 }
 

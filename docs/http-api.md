@@ -1,6 +1,6 @@
 # HTTP API
 
-The API is versioned under `/api/v1`. Successful mutation responses contain paths, never server-generated absolute URLs. Build public URLs using the origin you used for the request.
+The API is versioned under `/api/v1`. Successful mutation responses contain paths, never server-generated absolute URLs. Build public URLs using the origin used for the request.
 
 ## Routes
 
@@ -8,26 +8,36 @@ The API is versioned under `/api/v1`. Successful mutation responses contain path
 | --- | --- |
 | `GET /healthz` | `200 {"status":"ok"}`; `Cache-Control: no-store` |
 | `GET /readyz` | `200 {"status":"ready"}` or `503 {"status":"unavailable"}` |
-| `POST /api/v1/whiteboards/markdown` | multipart `file`, optional `expires_in_seconds`; `201` resource |
-| `PUT /api/v1/whiteboards/markdown/{id}` | same multipart fields; `200` resource |
+| `POST /api/v1/whiteboards/markdown` | multipart `file` and `context`, optional `expires_in_seconds`; `201` resource |
+| `GET /api/v1/whiteboards/markdown/{id}` | `200` resource plus exact `markdown` and `context` strings |
+| `PUT /api/v1/whiteboards/markdown/{id}` | same paired multipart fields; `200` resource |
 | `DELETE /api/v1/whiteboards/markdown/{id}` | `204` |
 | `POST /api/v1/whiteboards/html` | multipart `file`, optional `expires_in_seconds`; `201` resource |
 | `PUT /api/v1/whiteboards/html/{id}` | same multipart fields; `200` resource |
 | `DELETE /api/v1/whiteboards/html/{id}` | `204` |
 | `GET /whiteboards/markdown/{id}` | browser-rendering HTML shell for Markdown |
-| `GET /whiteboards/html/{id}` | trusted HTML bytes unchanged |
+| `GET /whiteboards/html/{id}` | application-controlled sandbox wrapper for trusted HTML |
+| `GET /whiteboards/html/{id}/content` | exact trusted HTML bytes with an independent opaque-origin CSP sandbox |
 | `POST /api/v1/images` | one or more multipart `images`, optional `expires_in_seconds`; `201` images |
 | `PUT /api/v1/images/{id}` | exactly one multipart `file`, optional `expires_in_seconds`; `200` resource |
 | `DELETE /api/v1/images/{id}` | `204` |
 | `GET /images/{id}` | validated raster bytes with detected media type |
 
-`HEAD` is supported by Go's GET routing for public resources. Health endpoints require `GET`. Unsupported methods return `405` with `Allow`.
+`HEAD` is supported by Go's GET routing for public and API retrieval routes. Health endpoints require `GET`. Unsupported methods return `405` with `Allow`.
 
-## Multipart and limits
+The stable HTML capability URL is the supported browser entry point. It returns one `credentialless` iframe with exactly `sandbox="allow-scripts"`, `referrerpolicy="no-referrer"`, and the exact relative `/content` route. Submitted bytes never appear in that outer response. The `/content` response preserves exact stored bytes while headers impose an opaque-origin CSP sandbox that blocks origin storage, parent access, connections, forms, popups, downloads, child frames, top navigation, and remote subresources. Malformed, missing, expired, and wrong-kind `/content` requests retain the same security headers while returning `404`; no `/raw`, `/source`, or nested alternate route serves submitted bytes.
 
-`expires_in_seconds` is a signed decimal field at the transport layer; valid service values are nonnegative. Omit it to use the create default or preserve update expiration. Zero means permanent. Only documented fields are accepted, and whiteboard create/update requires exactly one `file`.
+A script-capable sandbox may navigate its own child. The wrapper's outer `frame-src 'self'` currently limits that navigation to the publishing origin, and the iframe's credentialless/no-referrer attributes strip publishing-origin cookies and Referer. Trusted HTML can nevertheless encode its capability URL into such a permitted request. Direct top-level `/content` navigation remains independently opaque and network/storage restricted, but bypasses the wrapper's destination restriction and is not the supported entry point.
 
-Defaults are 10 MiB per whiteboard, 25 MiB per image, and 100 MiB for the complete image request. Limits are exact byte limits including a bounded multipart request. Image type is detected from content and verified with format-specific configuration parsing, not trusted from the filename: PNG, JPEG, GIF, and WebP are accepted; SVG and malformed files return `unsupported_media_type`.
+## Paired Markdown multipart
+
+Markdown create and update require exactly one file part named `file` and exactly one file part named `context`. Both must be non-empty UTF-8. The context is Markdown summarizing creator goals, decisions, assumptions, and open questions. Source and context are validated and replaced together; there is no API to preserve or update only one half.
+
+Only the documented file fields and at most one scalar `expires_in_seconds` field are accepted. `expires_in_seconds` is a signed decimal at the transport layer; valid service values are nonnegative. Omit it to use the create default or preserve update expiration. Zero means permanent.
+
+The source and context have independent limits: 10 MiB and 1 MiB by default. The Markdown multipart request is bounded to the configured source limit plus context limit plus 64 KiB of multipart overhead. The context limit is independently configurable through YAML `server.max_context_bytes`, environment `AGENT_WHITEBOARD_MAX_CONTEXT_BYTES`, and `serve --max-context-bytes`, with flags taking precedence over non-empty environment, YAML, and the built-in. A configured zero selects the 1 MiB built-in; it does not disable the limit.
+
+HTML continues to require exactly one `file`. Images default to 25 MiB each and 100 MiB for the complete image request. Image type is detected from content and verified with format-specific configuration parsing, not trusted from the filename: PNG, JPEG, GIF, and WebP are accepted; SVG and malformed files return `unsupported_media_type`.
 
 ## Schemas
 
@@ -38,6 +48,14 @@ A whiteboard or single-image mutation returns:
 ```
 
 Image resources use `filename`, `extension`, and `media_type` instead of `type`. Multi-image create returns `{"images":[...]}` in upload order. `expires_at` is a nullable Unix-seconds integer; when it is `null`, `permanent` is `true`.
+
+Markdown retrieval returns the same resource metadata plus the exact stored pair:
+
+```json
+{"resource":{"id":"CAPABILITY_ID","type":"markdown","path":"/whiteboards/markdown/CAPABILITY_ID","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","expires_at":1767229200,"permanent":false},"markdown":"# Board\n","context":"# Creator context\n"}
+```
+
+A legacy schema-1 Markdown resource remains retrievable and returns `"context":""`. Its first `PUT` must provide both a non-empty `file` and `context`, after which retrieval returns the pair.
 
 Errors are stable JSON:
 
@@ -54,12 +72,31 @@ Errors are stable JSON:
 | `storage_unavailable` | 503 |
 | `internal_error` | 500 |
 
-Unknown/internal causes are sanitized. Public GET responses set `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and `X-Robots-Tag: noindex, nofollow, noarchive`; images append `noimageindex` and set `Content-Disposition: inline` with filename `<id><detected-extension>`. Markdown HTML also contains the corresponding robots meta tag.
+Unknown/internal causes are sanitized. Error bodies do not echo Markdown, creator context, request bodies, filesystem paths, or internal causes.
+
+If a whiteboard create fails after the server can no longer prove rollback, the error response also includes the generated `resource` next to `error`. Treat that capability as possibly live and use retrieval or deletion to resolve it. Ordinary failed creates omit `resource`.
+
+Public GET responses set `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and `X-Robots-Tag: noindex, nofollow, noarchive`; images append `noimageindex` and set `Content-Disposition: inline` with filename `<id><detected-extension>`. Markdown HTML also contains the corresponding robots meta tag.
+
+Creator context is not embedded in the current browser-rendering Markdown shell, but it is available from the machine retrieval route to anyone with the capability ID. It is not a private, hidden, or authorization-protected channel. Never include hidden reasoning, credentials, personal or sensitive data, private source, or raw tool output.
 
 ## curl
 
+Create a temporary context file before publishing Markdown:
+
 ```sh
-curl -fsS -F file=@docs/examples/diagram.md -F expires_in_seconds=3600 http://127.0.0.1:8567/api/v1/whiteboards/markdown
+context_dir="$(mktemp -d)"
+trap 'rm -rf "$context_dir"' EXIT
+context_file="$context_dir/context.md"
+cat >"$context_file" <<'EOF'
+# Creator context
+
+- Goal: demonstrate the HTTP pair contract.
+- Open questions: none.
+EOF
+
+curl -fsS -F file=@docs/examples/diagram.md -F context=@"$context_file" -F expires_in_seconds=3600 http://127.0.0.1:8567/api/v1/whiteboards/markdown
+curl -fsS http://127.0.0.1:8567/api/v1/whiteboards/markdown/CAPABILITY_ID
 curl -fsS -F images=@chart.png -F images=@photo.webp -F expires_in_seconds=0 http://127.0.0.1:8567/api/v1/images
 curl -fsS -X DELETE http://127.0.0.1:8567/api/v1/images/CAPABILITY_ID
 ```

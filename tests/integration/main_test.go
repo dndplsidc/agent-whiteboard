@@ -99,6 +99,13 @@ type cliResourceEnvelope struct {
 	Resource      cliResource `json:"resource"`
 }
 
+type cliMarkdownEnvelope struct {
+	SchemaVersion int         `json:"schema_version"`
+	Resource      cliResource `json:"resource"`
+	Markdown      string      `json:"markdown"`
+	Context       string      `json:"context"`
+}
+
 type cliResourcesEnvelope struct {
 	SchemaVersion int           `json:"schema_version"`
 	Resources     []cliResource `json:"resources"`
@@ -334,11 +341,26 @@ func writeFixture(t *testing.T, name string, content []byte) string {
 	return path
 }
 
+func writeContextFixture(t *testing.T, content string) string {
+	t.Helper()
+	return writeFixture(t, "context.md", []byte(content))
+}
+
+func writeConfigFixture(t *testing.T, content string) string {
+	t.Helper()
+	return writeFixture(t, "config.yaml", []byte(content))
+}
+
 func fetch(t *testing.T, endpoint string) (*http.Response, string) {
+	t.Helper()
+	return fetchMethod(t, http.MethodGet, endpoint)
+}
+
+func fetchMethod(t *testing.T, method, endpoint string) (*http.Response, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
 	require.NoError(t, err)
 	response, err := (&http.Client{Timeout: integrationTimeout}).Do(request)
 	require.NoError(t, err)
@@ -352,6 +374,33 @@ func runCLIResource(t *testing.T, server *testServer, args ...string) cliResourc
 	t.Helper()
 	stdout := runCLISuccess(t, server, args...)
 	var envelope cliResourceEnvelope
+	require.NoError(t, json.Unmarshal([]byte(stdout), &envelope), stdout)
+	return envelope
+}
+
+func runCLIWithConfigSuccess(t *testing.T, server *testServer, configPath string, args ...string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+	stdout, stderr, err := server.RunCLIWithConfig(ctx, configPath, args...)
+	require.NoError(t, err, "stderr: %s", stderr)
+	require.Empty(t, stderr)
+	require.True(t, json.Valid([]byte(stdout)), "stdout must contain JSON only: %q", stdout)
+	return stdout
+}
+
+func runCLIResourceWithConfig(t *testing.T, server *testServer, configPath string, args ...string) cliResourceEnvelope {
+	t.Helper()
+	var envelope cliResourceEnvelope
+	stdout := runCLIWithConfigSuccess(t, server, configPath, args...)
+	require.NoError(t, json.Unmarshal([]byte(stdout), &envelope), stdout)
+	return envelope
+}
+
+func runCLIMarkdownWithConfig(t *testing.T, server *testServer, configPath string, args ...string) cliMarkdownEnvelope {
+	t.Helper()
+	var envelope cliMarkdownEnvelope
+	stdout := runCLIWithConfigSuccess(t, server, configPath, args...)
 	require.NoError(t, json.Unmarshal([]byte(stdout), &envelope), stdout)
 	return envelope
 }
@@ -398,8 +447,21 @@ func requireCategoryEmpty(t *testing.T, root, category string) {
 
 func (s *testServer) RunCLI(ctx context.Context, args ...string) (string, string, error) {
 	commandArgs := append([]string{"--server", s.URL}, args...)
-	command := exec.CommandContext(ctx, binaryPath, commandArgs...)
-	command.Env = s.env
+	return s.runCommand(ctx, s.env, commandArgs...)
+}
+
+func (s *testServer) RunCLIWithConfig(ctx context.Context, configPath string, args ...string) (string, string, error) {
+	commandArgs := append([]string{"--config", configPath}, args...)
+	return s.runCommand(ctx, s.env, commandArgs...)
+}
+
+func (s *testServer) RunCLIWithEnv(ctx context.Context, env []string, args ...string) (string, string, error) {
+	return s.runCommand(ctx, env, args...)
+}
+
+func (s *testServer) runCommand(ctx context.Context, env []string, args ...string) (string, string, error) {
+	command := exec.CommandContext(ctx, binaryPath, args...)
+	command.Env = env
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout

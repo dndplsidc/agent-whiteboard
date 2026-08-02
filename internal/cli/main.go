@@ -34,6 +34,9 @@ func Run(ctx context.Context, stdout, stderr io.Writer, getenv func(string) stri
 		NewApplication: func(config app.ServiceConfig, options ...app.Option) (Application, error) {
 			return app.NewService(config, options...)
 		},
+		NewAgentApplication: func(config app.AgentServiceConfig) (Application, error) {
+			return app.NewAgentService(config)
+		},
 	}
 	return run(ctx, stdout, stderr, getenv, os.Args[1:], deps)
 }

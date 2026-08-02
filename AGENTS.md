@@ -31,6 +31,16 @@ Use the test levels that can meaningfully detect regressions from the change. Bu
 
 Tests must be hermetic, deterministic, and isolated. They must not depend on public networks, hosted services, credentials, existing machine state, or fixed ports. Prefer temporary directories, ephemeral ports, local servers, injected dependencies, and committed fixtures. Clean up all resources created by tests.
 
+Keep repeated stress runs focused. Run an affected package normally first, then use `-count` only with a narrow `-run` expression for tests that exercise a specific race or nondeterministic interleaving. Do not apply high repeat counts to an entire package—especially one containing filesystem `fsync`, process, timeout, or integration tests. Run the race detector once for the affected package, increasing the count only for focused race-sensitive tests. Run repository-wide normal and race checks once at the milestone boundary.
+
+For example:
+
+```sh
+go test ./internal/pi
+go test ./internal/pi -run 'TestSessionSubmitNegativeAndAmbiguousAcceptance|TestNativeConcurrentExactFinalization' -count=20
+go test -race ./internal/pi
+```
+
 Run the checks applicable to the change:
 
 ```sh
