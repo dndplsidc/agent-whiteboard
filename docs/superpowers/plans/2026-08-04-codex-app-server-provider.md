@@ -4,7 +4,7 @@
 
 The Page Agent supports Pi and Codex as two independent, content-only conversation providers. Readers switch between them inside the existing drawer, and the last selected provider is restored automatically from local storage. Each provider retains its own conversation, queue, lifecycle, and history for the same whiteboard.
 
-Codex runs through one broker-owned `codex app-server` process that multiplexes all loaded Codex threads. The integration uses Codex's native authentication and configured default model, but it does not expose coding-agent capabilities: no tools, filesystem access, skills, project instructions, MCP, apps, hooks, subprocesses, or network access are available to a Page Agent turn.
+Codex runs through one broker-owned `codex app-server` process that multiplexes all loaded Codex threads. The integration uses Codex's native authentication and effective configured/default model without overriding it, but it does not expose coding-agent capabilities: no tools, filesystem access, skills, project instructions, MCP, apps, hooks, subprocesses, or network access are available to a Page Agent turn.
 
 The implementation extends the current Page Agent visual system. The standalone prototype is a behavioral reference only; production controls reuse the existing drawer's typography, spacing, colors, focus treatment, responsive breakpoints, and component patterns.
 
@@ -39,15 +39,18 @@ The implementation extends the current Page Agent visual system. The standalone 
 - The proof includes sentinel filesystem and local-network targets plus adversarial prompts requesting each excluded capability. Absence of a side effect and absence of tool availability are both required; prompt instructions alone are not enforcement.
 - `thread/start` and `thread/resume` must return no loaded `instructionSources`. Any nonempty instruction source list fails before page content is submitted.
 - Any tool-, command-, file-, web-, MCP-, app-, skill-, permission-, or approval-related request/item is a content-policy violation. The adapter declines when the protocol permits, exposes only the existing generic blocked state, interrupts the affected turn, and restarts the Codex runtime before accepting more work. Native names, arguments, paths, payloads, output, and approval details never reach browser events or logs.
-- Raw reasoning and reasoning deltas are ignored. Only final-answer `agentMessage` content, or unphased agent messages on compatible older versions, becomes assistant output. Context-compaction may use the existing sanitized compaction activity.
+- Raw reasoning and reasoning deltas are ignored. Only final-answer `agentMessage` content, or unphased agent messages on compatible older versions, becomes assistant output.
 - If the pinned CLI cannot enforce this boundary, implementation stops at the compatibility gate and the design returns for revision; it does not ship a prompt-only approximation.
 
-### R5 — Native authentication and model readiness
+### R5 — Native authentication, model readiness, and context capacity
 
 - Agent Whiteboard uses the user's existing Codex native login state. It never accepts, copies, persists, displays, or logs provider credentials and does not add login UI.
-- Codex readiness uses the initialized stable app-server API, `account/read`, `model/list`, and the stable capability query needed for input-capacity preflight. It does not send page content.
-- The adapter selects the configured/default usable text model reported by Codex and displays its normalized label read-only. There is no Page Agent model picker or Agent Whiteboard model override.
-- Missing executable, missing authentication, no usable default model, unavailable content-only enforcement, incompatible capability bounds, startup failure, and protocol incompatibility map to existing provider-neutral readiness/error categories.
+- Codex readiness uses only initialization and `account/read`; it does not send page content. New-thread creation omits model, model-provider, reasoning-effort, and service-tier overrides so app-server applies the user's effective Codex configuration and defaults. Resume omits those overrides and preserves the model recorded in that thread.
+- The successful thread response's resolved model is authoritative and displayed read-only. Agent Whiteboard does not call `model/list` to choose a model and provides no Page Agent model picker or override. Failure to resolve a usable model makes only that Codex connection unavailable.
+- Agent Whiteboard does not read, estimate, set, or override model context windows or automatic-compaction thresholds. The owned app-server uses the user's current Codex configuration and model defaults; production code does not set `model_context_window`, `model_auto_compact_token_limit`, or `model_auto_compact_token_limit_scope`, and does not initiate manual compaction. Existing provider-neutral message byte limits remain resource-safety bounds, not model-capacity checks.
+- App-server `contextCompaction` item start and completion notifications become sanitized provider-neutral `compaction` activity. Users see clearly labeled start and completion activity without native item IDs or compaction payloads.
+- App-server `ContextWindowExceeded` becomes the existing `context_too_large` failure with Codex-specific guidance to start a new conversation or reduce the page or message content. Agent Whiteboard does not truncate content, switch models, compact manually, or retry/replay the turn. Context commit continues to follow native turn acceptance, independently of the turn's later completion or failure.
+- Missing executable, missing authentication, no usable default model, unavailable content-only enforcement, startup failure, and protocol incompatibility map to existing provider-neutral readiness/error categories.
 - One unavailable provider does not prevent the local broker or the other provider from working.
 
 ### R6 — Shared Codex runtime and concurrency
@@ -77,7 +80,7 @@ The implementation extends the current Page Agent visual system. The standalone 
 
 ### R9 — Stable protocol compatibility
 
-- The Codex adapter uses the stable app-server surface only: initialization, account/model/capability readiness, thread start/resume/read/delete, turn start/interrupt, and the notifications required for agent messages and authoritative turn state.
+- The Codex adapter uses the stable app-server surface only: initialization, account readiness, thread start/resume/read/delete, turn start/interrupt, and the notifications required for agent messages, context compaction, errors, and authoritative turn state.
 - Experimental app-server capability is not enabled, and generated version-wide schemas are not copied into production. Small explicit Go DTOs accept only fields needed by the integration, reject duplicate/malformed critical data, and tolerate unknown fields or notifications only where they are noncritical.
 - There is no rigid allowlist of installed Codex versions. Startup capability probes determine compatibility; the pinned real-CLI fixture establishes the supported contract in CI.
 - The browser/broker v1 protocol gains the closed provider value `codex` while preserving all existing message shapes, limits, strict validation, and Pi behavior. Native thread, turn, request, item, path, and account identifiers remain behind the adapter.
@@ -94,12 +97,13 @@ The implementation extends the current Page Agent visual system. The standalone 
 - The implementation reuses the existing `.agent-*` drawer components, CSS variables, neutral palette, type scale, spacing rhythm, shadows, focus indicators, and light/dark theme behavior. Disposable prototype CSS and visual branding are not copied.
 - The selector fits the existing compact header and overflow/menu language. The onboarding selector fits the existing setup card and button treatment without adding redundant explanatory chrome.
 - Provider changes are silent; connection, error, and destructive archive actions may retain their existing actionable announcements.
+- The R5 compaction and context-window outcomes use the existing compact activity, expanded error, and non-disruptive announcement treatments.
 - The established `64rem` docked/modal boundary, `40rem` full-width mobile behavior, resize handling, focus trap, keyboard navigation, reduced motion, and drawer alignment remain intact.
 - Labels, placeholders, loading announcements, provider/model status, setup guidance, archive rows, and errors use the active provider dynamically. Mobile and narrow desktop layouts do not clip or misalign the header selector or actions.
 
 ### R12 — Documentation and verification
 
-- README, configuration, security, HTTP/browser protocol, and agent-facing guidance explain provider selection, local preference storage, independent conversations, native auth, the shared Codex runtime, and the exact content-only boundary.
+- README, configuration, security, HTTP/browser protocol, and agent-facing guidance explain provider selection, local preference storage, independent conversations, native auth, the shared Codex runtime, the exact content-only boundary, user-owned compaction configuration, visible compaction activity, and context-window failure behavior.
 - Unit tests cover every changed validator, registry, lifecycle, parser, state transition, and browser preference/rendering helper.
 - Integration tests use pinned real Pi and Codex CLIs with local deterministic model servers, temporary homes/state, ephemeral ports, and no public network or existing credentials.
 - Browser tests cover silent selection, preference reload, explicit consent per provider, independent histories/queues, switching during an active response, provider-specific Stop, unavailable-provider isolation, current styling, accessibility, and mobile/desktop alignment.
@@ -120,6 +124,7 @@ The browser similarly moves from one hard-coded Pi state object to two instances
 
 - Add Pi and Codex to one closed provider-name validator and descriptor table.
 - Replace the session `Child()` assumption with provider-owned bounded shutdown/escalation and add driver-level shutdown for shared runtimes.
+- Remove model-capacity preflight from the provider-neutral session contract. Pi retains its current sizing behavior inside its adapter's submission path; Codex relies on the R5 app-server outcomes.
 - Move the canonical turn envelope, parser, and deterministic assistant-message identity out of `internal/pi` into a neutral internal package consumed by both adapters.
 - Keep native session references opaque, bounded, non-serializable provider values in memory and bounded opaque strings only inside the durable mapping codec.
 
@@ -133,8 +138,8 @@ The browser similarly moves from one hard-coded Pi state object to two instances
 #### Codex app-server adapter
 
 - A runtime owns the process, initialization handshake, request correlation, bounded JSONL parsing, stderr draining/redaction, thread subscriptions, idle timer, restart singleflight, and final shutdown.
-- A driver owns readiness and thread create/resume/inspect/delete. It obtains native auth state and the default model from stable app-server calls and verifies the content-only capability contract before a thread may receive content.
-- A session owns one thread's event channel, history projection, turn submission/preflight, interrupt, reconciliation, and detach. It never terminates a process used by another session.
+- A driver owns readiness and thread create/resume/inspect/delete. It obtains native auth state, omits model-selection overrides, records the resolved model returned by thread creation/resumption, and verifies the content-only capability contract before a thread may receive content.
+- A session owns one thread's event channel, history projection, turn submission, compaction/error normalization, interrupt, reconciliation, and detach. It never terminates a process used by another session.
 - History parsing accepts only canonical Agent Whiteboard user envelopes and allowed final agent messages. Native IDs are correlated internally but converted to deterministic broker IDs before leaving the adapter.
 
 #### Browser provider controllers
@@ -185,7 +190,7 @@ An exit transition publishes interruption to active sessions before recovery. Ac
 - A shared process belongs to the Codex adapter, not the broker, because process cardinality and restart coordination are provider-specific.
 - Both browser provider controllers stay connected after explicit consent so inactive response status and history remain authoritative without treating selection as consent.
 - The existing canonical envelope is shared instead of inventing a Codex-only prompt, preserving context replacement, IDs, history, and security semantics.
-- Capability probing replaces a Codex version allowlist. A missing stable method, missing model capacity bound, unexpected instruction source, or unenforceable capability boundary makes Codex unavailable before content is sent.
+- Capability probing replaces a Codex version allowlist. A missing required stable method, unexpected instruction source, or unenforceable capability boundary makes Codex unavailable before content is sent; model-capacity metadata is not required.
 - Provider absence is isolated. The broker can serve Pi when Codex is missing and Codex when Pi is missing.
 - The prototype supplies interaction intent only. Existing production styles and accessibility behavior are the implementation standard.
 
@@ -232,15 +237,15 @@ Pairwise ownership is explicit: M2 and M3 share only frozen M1 inputs and have n
 
 **Deliverable**
 
-A hermetic executable compatibility test proves the current pinned Codex app-server can initialize over stdio, report native account/model/capacity state, create multiple threads, stream a plain text response, and prevent every excluded capability without filesystem or network side effects.
+A hermetic executable compatibility test proves the current pinned Codex app-server can initialize over stdio, report native account state, inherit and report the configured model without a client override, create multiple threads, stream a plain text response, emit automatic-compaction lifecycle notifications, report an irreducible context-window overflow, and prevent every excluded capability without filesystem or network side effects.
 
 **Implementation**
 
 1. Generate the pinned CLI's schema into a temporary test directory for inspection only; identify the smallest stable DTO surface and exact launch/turn policy needed by R4.
-2. Run the app-server against an isolated temporary Codex home and deterministic local model endpoint. Use a private empty working directory, disabled experimental API, disabled network, disabled shell/tools/features, empty MCP/app/plugin/hook/skill inputs, and no project instruction discovery.
-3. Assert initialization ordering, `account/read`, default `model/list`, capacity capability, two simultaneously loaded threads, per-thread turn routing, interrupt, thread read/resume/delete, and clean shutdown.
+2. Run the app-server against an isolated temporary Codex home and deterministic local model endpoint. Use a private empty working directory, disabled experimental API, disabled network, disabled shell/tools/features, empty MCP/app/plugin/hook/skill inputs, and no project instruction discovery. The fixture may set a deliberately small automatic-compaction threshold only to make this hermetic test deterministic; production code never supplies compaction or context-window settings.
+3. Assert initialization ordering, `account/read`, omission of model-selection fields, configured/default model resolution for a new thread, recorded-model preservation on resume, authoritative resolved-model responses, two simultaneously loaded threads, per-thread turn routing, automatic `contextCompaction` start/completion, typed `ContextWindowExceeded` failure for an irreducibly oversized turn, interrupt, thread read/resume/delete, and clean shutdown.
 4. Use filesystem and local HTTP sentinels plus adversarial requests to prove the model cannot read, write, execute, browse, invoke skills, or call any configured external tool. Assert `instructionSources` is empty.
-5. Stop and return to design if enforcement depends only on prompting, any excluded side effect occurs, or the stable protocol cannot supply a reliable model-capacity preflight.
+5. Stop and return to design if enforcement depends only on prompting, any excluded side effect occurs, or the pinned app-server cannot own automatic compaction and expose reliable compaction/overflow outcomes without Agent Whiteboard calculating model capacity.
 
 **Validation**
 
@@ -258,16 +263,17 @@ A hermetic executable compatibility test proves the current pinned Codex app-ser
 
 **Deliverable**
 
-The core supports a closed two-provider registry and provider-owned lifecycle without changing observable Pi behavior. Both adapters can consume the same canonical content envelope, and the broker no longer exposes per-session child-process assumptions.
+The core supports a closed two-provider registry, provider-owned lifecycle and submission checks, and no shared model-capacity contract without changing observable Pi behavior. Both adapters can consume the same canonical content envelope, and the broker no longer exposes per-session child-process assumptions.
 
 **Implementation**
 
 1. Add the closed Codex provider name and provider-neutral validation helpers.
 2. Extract the canonical envelope/parser and deterministic message derivation from Pi; preserve byte-for-byte Pi prompts and history behavior with regression tests.
-3. Define driver/session shutdown contracts that cover both dedicated and shared runtimes. Move Pi graceful/terminate/kill ownership behind its adapter while preserving bounded cleanup and retry safety.
-4. Replace the broker's single driver with a validated registry and route solely by durable identity. Remove hard-coded Pi substitution in conversion, handoff, recovery, and archive paths.
-5. Extend schema-1 state validation to both providers while keeping existing Pi files readable and keeping native references opaque.
-6. Add architectural dependency tests for the approved package boundaries and provider-dispatch rule.
+3. Remove provider-neutral preflight request/result DTOs and the broker preflight call. Move Pi's existing sizing check inside Pi submission with regression coverage; Codex implementations must not add model-capacity calculation through another shared seam.
+4. Define driver/session shutdown contracts that cover both dedicated and shared runtimes. Move Pi graceful/terminate/kill ownership behind its adapter while preserving bounded cleanup and retry safety.
+5. Replace the broker's single driver with a validated registry and route solely by durable identity. Remove hard-coded Pi substitution in conversion, handoff, recovery, and archive paths.
+6. Extend schema-1 state validation to both providers while keeping existing Pi files readable and keeping native references opaque.
+7. Add architectural dependency tests for the approved package boundaries and provider-dispatch rule.
 
 **Validation**
 
@@ -291,15 +297,15 @@ The Codex driver satisfies the frozen provider contract through one lazy, multip
 **Implementation**
 
 1. Implement bounded stdio JSONL transport, initialization, request correlation, server-request denial, notification routing, stderr handling, and deterministic shutdown using the M0-proven launch policy.
-2. Implement readiness, default model/capacity selection, thread start/resume/inspect/delete, and provider-wide idle behavior.
-3. Implement canonical turn preflight/submission, native acceptance tracking, final-answer streaming, history projection, reconciliation, interrupt, and thread detach.
+2. Implement readiness, thread start/resume/inspect/delete, authoritative resolved-model display, and provider-wide idle behavior without selecting a model or reading or overriding context-window or compaction configuration.
+3. Implement canonical turn submission without model-capacity preflight, native acceptance tracking, final-answer streaming, `contextCompaction` activity normalization, typed `ContextWindowExceeded` mapping, history projection, reconciliation, interrupt, and thread detach.
 4. Demultiplex concurrent threads and enforce one active ordinary turn per thread. Coordinate one restart after process loss and notify all affected sessions without replay.
 5. Fail closed on malformed critical data, policy-violating items, approval requests, incorrect routing, duplicate responses, and unknown acceptance while retaining no native or sensitive data in errors.
 
 **Validation**
 
 - `go test ./internal/codex`
-- Focused concurrent-thread, unknown-acceptance, runtime-exit, restart-singleflight, and idle-shutdown tests.
+- Focused concurrent-thread, automatic-compaction, context-window-overflow, unknown-acceptance, runtime-exit, restart-singleflight, and idle-shutdown tests.
 - `go test -race ./internal/codex`
 - Re-run the M0 real-CLI compatibility test against the integrated adapter.
 
@@ -319,7 +325,7 @@ The production drawer source provides the approved silent Pi/Codex switching beh
 **Implementation**
 
 1. Add the validated provider preference to the existing explicit storage allowlist and create one descriptor-driven controller/state instance per provider.
-2. Update connect commands, event validation, archive validation, labels, guidance, composer, loading, errors, and accessibility names to use the active validated descriptor.
+2. Update connect commands, event validation, archive validation, labels, guidance, composer, loading, errors, and accessibility names to use the active validated descriptor. Implement the R5 compaction presentation and provider-specific `context_too_large` guidance without changing Pi copy.
 3. Add the selector to onboarding and the compact header using current control/menu patterns. Make switching silent and render only the selected provider while connected inactive controllers keep processing events.
 4. Preserve explicit Connect, context review, queue/Stop coexistence, archives, reconnect, settings, focus management, resize behavior, themes, and responsive layout.
 5. Add source-level regressions for preference, consent, state isolation, active switching, failure isolation, and provider-dynamic labels without modifying the Playwright fixture reserved to M5.
@@ -373,7 +379,7 @@ The generated viewer, real broker, pinned Pi, and pinned Codex CLI demonstrate t
 **Implementation**
 
 1. Extend the deterministic broker fixture for two providers and add browser regressions for preference, consent, isolation, active switching, failure isolation, current styling, accessibility, and alignment.
-2. Add real-Codex browser coverage using the hermetic local model fixture and explicit phase barriers for pre-delta, streaming, completion, interruption, shared-runtime crash, and recovery.
+2. Add real-Codex browser coverage using the hermetic local model fixture and explicit phase barriers for pre-delta, streaming, automatic-compaction start/completion, context-window overflow, completion, interruption, shared-runtime crash, and recovery.
 3. Prove separate Pi/Codex conversations for one published resource, switching while Codex responds, provider-specific Stop/queue behavior, exact first/replacement context, native-ID privacy, and unavailable-provider isolation.
 4. Review accepted JS/CSS, generate bundled assets once, and run the asset consistency check before real-browser validation.
 
@@ -399,8 +405,8 @@ User, operator, security, API, and agent-facing guidance accurately describes bo
 
 **Implementation**
 
-1. Update README and configuration/operations guidance for provider selection, `--codex-executable`, environment precedence, daemon behavior, and unavailable-provider isolation.
-2. Update security and protocol guidance for local-storage boundaries, exact context delivery, shared runtime recovery, native-ID privacy, and excluded Codex capabilities.
+1. Update README and configuration/operations guidance for provider selection, `--codex-executable`, environment precedence, daemon behavior, unavailable-provider isolation, and the rules that Codex model/compaction settings come from the user's effective Codex configuration and are never selected or managed by Agent Whiteboard.
+2. Update security and protocol guidance for local-storage boundaries, exact context delivery, shared runtime recovery, native-ID privacy, excluded Codex capabilities, normalized compaction activity, and actionable context-window failures without truncation or automatic replay.
 3. Update the Agent Whiteboard skill so agent-facing instructions match the shipped provider behavior without promising deferred tools or account UI.
 4. Inspect commands, examples, links, and terminology against the integrated behavior.
 
@@ -445,6 +451,7 @@ CI remains responsible for the supported operating-system matrix and clean gener
 - Codex's app-server contract can change independently of Agent Whiteboard. Stable-method DTOs, capability probes, and the pinned compatibility test limit this risk without pretending every installed version is identical.
 - Content-only enforcement is the release gate. A read-only sandbox alone is insufficient because it may still permit reads or command execution; all excluded capabilities must be absent or independently denied before content is submitted.
 - Codex native authentication and user configuration share a home boundary. The launch policy must consume authentication without loading user instructions, tools, MCP, apps, plugins, hooks, or ambient secrets; M0 must prove that separation with the real CLI.
+- Automatic compaction cannot guarantee that one irreducibly large turn fits. R5 defines that residual failure without introducing local capacity management.
 - One shared process creates correlated-failure risk. Runtime-owned demultiplexing, bounded queues, restart singleflight, per-thread session state, and race testing are required before browser integration.
 - Existing Pi cleanup currently relies on broker-visible child handles. Moving escalation behind the adapter is a high-risk refactor and requires preservation tests before Codex is introduced.
 - Browser capability pages share one origin, so the provider preference is intentionally non-sensitive and global to that publishing origin. Provider connection consent and state remain memory-only.
