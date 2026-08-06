@@ -73,3 +73,36 @@ A whiteboard create can fail after persistence becomes uncertain. In that case t
 Human mode prints URLs to stdout, one per line; successful delete and trust mutations print nothing. Scripts should branch on `schema_version`, the top-level `resource`/`resources`/`markdown`/`error` member, and exit status. Do not assume stdout is empty after an uncertain create error. Version 1 will not change the meaning or type of existing fields; additive fields may be introduced. A breaking change requires a new schema version.
 
 Creator context is not a private or hidden channel. Anyone with the capability ID can retrieve it. Do not include hidden reasoning, credentials, personal or sensitive data, private source, or raw tool output. Error envelopes do not echo Markdown or context.
+
+## Local Page Agent and daemon output
+
+`agent serve` is a long-running local broker service rather than a stream of CLI JSON envelopes. It resolves Pi and Codex independently and accepts these provider executable selectors:
+
+```sh
+agent-whiteboard agent serve --pi-executable /absolute/path/to/pi
+agent-whiteboard agent serve --codex-executable /absolute/path/to/codex
+
+AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE=/absolute/path/to/pi \
+  AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE=/absolute/path/to/codex \
+  agent-whiteboard agent serve
+```
+
+An explicit flag takes precedence over the matching non-empty environment variable; otherwise the service resolves `pi` or `codex` from `PATH`. One unavailable provider does not prevent the other provider or the broker from starting. Codex inherits the effective default user Codex configuration and authentication unchanged. Agent Whiteboard never edits `~/.codex/config.toml` or sets a production `CODEX_HOME`.
+
+On macOS, `agent serve --daemon` install success and `agent daemon restart|stop|uninstall` mutation success use the ordinary delete-success JSON envelope:
+
+```json
+{"schema_version":1}
+```
+
+`agent daemon status` reports only managed-process state:
+
+```json
+{"schema_version":1,"installed":true,"loaded":true,"running":true,"pid":1234}
+```
+
+The daemon accepts `--pi-executable` and `--codex-executable`, but rejects the foreground-only `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` flags. Its provider-specific persisted values are resolved executable paths only; it does not copy provider configuration or credentials.
+
+The browser protocol remains separate from CLI JSON. It is versioned and strictly validated, and identifies `pi` or `codex` conversations independently. Provider selection itself does not connect or send whiteboard content. The first contextual turn carries the complete canonical context envelope. Codex tool activity is normalized into bounded `tool_activity` events, while native App Server identifiers and raw JSONL never enter the browser protocol.
+
+Stable command, file-change, and permission approvals and MCP elicitation use typed `interaction_request` and `interaction_resolved` events plus the `interaction_respond` command. The broker accepts exactly one valid response; the first response across attached tabs wins and all tabs receive the resolved state. App Server's `request_user_input` remains experimental, so `experimentalApi` is disabled and that request family is not active in this stable protocol slice.

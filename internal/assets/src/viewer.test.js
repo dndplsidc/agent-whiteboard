@@ -13,6 +13,7 @@ import {
   AGENT_DRAWER_STORAGE_KEY,
   AGENT_DRAWER_WIDTH_STORAGE_KEY,
   AGENT_PORT_STORAGE_KEY,
+  AGENT_PROVIDER_STORAGE_KEY,
   AGENT_WEBSOCKET_PROTOCOL,
   DEFAULT_AGENT_PORT,
   DEFAULT_AGENT_DRAWER_WIDTH,
@@ -347,7 +348,7 @@ describe("local agent source and commands", () => {
     localStorage.setItem(AGENT_PORT_STORAGE_KEY, "08080");
     localStorage.setItem(AGENT_DRAWER_WIDTH_STORAGE_KEY, "0420");
     localStorage.setItem("conversation-id", agentIDs.conversation);
-    expect(readAgentPreferences(localStorage)).toEqual({ open: false, port: DEFAULT_AGENT_PORT, width: DEFAULT_AGENT_DRAWER_WIDTH });
+    expect(readAgentPreferences(localStorage)).toEqual({ open: false, port: DEFAULT_AGENT_PORT, width: DEFAULT_AGENT_DRAWER_WIDTH, provider: "pi" });
 
     localStorage.setItem(AGENT_DRAWER_WIDTH_STORAGE_KEY, "720");
     expect(readAgentPreferences(localStorage).width).toBe(720);
@@ -387,6 +388,16 @@ describe("local agent source and commands", () => {
     });
     expect(JSON.stringify(command)).not.toContain(agentPayload().markdown);
     expect(JSON.stringify(command)).not.toContain(agentPayload().context);
+  });
+
+  test("stores only the canonical provider preference and falls back to Pi", () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
+    expect(readAgentPreferences(localStorage).provider).toBe("codex");
+
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "unknown");
+    expect(readAgentPreferences(localStorage).provider).toBe("pi");
+    expect(createConnectCommand({ payload: agentPayload(), provider: "codex", clientID: agentIDs.message, idFactory: fixedIDFactory }).payload.provider).toBe("codex");
+    expect(() => createConnectCommand({ payload: agentPayload(), provider: "unknown", clientID: agentIDs.message, idFactory: fixedIDFactory })).toThrow(TypeError);
   });
 
   test("builds initial, replacement, and unchanged continuation submits", () => {
@@ -506,6 +517,111 @@ describe("local agent transport and event state", () => {
     expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"1"', '"api_version":"1","api_version":"1"'))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent({ event_id: "short" })))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "hello", reasoning: "secret" })))).toThrow(TypeError);
+  });
+
+  test("strictly validates Codex tool activity and interaction wire payloads", () => {
+    const tool = agentEvent("tool_activity", {
+      activity_id: agentIDs.archive,
+      turn_id: agentIDs.turn,
+      kind: "command",
+      status: "running",
+      title: "Run tests",
+      summary: "Running focused tests",
+      detail: "pnpm test -- internal/assets/src/viewer.test.js",
+    });
+    expect(decodeAgentEvent(JSON.stringify(tool))).toEqual(tool);
+    expect(() => decodeAgentEvent(JSON.stringify({ ...tool, payload: { ...tool.payload, status: "pending" } }))).toThrow(TypeError);
+    expect(() => decodeAgentEvent(JSON.stringify({ ...tool, payload: { ...tool.payload, native_id: "secret" } }))).toThrow(TypeError);
+
+    const request = agentEvent("interaction_request", {
+      request_id: agentIDs.archive,
+      turn_id: agentIDs.turn,
+      kind: "mcp_elicitation",
+      title: "Provide details",
+      summary: "",
+      command: "",
+      working_directory: "",
+      options: [{ id: "accept", label: "Accept", description: "Provide input." }, { id: "decline", label: "Decline", description: "Decline." }, { id: "cancel", label: "Cancel", description: "Cancel." }],
+      questions: null,
+      fields: [{ id: "target", label: "Target", description: "Deployment target", type: "text", required: true, secret: false, options: null }],
+    });
+    expect(decodeAgentEvent(JSON.stringify(request))).toEqual(request);
+		expect(() => decodeAgentEvent(JSON.stringify({ ...request, payload: { ...request.payload, options: null } }))).toThrow(TypeError);
+    expect(() => decodeAgentEvent(JSON.stringify({
+      ...request,
+      payload: {
+        ...request.payload,
+        questions: [{ id: "target", header: "Target", prompt: "Choose", options: [], allow_other: true, secret: false, multiple: false }],
+      },
+    }))).toThrow(TypeError);
+
+    const response = createAgentCommand({
+      type: "interaction_respond",
+      payload: { request_id: agentIDs.archive, kind: "user_input", option_id: "", answers: { target: ["local"] } },
+      clientID: agentIDs.message,
+      conversationID: agentIDs.conversation,
+      idFactory: fixedIDFactory,
+    });
+    expect(response.payload.answers).toEqual({ target: ["local"] });
+    expect(() => createAgentCommand({
+      type: "interaction_respond",
+      payload: { request_id: agentIDs.archive, kind: "user_input", option_id: "", answers: {} },
+      clientID: agentIDs.message,
+      conversationID: agentIDs.conversation,
+      idFactory: fixedIDFactory,
+    })).toThrow(TypeError);
+  });
+
+  test("reduces Codex provider, tool updates, requests, and first-response resolution", () => {
+    const state = createAgentState("codex");
+    applyAgentEvent(state, snapshotEvent());
+    applyAgentEvent(state, agentEvent("provider", { provider: "codex", state: "ready", model: "gpt-5" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    applyAgentEvent(state, agentEvent("tool_activity", {
+      activity_id: agentIDs.archive, kind: "command", status: "running", title: "Run tests", summary: "Started", detail: "pnpm test",
+    }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    applyAgentEvent(state, agentEvent("tool_activity", {
+      activity_id: agentIDs.archive, kind: "command", status: "completed", title: "Run tests", summary: "Passed", detail: "All passed",
+    }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
+    applyAgentEvent(state, agentEvent("interaction_request", {
+      request_id: agentIDs.message, kind: "command_approval", title: "Approve command", summary: "Run tests?", command: "pnpm test", working_directory: "/workspace",
+      options: [{ id: "accept", label: "Allow once", description: "Run this command." }], questions: [], fields: [],
+    }, { event_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK" }));
+    applyAgentEvent(state, agentEvent("interaction_request", {
+      request_id: agentIDs.message, kind: "command_approval", title: "Duplicate", summary: "", command: "", working_directory: "",
+      options: [{ id: "decline", label: "Decline", description: "" }], questions: [], fields: [],
+    }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
+    applyAgentEvent(state, agentEvent("interaction_resolved", {
+      request_id: agentIDs.message, kind: "command_approval", option_id: "accept",
+    }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
+
+    expect(state.provider).toEqual({ provider: "codex", state: "ready", model: "gpt-5" });
+    expect(state.timeline).toContainEqual(expect.objectContaining({ kind: "tool", status: "completed", summary: "Passed" }));
+    expect(state.timeline.filter((item) => item.kind === "tool")).toHaveLength(1);
+    expect(state.interactions).toEqual([expect.objectContaining({ title: "Approve command", resolved: true, option_id: "accept" })]);
+  });
+
+  test("bounds retained and unresolved interaction state", () => {
+    const state = createAgentState("codex");
+    applyAgentEvent(state, snapshotEvent());
+    const opaqueID = (prefix, index) => index.toString(36).padStart(32, prefix);
+    const requestPayload = (requestID) => ({
+      request_id: requestID, kind: "command_approval", title: "Approve command", summary: "Run it?", command: "true", working_directory: "/workspace",
+      options: [{ id: "accept", label: "Allow", description: "Run it." }], questions: [], fields: [],
+    });
+
+    for (let index = 0; index < 65; index += 1) {
+      const requestID = opaqueID("R", index);
+      applyAgentEvent(state, agentEvent("interaction_request", requestPayload(requestID), { event_id: opaqueID("E", index) }));
+      applyAgentEvent(state, agentEvent("interaction_resolved", { request_id: requestID, kind: "command_approval", option_id: "accept" }, { event_id: opaqueID("F", index) }));
+    }
+    expect(state.interactions).toHaveLength(64);
+    expect(state.interactions.some((item) => item.request_id === opaqueID("R", 0))).toBe(false);
+
+    for (let index = 0; index < 32; index += 1) {
+      applyAgentEvent(state, agentEvent("interaction_request", requestPayload(opaqueID("P", index)), { event_id: opaqueID("G", index) }));
+    }
+    expect(state.interactions.filter((item) => !item.resolved)).toHaveLength(32);
+    expect(() => applyAgentEvent(state, agentEvent("interaction_request", requestPayload(opaqueID("P", 32)), { event_id: opaqueID("G", 32) }))).toThrow(TypeError);
   });
 
   test("normalizes snapshot, streaming, completion, queue, and deduplicates event IDs", () => {
@@ -635,6 +751,177 @@ describe("local agent transport and event state", () => {
 });
 
 describe("local agent rendering and controls", () => {
+  test("switches silently between independent Pi and Codex controllers", async () => {
+    const instances = [];
+    const drawer = createAgentDrawer({
+      payload: agentPayload(), doc: document, storage: localStorage,
+      transportFactory: (options) => {
+        const transport = {
+          provider: options.provider,
+          options,
+          clientID: `${options.provider === "pi" ? "P" : "C"}`.repeat(32),
+          conversationID: agentIDs.conversation,
+          consented: false,
+          probe: vi.fn(async () => ({ ok: true, code: null })),
+          grantConsent: vi.fn(), connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+        };
+        instances.push(transport);
+        return transport;
+      },
+    });
+    await vi.waitFor(() => expect(instances).toHaveLength(1));
+    instances[0].options.onEvent(snapshotEvent());
+
+    drawer.elements.providerSelect.value = "codex";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(instances).toHaveLength(2);
+    expect(instances.map((item) => item.provider)).toEqual(["pi", "codex"]);
+    expect(instances[0].close).not.toHaveBeenCalled();
+    expect(instances.every((item) => item.send.mock.calls.length === 0 && item.connect.mock.calls.length === 0)).toBe(true);
+    expect(drawer.elements.drawer.textContent).toContain("Configured access · Local Codex");
+    expect(drawer.elements.setup.textContent).toContain("current Codex tools, approvals, sandbox, and configuration");
+    expect(localStorage.getItem(AGENT_PROVIDER_STORAGE_KEY)).toBe("codex");
+
+    instances[0].options.onEvent(agentEvent("assistant_message", {
+      turn_id: agentIDs.turn, message_id: agentIDs.message, text: "Pi finished in the background.", created_at: "2026-07-27T03:04:05Z",
+    }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    instances[1].options.onEvent(snapshotEvent());
+    expect(drawer.elements.timeline.textContent).not.toContain("Pi finished in the background.");
+
+    drawer.elements.providerSelect.value = "pi";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(drawer.elements.timeline.textContent).toContain("Pi finished in the background.");
+    expect(instances[1].close).not.toHaveBeenCalled();
+    drawer.destroy();
+  });
+
+  test("restores ready consent controls when switching away from a successful provider connection", async () => {
+    const instances = [];
+    const drawer = createAgentDrawer({
+      payload: agentPayload(), doc: document, storage: localStorage,
+      transportFactory: (options) => {
+        const transport = {
+          provider: options.provider,
+          options,
+          clientID: `${options.provider === "pi" ? "P" : "C"}`.repeat(32),
+          conversationID: agentIDs.conversation,
+          consented: false,
+          probe: vi.fn(async () => ({ ok: true, code: null })),
+          grantConsent: vi.fn(() => { transport.consented = true; }),
+          connect: vi.fn(async () => { options.onEvent(snapshotEvent()); }),
+          reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+        };
+        instances.push(transport);
+        return transport;
+      },
+    });
+    const liveStatus = drawer.elements.drawer.querySelector(".agent-live-status");
+    await vi.waitFor(() => expect(liveStatus.textContent).toBe("Pi ready"));
+    drawer.elements.providerSelect.value = "codex";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    drawer.elements.connectButton.click();
+    await vi.waitFor(() => expect(liveStatus.textContent).toBe("Connected"));
+
+    drawer.elements.providerSelect.value = "pi";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(liveStatus.textContent).toBe("Pi ready");
+    expect(drawer.elements.connectButton.textContent).toBe("Connect to Pi");
+    expect(drawer.elements.connectButton.hidden).toBe(false);
+    expect(drawer.elements.connectButton.disabled).toBe(false);
+    expect(instances[0].connect).not.toHaveBeenCalled();
+    drawer.destroy();
+  });
+
+  test("renders Codex tool status and accessible, exactly-once interaction cards", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent: vi.fn(), connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(snapshotEvent());
+    options.onEvent(agentEvent("tool_activity", {
+      activity_id: agentIDs.archive, kind: "file_change", status: "failed", title: "Update viewer", summary: "Patch failed", detail: "viewer.js was not changed",
+    }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+
+    const requests = [
+      ["IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ", "command_approval", "Approve command", "pnpm test", [{ id: "accept", label: "Allow once", description: "Run this command." }, { id: "decline", label: "Decline", description: "Do not run it." }], [], []],
+      ["KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK", "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", "file_change_approval", "Approve file changes", "", [{ id: "accept", label: "Allow", description: "Apply changes." }, { id: "decline", label: "Decline", description: "Keep files unchanged." }], [], []],
+      ["MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM", "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN", "permission_approval", "Grant permissions", "", [{ id: "grantTurn", label: "Allow for turn", description: "Use this permission for the turn." }, { id: "grantSession", label: "Allow for session", description: "Use this permission for the session." }, { id: "decline", label: "Decline", description: "Decline the request." }], [], [{ id: "permissions", label: "Permissions to grant", description: "Select only the permissions Codex may use.", type: "multi_select", required: false, secret: false, options: [{ id: "permission0", label: "Network access", description: "Allow network access." }, { id: "permission1", label: "Filesystem write", description: "Allow the requested write path." }] }]],
+      ["OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO", "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP", "user_input", "Choose a target", "", [], [{ id: "target", header: "Target", prompt: "Where should this run?", options: [{ id: "local", label: "Local", description: "This device." }], allow_other: true, secret: false, multiple: false }, { id: "profile", header: "Profile", prompt: "Which profile?", options: [], allow_other: true, secret: false, multiple: false }], []],
+      ["QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ", "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", "mcp_elicitation", "MCP details", "", [{ id: "accept", label: "Accept", description: "Provide the requested input." }, { id: "decline", label: "Decline", description: "Decline the request." }, { id: "cancel", label: "Cancel", description: "Cancel the request." }], [], [{ id: "project", label: "Project", description: "Project slug", type: "text", required: true, secret: false, options: [] }, { id: "private", label: "Private", description: "Limit visibility", type: "boolean", required: true, secret: false, options: [] }]],
+    ];
+    for (const [eventID, requestID, kind, title, command, requestOptions, questions, fields] of requests) {
+      options.onEvent(agentEvent("interaction_request", {
+        request_id: requestID, kind, title, summary: `${title}?`, command, working_directory: command ? "/workspace" : "", options: requestOptions, questions, fields,
+      }, { event_id: eventID }));
+    }
+
+    const tool = drawer.elements.timeline.querySelector(".agent-tool-activity");
+    expect(tool?.dataset.status).toBe("failed");
+    expect(tool?.textContent).toContain("Patch failed");
+    const cards = [...drawer.elements.timeline.querySelectorAll(".agent-interaction")];
+    expect(cards.map((card) => card.querySelector("h3")?.textContent)).toEqual(["Approve command", "Approve file changes", "Grant permissions", "Choose a target", "MCP details"]);
+    expect(cards[3].querySelector("fieldset")?.textContent).toContain("Where should this run?");
+    expect(cards[4].textContent).toContain("Project slug");
+
+    cards[0].querySelector("button").click();
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(1));
+    expect(transport.send.mock.calls[0][0]).toMatchObject({ type: "interaction_respond", payload: { request_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ", kind: "command_approval", option_id: "accept", answers: {} } });
+    expect([...drawer.elements.timeline.querySelectorAll(".agent-interaction")][0].querySelector("button").disabled).toBe(true);
+
+    options.onEvent(agentEvent("interaction_resolved", {
+      request_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ", kind: "command_approval", option_id: "accept",
+    }, { event_id: "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS" }));
+    const resolved = [...drawer.elements.timeline.querySelectorAll(".agent-interaction")][0];
+    expect(resolved.dataset.state).toBe("resolved");
+    expect(resolved.getAttribute("aria-label")).toContain("Resolved");
+    resolved.querySelector("button").click();
+    expect(transport.send).toHaveBeenCalledTimes(1);
+
+    const permission = [...drawer.elements.timeline.querySelectorAll(".agent-interaction")][2];
+		const permissionButtons = permission.querySelectorAll("button");
+		permissionButtons[1].click();
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    permission.querySelector('select option[value="permission1"]').selected = true;
+		permissionButtons[1].click();
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
+    expect(transport.send.mock.calls[1][0]).toMatchObject({
+      type: "interaction_respond",
+      payload: { request_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN", kind: "permission_approval", option_id: "grantSession", answers: { permissions: ["permission1"] } },
+    });
+
+    const userInput = [...drawer.elements.timeline.querySelectorAll(".agent-interaction")][3];
+    userInput.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(transport.send).toHaveBeenCalledTimes(2);
+    userInput.querySelector('input[type="radio"]').checked = true;
+    userInput.querySelector('input[type="radio"]').dispatchEvent(new Event("input", { bubbles: true }));
+    userInput.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+		expect(transport.send).toHaveBeenCalledTimes(2);
+		const profileInput = [...userInput.querySelectorAll('input[type="text"]')].at(-1);
+		profileInput.value = "default";
+		profileInput.dispatchEvent(new Event("input", { bubbles: true }));
+		userInput.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(3));
+    expect(transport.send.mock.calls[2][0]).toMatchObject({
+      type: "interaction_respond",
+      payload: { request_id: "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP", kind: "user_input", option_id: "", answers: { target: ["local"], profile: ["default"] } },
+    });
+
+    const mcp = [...drawer.elements.timeline.querySelectorAll(".agent-interaction")].at(-1);
+    mcp.querySelector("button").click();
+    expect(transport.send).toHaveBeenCalledTimes(3);
+    mcp.querySelector('input[type="text"]').value = "agent-whiteboard";
+    mcp.querySelector("button").click();
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(4));
+    expect(transport.send.mock.calls[3][0]).toMatchObject({
+      type: "interaction_respond",
+      payload: { request_id: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", kind: "mcp_elicitation", option_id: "accept", answers: { project: ["agent-whiteboard"], private: ["false"] } },
+    });
+    drawer.destroy();
+  });
+
   test("separates identity, concise status, and offline, ready, and connected bodies", async () => {
     let options;
     const transport = {
@@ -1092,7 +1379,7 @@ describe("local agent rendering and controls", () => {
 
     options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }));
     expect(loading()?.textContent).toContain("Pi is responding");
-    options.onEvent(agentEvent("error", { error: { code: "provider_startup_failed", message: "Pi could not be started.", action: "try_again" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    options.onEvent(agentEvent("error", { error: { code: "provider_startup_failed", message: "The selected provider could not be started.", action: "try_again" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
     expect(loading()).not.toBeNull();
     options.onEvent(agentEvent("completion", { turn_id: agentIDs.turn }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
     expect(loading()).toBeNull();
@@ -1133,7 +1420,7 @@ describe("local agent rendering and controls", () => {
       agentEvent("activity", { kind: "compaction", summary: "Compacted context." }, { event_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK" }),
       agentEvent("blocked", { kind: "tool", message: "A provider tool request was blocked by content-only policy." }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }),
       agentEvent("blocked", { kind: "permission", message: "A provider permission request was blocked by content-only policy." }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }),
-      agentEvent("error", { error: { code: "provider_startup_failed", message: "Pi could not be started.", action: "try_again" } }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }),
+      agentEvent("error", { error: { code: "provider_startup_failed", message: "The selected provider could not be started.", action: "try_again" } }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }),
     ];
     for (const event of events) options.onEvent(event);
     const activities = [...drawer.elements.timeline.querySelectorAll(".agent-activity")];

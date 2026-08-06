@@ -15,6 +15,7 @@ import (
 
 	"github.com/edocsss/agent-whiteboard/internal/agentstate"
 	"github.com/edocsss/agent-whiteboard/internal/broker"
+	"github.com/edocsss/agent-whiteboard/internal/codex"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
 	"github.com/edocsss/agent-whiteboard/internal/localapi"
@@ -32,7 +33,9 @@ type AgentServiceConfig struct {
 
 	Port                int
 	PiExecutable        string
+	CodexExecutable     string
 	ProviderEnvironment []string
+	CodexEnvironment    []string
 	IdleTimeout         time.Duration
 	ShutdownTimeout     time.Duration
 
@@ -40,6 +43,45 @@ type AgentServiceConfig struct {
 	IDs      common.IDGenerator
 	Clock    common.Clock
 	Timers   broker.TimerFactory
+}
+
+type providerRegistryConfig struct {
+	state            *agentstate.Store
+	piExecutable     string
+	piEnvironment    []string
+	piAvailable      bool
+	codexExecutable  string
+	codexEnvironment []string
+	codexAvailable   bool
+	launcher         provider.Launcher
+	ids              common.IDGenerator
+	clock            common.Clock
+	idleTimeout      time.Duration
+}
+
+type unavailableProviderDriver struct{ name provider.Name }
+
+// unavailableProviderDriver keeps every closed provider name dispatchable when
+// its default executable is absent, so the broker can return provider_missing
+// without preventing another provider from serving conversations.
+func (driver unavailableProviderDriver) Readiness(context.Context) provider.Readiness {
+	return provider.Readiness{State: provider.MissingExecutable, Provider: driver.name}
+}
+
+func (unavailableProviderDriver) Create(context.Context, provider.CreateRequest) (provider.Session, error) {
+	return nil, provider.NewProviderError(provider.ErrorMissingExecutable)
+}
+
+func (unavailableProviderDriver) Resume(context.Context, provider.ResumeRequest) (provider.Session, error) {
+	return nil, provider.NewProviderError(provider.ErrorMissingExecutable)
+}
+
+func (unavailableProviderDriver) Inspect(context.Context, provider.InspectRequest) (provider.NativeSession, error) {
+	return provider.NativeSession{}, provider.NewProviderError(provider.ErrorMissingExecutable)
+}
+
+func (unavailableProviderDriver) Delete(context.Context, provider.DeleteRequest) error {
+	return provider.NewProviderError(provider.ErrorMissingExecutable)
 }
 
 // AgentService owns the agent state, provider broker, and local API listener.
@@ -82,11 +124,19 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 		timers = broker.RealTimerFactory{}
 	}
 
-	executable, err := resolvePiExecutable(config.PiExecutable)
+	piExecutable, piAvailable, err := resolvePiExecutable(config.PiExecutable)
 	if err != nil {
 		return nil, err
 	}
-	environment, err := providerEnvironment(config.Home, config.ProviderEnvironment)
+	piEnvironment, err := providerEnvironment(config.Home, config.ProviderEnvironment)
+	if err != nil {
+		return nil, err
+	}
+	codexExecutable, codexAvailable, err := resolveCodexExecutable(config.CodexExecutable)
+	if err != nil {
+		return nil, err
+	}
+	codexEnvironment, err := defaultCodexEnvironment(config.CodexEnvironment)
 	if err != nil {
 		return nil, err
 	}
@@ -98,19 +148,16 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 	cleanupState := func(constructionErr error) (*AgentService, error) {
 		return nil, errors.Join(constructionErr, state.Close())
 	}
-	providerRoot, err := state.EnsureProviderDirectory(provider.NamePi)
-	if err != nil {
-		return cleanupState(fmt.Errorf("ensure Pi provider directory: %w", err))
-	}
-	driver, err := pi.NewDriver(pi.Config{
-		Executable: executable, Environment: environment, ProviderRoot: providerRoot,
-		Launcher: launcher, IDs: ids, Clock: clock,
+	registry, err := newProviderRegistry(providerRegistryConfig{
+		state: state, piExecutable: piExecutable, piEnvironment: piEnvironment, piAvailable: piAvailable,
+		codexExecutable: codexExecutable, codexEnvironment: codexEnvironment, codexAvailable: codexAvailable,
+		launcher: launcher, ids: ids, clock: clock, idleTimeout: config.IdleTimeout,
 	})
 	if err != nil {
-		return cleanupState(fmt.Errorf("create Pi driver: %w", err))
+		return cleanupState(err)
 	}
 	backend, err := broker.New(broker.Config{
-		State: state, Driver: driver, IDs: ids, Clock: clock, Timers: timers,
+		State: state, Drivers: registry, IDs: ids, Clock: clock, Timers: timers,
 		IdleTimeout: config.IdleTimeout, ShutdownTimeout: config.ShutdownTimeout,
 	})
 	if err != nil {
@@ -128,6 +175,50 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 		return cleanupBroker(fmt.Errorf("create local API: %w", err))
 	}
 	return &AgentService{state: state, broker: backend, local: local, shutdownTimeout: config.ShutdownTimeout}, nil
+}
+
+func newProviderRegistry(config providerRegistryConfig) (provider.Registry, error) {
+	if config.state == nil {
+		return provider.Registry{}, errors.New("provider state is required")
+	}
+	drivers := make(map[provider.Name]provider.Driver, len(provider.AllNames()))
+	if config.piAvailable {
+		piRoot, err := config.state.EnsureProviderDirectory(provider.NamePi)
+		if err != nil {
+			return provider.Registry{}, fmt.Errorf("ensure Pi provider directory: %w", err)
+		}
+		piDriver, err := pi.NewDriver(pi.Config{
+			Executable: config.piExecutable, Environment: config.piEnvironment, ProviderRoot: piRoot,
+			Launcher: config.launcher, IDs: config.ids, Clock: config.clock,
+		})
+		if err != nil {
+			return provider.Registry{}, fmt.Errorf("create Pi driver: %w", err)
+		}
+		drivers[provider.NamePi] = piDriver
+	} else {
+		drivers[provider.NamePi] = unavailableProviderDriver{name: provider.NamePi}
+	}
+	if config.codexAvailable {
+		codexRoot, rootErr := config.state.EnsureProviderDirectory(provider.NameCodex)
+		if rootErr != nil {
+			return provider.Registry{}, fmt.Errorf("ensure Codex provider directory: %w", rootErr)
+		}
+		codexDriver, driverErr := codex.NewDriver(codex.Config{
+			Executable: config.codexExecutable, Environment: config.codexEnvironment, ProviderRoot: codexRoot,
+			Launcher: config.launcher, IDs: config.ids, Clock: config.clock, IdleTimeout: config.idleTimeout,
+		})
+		if driverErr != nil {
+			return provider.Registry{}, fmt.Errorf("create Codex driver: %w", driverErr)
+		}
+		drivers[provider.NameCodex] = codexDriver
+	} else {
+		drivers[provider.NameCodex] = unavailableProviderDriver{name: provider.NameCodex}
+	}
+	registry, err := provider.NewRegistry(drivers)
+	if err != nil {
+		return provider.Registry{}, fmt.Errorf("create provider registry: %w", err)
+	}
+	return registry, nil
 }
 
 // Addr exposes the bound local API address for in-process callers and tests.
@@ -217,26 +308,65 @@ func (source configTrustSource) TrustedOrigins(ctx context.Context) (map[string]
 	return trusted, nil
 }
 
-func resolvePiExecutable(value string) (string, error) {
-	resolved := value
-	if resolved == "" {
+func resolvePiExecutable(value string) (string, bool, error) {
+	resolved := ""
+	if value == "" {
 		var err error
 		resolved, err = exec.LookPath("pi")
 		if err != nil {
-			return "", fmt.Errorf("resolve Pi executable: %w", err)
+			return "", false, nil
 		}
-	} else if !filepath.IsAbs(resolved) {
+	} else {
 		var err error
-		resolved, err = exec.LookPath(resolved)
+		resolved, err = exec.LookPath(value)
 		if err != nil {
-			return "", fmt.Errorf("resolve Pi executable: %w", err)
+			return "", false, fmt.Errorf("resolve Pi executable: %w", err)
 		}
 	}
 	absolute, err := filepath.Abs(resolved)
 	if err != nil {
-		return "", fmt.Errorf("resolve Pi executable path: %w", err)
+		return "", false, fmt.Errorf("resolve Pi executable path: %w", err)
 	}
-	return filepath.Clean(absolute), nil
+	return filepath.Clean(absolute), true, nil
+}
+
+func resolveCodexExecutable(value string) (string, bool, error) {
+	resolved := ""
+	if value == "" {
+		var err error
+		resolved, err = exec.LookPath("codex")
+		if err != nil {
+			return "", false, nil
+		}
+	} else {
+		var err error
+		resolved, err = exec.LookPath(value)
+		if err != nil {
+			return "", false, fmt.Errorf("resolve Codex executable: %w", err)
+		}
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve Codex executable path: %w", err)
+	}
+	return filepath.Clean(absolute), true, nil
+}
+
+// defaultCodexEnvironment deliberately inherits the foreground process
+// environment. In particular, it does not replace HOME, set CODEX_HOME, or
+// inject configuration overrides, so App Server resolves the user's normal
+// Codex configuration and authentication state.
+func defaultCodexEnvironment(override []string) ([]string, error) {
+	environment := override
+	if environment == nil {
+		environment = os.Environ()
+	}
+	cloned := make([]string, len(environment))
+	copy(cloned, environment)
+	if err := validateEnvironment(cloned); err != nil {
+		return nil, err
+	}
+	return cloned, nil
 }
 
 func providerEnvironment(home string, override []string) ([]string, error) {

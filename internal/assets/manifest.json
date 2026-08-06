@@ -7,7 +7,7 @@
     "esbuild": "0.28.1"
   },
   "sha256": {
-    "dist/viewer.min.js": "5657996f369c7431f7614d34f62fef4ec17b6f7fe6e70274879facbeff8c67da",
-    "dist/viewer.min.css": "b810df249fefc46f42f4f548bbd5c1b89ec400f71d3266c3f97c4c89f43504cf"
+    "dist/viewer.min.js": "f4434b10d1dd9e4d23383fb0eb9b90af5b7b9786e51f0d611bd9e04ff5edc1ee",
+    "dist/viewer.min.css": "5b8165cf8483c476c3b476aabf093a04afb33e4f3ff24b231dbeefd71e1dad2d"
   }
 }

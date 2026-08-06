@@ -590,7 +590,7 @@ func (store *Store) RemoveWorkspace(conversationID string) error {
 }
 
 func (store *Store) EnsureProviderDirectory(name provider.Name) (string, error) {
-	if name != provider.NamePi {
+	if !name.Valid() {
 		return "", errors.New("invalid provider")
 	}
 	release, err := store.begin("provider/" + string(name))

@@ -143,7 +143,11 @@ func (actor *conversation) convertSubmittedTurn(payload agentprotocol.SubmitPayl
 	if payload.Context == nil || actor.mapping.Current == nil || actor.mapping.Current.Observed == nil || actor.resource.ID == "" {
 		return provider.TurnRequest{}, agentprotocol.ErrorInvalidState
 	}
-	connected := ConnectIdentity{Origin: actor.identity.Origin, Provider: agentprotocol.ProviderPi, Resource: actor.resource, ContextDigest: actor.contextDigest}
+	wireProvider, err := providerNameFromDomain(actor.identity.Provider)
+	if err != nil {
+		return provider.TurnRequest{}, agentprotocol.ErrorInvalidState
+	}
+	connected := ConnectIdentity{Origin: actor.identity.Origin, Provider: wireProvider, Resource: actor.resource, ContextDigest: actor.contextDigest}
 	converted, err := PageContextToProvider(*payload.Context, connected, actor.identity.Origin)
 	if err != nil || string(payload.Context.Revision) != string(actor.mapping.Current.Observed.Revision) || payload.Context.Digest != actor.mapping.Current.Observed.Digest || !payload.Context.Resource.UpdatedAt.Equal(actor.mapping.Current.Observed.SourceUpdatedAt) {
 		zeroProviderContext(&converted)

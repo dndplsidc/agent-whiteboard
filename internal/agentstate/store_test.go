@@ -563,7 +563,9 @@ func TestWorkspaceAndProviderDirectories(t *testing.T) {
 	require.NoError(t, err)
 	providerRoot, err := store.EnsureProviderDirectory(provider.NamePi)
 	require.NoError(t, err)
-	for _, path := range []string{workspace, providerRoot} {
+	codexRoot, err := store.EnsureProviderDirectory(provider.NameCodex)
+	require.NoError(t, err)
+	for _, path := range []string{workspace, providerRoot, codexRoot} {
 		info, statErr := os.Stat(path)
 		require.NoError(t, statErr)
 		require.Equal(t, os.FileMode(0o700), info.Mode().Perm())

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/provider"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,4 +27,21 @@ func TestExportedMappingAndSessionValidationUseCompleteInvariants(t *testing.T) 
 	invalidMapping := mapping
 	invalidMapping.SchemaVersion++
 	require.Error(t, invalidMapping.Validate(identity))
+}
+
+func TestIdentityAcceptsEachClosedProviderAndKeepsKeysSeparate(t *testing.T) {
+	pi := testIdentity()
+	codex := pi
+	codex.Provider = provider.NameCodex
+	require.NoError(t, pi.Validate())
+	require.NoError(t, codex.Validate())
+	piKey, err := ConversationKey(pi)
+	require.NoError(t, err)
+	codexKey, err := ConversationKey(codex)
+	require.NoError(t, err)
+	require.NotEqual(t, piKey, codexKey)
+
+	invalid := pi
+	invalid.Provider = provider.Name("other")
+	require.Error(t, invalid.Validate())
 }

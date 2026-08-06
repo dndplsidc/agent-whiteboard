@@ -19,6 +19,11 @@ type piProviderDescriptor struct{}
 func (piProviderDescriptor) ProviderName() string   { return launchagent.ProviderPi }
 func (piProviderDescriptor) ExecutableName() string { return launchagent.ProviderPi }
 
+type codexProviderDescriptor struct{}
+
+func (codexProviderDescriptor) ProviderName() string   { return launchagent.ProviderCodex }
+func (codexProviderDescriptor) ExecutableName() string { return launchagent.ProviderCodex }
+
 func (factory commandFactory) newAgentDaemonCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use:         "daemon",
@@ -97,7 +102,7 @@ func rejectDaemonFlags(cmd *cobra.Command) error {
 	return nil
 }
 
-func (factory commandFactory) installAgentDaemon(cmd *cobra.Command, flagValue string, flagSet bool) error {
+func (factory commandFactory) installAgentDaemon(cmd *cobra.Command, piFlagValue string, piFlagSet bool, codexFlagValue string, codexFlagSet bool) error {
 	manager, err := factory.newLaunchAgentManager()
 	if err != nil {
 		return err
@@ -110,18 +115,22 @@ func (factory commandFactory) installAgentDaemon(cmd *cobra.Command, flagValue s
 	if err != nil {
 		return err
 	}
-	selected := flagValue
-	if !flagSet {
-		selected = factory.deps.Getenv(launchagent.PiExecutableEnvironment)
+	piSelected := piFlagValue
+	if !piFlagSet {
+		piSelected = factory.deps.Getenv(launchagent.PiExecutableEnvironment)
+	}
+	codexSelected := codexFlagValue
+	if !codexFlagSet {
+		codexSelected = factory.deps.Getenv(launchagent.CodexExecutableEnvironment)
 	}
 	install := launchagent.Config{
 		Executable:         executable,
 		ConfigPath:         configuration,
-		Providers:          []launchagent.ProviderDescriptor{piProviderDescriptor{}},
+		Providers:          []launchagent.ProviderDescriptor{piProviderDescriptor{}, codexProviderDescriptor{}},
 		ExecutableResolver: nil,
 	}
-	if selected != "" {
-		install.ExecutableResolver = selectedPiExecutableResolver{selected: selected}
+	if piSelected != "" || codexSelected != "" {
+		install.ExecutableResolver = selectedProviderExecutableResolver{pi: piSelected, codex: codexSelected}
 	}
 	return manager.Install(cmd.Context(), install)
 }

@@ -299,7 +299,28 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 			copyOfValue.Error = &errorValue
 		}
 		return &copyOfValue
+	case agentprotocol.InteractionRequestPayload:
+		return cloneInteractionRequestPayload(value)
+	case *agentprotocol.InteractionRequestPayload:
+		if value == nil {
+			return (*agentprotocol.InteractionRequestPayload)(nil)
+		}
+		copyOfValue := cloneInteractionRequestPayload(*value)
+		return &copyOfValue
 	default:
 		return payload
 	}
+}
+
+func cloneInteractionRequestPayload(value agentprotocol.InteractionRequestPayload) agentprotocol.InteractionRequestPayload {
+	value.Options = append([]agentprotocol.InteractionOption(nil), value.Options...)
+	value.Questions = append([]agentprotocol.InteractionQuestion(nil), value.Questions...)
+	for index := range value.Questions {
+		value.Questions[index].Options = append([]agentprotocol.InteractionOption(nil), value.Questions[index].Options...)
+	}
+	value.Fields = append([]agentprotocol.InteractionField(nil), value.Fields...)
+	for index := range value.Fields {
+		value.Fields[index].Options = append([]agentprotocol.InteractionOption(nil), value.Fields[index].Options...)
+	}
+	return value
 }

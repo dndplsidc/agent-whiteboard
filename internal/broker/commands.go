@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash"
+	"sort"
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
@@ -166,6 +167,21 @@ func commandFingerprint(command agentprotocol.Command) ([sha256.Size]byte, error
 		writer.text(payload.ArchiveID)
 	case agentprotocol.ResyncPayload:
 		writer.text(payload.AfterEventID)
+	case agentprotocol.InteractionResponsePayload:
+		writer.text(payload.RequestID)
+		writer.text(string(payload.Kind))
+		writer.text(payload.OptionID)
+		keys := make([]string, 0, len(payload.Answers))
+		for key := range payload.Answers {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			writer.text(key)
+			for _, answer := range payload.Answers[key] {
+				writer.text(answer)
+			}
+		}
 	default:
 		return [sha256.Size]byte{}, errors.New("unsupported command payload")
 	}

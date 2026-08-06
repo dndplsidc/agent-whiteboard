@@ -44,6 +44,21 @@ func TestDecodeConnectCommandContract(t *testing.T) {
 	require.NotContains(t, string(encoded), "title")
 }
 
+func TestProviderNamesAreClosedAndCodexConnectRoundTrips(t *testing.T) {
+	require.True(t, agentprotocol.ProviderPi.Valid())
+	require.True(t, agentprotocol.ProviderCodex.Valid())
+	require.False(t, agentprotocol.ProviderName("other").Valid())
+	require.Equal(t, []agentprotocol.ProviderName{agentprotocol.ProviderPi, agentprotocol.ProviderCodex}, agentprotocol.AllProviderNames())
+
+	input := `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"codex","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}`
+	command, err := agentprotocol.DecodeCommand([]byte(input))
+	require.NoError(t, err)
+	require.Equal(t, agentprotocol.ProviderCodex, command.Payload.(agentprotocol.ConnectPayload).Provider)
+	encoded, err := agentprotocol.EncodeCommand(command)
+	require.NoError(t, err)
+	require.JSONEq(t, input, string(encoded))
+}
+
 func TestDecodeSubmitCarriesCompleteInitialOrReplacementContext(t *testing.T) {
 	for _, revision := range []agentprotocol.ContextRevision{agentprotocol.ContextInitial, agentprotocol.ContextReplacement} {
 		t.Run(string(revision), func(t *testing.T) {
@@ -84,6 +99,44 @@ func TestAllCommandPayloadsAreClosedAndValidated(t *testing.T) {
 		decoded, err := agentprotocol.DecodeCommand([]byte(input))
 		require.NoError(t, err, input)
 		require.NotNil(t, decoded.Payload)
+	}
+}
+
+func TestInteractionResponseCommandIsStrictAndBounded(t *testing.T) {
+	input := `{"api_version":"1","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"interaction_respond","payload":{"request_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","kind":"user_input","option_id":"","answers":{"target":["local"]}}}`
+	command, err := agentprotocol.DecodeCommand([]byte(input))
+	require.NoError(t, err)
+	payload := command.Payload.(agentprotocol.InteractionResponsePayload)
+	require.Equal(t, agentprotocol.InteractionUserInput, payload.Kind)
+	require.Equal(t, []string{"local"}, payload.Answers["target"])
+	encoded, err := agentprotocol.EncodeCommand(command)
+	require.NoError(t, err)
+	require.JSONEq(t, input, string(encoded))
+
+	bad := strings.Replace(input, `"request_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"`, `"request_id":"native"`, 1)
+	_, err = agentprotocol.DecodeCommand([]byte(bad))
+	require.Error(t, err)
+}
+
+func TestToolAndInteractionEventsRoundTripWithoutNativeIdentifiers(t *testing.T) {
+	tool := agentprotocol.ToolActivityPayload{
+		ActivityID: idC, TurnID: idA, Kind: agentprotocol.ToolCommand, Status: agentprotocol.ToolRunning,
+		Title: "Run tests", Summary: "Running tests", Detail: "go test ./internal/codex",
+	}
+	request := agentprotocol.InteractionRequestPayload{
+		RequestID: idC, TurnID: idA, Kind: agentprotocol.InteractionCommandApproval,
+		Title: "Approve command", Summary: "Run tests?", Command: "go test ./internal/codex", WorkingDirectory: "/workspace",
+		Options: []agentprotocol.InteractionOption{{ID: "accept", Label: "Allow once", Description: "Run it."}},
+	}
+	resolved := agentprotocol.InteractionResolvedPayload{RequestID: idC, Kind: agentprotocol.InteractionCommandApproval, OptionID: "accept"}
+	for _, payload := range []agentprotocol.EventPayload{tool, request, resolved} {
+		event := validEvent(payload)
+		encoded, err := agentprotocol.EncodeEvent(event)
+		require.NoError(t, err)
+		require.NotContains(t, string(encoded), "native")
+		decoded, err := agentprotocol.DecodeEvent(encoded)
+		require.NoError(t, err)
+		require.Equal(t, event, decoded)
 	}
 }
 
@@ -380,6 +433,22 @@ func TestBrowserErrorsHaveOnlyFixedBrokerOwnedRepresentations(t *testing.T) {
 	var decoded agentprotocol.BrowserError
 	err := json.Unmarshal([]byte(`{"code":"provider_crashed","message":"/secret/path","action":"retry"}`), &decoded)
 	require.Error(t, err)
+}
+
+func TestProviderErrorsRemainProviderNeutral(t *testing.T) {
+	for _, code := range []agentprotocol.BrowserErrorCode{
+		agentprotocol.ErrorProviderMissing,
+		agentprotocol.ErrorAuthenticationRequired,
+		agentprotocol.ErrorNoUsableModel,
+		agentprotocol.ErrorProviderStartupFailed,
+		agentprotocol.ErrorContentOnlyUnavailable,
+		agentprotocol.ErrorProviderCrashed,
+		agentprotocol.ErrorProviderRecoveryFailed,
+	} {
+		message := agentprotocol.NewBrowserError(code).Message()
+		require.NotContains(t, message, "Pi")
+		require.NotContains(t, message, "Codex")
+	}
 }
 
 func TestActiveTurnIdentityIsExplicitAcrossSubmissionQueueAndEvents(t *testing.T) {

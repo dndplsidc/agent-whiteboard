@@ -32,7 +32,7 @@ func (identity ConnectIdentity) Validate(authorizedOrigin string) error {
 	if err != nil || authorized != authorizedOrigin || authorized != identity.Origin {
 		return errors.New("connect origin is not the authorized canonical origin")
 	}
-	if identity.Provider != agentprotocol.ProviderPi || validateProtocolResource(identity.Resource) != nil || !validDigest(identity.ContextDigest) {
+	if !identity.Provider.Valid() || validateProtocolResource(identity.Resource) != nil || !validDigest(identity.ContextDigest) {
 		return errors.New("invalid connect identity")
 	}
 	return nil
@@ -44,12 +44,38 @@ func ConnectIdentityToState(identity ConnectIdentity, authorizedOrigin string) (
 	if err := identity.Validate(authorizedOrigin); err != nil {
 		return agentstate.Identity{}, err
 	}
+	name, err := providerNameToDomain(identity.Provider)
+	if err != nil {
+		return agentstate.Identity{}, err
+	}
 	return agentstate.Identity{
 		Origin:       identity.Origin,
 		Kind:         agentstate.ResourceMarkdown,
 		CapabilityID: identity.Resource.ID,
-		Provider:     provider.NamePi,
+		Provider:     name,
 	}, nil
+}
+
+func providerNameToDomain(name agentprotocol.ProviderName) (provider.Name, error) {
+	switch name {
+	case agentprotocol.ProviderPi:
+		return provider.NamePi, nil
+	case agentprotocol.ProviderCodex:
+		return provider.NameCodex, nil
+	default:
+		return "", errors.New("invalid provider")
+	}
+}
+
+func providerNameFromDomain(name provider.Name) (agentprotocol.ProviderName, error) {
+	switch name {
+	case provider.NamePi:
+		return agentprotocol.ProviderPi, nil
+	case provider.NameCodex:
+		return agentprotocol.ProviderCodex, nil
+	default:
+		return "", errors.New("invalid provider")
+	}
 }
 
 // IdentityFromConnect adapts a protocol connect payload after binding the

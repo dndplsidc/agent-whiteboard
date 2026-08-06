@@ -116,4 +116,11 @@ func TestSessionHandleCapturesResourcesOnceForInvalidAndPartialCleanup(t *testin
 	})
 }
 
+func TestValidateProviderSessionRejectsProviderIdentityMismatch(t *testing.T) {
+	session := newHardeningSession("sessions/provider-mismatch")
+	require.Equal(t, provider.NamePi, session.native.Provider)
+	_, err := validateProviderSession(captureSession(session), nil, provider.NameCodex)
+	require.Error(t, err)
+}
+
 var _ provider.Session = (*countingSession)(nil)

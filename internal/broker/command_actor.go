@@ -6,7 +6,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 )
 
-func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, historyResults chan<- historyWorkerResult, archiveResults chan<- archiveWorkerResult, handoffResults chan<- handoffResult, request commandRequest) {
+func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, historyResults chan<- historyWorkerResult, archiveResults chan<- archiveWorkerResult, handoffResults chan<- handoffResult, interactionResults chan<- interactionWorkerResult, request commandRequest) {
 	if err := request.ctx.Err(); err != nil {
 		request.response <- commandResponse{err: err}
 		return
@@ -135,6 +135,14 @@ func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, t
 			actor.send(attachments, request.attachment, event)
 		}
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, "")
+	case agentprotocol.InteractionResponsePayload:
+		if request.command.Type != agentprotocol.CommandInteractionRespond {
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
+			return
+		}
+		if code := actor.commandInteractionRespond(interactionResults, request.command, payload); code != "" {
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
+		}
 	default:
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
 	}

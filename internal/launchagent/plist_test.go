@@ -15,6 +15,9 @@ func TestExactContractLiterals(t *testing.T) {
 	if PiExecutableEnvironment != "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE" {
 		t.Fatalf("Pi environment key = %q", PiExecutableEnvironment)
 	}
+	if CodexExecutableEnvironment != "AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE" {
+		t.Fatalf("Codex environment key = %q", CodexExecutableEnvironment)
+	}
 	if got := unsupportedGuidance("linux"); got != "managed agent daemon is unsupported on linux; run 'agent-whiteboard agent serve' in the foreground" {
 		t.Fatalf("Linux guidance = %q", got)
 	}
@@ -29,13 +32,17 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	home := t.TempDir()
 	executable := testRegularFile(t, filepath.Join(home, "bin & tools", "agent-whiteboard"), 0o700)
 	configuration := testRegularFile(t, filepath.Join(home, "config & selected.yaml"), 0o600)
-	provider := testRegularFile(t, filepath.Join(home, "providers", "pi & rpc"), 0o700)
+	piProvider := testRegularFile(t, filepath.Join(home, "providers", "pi & rpc"), 0o700)
+	codexProvider := testRegularFile(t, filepath.Join(home, "providers", "codex & rpc"), 0o700)
 	paths := pathsForHome(home)
 	config := Config{
-		Executable:         executable,
-		ConfigPath:         configuration,
-		Providers:          []ProviderDescriptor{testProviderDescriptor{name: "pi", executable: "pi"}},
-		ExecutableResolver: testExecutableResolver{paths: map[string]string{"pi": provider}},
+		Executable: executable,
+		ConfigPath: configuration,
+		Providers: []ProviderDescriptor{
+			testProviderDescriptor{name: ProviderPi, executable: ProviderPi},
+			testProviderDescriptor{name: ProviderCodex, executable: ProviderCodex},
+		},
+		ExecutableResolver: testExecutableResolver{paths: map[string]string{ProviderPi: piProvider, ProviderCodex: codexProvider}},
 	}
 
 	normalized, err := normalizeConfig(config)
@@ -68,7 +75,8 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	assertStringValue(t, parsed, "StandardOutPath", paths.StdoutLog)
 	assertStringValue(t, parsed, "StandardErrorPath", paths.StderrLog)
 	assertStringDictionary(t, parsed, "EnvironmentVariables", map[string]string{
-		"AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE": normalized.ProviderExecutables[ProviderPi],
+		PiExecutableEnvironment:    normalized.ProviderExecutables[ProviderPi],
+		CodexExecutableEnvironment: normalized.ProviderExecutables[ProviderCodex],
 	})
 
 	text := string(first)
@@ -288,6 +296,34 @@ func TestProviderResolverFoundMissingAndUntrustedResults(t *testing.T) {
 	resolverFailure.ExecutableResolver = testExecutableResolver{err: errors.New("resolver failed")}
 	if _, err := normalizeConfig(resolverFailure); err == nil || !strings.Contains(err.Error(), "resolver failed") {
 		t.Fatalf("resolver error = %v", err)
+	}
+}
+
+func TestProviderResolverResolvesPiAndCodexIndependently(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	piProvider := testRegularFile(t, filepath.Join(home, "bin", ProviderPi), 0o700)
+	base := Config{
+		Executable: testRegularFile(t, filepath.Join(home, "agent-whiteboard"), 0o700),
+		ConfigPath: filepath.Join(home, "missing-config.yaml"),
+		Providers: []ProviderDescriptor{
+			testProviderDescriptor{name: ProviderPi, executable: ProviderPi},
+			testProviderDescriptor{name: ProviderCodex, executable: ProviderCodex},
+		},
+		ExecutableResolver: testExecutableResolver{paths: map[string]string{ProviderPi: piProvider}},
+	}
+
+	normalized, err := normalizeConfig(base)
+	if err != nil {
+		t.Fatalf("normalize with missing default Codex: %v", err)
+	}
+	if _, exists := normalized.ProviderExecutables[ProviderCodex]; exists {
+		t.Fatalf("missing Codex executable recorded: %#v", normalized.ProviderExecutables)
+	}
+	resolvedPi, _ := filepath.EvalSymlinks(piProvider)
+	if normalized.ProviderExecutables[ProviderPi] != resolvedPi {
+		t.Fatalf("Pi executable = %q, want %q", normalized.ProviderExecutables[ProviderPi], resolvedPi)
 	}
 }
 
