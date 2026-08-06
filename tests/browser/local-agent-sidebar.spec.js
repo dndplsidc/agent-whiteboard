@@ -55,13 +55,12 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   expect(JSON.stringify(localAgentSidebar.brokerRequests)).not.toContain(creatorContext);
 
   await page.getByRole("button", { name: "Open Page agent" }).click();
-  await expect(page.locator(".agent-drawer-header")).toContainText("Content-only · Local Pi");
-  await expect(page.locator(".agent-drawer-header")).not.toContainText("Pi ready");
-  await expect(page.locator(".agent-status-bar")).toContainText("Pi ready");
-  await expect(page.locator(".agent-status-bar")).toContainText("Not connected");
+  await expect(page.locator(".agent-drawer-header")).toContainText("Pi ready");
+  await expect(page.locator(".agent-status-bar")).toHaveCount(0);
+  await expect(page.locator(".agent-provider-label")).toBeHidden();
   await expect(page.locator(".agent-consent")).toContainText("sends no page content");
   await expect(page.locator(".agent-consent-list")).toContainText("Complete Markdown and creator notes");
-  await expect(page.locator(".agent-context-disclosure")).toContainText("Full Markdown + creator notes");
+  await expect(page.locator(".agent-context-disclosure")).toContainText("Markdown + creator notes");
   await expect(page.locator(".agent-context-disclosure")).not.toContainText(/shared|uncertain/iu);
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
 
@@ -319,8 +318,9 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
   page,
   localAgentSidebar,
 }) => {
-  const markdown = "# Controlled response\n\nExact Markdown for context inspection.\n";
-  const creatorContext = "Exact creator context for inspection.\n";
+  await page.setViewportSize({ width: 390, height: 844 });
+  const markdown = `# Controlled response\n\n${Array.from({ length: 80 }, (_, index) => `Markdown line ${index + 1} for context inspection.`).join("\n")}\n`;
+  const creatorContext = `${Array.from({ length: 60 }, (_, index) => `Creator note ${index + 1} for context inspection.`).join("\n")}\n`;
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown, creatorContext });
   localAgentSidebar.setPhaseResponses(true);
   await connectSidebar(page);
@@ -354,18 +354,39 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
 
   localAgentSidebar.releaseResponsePhase("completion");
   await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+  const conversationHeaderBox = await page.locator(".agent-drawer-header").boundingBox();
   await page.getByRole("button", { name: "Open Page agent menu" }).click();
   await page.getByRole("menuitem", { name: "Inspect page context" }).click();
   await expect(page.locator(".agent-context")).toBeVisible();
+  const contextHeaderBox = await page.locator(".agent-drawer-header").boundingBox();
+  expect(Math.round(contextHeaderBox.height)).toBe(Math.round(conversationHeaderBox.height));
+  await expect(page.locator(".agent-drawer-header h2")).toHaveText("Page context");
+  await expect(page.getByLabel("Conversation provider")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Open Page agent menu" })).toBeHidden();
+  const contextCards = page.locator(".agent-context-card");
+  await expect(contextCards).toHaveCount(2);
+  await expect(contextCards.first()).toHaveAttribute("open", "");
+  await expect(contextCards.nth(1)).not.toHaveAttribute("open", "");
+  await contextCards.nth(1).locator("summary").click();
   const markdownContext = page.getByLabel("Page Markdown");
-  const creatorContextBlock = page.getByLabel("Creator context");
+  const creatorContextBlock = page.getByLabel("Creator notes");
   await expect(markdownContext).toHaveText(markdown);
   await expect(creatorContextBlock).toHaveText(creatorContext);
+  await expect(markdownContext).toHaveCSS("overflow-y", "scroll");
+  await expect(creatorContextBlock).toHaveCSS("overflow-y", "scroll");
+  await expect(markdownContext).toHaveCSS("touch-action", "pan-y");
+  await expect(creatorContextBlock).toHaveCSS("touch-action", "pan-y");
   const markdownContextBox = await markdownContext.boundingBox();
   const creatorContextBox = await creatorContextBlock.boundingBox();
-  expect(markdownContextBox.height).toBeGreaterThanOrEqual(224);
-  expect(creatorContextBox.height).toBeGreaterThanOrEqual(224);
+  expect(markdownContextBox.height).toBeGreaterThanOrEqual(288);
+  expect(creatorContextBox.height).toBeGreaterThanOrEqual(288);
   expect(Math.abs(markdownContextBox.height - creatorContextBox.height)).toBeLessThanOrEqual(1);
+  expect(await markdownContext.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  expect(await creatorContextBlock.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await markdownContext.evaluate((element) => { element.scrollTop = 240; });
+  await creatorContextBlock.evaluate((element) => { element.scrollTop = 240; });
+  expect(await markdownContext.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  expect(await creatorContextBlock.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect(page.locator(".agent-timeline")).toBeHidden();
   await page.getByRole("button", { name: "Back to conversation" }).click();
 
@@ -432,7 +453,7 @@ test("switches providers silently and isolates active Pi and Codex conversations
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
 
   await page.getByLabel("Conversation provider").selectOption("codex");
-  await expect(page.locator(".agent-drawer-header")).toContainText("Configured access · Local Codex");
+  await expect(page.locator(".agent-drawer-header")).toContainText("Codex ready");
   await expect(page.getByRole("button", { name: "Connect to Codex", exact: true })).toBeVisible();
   expect(parsedCommands(localAgentSidebar.brokerRequests)).toEqual([]);
   expect(JSON.stringify(localAgentSidebar.brokerRequests)).not.toContain(markdown);
@@ -448,7 +469,7 @@ test("switches providers silently and isolates active Pi and Codex conversations
   const commandCountBeforeSwitch = parsedCommands(localAgentSidebar.brokerRequests).length;
   await page.getByLabel("Conversation provider").selectOption("pi");
   await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
-  await expect(page.locator(".agent-provider-label")).toHaveText("Not connected");
+  await expect(page.locator(".agent-provider-label")).toBeHidden();
   expect(parsedCommands(localAgentSidebar.brokerRequests)).toHaveLength(commandCountBeforeSwitch);
   await connectSidebar(page, "pi");
   await page.getByLabel("Message Pi about this whiteboard").fill("Answer only in the Pi conversation.");
@@ -699,7 +720,7 @@ test("replays Codex interaction activity after reconnect and isolates an unavail
   await page.getByRole("menuitem", { name: "Reconnect" }).click();
   await expect.poll(() => localAgentSidebar.brokerRequests.some((request) => request.status === 503 && request.url === "/api/v1/agent/connect")).toBe(true);
   await expect(page.locator(".agent-live-status")).toHaveText("Codex ready");
-  await expect(page.locator(".agent-provider-label")).toHaveText("Not connected");
+  await expect(page.locator(".agent-provider-label")).toBeHidden();
   await page.getByLabel("Conversation provider").selectOption("pi");
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");

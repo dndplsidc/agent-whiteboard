@@ -778,7 +778,7 @@ describe("local agent rendering and controls", () => {
     expect(instances.map((item) => item.provider)).toEqual(["pi", "codex"]);
     expect(instances[0].close).not.toHaveBeenCalled();
     expect(instances.every((item) => item.send.mock.calls.length === 0 && item.connect.mock.calls.length === 0)).toBe(true);
-    expect(drawer.elements.drawer.textContent).toContain("Configured access · Local Codex");
+    expect(drawer.elements.drawer.querySelector(".agent-drawer-header")?.textContent).toContain("Codex ready");
     expect(drawer.elements.setup.textContent).toContain("current Codex tools, approvals, sandbox, and configuration");
     expect(localStorage.getItem(AGENT_PROVIDER_STORAGE_KEY)).toBe("codex");
 
@@ -922,7 +922,7 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
-  test("separates identity, concise status, and offline, ready, and connected bodies", async () => {
+  test("keeps one compact header and progressively discloses context and connection details", async () => {
     let options;
     const transport = {
       clientID: agentIDs.message,
@@ -940,31 +940,42 @@ describe("local agent rendering and controls", () => {
     });
 
     const header = drawer.elements.drawer.querySelector(".agent-drawer-header");
-    const statusBar = drawer.elements.drawer.querySelector(".agent-status-bar");
+    const liveStatus = drawer.elements.drawer.querySelector(".agent-live-status");
     const setup = drawer.elements.setup;
-    await vi.waitFor(() => expect(statusBar?.textContent).toContain("Broker unavailable"));
+    await vi.waitFor(() => expect(liveStatus?.textContent).toContain("Broker unavailable"));
+    expect(drawer.elements.drawer.querySelector(".agent-status-bar")).toBeNull();
     expect(header?.textContent).toContain("Page agent");
-    expect(header?.textContent).toContain("Content-only · Local Pi");
-    expect(header?.textContent).not.toContain("Broker unavailable");
-    expect(statusBar?.textContent).toContain("Port 8568");
+    expect(header?.textContent).toContain("Broker unavailable");
+    expect(header?.textContent).not.toContain("Port 8568");
     expect(setup.querySelector("h3")?.textContent).toBe("Pi isn’t available on this device");
     expect(setup.textContent).toContain("No page content has been shared");
     const contextDisclosure = setup.querySelector(".agent-context-disclosure");
-    expect(contextDisclosure?.textContent).toContain("Full Markdown + creator notes");
+    expect(contextDisclosure?.tagName).toBe("BUTTON");
+    expect(contextDisclosure?.textContent).toContain("Markdown + creator notes");
+    expect(contextDisclosure?.textContent).not.toContain("Review");
     expect(contextDisclosure?.textContent).not.toMatch(/shared|uncertain/iu);
     expect(drawer.elements.connectButton.hidden).toBe(true);
-    contextDisclosure.querySelector("button").click();
+    contextDisclosure.click();
     expect(drawer.elements.contextDetails.hidden).toBe(false);
+    expect(header?.querySelector("h2")?.textContent).toBe("Page context");
+    expect(drawer.elements.providerSelect.hidden).toBe(true);
+    expect(drawer.elements.overflowButton.hidden).toBe(true);
+    expect(drawer.elements.close.hidden).toBe(false);
     expect(drawer.elements.contextDetails.textContent).not.toContain("Digest");
     expect(drawer.elements.contextDetails.textContent).not.toContain("initial or replacement");
+    expect(drawer.elements.contextDetails.textContent).toContain("What the agent receives");
     expect(drawer.elements.contextDetails.textContent).toContain("Page Markdown");
-    expect(drawer.elements.contextDetails.textContent).toContain("Creator context");
+    expect(drawer.elements.contextDetails.textContent).toContain("Creator notes");
+    expect(drawer.elements.contextDetails.querySelectorAll(".agent-context-card")).toHaveLength(2);
+    expect([...drawer.elements.contextDetails.querySelectorAll("pre")].every((item) => item.tabIndex === 0)).toBe(true);
     expect(document.activeElement).toBe(drawer.elements.backButton);
     drawer.elements.backButton.click();
+    expect(header?.querySelector("h2")?.textContent).toBe("Page agent");
+    expect(drawer.elements.providerSelect.hidden).toBe(false);
+    expect(drawer.elements.overflowButton.hidden).toBe(false);
 
     await drawer.probe();
-    expect(statusBar?.textContent).toContain("Pi ready");
-    expect(statusBar?.textContent).toContain("Not connected");
+    expect(liveStatus?.textContent).toContain("Pi ready");
     expect(setup.querySelector("h3")?.textContent).toBe("Ready to connect");
     expect(setup.textContent).toContain("Complete Markdown and creator notes on the first message");
     expect(drawer.elements.connectButton.textContent).toBe("Connect to Pi");
@@ -972,8 +983,8 @@ describe("local agent rendering and controls", () => {
 
     options.onEvent(snapshotEvent());
     options.onEvent(agentEvent("provider", { provider: "pi", state: "ready", model: "fixture-model" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
-    expect(statusBar?.textContent).toContain("Connected");
-    expect(statusBar?.textContent).toContain("fixture-model");
+    expect(header?.textContent).toContain("Connected");
+    expect(header?.textContent).toContain("fixture-model");
     expect(setup.hidden).toBe(true);
     expect(drawer.elements.timeline.hidden).toBe(false);
     drawer.destroy();

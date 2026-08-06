@@ -1686,9 +1686,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   headerCopy.className = "agent-header-copy";
   const heading = doc.createElement("h2");
   heading.textContent = "Page agent";
-  const headerSubtitle = doc.createElement("p");
+  const headerSubtitle = doc.createElement("div");
   headerSubtitle.className = "agent-header-subtitle";
-  headerSubtitle.textContent = "Content-only · Local Pi";
   const providerSelect = doc.createElement("select");
   providerSelect.className = "agent-provider-select";
   providerSelect.setAttribute("aria-label", "Conversation provider");
@@ -1702,10 +1701,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const backButton = doc.createElement("button");
   backButton.type = "button";
   backButton.className = "agent-back-button";
-  backButton.textContent = "Back to conversation";
+  backButton.setAttribute("aria-label", "Back to conversation");
+  backButton.textContent = "‹";
   backButton.hidden = true;
-  headerCopy.append(heading, headerSubtitle, backButton);
-  headerIdentity.append(agentGlyph, headerCopy);
+  headerCopy.append(heading, headerSubtitle);
+  headerIdentity.append(agentGlyph, backButton, headerCopy);
   const headerActions = doc.createElement("div");
   headerActions.className = "agent-header-actions";
   const close = doc.createElement("button");
@@ -1714,8 +1714,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   close.setAttribute("aria-label", "Close local agent");
   close.textContent = "×";
 
-  const statusBar = doc.createElement("div");
-  statusBar.className = "agent-status-bar";
   const statusCopy = doc.createElement("div");
   statusCopy.className = "agent-status-copy";
   const headerStatusDot = doc.createElement("span");
@@ -1728,9 +1726,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   liveStatus.textContent = "Checking local broker…";
   const providerLabel = doc.createElement("span");
   providerLabel.className = "agent-provider-label";
-  providerLabel.textContent = `Port ${port}`;
   statusCopy.append(headerStatusDot, liveStatus);
-  statusBar.append(statusCopy, providerLabel);
+  headerSubtitle.append(statusCopy, providerLabel);
 
   const setup = doc.createElement("section");
   setup.className = "agent-setup";
@@ -1747,7 +1744,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   settings.className = "agent-settings";
   settings.hidden = true;
   const settingsHeading = doc.createElement("h3");
-  settingsHeading.textContent = "Connection settings";
+  settingsHeading.textContent = "Local connection";
   const portLabel = doc.createElement("label");
   portLabel.textContent = "Broker port";
   const portInput = doc.createElement("input");
@@ -1789,18 +1786,24 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   setupButtons.className = "agent-setup-buttons";
   setupButtons.append(setupCheckButton, directSettingsButton, connectButton);
   setupBody.append(setupIcon, setupHeading, consentDisclosure, consentList, setupButtons);
-  const contextDisclosure = doc.createElement("div");
+  const contextDisclosure = doc.createElement("button");
+  contextDisclosure.type = "button";
   contextDisclosure.className = "agent-context-disclosure";
+  const contextDisclosureIcon = doc.createElement("span");
+  contextDisclosureIcon.className = "agent-context-disclosure-icon";
+  contextDisclosureIcon.setAttribute("aria-hidden", "true");
+  contextDisclosureIcon.textContent = "≡";
   const contextDisclosureCopy = doc.createElement("div");
   const contextDisclosureHeading = doc.createElement("strong");
   contextDisclosureHeading.textContent = "Page context";
   const contextDisclosureDescription = doc.createElement("span");
-  contextDisclosureDescription.textContent = "Full Markdown + creator notes";
+  contextDisclosureDescription.textContent = "Markdown + creator notes";
   contextDisclosureCopy.append(contextDisclosureHeading, contextDisclosureDescription);
-  const reviewContextButton = doc.createElement("button");
-  reviewContextButton.type = "button";
-  reviewContextButton.textContent = "Review";
-  contextDisclosure.append(contextDisclosureCopy, reviewContextButton);
+  const contextDisclosureChevron = doc.createElement("span");
+  contextDisclosureChevron.className = "agent-context-disclosure-chevron";
+  contextDisclosureChevron.setAttribute("aria-hidden", "true");
+  contextDisclosureChevron.textContent = "›";
+  contextDisclosure.append(contextDisclosureIcon, contextDisclosureCopy, contextDisclosureChevron);
   setup.append(setupBody, contextDisclosure);
   settings.append(settingsHeading, portLabel, guidance, checkButton);
 
@@ -1848,14 +1851,41 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   headerActions.append(providerSelect, close, overflow);
   header.append(headerIdentity, headerActions);
 
-  const contextDetails = doc.createElement("details");
+  const contextDetails = doc.createElement("section");
   contextDetails.className = "agent-context";
-  const contextSummary = doc.createElement("summary"); contextSummary.textContent = "Page context";
-  const markdownLabel = doc.createElement("h3"); markdownLabel.textContent = "Page Markdown";
-  const markdownContext = doc.createElement("pre"); markdownContext.textContent = payload.markdown; markdownContext.setAttribute("aria-label", "Page Markdown");
-  const creatorLabel = doc.createElement("h3"); creatorLabel.textContent = "Creator context";
-  const creatorContext = doc.createElement("pre"); creatorContext.textContent = payload.context; creatorContext.setAttribute("aria-label", "Creator context");
-  contextDetails.append(contextSummary, markdownLabel, markdownContext, creatorLabel, creatorContext);
+  const contextIntro = doc.createElement("div");
+  contextIntro.className = "agent-context-intro";
+  const contextIntroHeading = doc.createElement("h3");
+  contextIntroHeading.textContent = "What the agent receives";
+  const contextIntroCopy = doc.createElement("p");
+  contextIntroCopy.textContent = "Review the page material. Expand only the part you need.";
+  contextIntro.append(contextIntroHeading, contextIntroCopy);
+  const contextCard = ({ title, description, content, label, open = false }) => {
+    const details = doc.createElement("details");
+    details.className = "agent-context-card";
+    details.open = open;
+    const summary = doc.createElement("summary");
+    const summaryCopy = doc.createElement("span");
+    const summaryTitle = doc.createElement("strong");
+    summaryTitle.textContent = title;
+    const summaryDescription = doc.createElement("span");
+    summaryDescription.textContent = description;
+    summaryCopy.append(summaryTitle, summaryDescription);
+    summary.append(summaryCopy);
+    const preview = doc.createElement("pre");
+    preview.className = "agent-context-content";
+    preview.textContent = content;
+    preview.tabIndex = 0;
+    preview.setAttribute("aria-label", label);
+    details.append(summary, preview);
+    return details;
+  };
+  const markdownCard = contextCard({ title: "Page Markdown", description: "Original page content", content: payload.markdown, label: "Page Markdown", open: true });
+  const creatorCard = contextCard({ title: "Creator notes", description: "Notes supplied by the creator", content: payload.context, label: "Creator notes" });
+  const contextPrivacy = doc.createElement("p");
+  contextPrivacy.className = "agent-context-privacy";
+  contextPrivacy.textContent = "Context is included with the next message that needs it—not when you simply open this panel.";
+  contextDetails.append(contextIntro, markdownCard, creatorCard, contextPrivacy);
 
   const timeline = doc.createElement("section");
   timeline.className = "agent-timeline";
@@ -1916,7 +1946,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   separator.setAttribute("aria-valuenow", String(effectiveWidth));
   separator.setAttribute("aria-label", "Resize Page agent pane");
 
-  drawer.append(header, statusBar, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
+  drawer.append(header, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
   doc.body.append(overlay, drawer, toggle);
 
   function buildController(provider) {
@@ -2182,7 +2212,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     saveController();
     const providerName = selectedProvider === "codex" ? "Codex" : "Pi";
     const connectionState = controller.connecting ? "connecting" : brokerState;
-    headerSubtitle.textContent = selectedProvider === "codex" ? "Configured access · Local Codex" : "Content-only · Local Pi";
     agentGlyph.textContent = providerName[0];
     connectButton.textContent = `Connect to ${providerName}`;
     message.setAttribute("aria-label", `Message ${providerName} about this whiteboard`);
@@ -2190,7 +2219,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     accessListItem.textContent = selectedProvider === "codex"
       ? "Uses your current Codex tools, approvals, sandbox, and configuration"
       : "Pi has no tools, files, network, or project access";
-    statusBar.removeAttribute("title");
+    headerSubtitle.removeAttribute("title");
     if (!timeline.hidden) {
       timelineScrollTop = timeline.scrollTop;
       followTimeline = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
@@ -2202,7 +2231,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         : connectionState === "connecting" ? "connecting" : "unavailable";
     statusDot.dataset.state = statusState;
     headerStatusDot.dataset.state = statusState;
-    statusBar.dataset.state = statusState;
+    headerSubtitle.dataset.state = statusState;
     if (state.connected) {
       providerLabel.textContent = state.provider.model || providerName;
       providerLabel.hidden = false;
@@ -2212,16 +2241,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           ? "Sending"
           : "Connected";
     } else {
-      providerLabel.hidden = false;
+      providerLabel.hidden = true;
       if (connectionState === "checking") {
         liveStatus.textContent = "Checking local broker…";
-        providerLabel.textContent = `Port ${port}`;
       } else if (connectionState === "connecting") {
         liveStatus.textContent = "Connecting…";
-        providerLabel.textContent = `Local ${providerName}`;
       } else if (connectionState === "ready") {
         liveStatus.textContent = `${providerName} ready`;
-        providerLabel.textContent = "Not connected";
       } else {
         const shortStatus = {
           wrong_port: "Broker not found",
@@ -2232,7 +2258,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           broker_unavailable: "Broker unavailable",
         };
         liveStatus.textContent = shortStatus[brokerCode] ?? shortStatus.broker_unavailable;
-        providerLabel.textContent = `Port ${port}`;
       }
     }
     setup.hidden = state.connected || activeView !== "conversation";
@@ -2260,8 +2285,15 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     timeline.hidden = !state.connected || activeView !== "conversation";
     queue.hidden = !state.connected || activeView !== "conversation" || state.queue.length === 0;
     actions.hidden = true;
-    backButton.hidden = activeView === "conversation";
-    headerSubtitle.hidden = activeView !== "conversation";
+    const alternateView = activeView !== "conversation";
+    const viewTitles = { settings: "Connection settings", context: "Page context", archives: "Archives" };
+    heading.textContent = viewTitles[activeView] ?? "Page agent";
+    agentGlyph.hidden = alternateView;
+    backButton.hidden = !alternateView;
+    headerSubtitle.hidden = alternateView;
+    providerSelect.hidden = alternateView;
+    overflow.hidden = alternateView;
+    overflowButton.hidden = alternateView;
     contextDetails.hidden = activeView !== "context";
     contextDetails.classList.toggle("agent-view-hidden", activeView !== "context");
     contextDetails.setAttribute("aria-hidden", String(activeView !== "context"));
@@ -2416,7 +2448,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   function showTransientStatus(summary, detail, explanation) {
     liveStatus.textContent = summary;
     providerLabel.textContent = detail;
-    if (explanation) statusBar.title = explanation;
+    providerLabel.hidden = detail.length === 0;
+    if (explanation) headerSubtitle.title = explanation;
   }
 
   async function sendCommand(type, commandPayload, { handoff = false, freshArchivePage = false } = {}) {
@@ -2532,7 +2565,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   showView = (view, { focus = true } = {}) => {
     const previousView = activeView;
     activeView = ["conversation", "settings", "context", "archives"].includes(view) ? view : "conversation";
-    if (activeView === "context") contextDetails.open = true;
+    if (activeView === "context") markdownCard.open = true;
     if (activeView === "archives" && previousView !== "archives" && state.connected) void sendCommand("archive_list", { limit: 50 }, { freshArchivePage: true });
     render();
     if (!focus) return;
@@ -2542,7 +2575,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   };
   backButton.addEventListener("click", () => showView("conversation"));
   contextChip.addEventListener("click", () => showView("context"));
-  reviewContextButton.addEventListener("click", () => showView("context"));
+  contextDisclosure.addEventListener("click", () => showView("context"));
   directSettingsButton.addEventListener("click", () => showView("settings"));
   queueChip.addEventListener("click", () => queue.querySelector("textarea")?.focus());
   providerSelect.addEventListener("change", () => {
