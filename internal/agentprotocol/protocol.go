@@ -52,7 +52,14 @@ var (
 
 type ProviderName string
 
-const ProviderPi ProviderName = "pi"
+const (
+	ProviderPi    ProviderName = "pi"
+	ProviderCodex ProviderName = "codex"
+)
+
+func (name ProviderName) Valid() bool { return name == ProviderPi || name == ProviderCodex }
+
+func AllProviderNames() []ProviderName { return []ProviderName{ProviderPi, ProviderCodex} }
 
 type ResourceKind string
 
@@ -61,18 +68,19 @@ const ResourceMarkdown ResourceKind = "markdown"
 type CommandType string
 
 const (
-	CommandConnect        CommandType = "connect"
-	CommandSubmit         CommandType = "submit"
-	CommandQueueEdit      CommandType = "queue_edit"
-	CommandQueueRemove    CommandType = "queue_remove"
-	CommandInterrupt      CommandType = "interrupt"
-	CommandRetry          CommandType = "retry"
-	CommandNew            CommandType = "new"
-	CommandArchiveList    CommandType = "archive_list"
-	CommandArchiveRestore CommandType = "archive_restore"
-	CommandArchiveDelete  CommandType = "archive_delete"
-	CommandHistoryPage    CommandType = "history_page"
-	CommandResync         CommandType = "resync"
+	CommandConnect            CommandType = "connect"
+	CommandSubmit             CommandType = "submit"
+	CommandQueueEdit          CommandType = "queue_edit"
+	CommandQueueRemove        CommandType = "queue_remove"
+	CommandInterrupt          CommandType = "interrupt"
+	CommandRetry              CommandType = "retry"
+	CommandNew                CommandType = "new"
+	CommandArchiveList        CommandType = "archive_list"
+	CommandArchiveRestore     CommandType = "archive_restore"
+	CommandArchiveDelete      CommandType = "archive_delete"
+	CommandHistoryPage        CommandType = "history_page"
+	CommandResync             CommandType = "resync"
+	CommandInteractionRespond CommandType = "interaction_respond"
 )
 
 type ContextRevision string
@@ -235,6 +243,7 @@ func DecodeCommand(data []byte) (Command, error) {
 		"conversation_id":                     true,
 		"payload.resource.expires_at":         true,
 		"payload.context.resource.expires_at": true,
+		"payload.answers":                     true,
 	}
 	if err := inspectJSON(data, nullable); err != nil {
 		return Command{}, err
@@ -285,6 +294,8 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 		target, required = &ArchiveReferencePayload{}, []string{"archive_id"}
 	case CommandResync:
 		target = &ResyncPayload{}
+	case CommandInteractionRespond:
+		target, required = &InteractionResponsePayload{}, []string{"request_id", "kind", "option_id", "answers"}
 	default:
 		return nil, invalid(nil)
 	}
@@ -313,6 +324,8 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 		return *value, nil
 	case *ResyncPayload:
 		return *value, nil
+	case *InteractionResponsePayload:
+		return *value, nil
 	default:
 		panic("unreachable command payload")
 	}
@@ -331,7 +344,7 @@ func validateCommand(command Command) error {
 	}
 	switch payload := command.Payload.(type) {
 	case ConnectPayload:
-		if command.Type != CommandConnect || payload.Provider != ProviderPi || validateResource(payload.Resource) != nil || !validDigest(payload.ContextDigest) || (payload.ReplayAfter != "" && !validID(payload.ReplayAfter)) {
+		if command.Type != CommandConnect || !payload.Provider.Valid() || validateResource(payload.Resource) != nil || !validDigest(payload.ContextDigest) || (payload.ReplayAfter != "" && !validID(payload.ReplayAfter)) {
 			return invalid(nil)
 		}
 	case SubmitPayload:
@@ -373,6 +386,10 @@ func validateCommand(command Command) error {
 		}
 	case ResyncPayload:
 		if command.Type != CommandResync || (payload.AfterEventID != "" && !validID(payload.AfterEventID)) {
+			return invalid(nil)
+		}
+	case InteractionResponsePayload:
+		if command.Type != CommandInteractionRespond || payload.validate() != nil {
 			return invalid(nil)
 		}
 	default:

@@ -1,14 +1,17 @@
 # Optional hosted-provider smoke test
 
-This procedure is manual and optional. It is excluded from CI because CI must not use public networks, hosted services, or credentials.
+This procedure is manual and optional. It uses the operator's native Pi and Codex configuration and is excluded from CI because CI must not use public networks, hosted services, or credentials.
 
-1. Use a disposable, non-sensitive Markdown fixture and creator context. Do not use production capability URLs, private source, personal data, or secrets.
-2. Authenticate with Pi itself using its provider-native login flow. Do not pass API keys or tokens through agent-whiteboard flags, environment variables, prompts, or logs.
+1. Use disposable low-cost provider accounts and a non-sensitive Markdown fixture and creator context. Do not use production capability URLs, private source, personal data, or secrets. Use a restrictive Codex approval policy and sandbox suitable for untrusted whiteboard input.
+2. Authenticate with Pi and Codex through each provider's native CLI flow. Do not pass API keys or tokens through Agent Whiteboard flags, environment variables, prompts, or logs.
 3. Enable `viewer.local_agent.enabled`, add the exact HTTPS publishing origin with `agent-whiteboard agent trust add`, and start the publishing server and `agent-whiteboard agent serve`.
-4. In current Chrome, open the Markdown capability, grant Local Network Access if prompted, inspect the Page context disclosure, and select **Connect to Pi**. Confirm that connecting alone produces no hosted model request.
-5. Send one distinctive, non-sensitive reader message. Confirm that the response streams in the drawer, Pi reports the intended model, and the provider receives one turn containing the complete Markdown/context envelope and reader message.
-6. Reload and reconnect. Send a continuation and confirm that the page context is not resent when the revision is unchanged. Interrupt a separate test turn and confirm it is not automatically replayed.
-7. Exercise New, archive restore, and archive deletion only with disposable sessions. Confirm deletion before removing any local test state.
-8. Stop the broker, delete the disposable whiteboard and local test sessions, and remove the test origin from the trust list if it is no longer needed.
+4. In current Chrome, open the Markdown capability, grant Local Network Access if prompted, inspect the Page context disclosure, and switch between Pi and Codex before connecting. Confirm that selection alone produces no hosted request and sends no page content.
+5. Select Pi, connect, and send one distinctive, non-sensitive reader message. Confirm that the response streams in the drawer, Pi reports the intended model, and the provider receives one turn containing the complete Markdown/context envelope and reader message.
+6. Select Codex and confirm Pi's transcript remains intact while Codex starts with its own conversation and archives. Connect and send a different non-sensitive message. Confirm Codex receives the complete canonical envelope as user-message content and displays its resolved model read-only.
+7. If the effective Codex configuration makes a harmless command, file change, permission request, or MCP elicitation available, exercise one request without using sensitive data. Confirm bounded tool activity appears, the interactive response reaches App Server, and a second attached tab becomes read-only after the first valid response wins. Do not expect a Page Agent prompt when the effective approval policy does not request one.
+8. Do not test `request_user_input` as part of this stable smoke test. It is an experimental App Server API and Agent Whiteboard leaves `experimentalApi` disabled.
+9. Reload and reconnect each provider. Send a continuation and confirm that unchanged page context is not resent. Interrupt a separate test turn and confirm it is not automatically replayed. A Codex App Server failure may interrupt every active Codex turn, but Pi remains independently available.
+10. Exercise New, archive restore, and archive deletion for each provider only with disposable sessions. Confirm that archives remain provider-specific and verify deletion before removing local test state.
+11. Stop the broker, delete the disposable whiteboard and local test sessions, and remove the test origin from the trust list if it is no longer needed.
 
-Do not capture provider request bodies, auth files, transcripts, capability IDs, or model output in shared logs or bug reports. Record only sanitized pass/fail observations and version information.
+Do not capture provider request bodies, auth files, transcripts, capability IDs, model output, tool details, or approval payloads in shared logs or bug reports. Record only sanitized pass/fail observations and version information. This smoke test does not establish a content-only Codex boundary: tool allowlists, per-whiteboard filesystem roots, and a stronger cross-agent sandbox are deferred.

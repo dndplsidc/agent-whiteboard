@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,10 @@ type turnSession struct {
 	historyCalls           atomic.Int32
 	submitted              chan provider.TurnRequest
 	interrupted            chan provider.AcceptedTurn
+	responded              chan provider.InteractionResponse
+	respondGate            chan struct{}
+	respondErr             error
+	cancelled              chan string
 }
 
 func newTurnSession(ref string) *turnSession {
@@ -47,6 +52,8 @@ func newTurnSession(ref string) *turnSession {
 		preflightResult:  provider.PreflightResult{ResolvedModel: "model", EstimatedInputTokens: 10, EffectiveCapacityTokens: 100, SafetyMarginTokens: 10},
 		submitted:        make(chan provider.TurnRequest, 32),
 		interrupted:      make(chan provider.AcceptedTurn, 8),
+		responded:        make(chan provider.InteractionResponse, 8),
+		cancelled:        make(chan string, 8),
 	}
 }
 func (session *turnSession) enterProviderCall() func() {
@@ -173,6 +180,488 @@ func (session *turnSession) Interrupt(ctx context.Context, accepted provider.Acc
 		}
 	}
 	return err
+}
+
+func (session *turnSession) Respond(ctx context.Context, response provider.InteractionResponse) error {
+	if response.Validate() != nil {
+		return errors.New("invalid interaction response")
+	}
+	select {
+	case session.responded <- response:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	session.mu.Lock()
+	gate := session.respondGate
+	session.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	session.mu.Lock()
+	err := session.respondErr
+	session.mu.Unlock()
+	return err
+}
+
+func (session *turnSession) CancelInteraction(ctx context.Context, requestID string) error {
+	select {
+	case session.cancelled <- requestID:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestInteractiveRequestFirstResponseWinsAcrossAttachments(t *testing.T) {
+	broker, _, session, first, firstClientID, identity, resource, page := turnFixture(t, 7050)
+	defer broker.Close(context.Background())
+	secondClientID := sequenceID(7051)
+	connected, err := broker.Connect(context.Background(), identity.Origin, observationConnect(secondClientID, identity.CapabilityID, page.Digest, resource, ""))
+	require.NoError(t, err)
+	second := connected.(*Connection)
+	defer second.Close(context.Background())
+	require.Equal(t, agentprotocol.EventSnapshot, receiveLifecycle(t, second.Events()).Type)
+
+	conversationID := first.ConversationID()
+	turnID := sequenceID(7052)
+	submit := submitCommand(sequenceID(7053), firstClientID, conversationID, turnID, sequenceID(7054), "run the tests", &page)
+	result, err := first.Command(context.Background(), submit)
+	require.NoError(t, err)
+	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
+	require.Equal(t, turnID, receiveLifecycle(t, session.submitted).TurnID)
+	drainEvents(t, first.Events(), 3)
+	drainEvents(t, second.Events(), 2)
+
+	requestID := sequenceID(7055)
+	nativeRequest := provider.InteractionRequest{
+		ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval, Title: "Approve command", Summary: "Run tests?",
+		Command: "go test ./internal/codex", WorkingDirectory: "/workspace",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Allow once", Description: "Run it."}, {ID: "decline", Label: "Decline", Description: "Skip it."}},
+	}
+	session.events <- provider.NewInteractionRequestEvent(nativeRequest)
+	for _, connection := range []*Connection{first, second} {
+		event := receiveLifecycle(t, connection.Events())
+		require.Equal(t, agentprotocol.EventInteractionRequest, event.Type)
+		require.Equal(t, requestID, event.Payload.(agentprotocol.InteractionRequestPayload).RequestID)
+	}
+
+	gate := make(chan struct{})
+	session.mu.Lock()
+	session.respondGate = gate
+	session.mu.Unlock()
+	firstCommand := interactionResponseCommand(sequenceID(7056), firstClientID, conversationID, requestID, agentprotocol.InteractionCommandApproval, "accept")
+	firstResult := make(chan agentprotocol.Event, 1)
+	firstError := make(chan error, 1)
+	go func() {
+		event, commandErr := first.Command(context.Background(), firstCommand)
+		firstResult <- event
+		firstError <- commandErr
+	}()
+	require.Equal(t, requestID, receiveLifecycle(t, session.responded).RequestID)
+
+	secondCommand := interactionResponseCommand(sequenceID(7057), secondClientID, conversationID, requestID, agentprotocol.InteractionCommandApproval, "decline")
+	secondResult, err := second.Command(context.Background(), secondCommand)
+	require.NoError(t, err)
+	requireCommandResult(t, secondResult, agentprotocol.CommandRejected, agentprotocol.ErrorInvalidState)
+	require.Equal(t, secondResult, receiveLifecycle(t, second.Events()))
+
+	close(gate)
+	require.NoError(t, <-firstError)
+	requireCommandResult(t, <-firstResult, agentprotocol.CommandSucceeded, "")
+	for _, connection := range []*Connection{first, second} {
+		resolved := receiveLifecycle(t, connection.Events())
+		require.Equal(t, agentprotocol.EventInteractionResolved, resolved.Type)
+		require.Equal(t, "accept", resolved.Payload.(agentprotocol.InteractionResolvedPayload).OptionID)
+	}
+	require.Equal(t, agentprotocol.EventCommandResult, receiveLifecycle(t, first.Events()).Type)
+	select {
+	case duplicate := <-session.responded:
+		t.Fatalf("unexpected duplicate response: %#v", duplicate)
+	default:
+	}
+}
+
+func TestTerminalTurnExpiresPendingInteraction(t *testing.T) {
+	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7060)
+	defer broker.Close(context.Background())
+	conversationID := connection.ConversationID()
+	turnID := sequenceID(7061)
+	submit := submitCommand(sequenceID(7062), clientID, conversationID, turnID, sequenceID(7063), "run the tests", &page)
+	result, err := connection.Command(context.Background(), submit)
+	require.NoError(t, err)
+	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
+	require.Equal(t, turnID, receiveLifecycle(t, session.submitted).TurnID)
+	drainEvents(t, connection.Events(), 3)
+
+	requestID := sequenceID(7064)
+	request := provider.InteractionRequest{
+		ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval,
+		Title: "Approve command", Summary: "Run tests?", Command: "go test ./...", WorkingDirectory: "/workspace",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Allow once", Description: "Run it."}, {ID: "decline", Label: "Decline", Description: "Skip it."}},
+	}
+	session.events <- provider.NewInteractionRequestEvent(request)
+	require.Equal(t, agentprotocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+
+	session.events <- provider.NewCompletionEvent(turnID)
+	resolved := receiveLifecycle(t, connection.Events())
+	require.Equal(t, agentprotocol.EventInteractionResolved, resolved.Type)
+	require.Equal(t, requestID, resolved.Payload.(agentprotocol.InteractionResolvedPayload).RequestID)
+	require.Empty(t, resolved.Payload.(agentprotocol.InteractionResolvedPayload).OptionID)
+	require.Equal(t, agentprotocol.EventCompletion, receiveLifecycle(t, connection.Events()).Type)
+	require.Equal(t, agentprotocol.LifecycleReady, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
+
+	response := interactionResponseCommand(sequenceID(7065), clientID, conversationID, requestID, agentprotocol.InteractionCommandApproval, "accept")
+	rejected, err := connection.Command(context.Background(), response)
+	require.NoError(t, err)
+	requireCommandResult(t, rejected, agentprotocol.CommandRejected, agentprotocol.ErrorInvalidState)
+	require.Equal(t, rejected, receiveLifecycle(t, connection.Events()))
+	select {
+	case unexpected := <-session.responded:
+		t.Fatalf("terminal interaction reached provider: %#v", unexpected)
+	default:
+	}
+}
+
+func TestProviderResolutionConsumesPendingInteractionAndIgnoresStaleDuplicate(t *testing.T) {
+	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7090)
+	defer broker.Close(context.Background())
+	conversationID := connection.ConversationID()
+	turnID := sequenceID(7091)
+	submit := submitCommand(sequenceID(7092), clientID, conversationID, turnID, sequenceID(7093), "run the tests", &page)
+	result, err := connection.Command(context.Background(), submit)
+	require.NoError(t, err)
+	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
+	require.Equal(t, turnID, receiveLifecycle(t, session.submitted).TurnID)
+	drainEvents(t, connection.Events(), 3)
+
+	requestID := sequenceID(7094)
+	request := provider.InteractionRequest{
+		ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval,
+		Title: "Approve command", Summary: "Run tests?", Command: "go test ./...", WorkingDirectory: "/workspace",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Allow once", Description: "Run it."}, {ID: "decline", Label: "Decline", Description: "Skip it."}},
+	}
+	session.events <- provider.NewInteractionRequestEvent(request)
+	require.Equal(t, agentprotocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+
+	resolution := provider.InteractionResolution{RequestID: requestID, Kind: request.Kind}
+	session.events <- provider.NewInteractionResolvedEvent(resolution)
+	resolved := receiveLifecycle(t, connection.Events())
+	require.Equal(t, agentprotocol.EventInteractionResolved, resolved.Type)
+	require.Equal(t, requestID, resolved.Payload.(agentprotocol.InteractionResolvedPayload).RequestID)
+	require.Empty(t, resolved.Payload.(agentprotocol.InteractionResolvedPayload).OptionID)
+
+	// A duplicate notification from the provider is stale and has no browser effect.
+	session.events <- provider.NewInteractionResolvedEvent(resolution)
+	session.events <- provider.NewActivityEvent(turnID, provider.ActivityStatus, "Still working.")
+	require.Equal(t, agentprotocol.EventActivity, receiveLifecycle(t, connection.Events()).Type)
+	response := interactionResponseCommand(sequenceID(7095), clientID, conversationID, requestID, agentprotocol.InteractionCommandApproval, "accept")
+	rejected, err := connection.Command(context.Background(), response)
+	require.NoError(t, err)
+	requireCommandResult(t, rejected, agentprotocol.CommandRejected, agentprotocol.ErrorInvalidState)
+	require.Equal(t, rejected, receiveLifecycle(t, connection.Events()))
+	select {
+	case unexpected := <-session.responded:
+		t.Fatalf("resolved interaction reached provider: %#v", unexpected)
+	default:
+	}
+}
+
+func TestFailedNativeInteractionDeliveryStillConsumesTheFirstValidResponse(t *testing.T) {
+	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7080)
+	defer broker.Close(context.Background())
+	conversationID := connection.ConversationID()
+	turnID := sequenceID(7081)
+	submit := submitCommand(sequenceID(7082), clientID, conversationID, turnID, sequenceID(7083), "run the tests", &page)
+	result, err := connection.Command(context.Background(), submit)
+	require.NoError(t, err)
+	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
+	require.Equal(t, turnID, receiveLifecycle(t, session.submitted).TurnID)
+	drainEvents(t, connection.Events(), 3)
+
+	requestID := sequenceID(7084)
+	request := provider.InteractionRequest{
+		ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval,
+		Title: "Approve command", Summary: "Run tests?", Command: "go test ./...", WorkingDirectory: "/workspace",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Allow once", Description: "Run it."}, {ID: "decline", Label: "Decline", Description: "Skip it."}},
+	}
+	session.events <- provider.NewInteractionRequestEvent(request)
+	require.Equal(t, agentprotocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+	session.mu.Lock()
+	session.respondErr = provider.NewProviderError(provider.ErrorChildExited)
+	session.mu.Unlock()
+
+	response := interactionResponseCommand(sequenceID(7085), clientID, conversationID, requestID, agentprotocol.InteractionCommandApproval, "accept")
+	rejected, err := connection.Command(context.Background(), response)
+	require.NoError(t, err)
+	requireCommandResult(t, rejected, agentprotocol.CommandRejected, agentprotocol.ErrorProviderCrashed)
+	require.Equal(t, requestID, receiveLifecycle(t, session.responded).RequestID)
+	resolved := receiveLifecycle(t, connection.Events())
+	require.Equal(t, agentprotocol.EventInteractionResolved, resolved.Type)
+	require.Equal(t, "accept", resolved.Payload.(agentprotocol.InteractionResolvedPayload).OptionID)
+	require.Equal(t, rejected, receiveLifecycle(t, connection.Events()))
+
+	second := interactionResponseCommand(sequenceID(7086), clientID, conversationID, requestID, agentprotocol.InteractionCommandApproval, "decline")
+	secondResult, err := connection.Command(context.Background(), second)
+	require.NoError(t, err)
+	requireCommandResult(t, secondResult, agentprotocol.CommandRejected, agentprotocol.ErrorInvalidState)
+	require.Equal(t, secondResult, receiveLifecycle(t, connection.Events()))
+	select {
+	case duplicate := <-session.responded:
+		t.Fatalf("unexpected second native response: %#v", duplicate)
+	default:
+	}
+}
+
+func TestInteractionPendingStateRejectsCountAndAggregateByteOverflow(t *testing.T) {
+	actor := &conversation{pendingInteractions: make(map[string]*pendingInteraction)}
+	request := provider.InteractionRequest{
+		Kind: provider.InteractionCommandApproval, Title: "Approve command",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Allow"}},
+	}
+	for index := 0; index < provider.MaxInteractionAnswers; index++ {
+		request.ID = sequenceID(7400 + uint64(index))
+		require.NoError(t, actor.rememberInteraction(request))
+	}
+	request.ID = sequenceID(7500)
+	require.Error(t, actor.rememberInteraction(request))
+	require.Len(t, actor.pendingInteractions, provider.MaxInteractionAnswers)
+
+	large := provider.InteractionRequest{
+		ID: sequenceID(7501), Kind: provider.InteractionMCPElicitation, Title: "MCP input",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Accept"}, {ID: "decline", Label: "Decline"}, {ID: "cancel", Label: "Cancel"}},
+	}
+	for fieldIndex := 0; fieldIndex < provider.MaxInteractionAnswers; fieldIndex++ {
+		field := provider.InteractionField{ID: "field" + strconv.Itoa(fieldIndex), Label: "Field", Type: provider.InteractionMultiSelect}
+		for optionIndex := 0; optionIndex < provider.MaxInteractionOptions; optionIndex++ {
+			field.Options = append(field.Options, provider.InteractionOption{
+				ID: "option" + strconv.Itoa(optionIndex), Label: "Option", Description: strings.Repeat("x", provider.MaxSummaryBytes),
+			})
+		}
+		large.Fields = append(large.Fields, field)
+	}
+	require.NoError(t, large.Validate())
+	actor = &conversation{pendingInteractions: make(map[string]*pendingInteraction)}
+	require.NoError(t, actor.rememberInteraction(large))
+	large.ID = sequenceID(7502)
+	require.Error(t, actor.rememberInteraction(large))
+	require.Len(t, actor.pendingInteractions, 1)
+}
+
+func TestInteractionProviderStreamFailsClosedAtPendingCountLimit(t *testing.T) {
+	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7550)
+	defer broker.Close(context.Background())
+	session.cancelled = make(chan string, provider.MaxInteractionAnswers)
+	conversationID := connection.ConversationID()
+	turnID := sequenceID(7551)
+	result, err := connection.Command(context.Background(), submitCommand(sequenceID(7552), clientID, conversationID, turnID, sequenceID(7553), "run", &page))
+	require.NoError(t, err)
+	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
+	require.Equal(t, turnID, receiveLifecycle(t, session.submitted).TurnID)
+	drainEvents(t, connection.Events(), 3)
+
+	pending := make(map[string]struct{}, provider.MaxInteractionAnswers)
+	for index := 0; index < provider.MaxInteractionAnswers; index++ {
+		requestID := sequenceID(7560 + uint64(index))
+		pending[requestID] = struct{}{}
+		session.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{
+			ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval, Title: "Approve command",
+			Options: []provider.InteractionOption{{ID: "accept", Label: "Allow"}},
+		})
+		event := receiveLifecycle(t, connection.Events())
+		require.Equal(t, agentprotocol.EventInteractionRequest, event.Type)
+		require.Equal(t, requestID, event.Payload.(agentprotocol.InteractionRequestPayload).RequestID)
+	}
+	overflowID := sequenceID(7599)
+	session.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{
+		ID: overflowID, TurnID: turnID, Kind: provider.InteractionCommandApproval, Title: "Approve command",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Allow"}},
+	})
+	failure := receiveLifecycle(t, connection.Events())
+	require.Equal(t, agentprotocol.EventError, failure.Type)
+	require.Equal(t, agentprotocol.ErrorProviderMalformedStream, failure.Payload.(agentprotocol.ErrorPayload).Error.Code())
+
+	require.NoError(t, connection.Close(context.Background()))
+	for index := 0; index < provider.MaxInteractionAnswers; index++ {
+		cancelled := receiveLifecycle(t, session.cancelled)
+		_, exists := pending[cancelled]
+		require.True(t, exists, "unexpected cancellation %q", cancelled)
+		delete(pending, cancelled)
+	}
+	require.Empty(t, pending)
+	select {
+	case unexpected := <-session.cancelled:
+		t.Fatalf("overflow interaction entered pending state: %q", unexpected)
+	default:
+	}
+}
+
+func TestInteractionAfterFinalDetachIsCancelled(t *testing.T) {
+	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7510)
+	defer broker.Close(context.Background())
+	conversationID := connection.ConversationID()
+	turnID := sequenceID(7511)
+	result, err := connection.Command(context.Background(), submitCommand(sequenceID(7512), clientID, conversationID, turnID, sequenceID(7513), "run", &page))
+	require.NoError(t, err)
+	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
+	require.Equal(t, turnID, receiveLifecycle(t, session.submitted).TurnID)
+	drainEvents(t, connection.Events(), 3)
+	require.NoError(t, connection.Close(context.Background()))
+
+	requestID := sequenceID(7514)
+	session.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{
+		ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval, Title: "Approve command",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Allow"}, {ID: "decline", Label: "Decline"}},
+	})
+	require.Equal(t, requestID, receiveLifecycle(t, session.cancelled))
+	select {
+	case unexpected := <-session.responded:
+		t.Fatalf("detached interaction reached provider response path: %#v", unexpected)
+	default:
+	}
+}
+
+func TestInteractionResponseValidationMatchesRequestSurface(t *testing.T) {
+	option := func(id string) provider.InteractionOption { return provider.InteractionOption{ID: id, Label: id} }
+	command := provider.InteractionRequest{
+		ID: sequenceID(7520), Kind: provider.InteractionCommandApproval, Title: "Command",
+		Options: []provider.InteractionOption{option("accept"), option("decline")},
+	}
+	permission := provider.InteractionRequest{
+		ID: sequenceID(7521), Kind: provider.InteractionPermissionApproval, Title: "Permissions",
+		Options: []provider.InteractionOption{option("grantTurn"), option("grantSession"), option("decline")},
+		Fields:  []provider.InteractionField{{ID: "permissions", Label: "Permissions", Type: provider.InteractionMultiSelect, Options: []provider.InteractionOption{option("read"), option("write")}}},
+	}
+	question := provider.InteractionRequest{
+		ID: sequenceID(7522), Kind: provider.InteractionUserInput, Title: "Question",
+		Questions: []provider.InteractionQuestion{{ID: "target", Header: "Target", Prompt: "Choose", Options: []provider.InteractionOption{option("local"), option("remote")}}},
+	}
+	questionOther := question
+	questionOther.Questions = append([]provider.InteractionQuestion(nil), question.Questions...)
+	questionOther.Questions[0].AllowOther = true
+	questionMultiple := question
+	questionMultiple.Questions = append([]provider.InteractionQuestion(nil), question.Questions...)
+	questionMultiple.Questions[0].Multiple = true
+	questionPair := question
+	questionPair.Questions = append(append([]provider.InteractionQuestion(nil), question.Questions...), provider.InteractionQuestion{ID: "profile", Header: "Profile", Prompt: "Which profile?", AllowOther: true})
+	mcp := provider.InteractionRequest{
+		ID: sequenceID(7523), Kind: provider.InteractionMCPElicitation, Title: "MCP",
+		Options: []provider.InteractionOption{option("accept"), option("decline"), option("cancel")},
+		Fields: []provider.InteractionField{
+			{ID: "name", Label: "Name", Type: provider.InteractionText, Required: true},
+			{ID: "count", Label: "Count", Type: provider.InteractionNumber},
+			{ID: "enabled", Label: "Enabled", Type: provider.InteractionBoolean},
+			{ID: "target", Label: "Target", Type: provider.InteractionSelect, Options: []provider.InteractionOption{option("local"), option("remote")}},
+			{ID: "tags", Label: "Tags", Type: provider.InteractionMultiSelect, Options: []provider.InteractionOption{option("fast"), option("safe")}},
+		},
+	}
+	tests := []struct {
+		name     string
+		request  provider.InteractionRequest
+		optionID string
+		answers  map[string][]string
+		valid    bool
+	}{
+		{name: "offered command option", request: command, optionID: "accept", valid: true},
+		{name: "unknown command option", request: command, optionID: "other"},
+		{name: "command requires option", request: command, answers: map[string][]string{"target": {"local"}}},
+		{name: "command rejects answers", request: command, optionID: "accept", answers: map[string][]string{"target": {"local"}}},
+		{name: "permission grant selected subset", request: permission, optionID: "grantTurn", answers: map[string][]string{"permissions": {"read"}}, valid: true},
+		{name: "permission grant requires selection", request: permission, optionID: "grantSession"},
+		{name: "permission grant rejects unoffered selection", request: permission, optionID: "grantTurn", answers: map[string][]string{"permissions": {"admin"}}},
+		{name: "permission decline has no answers", request: permission, optionID: "decline", valid: true},
+		{name: "permission decline rejects answers", request: permission, optionID: "decline", answers: map[string][]string{"permissions": {"read"}}},
+		{name: "single question accepts offered option", request: question, answers: map[string][]string{"target": {"local"}}, valid: true},
+		{name: "single question rejects multiple answers", request: question, answers: map[string][]string{"target": {"local", "remote"}}},
+		{name: "question rejects other by default", request: question, answers: map[string][]string{"target": {"custom"}}},
+		{name: "question allows other", request: questionOther, answers: map[string][]string{"target": {"custom"}}, valid: true},
+		{name: "multiple question accepts multiple answers", request: questionMultiple, answers: map[string][]string{"target": {"local", "remote"}}, valid: true},
+		{name: "every question requires an answer", request: questionPair, answers: map[string][]string{"target": {"local"}}},
+		{name: "all questions answered", request: questionPair, answers: map[string][]string{"target": {"local"}, "profile": {"default"}}, valid: true},
+		{name: "MCP accept enforces required field", request: mcp, optionID: "accept"},
+		{name: "MCP decline omits fields", request: mcp, optionID: "decline", valid: true},
+		{name: "MCP cancel omits fields", request: mcp, optionID: "cancel", valid: true},
+		{name: "MCP decline rejects fields", request: mcp, optionID: "decline", answers: map[string][]string{"name": {"value"}}},
+		{name: "MCP accepts typed fields", request: mcp, optionID: "accept", answers: map[string][]string{"name": {"value"}, "count": {"1.5"}, "enabled": {"true"}, "target": {"local"}, "tags": {"fast", "safe"}}, valid: true},
+		{name: "number must be canonical", request: mcp, optionID: "accept", answers: map[string][]string{"name": {"value"}, "count": {"1.50"}}},
+		{name: "number must be finite", request: mcp, optionID: "accept", answers: map[string][]string{"name": {"value"}, "count": {"NaN"}}},
+		{name: "boolean must be canonical", request: mcp, optionID: "accept", answers: map[string][]string{"name": {"value"}, "enabled": {"TRUE"}}},
+		{name: "select requires offered option", request: mcp, optionID: "accept", answers: map[string][]string{"name": {"value"}, "target": {"other"}}},
+		{name: "multi select requires offered options", request: mcp, optionID: "accept", answers: map[string][]string{"name": {"value"}, "tags": {"fast", "other"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := agentprotocol.InteractionResponsePayload{RequestID: test.request.ID, Kind: agentprotocol.InteractionKind(test.request.Kind), OptionID: test.optionID, Answers: test.answers}
+			require.Equal(t, test.valid, validInteractionResponseForRequest(test.request, response))
+		})
+	}
+}
+
+func TestInvalidInteractionResponseDoesNotReachOrConsumeProviderRequest(t *testing.T) {
+	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7540)
+	defer broker.Close(context.Background())
+	conversationID := connection.ConversationID()
+	turnID := sequenceID(7541)
+	result, err := connection.Command(context.Background(), submitCommand(sequenceID(7542), clientID, conversationID, turnID, sequenceID(7543), "run", &page))
+	require.NoError(t, err)
+	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
+	require.Equal(t, turnID, receiveLifecycle(t, session.submitted).TurnID)
+	drainEvents(t, connection.Events(), 3)
+
+	requestID := sequenceID(7544)
+	session.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{
+		ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval, Title: "Approve command",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Allow"}, {ID: "decline", Label: "Decline"}},
+	})
+	require.Equal(t, agentprotocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+
+	invalid := interactionResponseCommand(sequenceID(7545), clientID, conversationID, requestID, agentprotocol.InteractionCommandApproval, "other")
+	rejected, err := connection.Command(context.Background(), invalid)
+	require.NoError(t, err)
+	requireCommandResult(t, rejected, agentprotocol.CommandRejected, agentprotocol.ErrorInvalidState)
+	require.Equal(t, rejected, receiveLifecycle(t, connection.Events()))
+	select {
+	case unexpected := <-session.responded:
+		t.Fatalf("invalid interaction reached provider: %#v", unexpected)
+	default:
+	}
+
+	valid := interactionResponseCommand(sequenceID(7546), clientID, conversationID, requestID, agentprotocol.InteractionCommandApproval, "accept")
+	accepted, err := connection.Command(context.Background(), valid)
+	require.NoError(t, err)
+	requireCommandResult(t, accepted, agentprotocol.CommandSucceeded, "")
+	require.Equal(t, "accept", receiveLifecycle(t, session.responded).OptionID)
+	require.Equal(t, agentprotocol.EventInteractionResolved, receiveLifecycle(t, connection.Events()).Type)
+	require.Equal(t, accepted, receiveLifecycle(t, connection.Events()))
+}
+
+func TestBufferedStructuredProviderEventsRespectReplayByteBound(t *testing.T) {
+	actor := &conversation{active: &activeTurn{}}
+	activity := provider.ToolActivity{
+		ID: sequenceID(7070), TurnID: sequenceID(7071), Kind: provider.ToolCommand, Status: provider.ToolRunning,
+		Title: "Command", Summary: "Running", Detail: strings.Repeat("x", provider.MaxInteractionTextBytes),
+	}
+	event := provider.NewToolActivityEvent(activity)
+	require.NoError(t, event.Validate())
+	buffered := 0
+	for !actor.active.pendingOverflow && buffered <= MaxReplayEvents {
+		actor.bufferProviderEvent(event)
+		buffered++
+	}
+	require.True(t, actor.active.pendingOverflow)
+	require.Less(t, buffered, MaxReplayEvents)
+	require.Empty(t, actor.active.pendingEvents)
+	require.Zero(t, actor.active.pendingBytes)
+}
+
+func interactionResponseCommand(commandID, clientID, conversationID, requestID string, kind agentprotocol.InteractionKind, optionID string) agentprotocol.Command {
+	return agentprotocol.Command{
+		APIVersion: agentprotocol.APIVersion, CommandID: commandID, ClientID: clientID, ConversationID: &conversationID, Type: agentprotocol.CommandInteractionRespond,
+		Payload: agentprotocol.InteractionResponsePayload{RequestID: requestID, Kind: kind, OptionID: optionID, Answers: map[string][]string{}},
+	}
 }
 
 func TestSubmitCommitsContextOnceAndDeduplicatesTheCommandResult(t *testing.T) {

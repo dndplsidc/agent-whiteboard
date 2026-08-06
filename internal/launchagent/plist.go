@@ -94,7 +94,7 @@ func resolveProviderExecutables(descriptors []ProviderDescriptor, resolver Execu
 			return nil, errors.New("provider descriptor is required")
 		}
 		name, executableName := descriptor.ProviderName(), descriptor.ExecutableName()
-		if name != ProviderPi || executableName != "pi" {
+		if (name != ProviderPi && name != ProviderCodex) || executableName != name {
 			return nil, fmt.Errorf("unsupported provider executable descriptor %q", name)
 		}
 		if _, duplicate := seen[name]; duplicate {
@@ -254,10 +254,14 @@ func marshalPlist(config normalizedConfig, paths servicePaths) ([]byte, error) {
 	arguments := []string{config.Executable, "--config", config.ConfigPath, "agent", "serve"}
 	environment := make(map[string]string, len(config.ProviderExecutables))
 	for provider, path := range config.ProviderExecutables {
-		if provider != ProviderPi || !validAbsolutePath(path) {
+		if (provider != ProviderPi && provider != ProviderCodex) || !validAbsolutePath(path) {
 			return nil, errors.New("plist contains an invalid provider executable")
 		}
-		environment[PiExecutableEnvironment] = path
+		key := PiExecutableEnvironment
+		if provider == ProviderCodex {
+			key = CodexExecutableEnvironment
+		}
+		environment[key] = path
 	}
 
 	var output bytes.Buffer

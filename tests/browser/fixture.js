@@ -465,36 +465,69 @@ function createSidebarBroker(initialAllowedOrigin) {
   const streams = new Set();
   const webSockets = new Set();
   const webSocketCommands = [];
-  const conversationID = protocolID(201);
+  const interactionResults = [];
   let allowedOrigin = initialAllowedOrigin;
   let webSocketEnabled = false;
-  let sequence = 1;
-  let contextState = "pending";
-  let contextDigest = "0".repeat(64);
-  let holdResponses = false;
-  let phaseResponses = false;
-  let activeTurn = null;
-  let pendingResponse = null;
-  const queue = [];
-  const history = [];
-  const archive = {
-    archive_id: protocolID(220),
-    created_at: "2026-07-26T01:02:03Z",
-    updated_at: "2026-07-26T02:03:04Z",
-    provider: "pi",
-    model: "fixture-model",
-    preview: "",
+  const providerDefinitions = {
+    pi: { conversationID: protocolID(201), model: "fixture-model", sequence: 1, identitySequence: 40, archiveID: protocolID(220) },
+    codex: { conversationID: protocolID(202), model: "fixture-codex-model", sequence: 101, identitySequence: 80, archiveID: protocolID(221) },
   };
+  const createProviderState = (provider) => {
+    const definition = providerDefinitions[provider];
+    return {
+      provider,
+      ...definition,
+      available: true,
+      contextState: "pending",
+      contextDigest: "0".repeat(64),
+      holdResponses: false,
+      phaseResponses: false,
+      activeTurn: null,
+      pendingResponse: null,
+      queue: [],
+      history: [],
+      interactions: new Map(),
+      holdInteractionResolution: false,
+      eventLog: [],
+      eventPositions: new Map(),
+    };
+  };
+  const providers = new Map(Object.keys(providerDefinitions).map((provider) => [provider, createProviderState(provider)]));
 
-  const nextEvent = (type, payload) => ({
+  const providerState = (provider) => {
+    const state = providers.get(provider);
+    if (!state) throw new Error(`unsupported sidebar provider: ${provider}`);
+    return state;
+  };
+  const stateForCommand = (command, connectedProvider) => {
+    if (command.type === "connect") return providerState(command.payload.provider);
+    if (connectedProvider) return providerState(connectedProvider);
+    const state = [...providers.values()].find((candidate) => candidate.conversationID === command.conversation_id);
+    if (!state) throw new Error("unknown sidebar conversation");
+    return state;
+  };
+  const nextEvent = (state, type, payload) => ({
     api_version: "1",
-    event_id: protocolID(sequence++),
-    conversation_id: conversationID,
+    event_id: protocolID(state.sequence++),
+    conversation_id: state.conversationID,
     type,
     timestamp: "2026-07-27T03:04:05Z",
     payload,
   });
-  const snapshotPayload = () => ({ lifecycle: activeTurn === null ? "ready" : "responding", queue: queue.map((item) => ({ ...item })), context_state: contextState, active_turn_id: activeTurn });
+  const snapshotPayload = (state) => ({
+    lifecycle: state.activeTurn === null ? "ready" : "responding",
+    queue: state.queue.map((item) => ({ ...item })),
+    context_state: state.contextState,
+    active_turn_id: state.activeTurn,
+  });
+  const archivePayload = (state) => ({
+    archive_id: state.archiveID,
+    created_at: "2026-07-26T01:02:03Z",
+    updated_at: "2026-07-26T02:03:04Z",
+    provider: state.provider,
+    model: state.model,
+    preview: "",
+  });
   const corsHeaders = () => ({ "Access-Control-Allow-Origin": allowedOrigin, Vary: "Origin" });
   const sendJSON = (response, record, status, value) => {
     const body = `${JSON.stringify(value)}\n`;
@@ -503,87 +536,129 @@ function createSidebarBroker(initialAllowedOrigin) {
     response.writeHead(status, record.responseHeaders);
     response.end(body);
   };
-  const emit = (event) => {
+  const broadcast = (state, event, clientID = null) => {
     const encoded = JSON.stringify(event);
-    for (const response of streams) response.write(`${encoded}\n`);
-    for (const socket of webSockets) socket.write(webSocketFrame(encoded));
+    for (const stream of streams) {
+      if (stream.provider === state.provider && (clientID === null || stream.clientID === clientID)) stream.response.write(`${encoded}\n`);
+    }
+    for (const connection of webSockets) {
+      if (connection.provider === state.provider && (clientID === null || connection.clientID === clientID)) connection.socket.write(webSocketFrame(encoded));
+    }
   };
-  const commandResult = (command, error) => nextEvent("command_result", error
+  const emit = (state, type, payload) => {
+    const event = nextEvent(state, type, payload);
+    state.eventLog.push(event);
+    state.eventPositions.set(event.event_id, state.eventLog.length);
+    broadcast(state, event);
+    return event;
+  };
+  const targetedEvent = (state, type, payload, clientID) => {
+    const event = nextEvent(state, type, payload);
+    state.eventPositions.set(event.event_id, state.eventLog.length);
+    broadcast(state, event, clientID);
+    return event;
+  };
+  const bootstrapEvents = (state, replayAfter) => {
+    if (replayAfter) {
+      const position = state.eventPositions.get(replayAfter);
+      if (position === undefined) return null;
+      return state.eventLog.slice(position);
+    }
+    const events = [
+      nextEvent(state, "snapshot", snapshotPayload(state)),
+      nextEvent(state, "provider", { provider: state.provider, state: "ready", model: state.model }),
+    ];
+    for (const event of events) state.eventPositions.set(event.event_id, state.eventLog.length);
+    return events;
+  };
+  const commandResult = (state, command, error) => targetedEvent(state, "command_result", error
     ? { command_id: command.command_id, status: "rejected", error }
-    : { command_id: command.command_id, status: "succeeded" });
-  const emitResponsePhase = (phase) => {
-    if (!pendingResponse) throw new Error(`no pending sidebar response for ${phase}`);
-    const response = pendingResponse;
+    : { command_id: command.command_id, status: "succeeded" }, command.client_id);
+  const emitResponsePhase = (phase, provider = "pi") => {
+    const state = providerState(provider);
+    if (!state.pendingResponse) throw new Error(`no pending ${provider} sidebar response for ${phase}`);
+    const response = state.pendingResponse;
+    const firstDelta = provider === "codex" ? "Codex fixture " : "Fixture ";
+    const finalText = provider === "codex" ? "Codex fixture reply" : "Fixture reply";
     if (phase === "first_delta" && response.phase === "responding") {
-      emit(nextEvent("assistant_delta", { turn_id: response.turnID, message_id: response.assistantID, text: "Fixture " }));
+      emit(state, "assistant_delta", { turn_id: response.turnID, message_id: response.assistantID, text: firstDelta });
       response.phase = "first_delta";
       return;
     }
     if (phase === "later_delta" && response.phase === "first_delta") {
-      emit(nextEvent("assistant_delta", { turn_id: response.turnID, message_id: response.assistantID, text: "reply" }));
+      emit(state, "assistant_delta", { turn_id: response.turnID, message_id: response.assistantID, text: "reply" });
       response.phase = "later_delta";
       return;
     }
     if (phase === "completion" && response.phase === "later_delta") {
-      const assistant = { item_id: response.assistantID, kind: "assistant", turn_id: response.turnID, message_id: response.assistantID, text: "Fixture reply", created_at: response.createdAt };
-      history.push(assistant);
-      emit(nextEvent("assistant_message", { turn_id: assistant.turn_id, message_id: assistant.message_id, text: assistant.text, created_at: assistant.created_at }));
-      emit(nextEvent("completion", { turn_id: response.turnID }));
-      activeTurn = null;
-      pendingResponse = null;
+      const assistant = { item_id: response.assistantID, kind: "assistant", turn_id: response.turnID, message_id: response.assistantID, text: finalText, created_at: response.createdAt };
+      state.history.push(assistant);
+      emit(state, "assistant_message", { turn_id: assistant.turn_id, message_id: assistant.message_id, text: assistant.text, created_at: assistant.created_at });
+      emit(state, "completion", { turn_id: response.turnID });
+      state.activeTurn = null;
+      state.pendingResponse = null;
       return;
     }
     throw new Error(`sidebar response cannot release ${phase} from ${response.phase}`);
   };
-  const handleCommand = (command) => {
+  const handleCommand = (command, connectedProvider) => {
+    const state = stateForCommand(command, connectedProvider);
     if (command.type === "history_page") {
-      emit(nextEvent("timeline", { command_id: command.command_id, items: [...history].reverse(), next_cursor: null }));
+      targetedEvent(state, "timeline", { command_id: command.command_id, items: [...state.history].reverse(), next_cursor: null }, command.client_id);
     } else if (command.type === "submit") {
-      if (activeTurn !== null) {
-        queue.push({ turn_id: command.payload.turn_id, message_id: command.payload.message_id, message: command.payload.message });
-        emit(nextEvent("queue", { items: queue.map((item) => ({ ...item })) }));
+      if (state.activeTurn !== null) {
+        state.queue.push({ turn_id: command.payload.turn_id, message_id: command.payload.message_id, message: command.payload.message });
+        emit(state, "queue", { items: state.queue.map((item) => ({ ...item })) });
       } else {
         if (command.payload.context) {
-          contextState = "accepted";
-          contextDigest = command.payload.context.digest;
-          emit(nextEvent("context", { digest: contextDigest, state: "accepted" }));
+          state.contextState = "accepted";
+          state.contextDigest = command.payload.context.digest;
+          emit(state, "context", { digest: state.contextDigest, state: "accepted" });
         }
         const createdAt = "2026-07-27T03:04:05Z";
         const user = { item_id: command.payload.message_id, kind: "user", turn_id: command.payload.turn_id, message_id: command.payload.message_id, text: command.payload.message, created_at: createdAt };
-        history.push(user);
-        activeTurn = command.payload.turn_id;
-        emit(nextEvent("user_message", { turn_id: user.turn_id, message_id: user.message_id, text: user.text, created_at: createdAt }));
-        emit(nextEvent("lifecycle", { state: "responding", turn_id: command.payload.turn_id }));
-        const assistantID = protocolID(150 + history.length);
-        if (phaseResponses) {
-          pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
-        } else if (!holdResponses) {
-          pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
-          emitResponsePhase("first_delta");
-          emitResponsePhase("later_delta");
-          emitResponsePhase("completion");
+        state.history.push(user);
+        state.activeTurn = command.payload.turn_id;
+        emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, text: user.text, created_at: createdAt });
+        emit(state, "lifecycle", { state: "responding", turn_id: command.payload.turn_id });
+        const assistantID = protocolID(150 + state.history.length + (state.provider === "codex" ? 25 : 0));
+        if (state.phaseResponses) {
+          state.pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
+        } else if (!state.holdResponses) {
+          state.pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
+          emitResponsePhase("first_delta", state.provider);
+          emitResponsePhase("later_delta", state.provider);
+          emitResponsePhase("completion", state.provider);
         }
       }
     } else if (command.type === "queue_edit") {
-      const item = queue.find((candidate) => candidate.message_id === command.payload.message_id);
+      const item = state.queue.find((candidate) => candidate.message_id === command.payload.message_id);
       if (item) item.message = command.payload.message;
-      emit(nextEvent("queue", { items: queue.map((candidate) => ({ ...candidate })) }));
+      emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
     } else if (command.type === "queue_remove") {
-      const index = queue.findIndex((candidate) => candidate.message_id === command.payload.message_id);
-      if (index >= 0) queue.splice(index, 1);
-      emit(nextEvent("queue", { items: queue.map((candidate) => ({ ...candidate })) }));
-    } else if (command.type === "interrupt" && activeTurn === command.payload.turn_id) {
-      emit(nextEvent("interruption", { turn_id: activeTurn, reason: "requested" }));
-      activeTurn = null;
-      pendingResponse = null;
+      const index = state.queue.findIndex((candidate) => candidate.message_id === command.payload.message_id);
+      if (index >= 0) state.queue.splice(index, 1);
+      emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
+    } else if (command.type === "interrupt" && state.activeTurn === command.payload.turn_id) {
+      emit(state, "interruption", { turn_id: state.activeTurn, reason: "requested" });
+      state.activeTurn = null;
+      state.pendingResponse = null;
     } else if (command.type === "archive_list") {
-      emit(nextEvent("history", { command_id: command.command_id, items: [{ ...archive }], next_cursor: null }));
+      targetedEvent(state, "history", { command_id: command.command_id, items: [archivePayload(state)], next_cursor: null }, command.client_id);
     } else if (command.type === "archive_restore" || command.type === "archive_delete") {
-      emit(nextEvent("archive", { action: command.type === "archive_restore" ? "restored" : "deleted", archive_id: command.payload.archive_id }));
+      emit(state, "archive", { action: command.type === "archive_restore" ? "restored" : "deleted", archive_id: command.payload.archive_id });
+    } else if (command.type === "interaction_respond") {
+      const interaction = state.interactions.get(command.payload.request_id);
+      if (!interaction || interaction.resolved || interaction.kind !== command.payload.kind) {
+        interactionResults.push({ provider: state.provider, requestID: command.payload.request_id, optionID: command.payload.option_id, status: "rejected" });
+        return commandResult(state, command, { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" });
+      }
+      interaction.resolved = true;
+      interaction.response = structuredClone(command.payload);
+      interactionResults.push({ provider: state.provider, requestID: interaction.requestID, optionID: command.payload.option_id, status: "accepted", answers: structuredClone(command.payload.answers) });
+      if (!state.holdInteractionResolution) emit(state, "interaction_resolved", { request_id: interaction.requestID, kind: interaction.kind, option_id: command.payload.option_id });
     }
-    const result = commandResult(command);
-    emit(result);
-    return result;
+    return commandResult(state, command);
   };
 
   const server = http.createServer((request, response) => {
@@ -619,13 +694,23 @@ function createSidebarBroker(initialAllowedOrigin) {
         return;
       }
       if (request.method === "POST" && request.url === "/api/v1/agent/connect") {
+        const state = stateForCommand(command);
+        if (!state.available) {
+          sendJSON(response, record, 503, { error: { code: "provider_missing", message: "The selected provider executable is not available.", action: "install_provider" } });
+          return;
+        }
+        const events = bootstrapEvents(state, command.payload.replay_after);
+        if (events === null) {
+          sendJSON(response, record, 409, { error: { code: "replay_window_unavailable", message: "The requested replay window is no longer available.", action: "reload_conversation" } });
+          return;
+        }
         record.status = 200;
         record.responseHeaders = { ...corsHeaders(), "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" };
         response.writeHead(200, record.responseHeaders);
-        streams.add(response);
-        response.once("close", () => streams.delete(response));
-        response.write(`${JSON.stringify(nextEvent("snapshot", snapshotPayload()))}\n`);
-        response.write(`${JSON.stringify(nextEvent("provider", { provider: "pi", state: "ready", model: "fixture-model" }))}\n`);
+        const stream = { provider: state.provider, clientID: command.client_id, response };
+        streams.add(stream);
+        response.once("close", () => streams.delete(stream));
+        for (const event of events) response.write(`${JSON.stringify(event)}\n`);
         return;
       }
       if (request.method !== "POST" || request.url !== "/api/v1/agent/commands") {
@@ -657,8 +742,9 @@ function createSidebarBroker(initialAllowedOrigin) {
       "",
       "",
     ].join("\r\n"));
-    webSockets.add(socket);
-    socket.once("close", () => webSockets.delete(socket));
+    const connection = { provider: null, clientID: null, socket };
+    webSockets.add(connection);
+    socket.once("close", () => webSockets.delete(connection));
     let buffered = Buffer.alloc(0);
     let connected = false;
     socket.on("data", (chunk) => {
@@ -668,12 +754,17 @@ function createSidebarBroker(initialAllowedOrigin) {
           const command = JSON.parse(payload);
           webSocketCommands.push(command);
           if (!connected) {
+            const state = stateForCommand(command);
+            if (!state.available) { socket.destroy(); return; }
+            const events = bootstrapEvents(state, command.payload.replay_after);
+            if (events === null) { socket.destroy(); return; }
             connected = true;
-            socket.write(webSocketFrame(JSON.stringify(nextEvent("snapshot", snapshotPayload()))));
-            socket.write(webSocketFrame(JSON.stringify(nextEvent("provider", { provider: "pi", state: "ready", model: "fixture-model" }))));
+            connection.provider = state.provider;
+            connection.clientID = command.client_id;
+            for (const event of events) socket.write(webSocketFrame(JSON.stringify(event)));
             return;
           }
-          handleCommand(command);
+          handleCommand(command, connection.provider);
         });
       } catch {
         socket.destroy();
@@ -687,30 +778,70 @@ function createSidebarBroker(initialAllowedOrigin) {
     webSocketCommands,
     setAllowedOrigin(origin) { allowedOrigin = origin; },
     setWebSocketEnabled(value) { webSocketEnabled = value; },
-    setHoldResponses(value) { holdResponses = value; },
-    setPhaseResponses(value) { phaseResponses = value; },
+    setHoldResponses(value, provider = "pi") { providerState(provider).holdResponses = value; },
+    setPhaseResponses(value, provider = "pi") { providerState(provider).phaseResponses = value; },
     releaseResponsePhase: emitResponsePhase,
-    emitBlocked(kind) {
+    setProviderAvailable(provider, value) { providerState(provider).available = value; },
+    setHoldInteractionResolution(provider, value) { providerState(provider).holdInteractionResolution = value; },
+    releaseInteraction(provider, requestID) {
+      const state = providerState(provider);
+      const interaction = state.interactions.get(requestID);
+      if (!interaction?.resolved || !interaction.response) throw new Error(`no resolved ${provider} interaction ${requestID}`);
+      emit(state, "interaction_resolved", { request_id: requestID, kind: interaction.kind, option_id: interaction.response.option_id });
+    },
+    disconnectProvider(provider) {
+      for (const stream of [...streams]) {
+        if (stream.provider === provider) stream.response.end();
+      }
+      for (const connection of [...webSockets]) {
+        if (connection.provider === provider) connection.socket.destroy();
+      }
+    },
+    emitBlocked(kind, provider = "pi") {
       const messages = {
         tool: "A provider tool request was blocked by content-only policy.",
         permission: "A provider permission request was blocked by content-only policy.",
       };
       if (!messages[kind]) throw new Error(`unsupported blocked fixture kind: ${kind}`);
-      emit(nextEvent("blocked", { kind, message: messages[kind] }));
+      const state = providerState(provider);
+      emit(state, "blocked", { kind, message: messages[kind] });
     },
-    emitActivity(kind, summary) { emit(nextEvent("activity", { kind, summary })); },
+    emitActivity(kind, summary, provider = "pi") {
+      const state = providerState(provider);
+      emit(state, "activity", { kind, summary });
+    },
+    emitToolActivity(provider, payload) {
+      const state = providerState(provider);
+      const activityID = payload.activity_id ?? protocolID(state.identitySequence++);
+      emit(state, "tool_activity", { ...payload, activity_id: activityID });
+      return activityID;
+    },
+    emitInteraction(provider, payload) {
+      const state = providerState(provider);
+      const requestID = payload.request_id ?? protocolID(state.identitySequence++);
+      const request = {
+        turn_id: payload.turn_id,
+        request_id: requestID,
+        kind: payload.kind,
+        title: payload.title,
+        summary: payload.summary ?? "",
+        command: payload.command ?? "",
+        working_directory: payload.working_directory ?? "",
+        options: payload.options ?? [],
+        questions: payload.questions ?? [],
+        fields: payload.fields ?? [],
+      };
+      if (request.turn_id === undefined) delete request.turn_id;
+      state.interactions.set(requestID, { requestID, kind: request.kind, resolved: false, response: null });
+      emit(state, "interaction_request", request);
+      return requestID;
+    },
     resetState() {
-      contextState = "pending";
-      contextDigest = "0".repeat(64);
-      holdResponses = false;
-      phaseResponses = false;
-      activeTurn = null;
-      pendingResponse = null;
-      queue.splice(0);
-      history.splice(0);
-      sequence = 1;
+      for (const provider of Object.keys(providerDefinitions)) providers.set(provider, createProviderState(provider));
+      interactionResults.splice(0);
     },
-    resetRequests() { requests.splice(0); webSocketCommands.splice(0); webSocketEnabled = false; },
+    resetRequests() { requests.splice(0); webSocketCommands.splice(0); interactionResults.splice(0); webSocketEnabled = false; },
+    interactionResults,
   };
 }
 
@@ -998,6 +1129,13 @@ export const test = base.extend({
           setHoldResponses: broker.setHoldResponses,
           setPhaseResponses: broker.setPhaseResponses,
           releaseResponsePhase: broker.releaseResponsePhase,
+          setProviderAvailable: broker.setProviderAvailable,
+          disconnectProvider: broker.disconnectProvider,
+          emitToolActivity: broker.emitToolActivity,
+          emitInteraction: broker.emitInteraction,
+          setHoldInteractionResolution: broker.setHoldInteractionResolution,
+          releaseInteraction: broker.releaseInteraction,
+          interactionResults: broker.interactionResults,
           emitBlocked: broker.emitBlocked,
           emitActivity: broker.emitActivity,
           publish: (markdown, creatorContext) => publishAtOrigin(sourceOrigin, markdown, creatorContext),

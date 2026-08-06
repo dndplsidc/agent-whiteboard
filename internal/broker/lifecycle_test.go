@@ -96,6 +96,7 @@ func (s *lifecycleState) RemoveWorkspace(id string) error {
 
 type lifecycleDriver struct {
 	mu          sync.Mutex
+	name        provider.Name
 	createGate  chan struct{}
 	createEnter chan struct{}
 	enterOnce   sync.Once
@@ -106,7 +107,11 @@ type lifecycleDriver struct {
 }
 
 func (d *lifecycleDriver) Readiness(context.Context) provider.Readiness {
-	return provider.Readiness{State: provider.Ready, Provider: provider.NamePi, Model: "model"}
+	name := d.name
+	if name == "" {
+		name = provider.NamePi
+	}
+	return provider.Readiness{State: provider.Ready, Provider: name, Model: "model"}
 }
 func (d *lifecycleDriver) Create(ctx context.Context, request provider.CreateRequest) (provider.Session, error) {
 	if d.createEnter != nil {
@@ -122,7 +127,7 @@ func (d *lifecycleDriver) Create(ctx context.Context, request provider.CreateReq
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.creates = append(d.creates, request)
-	session := newLifecycleSession(sequenceID(uint64(len(d.sessions) + 100)))
+	session := newLifecycleSessionForProvider(sequenceID(uint64(len(d.sessions)+100)), request.Provider)
 	d.sessions = append(d.sessions, session)
 	return session, nil
 }
@@ -130,7 +135,7 @@ func (d *lifecycleDriver) Resume(_ context.Context, request provider.ResumeReque
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.resumes = append(d.resumes, request)
-	session := newLifecycleSession(request.NativeSession.Value())
+	session := newLifecycleSessionForProvider(request.NativeSession.Value(), request.Provider)
 	d.sessions = append(d.sessions, session)
 	return session, nil
 }
@@ -152,8 +157,12 @@ type lifecycleSession struct {
 }
 
 func newLifecycleSession(refValue string) *lifecycleSession {
+	return newLifecycleSessionForProvider(refValue, provider.NamePi)
+}
+
+func newLifecycleSessionForProvider(refValue string, name provider.Name) *lifecycleSession {
 	ref, _ := provider.NewNativeSessionRef(refValue)
-	return &lifecycleSession{native: provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: "model", CreatedAt: testTime(), UpdatedAt: testTime()}, events: make(chan provider.Event, 4096)}
+	return &lifecycleSession{native: provider.NativeSession{Ref: ref, Provider: name, Model: "model", CreatedAt: testTime(), UpdatedAt: testTime()}, events: make(chan provider.Event, 4096)}
 }
 func (s *lifecycleSession) NativeSession() provider.NativeSession { return s.native }
 func (s *lifecycleSession) Model() string                         { return s.native.Model }
@@ -195,9 +204,42 @@ func validLifecycleConfig(state StateStore, driver provider.Driver, ids common.I
 	return Config{State: state, Driver: driver, IDs: ids, Clock: testClock{now: testTime()}, Timers: RealTimerFactory{}, IdleTimeout: time.Hour, ShutdownTimeout: time.Second}
 }
 func lifecycleConnect(client, resource string) agentprotocol.Command {
-	payload := agentprotocol.ConnectPayload{Provider: agentprotocol.ProviderPi, Resource: testResource(resource), ContextDigest: string(make([]byte, 64))}
+	return lifecycleProviderConnect(client, resource, agentprotocol.ProviderPi)
+}
+
+func lifecycleProviderConnect(client, resource string, name agentprotocol.ProviderName) agentprotocol.Command {
+	payload := agentprotocol.ConnectPayload{Provider: name, Resource: testResource(resource), ContextDigest: string(make([]byte, 64))}
 	payload.ContextDigest = "0000000000000000000000000000000000000000000000000000000000000000"
 	return agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: sequenceID(1), ClientID: client, Type: agentprotocol.CommandConnect, Payload: payload}
+}
+
+func TestRegistryRoutesSameWhiteboardToIndependentProviderDrivers(t *testing.T) {
+	state := &lifecycleState{mappings: make(map[agentstate.Identity]agentstate.Mapping)}
+	piDriver := &lifecycleDriver{name: provider.NamePi}
+	codexDriver := &lifecycleDriver{name: provider.NameCodex}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{
+		provider.NamePi: piDriver, provider.NameCodex: codexDriver,
+	})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: 250})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+
+	resourceID := sequenceID(251)
+	piConnection, err := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnect(sequenceID(252), resourceID, agentprotocol.ProviderPi))
+	require.NoError(t, err)
+	codexConnection, err := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnect(sequenceID(253), resourceID, agentprotocol.ProviderCodex))
+	require.NoError(t, err)
+	require.NotEqual(t, piConnection.ConversationID(), codexConnection.ConversationID())
+
+	piDriver.mu.Lock()
+	require.Equal(t, []provider.CreateRequest{{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: "/tmp/agent-whiteboard-test/" + piConnection.ConversationID()}}, piDriver.creates)
+	piDriver.mu.Unlock()
+	codexDriver.mu.Lock()
+	require.Equal(t, []provider.CreateRequest{{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: "/tmp/agent-whiteboard-test/" + codexConnection.ConversationID()}}, codexDriver.creates)
+	codexDriver.mu.Unlock()
+	require.NoError(t, broker.Close(context.Background()))
 }
 
 func TestNewRejectsNilTypedNilAndInvalidTimeout(t *testing.T) {

@@ -14,51 +14,53 @@ import (
 )
 
 type conversation struct {
-	identity               agentstate.Identity
-	mapping                agentstate.Mapping
-	state                  StateStore
-	driver                 provider.Driver
-	retainSession          func(*sessionHandle)
-	session                *sessionHandle
-	generation             uint64
-	factory                *EventFactory
-	replay                 *ReplayLog
-	requests               chan any
-	done                   chan struct{}
-	clock                  common.Clock
-	timers                 TimerFactory
-	idleTimeout            time.Duration
-	resource               agentprotocol.Resource
-	contextDigest          string
-	contextState           agentprotocol.ContextState
-	lifecycle              agentprotocol.LifecycleState
-	queue                  *Queue
-	commands               commandLedger
-	active                 *activeTurn
-	workerSettled          chan struct{}
-	workerKind             providerWorkerKind
-	workerCommandID        string
-	workerClientID         string
-	workerResolved         bool
-	shutdownAttempt        *actorShutdown
-	deferredInterrupt      *deferredInterrupt
-	lifecycleCtx           context.Context
-	recoveryCancel         context.CancelFunc
-	recoveryResults        chan<- recoveryWorkerResult
-	recoveryActive         bool
-	recoveryAttempted      uint64
-	recoveryUnavailable    bool
-	recoveryPending        bool
-	recoveryPendingTrigger recoveryTrigger
-	deferredObserve        *deferredObservation
-	stopping               bool
-	dispatchBlocked        bool
-	dispatchPending        bool
-	shutdownTimeout        time.Duration
-	startHandoff           func(handoffRequest, chan<- handoffResult) bool
-	handoffActive          bool
-	handoffFailed          bool
-	closeRequested         bool
+	identity                agentstate.Identity
+	mapping                 agentstate.Mapping
+	state                   StateStore
+	driver                  provider.Driver
+	retainSession           func(*sessionHandle)
+	session                 *sessionHandle
+	generation              uint64
+	factory                 *EventFactory
+	replay                  *ReplayLog
+	requests                chan any
+	done                    chan struct{}
+	clock                   common.Clock
+	timers                  TimerFactory
+	idleTimeout             time.Duration
+	resource                agentprotocol.Resource
+	contextDigest           string
+	contextState            agentprotocol.ContextState
+	lifecycle               agentprotocol.LifecycleState
+	queue                   *Queue
+	commands                commandLedger
+	pendingInteractions     map[string]*pendingInteraction
+	pendingInteractionBytes int
+	active                  *activeTurn
+	workerSettled           chan struct{}
+	workerKind              providerWorkerKind
+	workerCommandID         string
+	workerClientID          string
+	workerResolved          bool
+	shutdownAttempt         *actorShutdown
+	deferredInterrupt       *deferredInterrupt
+	lifecycleCtx            context.Context
+	recoveryCancel          context.CancelFunc
+	recoveryResults         chan<- recoveryWorkerResult
+	recoveryActive          bool
+	recoveryAttempted       uint64
+	recoveryUnavailable     bool
+	recoveryPending         bool
+	recoveryPendingTrigger  recoveryTrigger
+	deferredObserve         *deferredObservation
+	stopping                bool
+	dispatchBlocked         bool
+	dispatchPending         bool
+	shutdownTimeout         time.Duration
+	startHandoff            func(handoffRequest, chan<- handoffResult) bool
+	handoffActive           bool
+	handoffFailed           bool
+	closeRequested          bool
 
 	closeMu  sync.Mutex
 	activate sync.Once
@@ -267,7 +269,8 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 		done: make(chan struct{}), start: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
 		contextState: agentprotocol.ContextPending,
 		lifecycle:    agentprotocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(),
-		lifecycleCtx: lifecycleCtx, shutdownTimeout: shutdownTimeout,
+		pendingInteractions: make(map[string]*pendingInteraction),
+		lifecycleCtx:        lifecycleCtx, shutdownTimeout: shutdownTimeout,
 	}
 	if actor.mapping.Current.Observed != nil {
 		actor.contextDigest = actor.mapping.Current.Observed.Digest
@@ -292,6 +295,7 @@ func (actor *conversation) run() {
 	turnResults := make(chan turnWorkerResult, 1)
 	historyResults := make(chan historyWorkerResult, 1)
 	archiveResults := make(chan archiveWorkerResult, 1)
+	interactionResults := make(chan interactionWorkerResult, provider.MaxInteractionAnswers)
 	handoffResults := make(chan handoffResult, 1)
 	recoveryResults := make(chan recoveryWorkerResult, 1)
 	actor.recoveryResults = recoveryResults
@@ -321,6 +325,9 @@ func (actor *conversation) run() {
 		close(actor.done)
 	}()
 	for {
+		if len(attachments) == 0 && len(actor.pendingInteractions) != 0 {
+			actor.cancelPendingInteractions(interactionResults)
+		}
 		idle := len(attachments) == 0 && actor.active == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !actor.dispatchBlocked && !actor.recoveryActive && !actor.handoffActive && !shutdownActive && !actor.stopping
 		if idle && idleTimer == nil {
 			idleTimer = actor.timers.NewTimer(actor.idleTimeout)
@@ -341,7 +348,7 @@ func (actor *conversation) run() {
 				actor.detach(attachments, request.attachment)
 				close(request.ack)
 			case commandRequest:
-				actor.handleCommand(attachments, turnResults, historyResults, archiveResults, handoffResults, request)
+				actor.handleCommand(attachments, turnResults, historyResults, archiveResults, handoffResults, interactionResults, request)
 			case closeConversationRequest:
 				if actor.handoffActive {
 					shutdownWaiters = append(shutdownWaiters, request.response)
@@ -379,6 +386,8 @@ func (actor *conversation) run() {
 			actor.handleHistoryResult(attachments, turnResults, result)
 		case result := <-archiveResults:
 			actor.handleArchiveResult(attachments, recoveryResults, result)
+		case result := <-interactionResults:
+			actor.handleInteractionResult(attachments, result)
 		case result := <-handoffResults:
 			exit, needsShutdown := actor.handleHandoffResult(attachments, result)
 			if exit {
@@ -680,6 +689,28 @@ func (actor *conversation) handleAttach(attachments map[*attachment]struct{}, re
 		}
 		initial = append(initial, snapshot)
 	}
+	seenInteractions := make(map[string]struct{})
+	for _, event := range initial {
+		if payload, ok := event.Payload.(agentprotocol.InteractionRequestPayload); ok {
+			seenInteractions[payload.RequestID] = struct{}{}
+		}
+	}
+	for requestID, pending := range actor.pendingInteractions {
+		if _, seen := seenInteractions[requestID]; seen {
+			continue
+		}
+		payload, conversionErr := interactionRequestFromProvider(pending.request)
+		if conversionErr != nil {
+			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorProviderMalformedStream)}
+			return
+		}
+		event, eventErr := actor.factory.New(payload)
+		if eventErr != nil || actor.replay.AppendForClient(request.clientID, event) != nil {
+			request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
+			return
+		}
+		initial = append(initial, event)
+	}
 	item, err := newAttachment(request.clientID, initial)
 	if err != nil {
 		request.response <- attachResponse{err: NewBrokerError(agentprotocol.ErrorBrokerUnavailable)}
@@ -726,12 +757,38 @@ func (actor *conversation) handleProviderEvent(attachments map[*attachment]struc
 }
 
 func (actor *conversation) publishProviderEvent(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult, source provider.Event) {
+	if source.Kind == provider.EventInteractionRequest {
+		if actor.rememberInteraction(*source.Interaction) != nil {
+			actor.publishBrowserError(attachments, agentprotocol.ErrorProviderMalformedStream)
+			return
+		}
+	}
+	if source.Kind == provider.EventInteractionResolved {
+		pending := actor.pendingInteractions[source.Resolution.RequestID]
+		if pending == nil {
+			return
+		}
+		if pending.request.Kind != source.Resolution.Kind {
+			actor.publishBrowserError(attachments, agentprotocol.ErrorProviderMalformedStream)
+			return
+		}
+		actor.forgetInteraction(source.Resolution.RequestID)
+	}
+	if providerEventTerminal(source) {
+		actor.expirePendingInteractions(attachments)
+	}
 	event, err := actor.factory.FromProvider(source)
 	if err != nil {
+		if source.Kind == provider.EventInteractionRequest {
+			actor.forgetInteraction(source.Interaction.ID)
+		}
 		actor.publishBrowserError(attachments, agentprotocol.ErrorProviderMalformedStream)
 		return
 	}
 	if actor.replay.Append(event) != nil {
+		if source.Kind == provider.EventInteractionRequest {
+			actor.forgetInteraction(source.Interaction.ID)
+		}
 		return
 	}
 	for item := range attachments {
@@ -758,7 +815,7 @@ func (actor *conversation) bufferProviderEvent(source provider.Event) {
 	if actor.active == nil || actor.active.pendingOverflow {
 		return
 	}
-	size := len(source.Text) + len(source.TurnID) + len(source.MessageID) + 64
+	size := bufferedProviderEventSize(source)
 	if len(actor.active.pendingEvents)+1 > MaxReplayEvents || actor.active.pendingBytes+size > MaxReplayBytes {
 		actor.active.pendingOverflow = true
 		actor.active.pendingEvents = nil
@@ -767,6 +824,20 @@ func (actor *conversation) bufferProviderEvent(source provider.Event) {
 	}
 	actor.active.pendingEvents = append(actor.active.pendingEvents, source)
 	actor.active.pendingBytes += size
+}
+
+func bufferedProviderEventSize(source provider.Event) int {
+	size := len(source.Text) + len(source.TurnID) + len(source.MessageID) + 64
+	if source.Tool != nil {
+		size += len(source.Tool.ID) + len(source.Tool.TurnID) + len(source.Tool.Kind) + len(source.Tool.Status) + len(source.Tool.Title) + len(source.Tool.Summary) + len(source.Tool.Detail)
+	}
+	if source.Resolution != nil {
+		size += len(source.Resolution.RequestID) + len(source.Resolution.Kind) + len(source.Resolution.OptionID) + 16
+	}
+	if source.Interaction == nil {
+		return size
+	}
+	return size + interactionRequestSize(*source.Interaction)
 }
 
 func (actor *conversation) flushPendingProviderEvents(attachments map[*attachment]struct{}, turnResults chan<- turnWorkerResult) {
@@ -794,6 +865,12 @@ func (actor *conversation) flushPendingProviderEvents(attachments map[*attachmen
 }
 
 func (actor *conversation) providerEventMatchesActive(source provider.Event) bool {
+	if source.Kind == provider.EventInteractionResolved {
+		return true
+	}
+	if source.Kind == provider.EventInteractionRequest && source.TurnID == "" {
+		return true
+	}
 	if source.Kind == provider.EventActivity && source.TurnID == "" {
 		return true
 	}

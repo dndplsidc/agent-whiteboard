@@ -5,10 +5,16 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 	"github.com/edocsss/agent-whiteboard/internal/agentstate"
+	"github.com/edocsss/agent-whiteboard/internal/broker"
+	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/edocsss/agent-whiteboard/internal/processgroup"
+	"github.com/edocsss/agent-whiteboard/internal/provider"
 	"github.com/stretchr/testify/require"
 )
 
@@ -75,6 +81,179 @@ func TestProviderEnvironmentRejectsDuplicateAndNUL(t *testing.T) {
 	require.ErrorContains(t, err, "duplicate")
 	_, err = providerEnvironment("/home", []string{"A=bad\x00value"})
 	require.ErrorContains(t, err, "NUL")
+}
+
+func TestDefaultCodexEnvironmentInheritsAmbientUnchanged(t *testing.T) {
+	originalCodexHome, hadCodexHome := os.LookupEnv("CODEX_HOME")
+	require.NoError(t, os.Unsetenv("CODEX_HOME"))
+	t.Cleanup(func() {
+		if hadCodexHome {
+			require.NoError(t, os.Setenv("CODEX_HOME", originalCodexHome))
+			return
+		}
+		require.NoError(t, os.Unsetenv("CODEX_HOME"))
+	})
+	t.Setenv("HOME", "/ambient/codex-home")
+
+	want := os.Environ()
+	got, err := defaultCodexEnvironment(nil)
+	require.NoError(t, err)
+	require.Len(t, got, len(want))
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Codex environment differs from ambient environment at index %d", i)
+		}
+	}
+	require.Contains(t, got, "HOME=/ambient/codex-home")
+	for _, entry := range got {
+		require.False(t, strings.HasPrefix(entry, "CODEX_HOME="))
+	}
+}
+
+func TestDefaultCodexEnvironmentClonesAndValidatesOverride(t *testing.T) {
+	override := []string{"HOME=/explicit/home", "CODEX_HOME=/explicit/codex", "TOKEN=kept"}
+	got, err := defaultCodexEnvironment(override)
+	require.NoError(t, err)
+	override[0] = "HOME=mutated"
+	require.Equal(t, []string{"HOME=/explicit/home", "CODEX_HOME=/explicit/codex", "TOKEN=kept"}, got)
+
+	empty, err := defaultCodexEnvironment([]string{})
+	require.NoError(t, err)
+	require.NotNil(t, empty)
+
+	_, err = defaultCodexEnvironment([]string{"A=1", "A=2"})
+	require.ErrorContains(t, err, "duplicate")
+	_, err = defaultCodexEnvironment([]string{"A=bad\x00value"})
+	require.ErrorContains(t, err, "NUL")
+}
+
+func TestResolveCodexExecutableOptionalDefaultAndExplicitErrors(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	resolved, available, err := resolveCodexExecutable("")
+	require.NoError(t, err)
+	require.Empty(t, resolved)
+	require.False(t, available)
+
+	_, _, err = resolveCodexExecutable("missing-explicit-codex")
+	require.ErrorContains(t, err, "resolve Codex executable")
+	_, _, err = resolveCodexExecutable(filepath.Join(t.TempDir(), "missing-codex"))
+	require.ErrorContains(t, err, "resolve Codex executable")
+}
+
+func TestResolveCodexExecutableFindsExplicitNamedExecutable(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "named-codex")
+	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", directory)
+
+	resolved, available, err := resolveCodexExecutable("named-codex")
+	require.NoError(t, err)
+	require.True(t, available)
+	require.Equal(t, executable, resolved)
+}
+
+func TestResolvePiExecutableOptionalDefaultAndExplicitErrors(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	resolved, available, err := resolvePiExecutable("")
+	require.NoError(t, err)
+	require.Empty(t, resolved)
+	require.False(t, available)
+
+	_, _, err = resolvePiExecutable("missing-explicit-pi")
+	require.ErrorContains(t, err, "resolve Pi executable")
+	_, _, err = resolvePiExecutable(filepath.Join(t.TempDir(), "missing-pi"))
+	require.ErrorContains(t, err, "resolve Pi executable")
+}
+
+func TestResolvePiExecutableFindsExplicitNamedExecutable(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "named-pi")
+	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", directory)
+
+	resolved, available, err := resolvePiExecutable("named-pi")
+	require.NoError(t, err)
+	require.True(t, available)
+	require.Equal(t, executable, resolved)
+}
+
+func TestProviderEnvironmentCompositionRegistersAvailableProviders(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		piAvailable    bool
+		codexAvailable bool
+		missing        []provider.Name
+		wantPiRoot     bool
+		wantCodexRoot  bool
+	}{
+		{name: "Pi and Codex", piAvailable: true, codexAvailable: true, wantPiRoot: true, wantCodexRoot: true},
+		{name: "Pi only", piAvailable: true, missing: []provider.Name{provider.NameCodex}, wantPiRoot: true},
+		{name: "Codex only", codexAvailable: true, missing: []provider.Name{provider.NamePi}, wantCodexRoot: true},
+		{name: "neither provider", missing: []provider.Name{provider.NamePi, provider.NameCodex}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			state, err := agentstate.Open(home)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, state.Close()) }()
+
+			executable := executableFixture(t)
+			registry, err := newProviderRegistry(providerRegistryConfig{
+				state: state, piExecutable: executable, piEnvironment: []string{}, piAvailable: test.piAvailable,
+				codexExecutable: executable, codexEnvironment: []string{}, codexAvailable: test.codexAvailable,
+				launcher: processgroup.NewLauncher(), ids: common.CryptoIDGenerator{}, clock: common.SystemClock{},
+				idleTimeout: time.Second,
+			})
+			require.NoError(t, err)
+			require.Equal(t, provider.AllNames(), registry.Names())
+
+			backend, err := broker.New(broker.Config{
+				State: state, Drivers: registry, IDs: common.CryptoIDGenerator{}, Clock: common.SystemClock{}, Timers: broker.RealTimerFactory{},
+				IdleTimeout: time.Second, ShutdownTimeout: time.Second,
+			})
+			require.NoError(t, err)
+			for _, name := range test.missing {
+				require.Equal(t, provider.Readiness{State: provider.MissingExecutable, Provider: name}, registry.Lookup(name).Readiness(context.Background()))
+				_, connectErr := backend.Connect(context.Background(), "https://page.example", unavailableProviderConnect(name))
+				var brokerErr broker.BrokerError
+				require.ErrorAs(t, connectErr, &brokerErr)
+				require.Equal(t, agentprotocol.ErrorProviderMissing, brokerErr.Code())
+			}
+			require.NoError(t, backend.Close(context.Background()))
+
+			piRoot := filepath.Join(home, ".agent-whiteboard", "state", "providers", string(provider.NamePi))
+			_, err = os.Stat(piRoot)
+			if test.wantPiRoot {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, os.ErrNotExist)
+			}
+			codexRoot := filepath.Join(home, ".agent-whiteboard", "state", "providers", string(provider.NameCodex))
+			_, err = os.Stat(codexRoot)
+			if test.wantCodexRoot {
+				require.NoError(t, err)
+				require.NotEqual(t, piRoot, codexRoot)
+			} else {
+				require.ErrorIs(t, err, os.ErrNotExist)
+			}
+		})
+	}
+}
+
+func unavailableProviderConnect(name provider.Name) agentprotocol.Command {
+	created := time.Date(2026, 8, 5, 1, 2, 3, 0, time.UTC)
+	expires := created.Add(time.Hour)
+	return agentprotocol.Command{
+		APIVersion: agentprotocol.APIVersion,
+		CommandID:  strings.Repeat("a", 32),
+		ClientID:   strings.Repeat("b", 32),
+		Type:       agentprotocol.CommandConnect,
+		Payload: agentprotocol.ConnectPayload{
+			Provider:      agentprotocol.ProviderName(name),
+			Resource:      agentprotocol.Resource{Kind: agentprotocol.ResourceMarkdown, ID: strings.Repeat("c", 32), CreatedAt: created, UpdatedAt: created, ExpiresAt: &expires},
+			ContextDigest: strings.Repeat("0", 64),
+		},
+	}
 }
 
 func TestNewAgentServiceFailureReleasesState(t *testing.T) {

@@ -61,7 +61,7 @@ func TestBuildEnvelopeExactContinuationBytes(t *testing.T) {
 	parsed, err := ParseEnvelope(encoded)
 	require.NoError(t, err)
 	require.Equal(t, "continuation", parsed.Revision)
-	require.False(t, parsed.hasContextFields())
+	require.False(t, parsed.HasContextFields())
 }
 
 func TestParseEnvelopeClonesContentBytes(t *testing.T) {

@@ -30,7 +30,10 @@ type StateStore interface {
 }
 
 type Config struct {
-	State           StateStore
+	State   StateStore
+	Drivers provider.Registry
+	// Driver is retained as a Pi-only compatibility seam for embedders while
+	// composition migrates to Drivers. Supplying both is invalid.
 	Driver          provider.Driver
 	IDs             common.IDGenerator
 	Clock           common.Clock
@@ -41,7 +44,7 @@ type Config struct {
 
 type Broker struct {
 	state           StateStore
-	driver          provider.Driver
+	drivers         provider.Registry
 	ids             *serializedIDs
 	clock           common.Clock
 	timers          TimerFactory
@@ -124,7 +127,18 @@ func New(config Config) (*Broker, error) {
 	if common.IsNil(config.State) {
 		return nil, errors.New("broker state store is required")
 	}
-	if common.IsNil(config.Driver) {
+	registry := config.Drivers
+	if !common.IsNil(config.Driver) {
+		if len(registry.Names()) != 0 {
+			return nil, errors.New("broker provider configuration is ambiguous")
+		}
+		var err error
+		registry, err = provider.NewRegistry(map[provider.Name]provider.Driver{provider.NamePi: config.Driver})
+		if err != nil {
+			return nil, errors.New("broker provider driver is required")
+		}
+	}
+	if len(registry.Names()) == 0 {
 		return nil, errors.New("broker provider driver is required")
 	}
 	if common.IsNil(config.IDs) {
@@ -144,7 +158,7 @@ func New(config Config) (*Broker, error) {
 	}
 	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 	return &Broker{
-		state: config.State, driver: config.Driver,
+		state: config.State, drivers: registry,
 		ids: &serializedIDs{raw: config.IDs}, clock: config.Clock,
 		timers: config.Timers, idleTimeout: config.IdleTimeout,
 		shutdownTimeout: config.ShutdownTimeout,
@@ -262,6 +276,10 @@ func (broker *Broker) watchActor(identity agentstate.Identity, slot *conversatio
 }
 
 func (broker *Broker) startConversation(ctx context.Context, identity agentstate.Identity) (*conversation, error) {
+	driver := broker.drivers.Lookup(identity.Provider)
+	if common.IsNil(driver) {
+		return nil, NewBrokerError(agentprotocol.ErrorProviderMissing)
+	}
 	if !broker.retryIdentityCleanups(ctx, identity) {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
@@ -270,27 +288,30 @@ func (broker *Broker) startConversation(ctx context.Context, identity agentstate
 		if mapping.Validate(identity) != nil {
 			return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 		}
-		return broker.resumeConversation(ctx, identity, mapping)
+		return broker.resumeConversation(ctx, identity, mapping, driver)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
-	return broker.createConversation(ctx, identity)
+	return broker.createConversation(ctx, identity, driver)
 }
 
-func (broker *Broker) readiness(ctx context.Context) error {
+func (broker *Broker) readiness(ctx context.Context, name provider.Name, driver provider.Driver) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	readiness := broker.driver.Readiness(ctx)
+	readiness := driver.Readiness(ctx)
+	if readiness.Provider != name {
+		return NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
+	}
 	if failure, unavailable := MapReadiness(readiness); unavailable {
 		return failure
 	}
 	return nil
 }
 
-func (broker *Broker) createConversation(ctx context.Context, identity agentstate.Identity) (*conversation, error) {
-	if err := broker.readiness(ctx); err != nil {
+func (broker *Broker) createConversation(ctx context.Context, identity agentstate.Identity, driver provider.Driver) (*conversation, error) {
+	if err := broker.readiness(ctx, identity.Provider, driver); err != nil {
 		return nil, err
 	}
 	conversationID, err := broker.ids.NewID()
@@ -301,12 +322,12 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 	if err != nil {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
-	request := provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}
+	request := provider.CreateRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), Workspace: workspace}
 	if request.Validate() != nil {
 		broker.cleanupWorkspace(identity, conversationID)
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
-	session, createErr := broker.driver.Create(ctx, request)
+	session, createErr := driver.Create(ctx, request)
 	handle := captureSession(session)
 	if createErr != nil {
 		if handle == nil {
@@ -319,7 +340,7 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 		}
 		return nil, MapError(createErr)
 	}
-	native, err := validateProviderSession(handle, nil)
+	native, err := validateProviderSession(handle, nil, identity.Provider)
 	if err != nil {
 		broker.compensateCreate(identity, handle, native.Ref, conversationID)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
@@ -369,7 +390,7 @@ func (broker *Broker) createConversation(ctx context.Context, identity agentstat
 	return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 }
 
-func (broker *Broker) resumeConversation(ctx context.Context, identity agentstate.Identity, mapping agentstate.Mapping) (*conversation, error) {
+func (broker *Broker) resumeConversation(ctx context.Context, identity agentstate.Identity, mapping agentstate.Mapping, driver provider.Driver) (*conversation, error) {
 	if mapping.Validate(identity) != nil || mapping.Current == nil {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
@@ -383,18 +404,18 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity agentstat
 	if _, err := agentstate.NativeSessionRef(mapping.Current.NativeSession.Value()); err != nil {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
-	if err := broker.readiness(ctx); err != nil {
+	if err := broker.readiness(ctx, identity.Provider, driver); err != nil {
 		return nil, err
 	}
 	workspace, err := broker.state.EnsureWorkspace(mapping.Current.ConversationID)
 	if err != nil {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
-	request := provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: mapping.Current.NativeSession, Workspace: workspace}
+	request := provider.ResumeRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), NativeSession: mapping.Current.NativeSession, Workspace: workspace}
 	if request.Validate() != nil {
 		return nil, NewBrokerError(agentprotocol.ErrorStateRepairFailed)
 	}
-	session, err := broker.driver.Resume(ctx, request)
+	session, err := driver.Resume(ctx, request)
 	handle := captureSession(session)
 	if err != nil {
 		if handle != nil {
@@ -405,7 +426,7 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity agentstat
 		}
 		return nil, MapError(err)
 	}
-	if _, err := validateProviderSession(handle, &mapping.Current.NativeSession); err != nil {
+	if _, err := validateProviderSession(handle, &mapping.Current.NativeSession, identity.Provider); err != nil {
 		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 	}
@@ -415,12 +436,12 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity agentstat
 	return broker.newConversation(identity, mapping, handle)
 }
 
-func validateProviderSession(handle *sessionHandle, expected *provider.NativeSessionRef) (provider.NativeSession, error) {
+func validateProviderSession(handle *sessionHandle, expected *provider.NativeSessionRef, expectedProvider provider.Name) (provider.NativeSession, error) {
 	if handle == nil || common.IsNil(handle.session) {
 		return provider.NativeSession{}, errors.New("nil provider session")
 	}
 	native := handle.native
-	if native.Validate() != nil || handle.session.Model() != native.Model || common.IsNil(handle.child) || handle.events == nil {
+	if native.Validate() != nil || native.Provider != expectedProvider || handle.session.Model() != native.Model || common.IsNil(handle.child) || handle.events == nil {
 		return native, errors.New("invalid provider session")
 	}
 	ref, err := agentstate.NativeSessionRef(native.Ref.Value())
@@ -547,7 +568,8 @@ func (broker *Broker) performCleanup(ctx context.Context, cleanup *pendingCleanu
 		if !cleanup.ref.Valid() {
 			return false
 		}
-		if err := broker.driver.Delete(ctx, provider.DeleteRequest{Provider: provider.NamePi, NativeSession: cleanup.ref}); err != nil {
+		driver := broker.drivers.Lookup(cleanup.identity.Provider)
+		if common.IsNil(driver) || driver.Delete(ctx, provider.DeleteRequest{Provider: cleanup.identity.Provider, NativeSession: cleanup.ref}) != nil {
 			return false
 		}
 		cleanup.deleteDone = true
@@ -599,7 +621,12 @@ func stopPreActor(ctx context.Context, handle *sessionHandle) bool {
 }
 
 func (broker *Broker) newConversation(identity agentstate.Identity, mapping agentstate.Mapping, handle *sessionHandle) (*conversation, error) {
-	actor, err := newConversation(identity, mapping, handle, broker.state, broker.driver, func(candidate *sessionHandle) {
+	driver := broker.drivers.Lookup(identity.Provider)
+	if common.IsNil(driver) {
+		broker.retainStop(identity, handle)
+		return nil, NewBrokerError(agentprotocol.ErrorProviderMissing)
+	}
+	actor, err := newConversation(identity, mapping, handle, broker.state, driver, func(candidate *sessionHandle) {
 		broker.retainStop(identity, candidate)
 	}, broker.ids, broker.clock, broker.timers, broker.lifecycleCtx, broker.idleTimeout, broker.shutdownTimeout)
 	if err != nil {
@@ -607,6 +634,13 @@ func (broker *Broker) newConversation(identity agentstate.Identity, mapping agen
 		return nil, NewBrokerError(agentprotocol.ErrorProviderProtocolFailure)
 	}
 	return actor, nil
+}
+
+func accessForProvider(name provider.Name) provider.AccessMode {
+	if name == provider.NameCodex {
+		return provider.AccessConfigured
+	}
+	return provider.AccessContentOnly
 }
 
 // Close stops admissions before synchronously asking every actor to detach its

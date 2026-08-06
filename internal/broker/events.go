@@ -84,6 +84,24 @@ func (factory *EventFactory) FromProvider(event provider.Event) (agentprotocol.E
 		payload = agentprotocol.AssistantMessagePayload{TurnID: event.TurnID, MessageID: event.MessageID, Text: event.Text, CreatedAt: event.Timestamp}
 	case provider.EventActivity:
 		payload = agentprotocol.ActivityPayload{Kind: agentprotocol.ActivityKind(event.Activity), Summary: event.Text}
+	case provider.EventToolActivity:
+		tool := event.Tool
+		payload = agentprotocol.ToolActivityPayload{
+			ActivityID: tool.ID, TurnID: tool.TurnID, Kind: agentprotocol.ToolKind(tool.Kind), Status: agentprotocol.ToolStatus(tool.Status),
+			Title: tool.Title, Summary: tool.Summary, Detail: tool.Detail,
+		}
+	case provider.EventInteractionRequest:
+		converted, err := interactionRequestFromProvider(*event.Interaction)
+		if err != nil {
+			return agentprotocol.Event{}, NewBrokerError(agentprotocol.ErrorProviderMalformedStream)
+		}
+		payload = converted
+	case provider.EventInteractionResolved:
+		payload = agentprotocol.InteractionResolvedPayload{
+			RequestID: event.Resolution.RequestID,
+			Kind:      agentprotocol.InteractionKind(event.Resolution.Kind),
+			OptionID:  event.Resolution.OptionID,
+		}
 	case provider.EventBlocked:
 		payload = agentprotocol.NewBlockedPayload(agentprotocol.BlockedKind(event.Blocked))
 	case provider.EventCompletion:
@@ -96,4 +114,37 @@ func (factory *EventFactory) FromProvider(event provider.Event) (agentprotocol.E
 		return agentprotocol.Event{}, errors.New("unsupported provider event")
 	}
 	return factory.New(payload)
+}
+
+func interactionRequestFromProvider(request provider.InteractionRequest) (agentprotocol.InteractionRequestPayload, error) {
+	if request.Validate() != nil {
+		return agentprotocol.InteractionRequestPayload{}, errors.New("invalid provider interaction")
+	}
+	converted := agentprotocol.InteractionRequestPayload{
+		RequestID: request.ID, TurnID: request.TurnID, Kind: agentprotocol.InteractionKind(request.Kind), Title: request.Title,
+		Summary: request.Summary, Command: request.Command, WorkingDirectory: request.WorkingDirectory,
+		Options: make([]agentprotocol.InteractionOption, len(request.Options)), Questions: make([]agentprotocol.InteractionQuestion, len(request.Questions)), Fields: make([]agentprotocol.InteractionField, len(request.Fields)),
+	}
+	for index, option := range request.Options {
+		converted.Options[index] = agentprotocol.InteractionOption{ID: option.ID, Label: option.Label, Description: option.Description}
+	}
+	for index, question := range request.Questions {
+		converted.Questions[index] = agentprotocol.InteractionQuestion{
+			ID: question.ID, Header: question.Header, Prompt: question.Prompt, AllowOther: question.AllowOther, Secret: question.Secret, Multiple: question.Multiple,
+			Options: make([]agentprotocol.InteractionOption, len(question.Options)),
+		}
+		for optionIndex, option := range question.Options {
+			converted.Questions[index].Options[optionIndex] = agentprotocol.InteractionOption{ID: option.ID, Label: option.Label, Description: option.Description}
+		}
+	}
+	for index, field := range request.Fields {
+		converted.Fields[index] = agentprotocol.InteractionField{
+			ID: field.ID, Label: field.Label, Description: field.Description, Type: agentprotocol.InteractionFieldType(field.Type), Required: field.Required, Secret: field.Secret,
+			Options: make([]agentprotocol.InteractionOption, len(field.Options)),
+		}
+		for optionIndex, option := range field.Options {
+			converted.Fields[index].Options[optionIndex] = agentprotocol.InteractionOption{ID: option.ID, Label: option.Label, Description: option.Description}
+		}
+	}
+	return converted, nil
 }

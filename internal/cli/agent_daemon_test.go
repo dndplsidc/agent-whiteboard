@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -45,14 +46,17 @@ func (manager *fakeLaunchAgentManager) Uninstall(ctx context.Context) error {
 	return manager.err
 }
 
-func TestAgentDaemonInstallCapturesAbsoluteInputsAndPiOverride(t *testing.T) {
+func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	manager := &fakeLaunchAgentManager{}
 	deps := validDependencies()
 	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
 	deps.ExecutablePath = func() (string, error) { return "bin/agent-whiteboard", nil }
-	deps.Getenv = mapGetenv(map[string]string{launchagent.PiExecutableEnvironment: "/env/pi"})
+	deps.Getenv = mapGetenv(map[string]string{
+		launchagent.PiExecutableEnvironment:    "/env/pi",
+		launchagent.CodexExecutableEnvironment: "/env/codex",
+	})
 	var foregroundCalls int
 	deps.NewAgentApplication = func(app.AgentServiceConfig) (Application, error) {
 		foregroundCalls++
@@ -61,18 +65,26 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndPiOverride(t *testing.T) {
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
 	ctx := context.WithValue(context.Background(), struct{}{}, "daemon")
-	root.SetArgs([]string{"--config", "relative/config.yaml", "agent", "serve", "--daemon", "--pi-executable", "/flag/pi"})
+	root.SetArgs([]string{
+		"--config", "relative/config.yaml", "agent", "serve", "--daemon",
+		"--pi-executable", "/flag/pi", "--codex-executable", "/flag/codex",
+	})
 	require.NoError(t, root.ExecuteContext(ctx))
 
 	require.Equal(t, filepath.Join(mustWorkingDirectory(t), "bin", "agent-whiteboard"), manager.installConfig.Executable)
 	require.Equal(t, filepath.Join(mustWorkingDirectory(t), "relative", "config.yaml"), manager.installConfig.ConfigPath)
-	require.Len(t, manager.installConfig.Providers, 1)
+	require.Len(t, manager.installConfig.Providers, 2)
 	require.Equal(t, launchagent.ProviderPi, manager.installConfig.Providers[0].ProviderName())
 	require.Equal(t, launchagent.ProviderPi, manager.installConfig.Providers[0].ExecutableName())
+	require.Equal(t, launchagent.ProviderCodex, manager.installConfig.Providers[1].ProviderName())
+	require.Equal(t, launchagent.ProviderCodex, manager.installConfig.Providers[1].ExecutableName())
 	require.NotNil(t, manager.installConfig.ExecutableResolver)
 	resolved, err := manager.installConfig.ExecutableResolver.LookPath(launchagent.ProviderPi)
 	require.NoError(t, err)
 	require.Equal(t, "/flag/pi", resolved)
+	resolved, err = manager.installConfig.ExecutableResolver.LookPath(launchagent.ProviderCodex)
+	require.NoError(t, err)
+	require.Equal(t, "/flag/codex", resolved)
 	require.Same(t, ctx, manager.installCtx)
 	require.Zero(t, foregroundCalls)
 }
@@ -91,14 +103,17 @@ func TestAgentDaemonInstallJSONSuccess(t *testing.T) {
 	require.Equal(t, "{\"schema_version\":1}\n", stdout.String())
 }
 
-func TestAgentDaemonInstallUsesEnvironmentPiOverrideAndDefaultConfig(t *testing.T) {
+func TestAgentDaemonInstallUsesEnvironmentProviderOverridesAndDefaultConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	manager := &fakeLaunchAgentManager{}
 	deps := validDependencies()
 	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
 	deps.ExecutablePath = func() (string, error) { return "/agent-whiteboard", nil }
-	deps.Getenv = mapGetenv(map[string]string{launchagent.PiExecutableEnvironment: "/env/pi"})
+	deps.Getenv = mapGetenv(map[string]string{
+		launchagent.PiExecutableEnvironment:    "/env/pi",
+		launchagent.CodexExecutableEnvironment: "/env/codex",
+	})
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
 	root.SetArgs([]string{"agent", "serve", "--daemon"})
@@ -107,6 +122,9 @@ func TestAgentDaemonInstallUsesEnvironmentPiOverrideAndDefaultConfig(t *testing.
 	resolved, err := manager.installConfig.ExecutableResolver.LookPath(launchagent.ProviderPi)
 	require.NoError(t, err)
 	require.Equal(t, "/env/pi", resolved)
+	resolved, err = manager.installConfig.ExecutableResolver.LookPath(launchagent.ProviderCodex)
+	require.NoError(t, err)
+	require.Equal(t, "/env/codex", resolved)
 }
 
 func TestAgentDaemonInstallWithoutOverrideUsesOrdinaryResolver(t *testing.T) {
@@ -119,6 +137,7 @@ func TestAgentDaemonInstallWithoutOverrideUsesOrdinaryResolver(t *testing.T) {
 	root.SetArgs([]string{"agent", "serve", "--daemon"})
 	require.NoError(t, root.ExecuteContext(context.Background()))
 	require.Nil(t, manager.installConfig.ExecutableResolver)
+	require.Len(t, manager.installConfig.Providers, 2)
 }
 
 func TestAgentDaemonStatusRedactsLaunchAgentDetails(t *testing.T) {
@@ -181,17 +200,38 @@ func TestAgentDaemonLifecycleDispatchesContextAndJSONMutation(t *testing.T) {
 	}
 }
 
-func TestAgentServeRejectsExplicitEmptyPiExecutable(t *testing.T) {
-	for _, args := range [][]string{
-		{"agent", "serve", "--pi-executable="},
-		{"agent", "serve", "--daemon", "--pi-executable="},
+func TestAgentServeRejectsExplicitEmptyProviderExecutable(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "foreground Pi", args: []string{"agent", "serve", "--pi-executable="}, want: "Pi executable must not be empty"},
+		{name: "daemon Pi", args: []string{"agent", "serve", "--daemon", "--pi-executable="}, want: "Pi executable must not be empty"},
+		{name: "foreground Codex", args: []string{"agent", "serve", "--codex-executable="}, want: "Codex executable must not be empty"},
+		{name: "daemon Codex", args: []string{"agent", "serve", "--daemon", "--codex-executable="}, want: "Codex executable must not be empty"},
 	} {
-		deps := validDependencies()
-		root, err := NewRoot(deps)
-		require.NoError(t, err)
-		root.SetArgs(args)
-		require.EqualError(t, root.ExecuteContext(context.Background()), "Pi executable must not be empty")
+		t.Run(test.name, func(t *testing.T) {
+			deps := validDependencies()
+			root, err := NewRoot(deps)
+			require.NoError(t, err)
+			root.SetArgs(test.args)
+			require.EqualError(t, root.ExecuteContext(context.Background()), test.want)
+		})
 	}
+}
+
+func TestSelectedProviderExecutableResolverRejectsMissingExplicitSelection(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	resolver := selectedProviderExecutableResolver{codex: "missing-codex-selection"}
+
+	_, err := resolver.LookPath(launchagent.ProviderCodex)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, exec.ErrNotFound)
+	require.ErrorContains(t, err, "missing-codex-selection")
+
+	_, err = resolver.LookPath(launchagent.ProviderPi)
+	require.ErrorIs(t, err, exec.ErrNotFound)
 }
 
 func TestAgentDaemonRejectsForegroundSettingsAndNilManager(t *testing.T) {

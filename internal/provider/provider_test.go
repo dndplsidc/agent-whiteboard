@@ -17,6 +17,7 @@ import (
 const (
 	idA = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	idB = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	idC = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
 )
 
 var (
@@ -82,6 +83,104 @@ func TestNormalizedProviderEventsCarryTurnIdentityAndTypedTerminalFailure(t *tes
 	require.NoError(t, provider.NewTerminalFailureEvent("", failure).Validate())
 	_, err := json.Marshal(terminal)
 	require.Error(t, err)
+}
+
+func TestToolActivityAndInteractiveRequestContractsAreBoundedAndTyped(t *testing.T) {
+	activity := provider.ToolActivity{
+		ID: idC, TurnID: idA, Kind: provider.ToolCommand, Status: provider.ToolRunning,
+		Title: "Run tests", Summary: "Running a focused test", Detail: "go test ./internal/codex",
+	}
+	require.NoError(t, activity.Validate())
+	request := provider.InteractionRequest{
+		ID: idC, TurnID: idA, Kind: provider.InteractionCommandApproval,
+		Title: "Approve command", Summary: "Run the focused tests?", Command: "go test ./internal/codex", WorkingDirectory: "/workspace",
+		Options: []provider.InteractionOption{
+			{ID: "accept", Label: "Allow once", Description: "Run this command."},
+			{ID: "decline", Label: "Decline", Description: "Continue without running it."},
+		},
+	}
+	require.NoError(t, request.Validate())
+	require.NoError(t, provider.NewInteractionRequestEvent(request).Validate())
+	resolution := provider.InteractionResolution{RequestID: request.ID, Kind: request.Kind, OptionID: "accept"}
+	require.NoError(t, resolution.Validate())
+	require.NoError(t, provider.NewInteractionResolvedEvent(resolution).Validate())
+
+	response := provider.InteractionResponse{RequestID: request.ID, Kind: request.Kind, OptionID: "accept"}
+	require.NoError(t, response.Validate())
+	var interactive provider.InteractiveSession = validInteractiveFakeSession()
+	require.NoError(t, interactive.Respond(context.Background(), response))
+
+	request.Options[0].ID = "bad id"
+	require.Error(t, request.Validate())
+	resolution.OptionID = "bad id"
+	require.Error(t, resolution.Validate())
+	response.RequestID = "native-id"
+	require.Error(t, response.Validate())
+}
+
+func TestStructuredInteractionQuestionsValidateAnswersWithoutNativePayloads(t *testing.T) {
+	request := provider.InteractionRequest{
+		ID: idC, TurnID: idA, Kind: provider.InteractionUserInput, Title: "Need input", Summary: "Choose a target.",
+		Questions: []provider.InteractionQuestion{{
+			ID: "target", Header: "Target", Prompt: "Which target?", AllowOther: true,
+			Options: []provider.InteractionOption{{ID: "local", Label: "Local", Description: "Use the local target."}},
+		}},
+	}
+	require.NoError(t, request.Validate())
+	response := provider.InteractionResponse{RequestID: idC, Kind: provider.InteractionUserInput, Answers: map[string][]string{"target": {"local"}}}
+	require.NoError(t, response.Validate())
+	response.Answers["target"] = []string{strings.Repeat("x", provider.MaxInteractionTextBytes+1)}
+	require.Error(t, response.Validate())
+}
+
+func TestStructuredInteractionRequestsRejectUnanswerableSurfaces(t *testing.T) {
+	request := provider.InteractionRequest{
+		ID: idC, TurnID: idA, Kind: provider.InteractionUserInput, Title: "Need input",
+		Questions: []provider.InteractionQuestion{{ID: "target", Header: "Target", Prompt: "Which target?"}},
+	}
+	require.Error(t, request.Validate())
+
+	request.Questions[0].AllowOther = true
+	require.NoError(t, request.Validate())
+
+	request = provider.InteractionRequest{
+		ID: idC, TurnID: idA, Kind: provider.InteractionMCPElicitation, Title: "Need input",
+		Options: []provider.InteractionOption{{ID: "accept", Label: "Accept"}, {ID: "decline", Label: "Decline"}, {ID: "cancel", Label: "Cancel"}},
+		Fields:  []provider.InteractionField{{ID: "target", Label: "Target", Type: provider.InteractionSelect}},
+	}
+	require.Error(t, request.Validate())
+
+	request.Fields[0].Options = []provider.InteractionOption{{ID: "local", Label: "Local"}}
+	require.NoError(t, request.Validate())
+
+	request.Fields[0].Type = provider.InteractionText
+	require.Error(t, request.Validate())
+}
+
+func TestInteractionRequestsRequireKindSpecificResponseSurfaces(t *testing.T) {
+	option := func(id string) provider.InteractionOption { return provider.InteractionOption{ID: id, Label: id} }
+	tests := []provider.InteractionRequest{
+		{ID: idC, Kind: provider.InteractionCommandApproval, Title: "Command", Questions: []provider.InteractionQuestion{{ID: "answer", Header: "Answer", Prompt: "Answer?", AllowOther: true}}},
+		{ID: idC, Kind: provider.InteractionPermissionApproval, Title: "Permission", Options: []provider.InteractionOption{option("accept")}, Fields: []provider.InteractionField{{ID: "permissions", Label: "Permissions", Type: provider.InteractionMultiSelect, Options: []provider.InteractionOption{option("read")}}}},
+		{ID: idC, Kind: provider.InteractionUserInput, Title: "Input", Options: []provider.InteractionOption{option("accept")}},
+		{ID: idC, Kind: provider.InteractionMCPElicitation, Title: "MCP", Fields: []provider.InteractionField{{ID: "name", Label: "Name", Type: provider.InteractionText}}},
+	}
+	for _, request := range tests {
+		require.Error(t, request.Validate(), request.Kind)
+	}
+
+	permission := provider.InteractionRequest{
+		ID: idC, Kind: provider.InteractionPermissionApproval, Title: "Permission",
+		Options: []provider.InteractionOption{option("grantTurn"), option("grantSession"), option("decline")},
+		Fields:  []provider.InteractionField{{ID: "permissions", Label: "Permissions", Type: provider.InteractionMultiSelect, Options: []provider.InteractionOption{option("read")}}},
+	}
+	require.NoError(t, permission.Validate())
+	mcp := provider.InteractionRequest{
+		ID: idC, Kind: provider.InteractionMCPElicitation, Title: "MCP",
+		Options: []provider.InteractionOption{option("accept"), option("decline"), option("cancel")},
+		Fields:  []provider.InteractionField{{ID: "name", Label: "Name", Type: provider.InteractionText}},
+	}
+	require.NoError(t, mcp.Validate())
 }
 
 func TestProviderEventsRejectEveryFieldNotPermittedByKind(t *testing.T) {
@@ -243,6 +342,38 @@ func TestDriverLifecycleOperationsAreExplicitAndRejectZeroReferences(t *testing.
 	require.Error(t, deleteRequest.Validate())
 }
 
+func TestProviderNamesAndAccessModesAreClosed(t *testing.T) {
+	for _, name := range []provider.Name{provider.NamePi, provider.NameCodex} {
+		require.True(t, name.Valid())
+	}
+	require.False(t, provider.Name("other").Valid())
+	require.Equal(t, []provider.Name{provider.NamePi, provider.NameCodex}, provider.AllNames())
+
+	workspace := t.TempDir()
+	require.NoError(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}).Validate())
+	require.NoError(t, (provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
+	require.Error(t, (provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessContentOnly, Workspace: workspace}).Validate())
+	require.Error(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
+}
+
+func TestRegistryRejectsUnknownOrNilDrivers(t *testing.T) {
+	pi := &fakeDriver{}
+	codex := &fakeDriver{name: provider.NameCodex}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{
+		provider.NamePi: pi, provider.NameCodex: codex,
+	})
+	require.NoError(t, err)
+	require.Same(t, pi, registry.Lookup(provider.NamePi))
+	require.Same(t, codex, registry.Lookup(provider.NameCodex))
+	require.Nil(t, registry.Lookup(provider.Name("other")))
+	require.Equal(t, []provider.Name{provider.NamePi, provider.NameCodex}, registry.Names())
+
+	_, err = provider.NewRegistry(map[provider.Name]provider.Driver{provider.Name("other"): pi})
+	require.Error(t, err)
+	_, err = provider.NewRegistry(map[provider.Name]provider.Driver{provider.NamePi: nil})
+	require.Error(t, err)
+}
+
 func TestLaunchRequestCarriesAnExplicitProcessSpecification(t *testing.T) {
 	workingDirectory := t.TempDir()
 	valid := provider.LaunchRequest{
@@ -336,10 +467,14 @@ func TestReadinessTaxonomyAndResolvedModelAreClosed(t *testing.T) {
 	require.Error(t, (provider.Readiness{State: provider.Ready, Provider: provider.NamePi}).Validate())
 }
 
-type fakeDriver struct{}
+type fakeDriver struct{ name provider.Name }
 
-func (*fakeDriver) Readiness(context.Context) provider.Readiness {
-	return provider.Readiness{State: provider.Ready, Provider: provider.NamePi, Model: "resolved-model"}
+func (driver *fakeDriver) Readiness(context.Context) provider.Readiness {
+	name := driver.name
+	if name == "" {
+		name = provider.NamePi
+	}
+	return provider.Readiness{State: provider.Ready, Provider: name, Model: "resolved-model"}
 }
 func (*fakeDriver) Create(context.Context, provider.CreateRequest) (provider.Session, error) {
 	return validFakeSession(), nil
@@ -359,6 +494,17 @@ type fakeSession struct {
 	preflightErr error
 	child        provider.ManagedChild
 }
+
+type interactiveFakeSession struct{ *fakeSession }
+
+func validInteractiveFakeSession() *interactiveFakeSession {
+	return &interactiveFakeSession{fakeSession: validFakeSession()}
+}
+
+func (*interactiveFakeSession) Respond(context.Context, provider.InteractionResponse) error {
+	return nil
+}
+func (*interactiveFakeSession) CancelInteraction(context.Context, string) error { return nil }
 
 func validFakeSession() *fakeSession {
 	return &fakeSession{events: make(chan provider.Event), metadata: validNativeSession(), child: &fakeChild{}}

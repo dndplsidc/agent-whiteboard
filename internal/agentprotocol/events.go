@@ -10,23 +10,26 @@ import (
 type EventType string
 
 const (
-	EventSnapshot         EventType = "snapshot"
-	EventCommandResult    EventType = "command_result"
-	EventTimeline         EventType = "timeline"
-	EventHistory          EventType = "history"
-	EventUserMessage      EventType = "user_message"
-	EventAssistantDelta   EventType = "assistant_delta"
-	EventAssistantMessage EventType = "assistant_message"
-	EventQueue            EventType = "queue"
-	EventLifecycle        EventType = "lifecycle"
-	EventProvider         EventType = "provider"
-	EventContext          EventType = "context"
-	EventActivity         EventType = "activity"
-	EventBlocked          EventType = "blocked"
-	EventError            EventType = "error"
-	EventCompletion       EventType = "completion"
-	EventInterruption     EventType = "interruption"
-	EventArchive          EventType = "archive"
+	EventSnapshot            EventType = "snapshot"
+	EventCommandResult       EventType = "command_result"
+	EventTimeline            EventType = "timeline"
+	EventHistory             EventType = "history"
+	EventUserMessage         EventType = "user_message"
+	EventAssistantDelta      EventType = "assistant_delta"
+	EventAssistantMessage    EventType = "assistant_message"
+	EventQueue               EventType = "queue"
+	EventLifecycle           EventType = "lifecycle"
+	EventProvider            EventType = "provider"
+	EventContext             EventType = "context"
+	EventActivity            EventType = "activity"
+	EventBlocked             EventType = "blocked"
+	EventError               EventType = "error"
+	EventCompletion          EventType = "completion"
+	EventInterruption        EventType = "interruption"
+	EventArchive             EventType = "archive"
+	EventToolActivity        EventType = "tool_activity"
+	EventInteractionRequest  EventType = "interaction_request"
+	EventInteractionResolved EventType = "interaction_resolved"
 )
 
 type LifecycleState string
@@ -296,7 +299,7 @@ type ProviderPayload struct {
 
 func (ProviderPayload) EventType() EventType { return EventProvider }
 func (p ProviderPayload) validate() error {
-	if p.Provider != ProviderPi || !validProviderState(p.State) || !validBoundedText(p.Model, MaxTitleBytes, false) || (p.State == ProviderReady && p.Model == "") {
+	if !p.Provider.Valid() || !validProviderState(p.State) || !validBoundedText(p.Model, MaxTitleBytes, false) || (p.State == ProviderReady && p.Model == "") {
 		return invalid(nil)
 	}
 	return nil
@@ -479,9 +482,14 @@ func DecodeEvent(data []byte) (Event, error) {
 		return Event{}, ErrMessageTooLarge
 	}
 	nullable := map[string]bool{
-		"payload.active_turn_id": true,
-		"payload.next_cursor":    true,
-		"payload.turn_id":        true,
+		"payload.active_turn_id":      true,
+		"payload.next_cursor":         true,
+		"payload.turn_id":             true,
+		"payload.options":             true,
+		"payload.questions":           true,
+		"payload.fields":              true,
+		"payload.questions[].options": true,
+		"payload.fields[].options":    true,
 	}
 	if err := inspectJSON(data, nullable); err != nil {
 		return Event{}, err
@@ -542,6 +550,12 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 		target, required = &InterruptionPayload{}, []string{"turn_id", "reason"}
 	case EventArchive:
 		target, required = &ArchivePayload{}, []string{"action", "archive_id"}
+	case EventToolActivity:
+		target, required = &ToolActivityPayload{}, []string{"activity_id", "kind", "status", "title", "summary", "detail"}
+	case EventInteractionRequest:
+		target, required = &InteractionRequestPayload{}, []string{"request_id", "kind", "title", "summary", "command", "working_directory", "options", "questions", "fields"}
+	case EventInteractionResolved:
+		target, required = &InteractionResolvedPayload{}, []string{"request_id", "kind", "option_id"}
 	default:
 		return nil, invalid(nil)
 	}
@@ -585,6 +599,12 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	case *InterruptionPayload:
 		return *value, nil
 	case *ArchivePayload:
+		return *value, nil
+	case *ToolActivityPayload:
+		return *value, nil
+	case *InteractionRequestPayload:
+		return *value, nil
+	case *InteractionResolvedPayload:
 		return *value, nil
 	default:
 		panic("unreachable event payload")
@@ -693,7 +713,7 @@ func validTimelineItem(item TimelineItem) bool {
 	}
 }
 func validArchiveItem(item ArchiveItem) bool {
-	return validID(item.ArchiveID) && !item.CreatedAt.IsZero() && !item.UpdatedAt.IsZero() && !item.UpdatedAt.Before(item.CreatedAt) && item.Provider == ProviderPi && validBoundedText(item.Model, MaxTitleBytes, false) && validBoundedText(item.Preview, MaxTitleBytes, false) && utf8.ValidString(item.Preview)
+	return validID(item.ArchiveID) && !item.CreatedAt.IsZero() && !item.UpdatedAt.IsZero() && !item.UpdatedAt.Before(item.CreatedAt) && item.Provider.Valid() && validBoundedText(item.Model, MaxTitleBytes, false) && validBoundedText(item.Preview, MaxTitleBytes, false) && utf8.ValidString(item.Preview)
 }
 func validCursor(cursor *string) bool {
 	return cursor == nil || validID(*cursor)

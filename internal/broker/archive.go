@@ -24,6 +24,10 @@ type archiveWorkerResult struct {
 }
 
 func archivePage(mapping agentstate.Mapping, commandID string, request agentprotocol.PageRequestPayload) (agentprotocol.HistoryPayload, agentprotocol.BrowserErrorCode) {
+	wireProvider, err := providerNameFromDomain(mapping.Identity.Provider)
+	if err != nil {
+		return agentprotocol.HistoryPayload{}, agentprotocol.ErrorStateRepairFailed
+	}
 	archives := append([]agentstate.Session(nil), mapping.Archives...)
 	sort.SliceStable(archives, func(left, right int) bool {
 		return archives[left].UpdatedAt.After(archives[right].UpdatedAt)
@@ -50,7 +54,7 @@ func archivePage(mapping agentstate.Mapping, commandID string, request agentprot
 			ArchiveID: archived.ConversationID,
 			CreatedAt: archived.CreatedAt,
 			UpdatedAt: archived.UpdatedAt,
-			Provider:  agentprotocol.ProviderPi,
+			Provider:  wireProvider,
 			Model:     archived.ModelLabel,
 			Preview:   "",
 		}
@@ -113,7 +117,7 @@ func (actor *conversation) commandArchiveDelete(results chan<- archiveWorkerResu
 	generation := actor.generation
 	go func(target agentstate.Session) {
 		result := archiveWorkerResult{generation: generation, commandID: command.CommandID, clientID: command.ClientID, archiveID: target.ConversationID}
-		deleteRequest := provider.DeleteRequest{Provider: provider.NamePi, NativeSession: target.NativeSession}
+		deleteRequest := provider.DeleteRequest{Provider: actor.identity.Provider, NativeSession: target.NativeSession}
 		if deleteRequest.Validate() != nil || actor.driver.Delete(actor.lifecycleCtx, deleteRequest) != nil {
 			result.code = agentprotocol.ErrorArchiveDeleteRetained
 			results <- result

@@ -11,7 +11,9 @@ const (
 	Label                       = "com.agent-whiteboard.local-agent"
 	LaunchctlExecutable         = "/bin/launchctl"
 	ProviderPi                  = "pi"
+	ProviderCodex               = "codex"
 	PiExecutableEnvironment     = "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE"
+	CodexExecutableEnvironment  = "AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE"
 	installedNotRunningGuidance = "LaunchAgent is installed but not running"
 	notInstalledGuidance        = "LaunchAgent is not installed"
 )

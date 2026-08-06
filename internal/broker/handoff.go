@@ -221,7 +221,7 @@ func (broker *Broker) runHandoff(slot *conversationSlot, oldActor *conversation,
 		if _, ok := broker.state.(newConversationStore); !ok {
 			return result
 		}
-		if code := broker.handoffReadiness(); code != "" {
+		if code := broker.handoffReadiness(oldActor); code != "" {
 			result.code = code
 			return result
 		}
@@ -234,21 +234,21 @@ func (broker *Broker) runHandoff(slot *conversationSlot, oldActor *conversation,
 		if err != nil {
 			return result
 		}
-		createRequest := provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}
+		createRequest := provider.CreateRequest{Provider: oldActor.identity.Provider, Access: accessForProvider(oldActor.identity.Provider), Workspace: workspace}
 		if createRequest.Validate() != nil {
 			if exactMapping(broker.state, oldActor.identity, request.before) {
 				cleanupCandidate(true)
 			}
 			return result
 		}
-		session, err := broker.driver.Create(broker.lifecycleCtx, createRequest)
+		session, err := oldActor.driver.Create(broker.lifecycleCtx, createRequest)
 		candidate = captureSession(session)
 		if err != nil || broker.lifecycleCtx.Err() != nil {
 			result.code = MapError(err).Code()
 			cleanupCandidate(exactMapping(broker.state, oldActor.identity, request.before))
 			return result
 		}
-		native, err := validateProviderSession(candidate, nil)
+		native, err := validateProviderSession(candidate, nil, oldActor.identity.Provider)
 		if err != nil {
 			result.code = agentprotocol.ErrorProviderProtocolFailure
 			cleanupCandidate(exactMapping(broker.state, oldActor.identity, request.before))
@@ -286,7 +286,7 @@ func (broker *Broker) runHandoff(slot *conversationSlot, oldActor *conversation,
 		if _, ok := broker.state.(restoreArchiveStore); !ok || request.archive == nil {
 			return result
 		}
-		if code := broker.handoffReadiness(); code != "" {
+		if code := broker.handoffReadiness(oldActor); code != "" {
 			result.code = code
 			return result
 		}
@@ -297,20 +297,20 @@ func (broker *Broker) runHandoff(slot *conversationSlot, oldActor *conversation,
 			return result
 		}
 		resumeRequest := provider.ResumeRequest{
-			Provider: provider.NamePi, Access: provider.AccessContentOnly,
+			Provider: oldActor.identity.Provider, Access: accessForProvider(oldActor.identity.Provider),
 			NativeSession: current.NativeSession, Workspace: workspace,
 		}
 		if resumeRequest.Validate() != nil {
 			return result
 		}
-		session, err := broker.driver.Resume(broker.lifecycleCtx, resumeRequest)
+		session, err := oldActor.driver.Resume(broker.lifecycleCtx, resumeRequest)
 		candidate = captureSession(session)
 		if err != nil || broker.lifecycleCtx.Err() != nil {
 			result.code = MapError(err).Code()
 			cleanupCandidate(false)
 			return result
 		}
-		if _, err := validateProviderSession(candidate, &current.NativeSession); err != nil {
+		if _, err := validateProviderSession(candidate, &current.NativeSession, oldActor.identity.Provider); err != nil {
 			result.code = agentprotocol.ErrorProviderProtocolFailure
 			cleanupCandidate(false)
 			return result
@@ -411,8 +411,11 @@ func (broker *Broker) runHandoff(slot *conversationSlot, oldActor *conversation,
 	return result
 }
 
-func (broker *Broker) handoffReadiness() agentprotocol.BrowserErrorCode {
-	if err := broker.readiness(broker.lifecycleCtx); err != nil {
+func (broker *Broker) handoffReadiness(actor *conversation) agentprotocol.BrowserErrorCode {
+	if actor == nil || common.IsNil(actor.driver) {
+		return agentprotocol.ErrorProviderProtocolFailure
+	}
+	if err := broker.readiness(broker.lifecycleCtx, actor.identity.Provider, actor.driver); err != nil {
 		var coded browserErrorCoder
 		if errors.As(err, &coded) {
 			return coded.BrowserErrorCode()

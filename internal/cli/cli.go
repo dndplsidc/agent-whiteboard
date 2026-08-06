@@ -192,19 +192,35 @@ func isDaemonServeRequest(cmd *cobra.Command) bool {
 	return flag != nil && flag.Value.String() == "true"
 }
 
-// selectedPiExecutableResolver records an explicit Pi selection without
+// selectedProviderExecutableResolver records explicit provider selections without
 // copying any ambient environment into the LaunchAgent. Absolute selections
 // are returned as-is; names are resolved using the current PATH.
-type selectedPiExecutableResolver struct{ selected string }
+type selectedProviderExecutableResolver struct{ pi, codex string }
 
-func (resolver selectedPiExecutableResolver) LookPath(name string) (string, error) {
-	if name != launchagent.ProviderPi {
+func (resolver selectedProviderExecutableResolver) LookPath(name string) (string, error) {
+	selected := ""
+	switch name {
+	case launchagent.ProviderPi:
+		selected = resolver.pi
+	case launchagent.ProviderCodex:
+		selected = resolver.codex
+	default:
+		return "", exec.ErrNotFound
+	}
+	if selected == "" {
 		return exec.LookPath(name)
 	}
-	if filepath.IsAbs(resolver.selected) {
-		return resolver.selected, nil
+	if filepath.IsAbs(selected) {
+		return selected, nil
 	}
-	return exec.LookPath(resolver.selected)
+	path, err := exec.LookPath(selected)
+	if err != nil {
+		// An absent provider discovered through the ordinary PATH is optional,
+		// but a non-empty flag or environment selection is an explicit request
+		// and must make daemon installation fail.
+		return "", fmt.Errorf("explicit %s executable %q is unavailable: %v", name, selected, err)
+	}
+	return path, nil
 }
 
 func (factory commandFactory) newClient(cmd *cobra.Command) (Client, context.Context, context.CancelFunc, error) {

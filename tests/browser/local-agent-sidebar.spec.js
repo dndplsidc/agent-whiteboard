@@ -23,10 +23,13 @@ async function openSidebarPage({ context, page, fixture, markdown, creatorContex
   return resource;
 }
 
-async function connectSidebar(page) {
-  await page.getByRole("button", { name: "Open Page agent" }).click();
-  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
-  await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
+async function connectSidebar(page, provider = "pi") {
+  const providerName = provider === "codex" ? "Codex" : "Pi";
+  const model = provider === "codex" ? "fixture-codex-model" : "fixture-model";
+  const launcher = page.getByRole("button", { name: "Open Page agent", exact: true });
+  if (await launcher.isVisible()) await launcher.click();
+  await page.getByRole("button", { name: `Connect to ${providerName}`, exact: true }).click();
+  await expect(page.locator(".agent-provider-label")).toContainText(model);
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
 }
 
@@ -52,13 +55,12 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   expect(JSON.stringify(localAgentSidebar.brokerRequests)).not.toContain(creatorContext);
 
   await page.getByRole("button", { name: "Open Page agent" }).click();
-  await expect(page.locator(".agent-drawer-header")).toContainText("Content-only · Local Pi");
-  await expect(page.locator(".agent-drawer-header")).not.toContainText("Pi ready");
-  await expect(page.locator(".agent-status-bar")).toContainText("Pi ready");
-  await expect(page.locator(".agent-status-bar")).toContainText("Not connected");
+  await expect(page.locator(".agent-drawer-header")).toContainText("Pi ready");
+  await expect(page.locator(".agent-status-bar")).toHaveCount(0);
+  await expect(page.locator(".agent-provider-label")).toBeHidden();
   await expect(page.locator(".agent-consent")).toContainText("sends no page content");
   await expect(page.locator(".agent-consent-list")).toContainText("Complete Markdown and creator notes");
-  await expect(page.locator(".agent-context-disclosure")).toContainText("Full Markdown + creator notes");
+  await expect(page.locator(".agent-context-disclosure")).toContainText("Markdown + creator notes");
   await expect(page.locator(".agent-context-disclosure")).not.toContainText(/shared|uncertain/iu);
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
 
@@ -316,8 +318,9 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
   page,
   localAgentSidebar,
 }) => {
-  const markdown = "# Controlled response\n\nExact Markdown for context inspection.\n";
-  const creatorContext = "Exact creator context for inspection.\n";
+  await page.setViewportSize({ width: 390, height: 844 });
+  const markdown = `# Controlled response\n\n${Array.from({ length: 80 }, (_, index) => `Markdown line ${index + 1} for context inspection.`).join("\n")}\n`;
+  const creatorContext = `${Array.from({ length: 60 }, (_, index) => `Creator note ${index + 1} for context inspection.`).join("\n")}\n`;
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown, creatorContext });
   localAgentSidebar.setPhaseResponses(true);
   await connectSidebar(page);
@@ -351,18 +354,39 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
 
   localAgentSidebar.releaseResponsePhase("completion");
   await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+  const conversationHeaderBox = await page.locator(".agent-drawer-header").boundingBox();
   await page.getByRole("button", { name: "Open Page agent menu" }).click();
   await page.getByRole("menuitem", { name: "Inspect page context" }).click();
   await expect(page.locator(".agent-context")).toBeVisible();
+  const contextHeaderBox = await page.locator(".agent-drawer-header").boundingBox();
+  expect(Math.round(contextHeaderBox.height)).toBe(Math.round(conversationHeaderBox.height));
+  await expect(page.locator(".agent-drawer-header h2")).toHaveText("Page context");
+  await expect(page.getByLabel("Conversation provider")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Open Page agent menu" })).toBeHidden();
+  const contextCards = page.locator(".agent-context-card");
+  await expect(contextCards).toHaveCount(2);
+  await expect(contextCards.first()).toHaveAttribute("open", "");
+  await expect(contextCards.nth(1)).not.toHaveAttribute("open", "");
+  await contextCards.nth(1).locator("summary").click();
   const markdownContext = page.getByLabel("Page Markdown");
-  const creatorContextBlock = page.getByLabel("Creator context");
+  const creatorContextBlock = page.getByLabel("Creator notes");
   await expect(markdownContext).toHaveText(markdown);
   await expect(creatorContextBlock).toHaveText(creatorContext);
+  await expect(markdownContext).toHaveCSS("overflow-y", "scroll");
+  await expect(creatorContextBlock).toHaveCSS("overflow-y", "scroll");
+  await expect(markdownContext).toHaveCSS("touch-action", "pan-y");
+  await expect(creatorContextBlock).toHaveCSS("touch-action", "pan-y");
   const markdownContextBox = await markdownContext.boundingBox();
   const creatorContextBox = await creatorContextBlock.boundingBox();
-  expect(markdownContextBox.height).toBeGreaterThanOrEqual(224);
-  expect(creatorContextBox.height).toBeGreaterThanOrEqual(224);
+  expect(markdownContextBox.height).toBeGreaterThanOrEqual(288);
+  expect(creatorContextBox.height).toBeGreaterThanOrEqual(288);
   expect(Math.abs(markdownContextBox.height - creatorContextBox.height)).toBeLessThanOrEqual(1);
+  expect(await markdownContext.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  expect(await creatorContextBlock.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await markdownContext.evaluate((element) => { element.scrollTop = 240; });
+  await creatorContextBlock.evaluate((element) => { element.scrollTop = 240; });
+  expect(await markdownContext.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  expect(await creatorContextBlock.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect(page.locator(".agent-timeline")).toBeHidden();
   await page.getByRole("button", { name: "Back to conversation" }).click();
 
@@ -417,4 +441,288 @@ test("sends exact initial context once and resumes without replaying it", async 
   expect(Object.keys(stored).every((key) => allowedPreferenceKeys.has(key))).toBe(true);
   expect(JSON.stringify(stored)).not.toContain("What does this page say?");
   expect(JSON.stringify(stored)).not.toContain(creatorContext);
+});
+
+test("switches providers silently and isolates active Pi and Codex conversations", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  const markdown = "# Provider isolation\n\nDo not send this while switching.\n";
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown, creatorContext: "Provider context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await expect(page.locator(".agent-drawer-header")).toContainText("Codex ready");
+  await expect(page.getByRole("button", { name: "Connect to Codex", exact: true })).toBeVisible();
+  expect(parsedCommands(localAgentSidebar.brokerRequests)).toEqual([]);
+  expect(JSON.stringify(localAgentSidebar.brokerRequests)).not.toContain(markdown);
+  expect(await page.evaluate(() => localStorage.getItem("agent-whiteboard-agent-provider"))).toBe("codex");
+
+  localAgentSidebar.setHoldResponses(true, "codex");
+  await connectSidebar(page, "codex");
+  await page.getByLabel("Message Codex about this whiteboard").fill("Keep the Codex turn active.");
+  await page.getByLabel("Message Codex about this whiteboard").press("Enter");
+  await expect(page.locator(".agent-live-status")).toHaveText("Responding");
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+
+  const commandCountBeforeSwitch = parsedCommands(localAgentSidebar.brokerRequests).length;
+  await page.getByLabel("Conversation provider").selectOption("pi");
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
+  await expect(page.locator(".agent-provider-label")).toBeHidden();
+  expect(parsedCommands(localAgentSidebar.brokerRequests)).toHaveLength(commandCountBeforeSwitch);
+  await connectSidebar(page, "pi");
+  await page.getByLabel("Message Pi about this whiteboard").fill("Answer only in the Pi conversation.");
+  await page.getByLabel("Message Pi about this whiteboard").press("Enter");
+  await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
+  await expect(page.locator(".agent-timeline")).not.toContainText("Keep the Codex turn active.");
+
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await expect(page.locator(".agent-provider-label")).toContainText("fixture-codex-model");
+  await expect(page.locator(".agent-message-user")).toContainText("Keep the Codex turn active.");
+  await expect(page.locator(".agent-timeline")).not.toContainText("Answer only in the Pi conversation.");
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+
+  const commands = parsedCommands(localAgentSidebar.brokerRequests);
+  const connects = commands.filter((command) => command.type === "connect");
+  expect(connects.map((command) => command.payload.provider)).toEqual(["codex", "pi"]);
+  const codexSubmit = commands.find((command) => command.type === "submit" && command.payload.message.includes("Codex"));
+  const piSubmit = commands.find((command) => command.type === "submit" && command.payload.message.includes("Pi"));
+  expect(codexSubmit.conversation_id).not.toBe(piSubmit.conversation_id);
+});
+
+test("renders Codex tool lifecycle and stable approval and interaction families", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex interactions\n", creatorContext: "Interaction context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+
+  const activityID = localAgentSidebar.emitToolActivity("codex", {
+    kind: "command",
+    status: "running",
+    title: "Inspect browser tests",
+    summary: "Running a focused search.",
+    detail: "rg -n provider tests/browser",
+  });
+  await expect(page.locator(".agent-tool-activity")).toHaveCount(1);
+  await expect(page.locator(".agent-tool-activity")).toHaveAttribute("data-status", "running");
+  localAgentSidebar.emitToolActivity("codex", {
+    activity_id: activityID,
+    kind: "command",
+    status: "completed",
+    title: "Inspect browser tests",
+    summary: "Focused search completed.",
+    detail: "tests/browser/local-agent-sidebar.spec.js",
+  });
+  await expect(page.locator(".agent-tool-activity")).toHaveCount(1);
+  await expect(page.locator(".agent-tool-activity")).toHaveAttribute("data-status", "completed");
+  await expect(page.locator(".agent-tool-activity")).toContainText("Focused search completed.");
+
+  localAgentSidebar.emitInteraction("codex", {
+    kind: "command_approval",
+    title: "Run command",
+    summary: "Codex wants to inspect the focused browser files.",
+    command: "rg -n provider tests/browser",
+    working_directory: "/workspace/agent-whiteboard",
+    options: [
+      { id: "accept", label: "Accept", description: "Run once." },
+      { id: "acceptForSession", label: "Accept for session", description: "Allow matching commands for this session." },
+      { id: "decline", label: "Decline", description: "Do not run it." },
+    ],
+  });
+  const commandCard = page.locator('.agent-interaction[data-kind="command_approval"]');
+  await expect(commandCard).toHaveAccessibleName(/Run command · Response requested/u);
+  await expect(commandCard.getByLabel("Requested command")).toHaveText("rg -n provider tests/browser");
+  await commandCard.getByRole("button", { name: "Accept for session", exact: true }).click();
+  await expect(commandCard).toHaveAttribute("data-state", "resolved");
+
+  localAgentSidebar.emitInteraction("codex", {
+    kind: "file_change_approval",
+    title: "Apply file changes",
+    summary: "Update tests/browser/example.spec.js with the displayed diff.",
+    working_directory: "/workspace/agent-whiteboard",
+    options: [
+      { id: "accept", label: "Apply", description: "Apply this change." },
+      { id: "decline", label: "Decline", description: "Keep the file unchanged." },
+    ],
+  });
+  const fileCard = page.locator('.agent-interaction[data-kind="file_change_approval"]');
+  await fileCard.getByRole("button", { name: "Decline", exact: true }).click();
+  await expect(fileCard).toHaveAttribute("data-state", "resolved");
+
+  localAgentSidebar.emitInteraction("codex", {
+    kind: "permission_approval",
+    title: "Grant permissions",
+    summary: "Choose the requested permission subset and scope.",
+    options: [
+      { id: "grantTurn", label: "Allow for turn", description: "Grant the selected permissions for this turn." },
+      { id: "grantSession", label: "Allow for session", description: "Grant the selected permissions for this session." },
+      { id: "decline", label: "Decline", description: "Grant nothing." },
+    ],
+    fields: [
+      {
+        id: "permissions",
+        label: "Permissions",
+        description: "Select the capabilities Codex may use.",
+        type: "multi_select",
+        required: true,
+        secret: false,
+        options: [
+          { id: "workspace_read", label: "Workspace read", description: "Read workspace files." },
+          { id: "workspace_write", label: "Workspace write", description: "Modify workspace files." },
+          { id: "network", label: "Network", description: "Reach approved network resources." },
+        ],
+      },
+    ],
+  });
+  const permissionCard = page.locator('.agent-interaction[data-kind="permission_approval"]');
+  await permissionCard.getByLabel("Permissions").selectOption(["workspace_write", "network"]);
+  await permissionCard.getByRole("button", { name: "Allow for session", exact: true }).click();
+  await expect(permissionCard).toHaveAttribute("data-state", "resolved");
+
+  localAgentSidebar.emitInteraction("codex", {
+    kind: "mcp_elicitation",
+    title: "Configure MCP action",
+    summary: "The local MCP server needs structured values.",
+		options: [
+			{ id: "accept", label: "Accept", description: "Provide the requested input." },
+			{ id: "decline", label: "Decline", description: "Decline this request." },
+			{ id: "cancel", label: "Cancel", description: "Cancel this request." },
+		],
+    fields: [
+      { id: "project_name", label: "Project name", description: "Project to inspect.", type: "text", required: true, secret: false, options: [] },
+      { id: "mode", label: "Mode", description: "Requested operation.", type: "select", required: true, secret: false, options: [
+        { id: "inspect", label: "Inspect", description: "Read only." },
+        { id: "update", label: "Update", description: "Apply changes." },
+      ] },
+      { id: "confirmed", label: "Confirmed", description: "Confirm the request.", type: "boolean", required: false, secret: false, options: [] },
+    ],
+  });
+  const mcpCard = page.locator('.agent-interaction[data-kind="mcp_elicitation"]');
+  await mcpCard.getByLabel("Project name").fill("agent-whiteboard");
+  await mcpCard.getByLabel("Mode").selectOption("inspect");
+  await mcpCard.getByLabel("Confirmed").check();
+  await mcpCard.getByRole("button", { name: "Accept", exact: true }).click();
+  await expect(mcpCard).toHaveAttribute("data-state", "resolved");
+
+  const responses = parsedCommands(localAgentSidebar.brokerRequests).filter((command) => command.type === "interaction_respond");
+  expect(responses.map((command) => command.payload.kind)).toEqual([
+    "command_approval",
+    "file_change_approval",
+    "permission_approval",
+    "mcp_elicitation",
+  ]);
+  expect(responses[0].payload.option_id).toBe("acceptForSession");
+  expect(responses[1].payload.option_id).toBe("decline");
+  expect(responses[2].payload).toMatchObject({ option_id: "grantSession", answers: { permissions: ["workspace_write", "network"] } });
+  expect(responses[3].payload).toMatchObject({ option_id: "accept", answers: { project_name: ["agent-whiteboard"], mode: ["inspect"], confirmed: ["true"] } });
+});
+
+test("the first valid Codex interaction response wins across tabs", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  const resource = await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Cross-tab approval\n", creatorContext: "Cross-tab context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+
+  const otherPage = await context.newPage();
+  await otherPage.goto(resource.url);
+  await expect(otherPage.locator(".agent-live-status")).toHaveText("Codex ready");
+  await connectSidebar(otherPage, "codex");
+  localAgentSidebar.setHoldInteractionResolution("codex", true);
+  const requestID = localAgentSidebar.emitInteraction("codex", {
+    kind: "command_approval",
+    title: "Choose once",
+    summary: "Only the first valid browser response may resolve this request.",
+    options: [
+      { id: "accept", label: "Accept", description: "Approve once." },
+      { id: "decline", label: "Decline", description: "Reject once." },
+    ],
+  });
+  const firstCard = page.locator('.agent-interaction[data-kind="command_approval"]');
+  const secondCard = otherPage.locator('.agent-interaction[data-kind="command_approval"]');
+  await expect(firstCard).toBeVisible();
+  await expect(secondCard).toBeVisible();
+
+  await firstCard.getByRole("button", { name: "Accept", exact: true }).click();
+  await expect.poll(() => localAgentSidebar.interactionResults.filter(({ requestID: id }) => id === requestID)).toHaveLength(1);
+  await secondCard.getByRole("button", { name: "Decline", exact: true }).click();
+  await expect.poll(() => localAgentSidebar.interactionResults.filter(({ requestID: id }) => id === requestID)).toHaveLength(2);
+  expect(localAgentSidebar.interactionResults.filter(({ requestID: id, status }) => id === requestID && status === "accepted")).toEqual([
+    expect.objectContaining({ optionID: "accept" }),
+  ]);
+  expect(localAgentSidebar.interactionResults.filter(({ requestID: id, status }) => id === requestID && status === "rejected")).toHaveLength(1);
+
+  localAgentSidebar.releaseInteraction("codex", requestID);
+  await expect(firstCard).toHaveAttribute("data-state", "resolved");
+  await expect(secondCard).toHaveAttribute("data-state", "resolved");
+  await expect(firstCard.locator(".agent-interaction-status")).toHaveText("Resolved · Accept");
+  await expect(secondCard.locator(".agent-interaction-status")).toHaveText("Resolved · Accept");
+  await otherPage.close();
+});
+
+test("replays Codex interaction activity after reconnect and isolates an unavailable provider", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Recovery and isolation\n", creatorContext: "Recovery context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+
+  localAgentSidebar.disconnectProvider("codex");
+  await expect(page.locator(".agent-live-status")).toHaveText("Broker unavailable");
+  localAgentSidebar.emitToolActivity("codex", {
+    kind: "mcp",
+    status: "completed",
+    title: "Recovered MCP call",
+    summary: "This activity was emitted while the tab was disconnected.",
+    detail: "replayed detail",
+  });
+  localAgentSidebar.emitInteraction("codex", {
+    kind: "mcp_elicitation",
+    title: "Recovered elicitation",
+    summary: "This request must replay after reconnect.",
+		options: [
+			{ id: "accept", label: "Accept", description: "Provide the requested input." },
+			{ id: "decline", label: "Decline", description: "Decline this request." },
+			{ id: "cancel", label: "Cancel", description: "Cancel this request." },
+		],
+    fields: [
+      { id: "answer", label: "Recovered answer", description: "Replay proof.", type: "text", required: true, secret: false, options: [] },
+    ],
+  });
+  await expect(page.locator(".agent-tool-activity")).toContainText("Recovered MCP call", { timeout: 5_000 });
+  await expect(page.locator('.agent-interaction[data-kind="mcp_elicitation"]')).toContainText("Recovered elicitation");
+  const replayConnect = parsedCommands(localAgentSidebar.brokerRequests)
+    .filter((command) => command.type === "connect" && command.payload.provider === "codex")
+    .find((command) => Object.hasOwn(command.payload, "replay_after"));
+  expect(replayConnect).toBeDefined();
+
+  await page.getByLabel("Conversation provider").selectOption("pi");
+  await connectSidebar(page, "pi");
+  await page.getByLabel("Message Pi about this whiteboard").fill("Pi remains available.");
+  await page.getByLabel("Message Pi about this whiteboard").press("Enter");
+  await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
+
+  localAgentSidebar.setProviderAvailable("codex", false);
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await expect(page.locator(".agent-tool-activity")).toContainText("Recovered MCP call");
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Reconnect" }).click();
+  await expect.poll(() => localAgentSidebar.brokerRequests.some((request) => request.status === 503 && request.url === "/api/v1/agent/connect")).toBe(true);
+  await expect(page.locator(".agent-live-status")).toHaveText("Codex ready");
+  await expect(page.locator(".agent-provider-label")).toBeHidden();
+  await page.getByLabel("Conversation provider").selectOption("pi");
+  await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
+  await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
+  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
 });

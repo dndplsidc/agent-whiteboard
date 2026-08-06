@@ -4,13 +4,12 @@ package pi
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"sync"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/contentturn"
 	"github.com/edocsss/agent-whiteboard/internal/provider"
 )
 
@@ -246,11 +245,7 @@ func classifyPromptRejection(response rpcResponse) error {
 }
 
 func assistantMessageID(turnID string) string {
-	h := sha256.New()
-	_, _ = h.Write([]byte("agent-whiteboard-pi-assistant-v1\x00"))
-	_, _ = h.Write([]byte(turnID))
-	sum := h.Sum(nil)
-	return base64.RawURLEncoding.EncodeToString(sum[:24])
+	return contentturn.AssistantMessageID(turnID)
 }
 
 func (s *Session) eventLoop() {

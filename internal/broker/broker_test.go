@@ -184,6 +184,23 @@ func TestConversionsRequireCanonicalAuthorizedOriginAndCopyContextBytes(t *testi
 	require.Error(t, err)
 }
 
+func TestConnectIdentityPreservesEachProvider(t *testing.T) {
+	resource := testResource(testID('Z'))
+	page := testContext(resource)
+	for _, test := range []struct {
+		wire   agentprotocol.ProviderName
+		domain provider.Name
+	}{
+		{agentprotocol.ProviderPi, provider.NamePi},
+		{agentprotocol.ProviderCodex, provider.NameCodex},
+	} {
+		identity := ConnectIdentity{Origin: "https://example.com", Provider: test.wire, Resource: resource, ContextDigest: page.Digest}
+		state, err := ConnectIdentityToState(identity, identity.Origin)
+		require.NoError(t, err)
+		require.Equal(t, test.domain, state.Provider)
+	}
+}
+
 func TestResourceConversionsPreserveExactTimestamps(t *testing.T) {
 	resource := testResource(testID('B'))
 	converted, err := ResourceToProvider(resource)

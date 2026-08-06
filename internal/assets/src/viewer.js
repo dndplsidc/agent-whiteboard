@@ -440,6 +440,7 @@ function viewerContainer(doc) {
 export const AGENT_DRAWER_STORAGE_KEY = "agent-whiteboard-agent-drawer-open";
 export const AGENT_PORT_STORAGE_KEY = "agent-whiteboard-agent-port";
 export const AGENT_DRAWER_WIDTH_STORAGE_KEY = "agent-whiteboard-agent-drawer-width";
+export const AGENT_PROVIDER_STORAGE_KEY = "agent-whiteboard-agent-provider";
 export const DEFAULT_AGENT_PORT = 8568;
 export const DEFAULT_AGENT_DRAWER_WIDTH = 420;
 export const MIN_AGENT_DRAWER_WIDTH = 360;
@@ -458,8 +459,12 @@ const MAX_STATE_EVENTS = 2048;
 const MAX_TIMELINE_ITEMS = 200;
 const MAX_ARCHIVES = 100;
 const MAX_QUEUE_ITEMS = 64;
+const MAX_PENDING_INTERACTIONS = 32;
+const MAX_RETAINED_INTERACTIONS = 64;
 const MAX_TIMELINE_TEXT_BYTES = 96 * 1024;
 const MAX_DELTA_BYTES = 32 * 1024;
+const PROVIDERS = new Set(["pi", "codex"]);
+const INTERACTION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u;
 const encoder = new TextEncoder();
 
 const ERROR_DEFINITIONS = {
@@ -468,15 +473,15 @@ const ERROR_DEFINITIONS = {
   local_network_permission_denied: ["Browser permission to reach the local agent broker was denied.", "grant_local_network"],
   untrusted_origin: ["This whiteboard origin is not trusted by the local agent broker.", "trust_origin"],
   incompatible_api: ["The local agent broker uses an incompatible API version.", "update_broker"],
-  provider_missing: ["The Pi provider executable is not available.", "install_provider"],
-  authentication_required: ["Pi requires provider-native authentication.", "provider_login"],
-  no_usable_model: ["Pi has no usable default model.", "configure_model"],
-  provider_startup_failed: ["Pi could not be started.", "try_again"],
-  content_only_unavailable: ["Pi cannot enforce content-only access.", "try_again"],
+  provider_missing: ["The selected provider executable is not available.", "install_provider"],
+  authentication_required: ["The selected provider requires provider-native authentication.", "provider_login"],
+  no_usable_model: ["The selected provider has no usable default model.", "configure_model"],
+  provider_startup_failed: ["The selected provider could not be started.", "try_again"],
+  content_only_unavailable: ["The selected provider cannot enforce the required access policy.", "try_again"],
   context_too_large: ["The complete page context does not fit safely in the selected model.", "reduce_context"],
   native_session_missing: ["The provider session for this conversation is unavailable.", "restore_session"],
-  provider_crashed: ["Pi stopped unexpectedly and the active turn was interrupted.", "retry_turn"],
-  provider_recovery_failed: ["Pi could not recover the conversation.", "restart_provider"],
+  provider_crashed: ["The selected provider stopped unexpectedly and the active turn was interrupted.", "retry_turn"],
+  provider_recovery_failed: ["The selected provider could not recover the conversation.", "restart_provider"],
   turn_interrupted: ["The active turn was interrupted and was not replayed.", "retry_turn"],
   board_revision_unavailable: ["The current whiteboard revision is unavailable.", "reload_board"],
   board_revision_malformed: ["The current whiteboard revision is malformed.", "reload_board"],
@@ -613,23 +618,28 @@ function readBoolean(storage, key) {
 export function readAgentPreferences(storage) {
   let port;
   let width;
+  let provider;
   try {
     port = storage?.getItem(AGENT_PORT_STORAGE_KEY);
     width = storage?.getItem(AGENT_DRAWER_WIDTH_STORAGE_KEY);
+    provider = storage?.getItem(AGENT_PROVIDER_STORAGE_KEY);
   } catch {
     port = undefined;
     width = undefined;
+    provider = undefined;
   }
-  return { open: readBoolean(storage, AGENT_DRAWER_STORAGE_KEY), port: normalizeAgentPort(port), width: normalizeAgentDrawerWidth(width) };
+  return { open: readBoolean(storage, AGENT_DRAWER_STORAGE_KEY), port: normalizeAgentPort(port), width: normalizeAgentDrawerWidth(width), provider: PROVIDERS.has(provider) ? provider : "pi" };
 }
 
 export function persistAgentPreference(storage, key, value) {
-  if (key !== AGENT_DRAWER_STORAGE_KEY && key !== AGENT_PORT_STORAGE_KEY && key !== AGENT_DRAWER_WIDTH_STORAGE_KEY) throw new TypeError("unsupported agent preference");
+  if (key !== AGENT_DRAWER_STORAGE_KEY && key !== AGENT_PORT_STORAGE_KEY && key !== AGENT_DRAWER_WIDTH_STORAGE_KEY && key !== AGENT_PROVIDER_STORAGE_KEY) throw new TypeError("unsupported agent preference");
   const stored = key === AGENT_DRAWER_STORAGE_KEY
     ? String(value === true)
     : key === AGENT_PORT_STORAGE_KEY
       ? String(normalizeAgentPort(value))
-      : String(normalizeAgentDrawerWidth(value));
+      : key === AGENT_PROVIDER_STORAGE_KEY
+        ? (PROVIDERS.has(value) ? value : "pi")
+        : String(normalizeAgentDrawerWidth(value));
   try {
     storage?.setItem(key, stored);
   } catch {
@@ -654,12 +664,13 @@ function commandEnvelope({ type, payload, clientID, conversationID, idFactory })
   };
 }
 
-export function createConnectCommand({ payload, clientID, replayAfter, idFactory = generateAgentID }) {
+export function createConnectCommand({ payload, provider = "pi", clientID, replayAfter, idFactory = generateAgentID }) {
   validateViewerPayload(payload);
   if (payload.local_agent.enabled !== true) throw new TypeError("local agent is disabled");
+  if (!PROVIDERS.has(provider)) throw new TypeError("invalid agent provider");
   if (replayAfter && !validID(replayAfter)) throw new TypeError("invalid replay event ID");
   const connectPayload = {
-    provider: "pi",
+    provider,
     resource: { ...payload.local_agent.resource },
     context_digest: payload.local_agent.context_digest,
   };
@@ -709,6 +720,7 @@ export function createAgentCommand({ type, payload, clientID, conversationID, id
     archive_restore: () => exactObject(payload, ["archive_id"]) && validID(payload.archive_id),
     archive_delete: () => exactObject(payload, ["archive_id"]) && validID(payload.archive_id),
     resync: () => exactObject(payload, [], ["after_event_id"]) && (!payload.after_event_id || validID(payload.after_event_id)),
+    interaction_respond: () => exactObject(payload, ["request_id", "kind", "option_id", "answers"]) && validID(payload.request_id) && validInteractionKind(payload.kind) && (payload.option_id === "" || validInteractionKey(payload.option_id)) && validInteractionAnswers(payload.answers) && (payload.option_id !== "" || (payload.answers !== null && Object.keys(payload.answers).length > 0)),
   };
   if (!validators[type]?.()) throw new TypeError("invalid agent command");
   return commandEnvelope({ type, payload, clientID, conversationID, idFactory });
@@ -731,7 +743,53 @@ function validTimelineItem(item) {
 }
 
 function validArchiveItem(item) {
-  return exactObject(item, ["archive_id", "created_at", "updated_at", "provider"], ["model", "preview"]) && validID(item.archive_id) && validDate(item.created_at) && validDate(item.updated_at) && Date.parse(item.updated_at) >= Date.parse(item.created_at) && item.provider === "pi" && (!Object.hasOwn(item, "model") || validText(item.model, 512, true)) && (!Object.hasOwn(item, "preview") || validText(item.preview, 512, true));
+  return exactObject(item, ["archive_id", "created_at", "updated_at", "provider"], ["model", "preview"]) && validID(item.archive_id) && validDate(item.created_at) && validDate(item.updated_at) && Date.parse(item.updated_at) >= Date.parse(item.created_at) && PROVIDERS.has(item.provider) && (!Object.hasOwn(item, "model") || validText(item.model, 512, true)) && (!Object.hasOwn(item, "preview") || validText(item.preview, 512, true));
+}
+
+const TOOL_KINDS = new Set(["command", "file_change", "mcp", "web", "image", "collaboration", "plan", "other"]);
+const TOOL_STATUSES = new Set(["running", "completed", "failed", "interrupted"]);
+const INTERACTION_KINDS = new Set(["command_approval", "file_change_approval", "permission_approval", "user_input", "mcp_elicitation"]);
+const FIELD_TYPES = new Set(["text", "number", "boolean", "select", "multi_select"]);
+function validInteractionKey(value) { return typeof value === "string" && INTERACTION_KEY_PATTERN.test(value); }
+function validInteractionKind(value) { return INTERACTION_KINDS.has(value); }
+function validInteractionOption(value) { return exactObject(value, ["id", "label", "description"]) && validInteractionKey(value.id) && validText(value.label, 512) && validText(value.description, 8192, true); }
+function validInteractionOptions(values) {
+  return (values === null || Array.isArray(values)) && (values?.length ?? 0) <= 16 && (values ?? []).every(validInteractionOption) && new Set((values ?? []).map(({ id }) => id)).size === (values?.length ?? 0);
+}
+function interactionOptionIDsEqual(options, expected) {
+  const ids = (options ?? []).map(({ id }) => id);
+  return ids.length === expected.length && expected.every((id) => ids.includes(id));
+}
+function validInteractionAnswers(value) {
+  if (value === null) return true;
+  if (!isRecord(value) || Object.keys(value).length > 32) return false;
+  let bytes = 0;
+  return Object.entries(value).every(([key, answers]) => validInteractionKey(key) && Array.isArray(answers) && answers.length > 0 && answers.length <= 32 && answers.every((answer) => { bytes += encoder.encode(answer).length; return validText(answer, 64 * 1024) && bytes <= 64 * 1024; }));
+}
+function validToolActivity(payload) {
+  return exactObject(payload, ["activity_id", "kind", "status", "title", "summary", "detail"], ["turn_id"]) && validID(payload.activity_id) && (!Object.hasOwn(payload, "turn_id") || validID(payload.turn_id)) && TOOL_KINDS.has(payload.kind) && TOOL_STATUSES.has(payload.status) && validText(payload.title, 512) && validText(payload.summary, 8192, true) && validText(payload.detail, 64 * 1024, true);
+}
+function validInteractionRequest(payload) {
+  if (!exactObject(payload, ["request_id", "kind", "title", "summary", "command", "working_directory", "options", "questions", "fields"], ["turn_id"]) || !validID(payload.request_id) || (Object.hasOwn(payload, "turn_id") && !validID(payload.turn_id)) || !validInteractionKind(payload.kind) || !validText(payload.title, 512) || !validText(payload.summary, 8192, true) || !validText(payload.command, 64 * 1024, true) || !validText(payload.working_directory, 8192, true) || !validInteractionOptions(payload.options) || (payload.questions !== null && !Array.isArray(payload.questions)) || (payload.questions?.length ?? 0) > 3 || (payload.fields !== null && !Array.isArray(payload.fields)) || (payload.fields?.length ?? 0) > 32) return false;
+  const validQuestion = (question) => exactObject(question, ["id", "header", "prompt", "options", "allow_other", "secret", "multiple"]) && validInteractionKey(question.id) && validText(question.header, 512) && validText(question.prompt, 8192) && validInteractionOptions(question.options) && typeof question.allow_other === "boolean" && typeof question.secret === "boolean" && typeof question.multiple === "boolean" && ((question.options?.length ?? 0) > 0 || question.allow_other);
+  const validField = (field) => exactObject(field, ["id", "label", "description", "type", "required", "secret", "options"]) && validInteractionKey(field.id) && validText(field.label, 512) && validText(field.description, 8192, true) && FIELD_TYPES.has(field.type) && typeof field.required === "boolean" && typeof field.secret === "boolean" && validInteractionOptions(field.options) && (["select", "multi_select"].includes(field.type) ? (field.options?.length ?? 0) > 0 : (field.options?.length ?? 0) === 0);
+  const questions = payload.questions ?? [];
+  const fields = payload.fields ?? [];
+  const structuredIDs = [...questions, ...fields].map(({ id }) => id);
+  if (!questions.every(validQuestion) || !fields.every(validField) || new Set(structuredIDs).size !== structuredIDs.length) return false;
+  switch (payload.kind) {
+    case "command_approval":
+    case "file_change_approval":
+      return (payload.options?.length ?? 0) > 0 && questions.length === 0 && fields.length === 0;
+    case "permission_approval":
+      return interactionOptionIDsEqual(payload.options, ["grantTurn", "grantSession", "decline"]) && questions.length === 0 && fields.length === 1 && fields[0].id === "permissions" && fields[0].type === "multi_select";
+    case "user_input":
+      return (payload.options?.length ?? 0) === 0 && questions.length > 0 && fields.length === 0;
+    case "mcp_elicitation":
+      return interactionOptionIDsEqual(payload.options, ["accept", "decline", "cancel"]) && questions.length === 0;
+    default:
+      return false;
+  }
 }
 
 const lifecycleValues = new Set(["connecting", "ready", "responding", "interrupted", "unavailable"]);
@@ -763,7 +821,7 @@ function validateEventPayload(type, payload) {
     case "lifecycle":
       return exactObject(payload, ["state", "turn_id"]) && lifecycleValues.has(payload.state) && validActiveTurn(payload.state, payload.turn_id);
     case "provider":
-      return exactObject(payload, ["provider", "state"], ["model"]) && payload.provider === "pi" && providerValues.has(payload.state) && (!Object.hasOwn(payload, "model") || validText(payload.model, 512, true)) && (payload.state !== "ready" || validText(payload.model, 512));
+      return exactObject(payload, ["provider", "state"], ["model"]) && PROVIDERS.has(payload.provider) && providerValues.has(payload.state) && (!Object.hasOwn(payload, "model") || validText(payload.model, 512, true)) && (payload.state !== "ready" || validText(payload.model, 512));
     case "context":
       return exactObject(payload, ["digest", "state"]) && DIGEST_PATTERN.test(payload.digest) && contextValues.has(payload.state);
     case "activity":
@@ -778,6 +836,12 @@ function validateEventPayload(type, payload) {
       return exactObject(payload, ["turn_id", "reason"]) && validID(payload.turn_id) && ["requested", "provider_exit", "shutdown"].includes(payload.reason);
     case "archive":
       return exactObject(payload, ["action", "archive_id"]) && ["created", "restored", "deleted"].includes(payload.action) && validID(payload.archive_id);
+    case "tool_activity":
+      return validToolActivity(payload);
+    case "interaction_request":
+      return validInteractionRequest(payload);
+    case "interaction_resolved":
+      return exactObject(payload, ["request_id", "kind", "option_id"]) && validID(payload.request_id) && validInteractionKind(payload.kind) && (payload.option_id === "" || validInteractionKey(payload.option_id));
     default:
       return false;
   }
@@ -897,14 +961,15 @@ function parseStrictJSONOrNull(source) {
   catch { return null; }
 }
 
-export function createAgentState() {
+export function createAgentState(provider = "pi") {
+  if (!PROVIDERS.has(provider)) throw new TypeError("invalid agent provider");
   return {
     conversationID: null,
     lifecycle: "connecting",
     activeTurnID: null,
     contextState: "pending",
     contextDigest: null,
-    provider: { provider: "pi", state: "starting", model: "" },
+    provider: { provider, state: "starting", model: "" },
     timeline: [],
     queue: [],
     archives: [],
@@ -917,6 +982,7 @@ export function createAgentState() {
     knownCommandIDs: new Set(),
     freshArchiveCommandIDs: new Set(),
     connected: false,
+    interactions: [],
   };
 }
 
@@ -925,6 +991,14 @@ function appendTimeline(state, item) {
   if (state.timeline.some((current) => (current.item_id ?? current.message_id) === key)) return;
   state.timeline.push({ ...item });
   if (state.timeline.length > MAX_TIMELINE_ITEMS) state.timeline.splice(0, state.timeline.length - MAX_TIMELINE_ITEMS);
+}
+
+function trimResolvedInteractions(state) {
+  while (state.interactions.length > MAX_RETAINED_INTERACTIONS) {
+    const resolvedIndex = state.interactions.findIndex((item) => item.resolved);
+    if (resolvedIndex < 0) throw new TypeError("too many pending agent interactions");
+    state.interactions.splice(resolvedIndex, 1);
+  }
 }
 
 export function registerAgentCommand(state, command) {
@@ -950,6 +1024,7 @@ export function applyAgentEvent(state, untrustedEvent) {
     pendingCommandIDs: new Set(state.pendingCommandIDs),
     knownCommandIDs: new Set(state.knownCommandIDs),
     freshArchiveCommandIDs: new Set(state.freshArchiveCommandIDs),
+    interactions: state.interactions.map((item) => ({ ...item })),
   };
   const changed = applyAgentEventMutable(draft, untrustedEvent);
   if (changed) Object.assign(state, draft);
@@ -1012,7 +1087,10 @@ function applyAgentEventMutable(state, untrustedEvent) {
     }
     case "queue": state.queue = payload.items.map((item) => ({ ...item })); break;
     case "lifecycle": state.lifecycle = payload.state; state.activeTurnID = payload.turn_id; break;
-    case "provider": state.provider = { provider: payload.provider, state: payload.state, model: payload.model ?? "" }; break;
+    case "provider":
+      if (payload.provider !== state.provider.provider) throw new TypeError("agent provider changed unexpectedly");
+      state.provider = { provider: payload.provider, state: payload.state, model: payload.model ?? "" };
+      break;
     case "context": state.contextDigest = payload.digest; state.contextState = payload.state; break;
     case "activity": appendTimeline(state, { kind: "activity", activity: payload.kind, text: payload.summary, created_at: event.timestamp, item_id: event.event_id }); break;
     case "blocked": appendTimeline(state, { kind: "activity", activity: "blocked", blockedKind: payload.kind, text: payload.message, created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
@@ -1022,8 +1100,32 @@ function applyAgentEventMutable(state, untrustedEvent) {
     case "archive":
       if (payload.action === "deleted" || payload.action === "restored") state.archives = state.archives.filter((item) => item.archive_id !== payload.archive_id);
       break;
+    case "tool_activity": {
+      const current = state.timeline.find((item) => item.kind === "tool" && item.activity_id === payload.activity_id);
+      if (current) Object.assign(current, payload, { kind: "tool", tool_kind: payload.kind });
+      else appendTimeline(state, { ...payload, kind: "tool", tool_kind: payload.kind, item_id: payload.activity_id, created_at: event.timestamp });
+      break;
+    }
+    case "interaction_request":
+      if (!state.interactions.some((item) => item.request_id === payload.request_id)) {
+        if (state.interactions.filter((item) => !item.resolved).length >= MAX_PENDING_INTERACTIONS) throw new TypeError("too many pending agent interactions");
+        state.interactions.push({ ...payload, options: payload.options ?? [], questions: payload.questions ?? [], fields: payload.fields ?? [], resolved: false, submitting: false, responseCommandID: null });
+        trimResolvedInteractions(state);
+      }
+      break;
+    case "interaction_resolved": {
+      const request = state.interactions.find((item) => item.request_id === payload.request_id);
+      if (request?.kind !== undefined && request.kind !== payload.kind) throw new TypeError("interaction kind changed unexpectedly");
+      if (request) Object.assign(request, { resolved: true, submitting: false, responseCommandID: null, option_id: payload.option_id });
+      trimResolvedInteractions(state);
+      break;
+    }
     case "command_result":
       state.pendingCommandIDs.delete(payload.command_id);
+      if (payload.status === "rejected") {
+        const request = state.interactions.find((item) => item.responseCommandID === payload.command_id);
+        if (request) Object.assign(request, { submitting: false, responseCommandID: null });
+      }
       if (payload.status === "rejected") {
         state.freshArchiveCommandIDs.delete(payload.command_id);
         state.errors.push({ ...payload.error });
@@ -1051,6 +1153,7 @@ function safeHTTPErrorCode(body, fallback) {
 
 export function createAgentTransport({
   payload,
+  provider = "pi",
   port = DEFAULT_AGENT_PORT,
   clientID = generateAgentID(),
   fetchImpl = globalThis.fetch?.bind(globalThis),
@@ -1099,7 +1202,7 @@ export function createAgentTransport({
   }
 
   function connectCommand() {
-    return createConnectCommand({ payload, clientID, replayAfter: lastEventID, idFactory });
+    return createConnectCommand({ payload, provider, clientID, replayAfter: lastEventID, idFactory });
   }
 
   async function fallbackConnect(command) {
@@ -1278,9 +1381,9 @@ function actionGuidance(action, doc) {
     grant_local_network: "Allow Local Network Access for this site in Chrome, then check again.",
     trust_origin: `Trust this exact origin with: agent-whiteboard agent trust add ${origin}`,
     update_broker: "Update agent-whiteboard so the browser and broker API versions match.",
-    install_provider: "Install the pinned Pi provider executable, then restart the broker.",
-    provider_login: "Run Pi in a terminal and complete provider-native login, then try again.",
-    configure_model: "Configure a usable default model in Pi, then try again.",
+    install_provider: "Install the selected provider executable, then restart the broker.",
+    provider_login: "Complete provider-native login in a terminal, then try again.",
+    configure_model: "Configure a usable default model for the selected provider, then try again.",
     try_again: "Try the operation again; if it still fails, restart the broker.",
     restart_provider: "Restart the local agent broker before trying again.",
     reduce_context: "Reduce the complete page Markdown or creator context before trying again.",
@@ -1303,11 +1406,11 @@ function browserErrorText(code, doc, fallback) {
   return guidance ? `${definition[0]} ${guidance}` : definition[0];
 }
 
-function appendAgentMessage(doc, container, item) {
+function appendAgentMessage(doc, container, item, providerName = "Pi") {
   const article = doc.createElement("article");
   article.className = `agent-message agent-message-${item.kind}`;
   const label = doc.createElement("strong");
-  label.textContent = item.kind === "assistant" ? "Pi" : "You";
+  label.textContent = item.kind === "assistant" ? providerName : "You";
   const body = doc.createElement("div");
   body.className = "agent-message-body";
   body.innerHTML = renderAgentMarkdown(item.text, doc);
@@ -1315,9 +1418,211 @@ function appendAgentMessage(doc, container, item) {
   container.append(article);
 }
 
+function appendToolActivity(doc, container, item) {
+  const details = doc.createElement("details");
+  details.className = `agent-tool-activity agent-tool-${item.status}`;
+  details.dataset.status = item.status;
+  details.open = item.status === "failed" || item.status === "interrupted";
+  const summary = doc.createElement("summary");
+  const title = doc.createElement("strong");
+  title.textContent = item.title;
+  const status = doc.createElement("span");
+  status.textContent = item.status;
+  summary.append(title, status);
+  const copy = doc.createElement("p");
+  copy.textContent = item.summary;
+  details.append(summary, copy);
+  if (item.detail) {
+    const detail = doc.createElement("pre");
+    detail.textContent = item.detail;
+    details.append(detail);
+  }
+  container.append(details);
+}
+
+function appendInteractionCard(doc, container, request, respond) {
+  const disabled = request.resolved || request.submitting;
+  const card = doc.createElement("article");
+  card.className = "agent-interaction";
+  card.dataset.kind = request.kind;
+  card.dataset.state = request.resolved ? "resolved" : request.submitting ? "submitting" : "pending";
+  card.setAttribute("aria-label", `${request.title} · ${request.resolved ? "Resolved" : request.submitting ? "Submitting" : "Response requested"}`);
+  const heading = doc.createElement("h3");
+  heading.textContent = request.title;
+  const status = doc.createElement("p");
+  status.className = "agent-interaction-status";
+  status.setAttribute("role", "status");
+  const selected = request.options.find((option) => option.id === request.option_id)?.label;
+  status.textContent = request.resolved ? `Resolved${selected ? ` · ${selected}` : ""}` : request.submitting ? "Submitting response…" : "Response requested";
+  const summary = doc.createElement("p");
+  summary.className = "agent-interaction-summary";
+  summary.textContent = request.summary;
+  card.append(heading, status, summary);
+  if (request.command) {
+    const command = doc.createElement("pre");
+    command.setAttribute("aria-label", "Requested command");
+    command.textContent = request.command;
+    card.append(command);
+  }
+  if (request.working_directory) {
+    const directory = doc.createElement("p");
+    directory.className = "agent-interaction-directory";
+    directory.textContent = `Working directory: ${request.working_directory}`;
+    card.append(directory);
+  }
+  const form = doc.createElement("form");
+  form.className = "agent-interaction-form";
+  form.setAttribute("aria-disabled", String(disabled));
+  const controls = new Map();
+  for (const question of request.questions) {
+    const fieldset = doc.createElement("fieldset");
+    fieldset.disabled = disabled;
+    const legend = doc.createElement("legend");
+    legend.textContent = question.header;
+    const prompt = doc.createElement("p");
+    prompt.textContent = question.prompt;
+    fieldset.append(legend, prompt);
+    const values = [];
+    for (const option of question.options ?? []) {
+      const label = doc.createElement("label");
+      const input = doc.createElement("input");
+      input.type = question.multiple ? "checkbox" : "radio";
+      input.name = `interaction-${request.request_id}-${question.id}`;
+      input.value = option.id;
+      const copy = doc.createElement("span");
+      copy.textContent = option.label;
+      label.append(input, copy);
+      if (option.description) {
+        const description = doc.createElement("small");
+        description.textContent = option.description;
+        label.append(description);
+      }
+      fieldset.append(label);
+      values.push(input);
+    }
+    let other = null;
+    if (question.allow_other || (question.options?.length ?? 0) === 0) {
+      const otherLabel = doc.createElement("label");
+      const otherCopy = doc.createElement("span");
+      otherCopy.textContent = question.allow_other ? "Other answer" : "Answer";
+      other = doc.createElement("input");
+      other.type = question.secret ? "password" : "text";
+      otherLabel.append(otherCopy, other);
+      fieldset.append(otherLabel);
+    }
+    controls.set(question.id, () => [...values.filter((input) => input.checked).map((input) => input.value), ...(other?.value ? [other.value] : [])]);
+    form.append(fieldset);
+  }
+  for (const field of request.fields) {
+    const wrapper = doc.createElement("div");
+    wrapper.className = "agent-interaction-field";
+    const label = doc.createElement("label");
+    const fieldID = `interaction-${request.request_id}-${field.id}`;
+    label.htmlFor = fieldID;
+    label.textContent = field.label;
+    let input;
+    if (field.type === "select" || field.type === "multi_select") {
+      input = doc.createElement("select");
+      input.multiple = field.type === "multi_select";
+      if (!field.required && !input.multiple) input.append(doc.createElement("option"));
+      for (const option of field.options ?? []) {
+        const item = doc.createElement("option");
+        item.value = option.id;
+        item.textContent = option.label;
+        input.append(item);
+      }
+    } else {
+      input = doc.createElement("input");
+      input.type = field.secret ? "password" : field.type === "number" ? "number" : field.type === "boolean" ? "checkbox" : "text";
+    }
+    input.id = fieldID;
+    input.required = field.required && field.type !== "boolean";
+    if (field.required) input.setAttribute("aria-required", "true");
+    input.disabled = disabled;
+    wrapper.append(label, input);
+    if (field.description) {
+      const description = doc.createElement("p");
+      description.id = `${fieldID}-description`;
+      description.textContent = field.description;
+      input.setAttribute("aria-describedby", description.id);
+      wrapper.append(description);
+    }
+    controls.set(field.id, () => field.type === "multi_select"
+      ? [...input.selectedOptions].map((option) => option.value)
+      : field.type === "boolean"
+        ? [String(input.checked)]
+        : input.value ? [input.value] : []);
+    form.append(wrapper);
+  }
+  const collectAnswers = () => {
+    const answers = {};
+    for (const [key, collect] of controls) {
+      const values = collect();
+      if (values.length > 0) answers[key] = values;
+    }
+    return answers;
+  };
+  const actions = doc.createElement("div");
+  actions.className = "agent-interaction-actions";
+  if (request.options.length > 0) {
+    for (const option of request.options) {
+      const button = doc.createElement("button");
+      button.type = "button";
+      button.textContent = option.label;
+      button.title = option.description;
+      button.disabled = disabled;
+      button.addEventListener("click", () => {
+        if (request.resolved || request.submitting) return;
+        const answers = collectAnswers();
+        if (request.kind === "mcp_elicitation" && option.id === "accept" && !form.reportValidity()) return;
+        if (request.kind === "permission_approval" && (option.id === "grantTurn" || option.id === "grantSession") && (answers.permissions?.length ?? 0) === 0) {
+          const permissionControl = form.querySelector('select[multiple]');
+          permissionControl?.setCustomValidity("Select at least one permission to grant.");
+          permissionControl?.reportValidity();
+          return;
+        }
+        void respond(option.id, answers);
+      });
+      actions.append(button);
+    }
+  } else {
+    const button = doc.createElement("button");
+    button.type = "submit";
+    button.textContent = "Submit answer";
+    button.disabled = disabled;
+    actions.append(button);
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (request.resolved || request.submitting || !form.reportValidity()) return;
+    const answers = collectAnswers();
+    const invalidQuestion = request.questions.find((question) => {
+      const values = answers[question.id] ?? [];
+      return values.length === 0 || (!question.multiple && values.length !== 1);
+    });
+    if (invalidQuestion || Object.keys(answers).length === 0) {
+      const firstControl = form.querySelector("input, select");
+      firstControl?.setCustomValidity(invalidQuestion ? "Answer every question with the allowed number of choices." : "Provide at least one answer.");
+      firstControl?.reportValidity();
+      return;
+    }
+    void respond("", answers);
+  });
+  form.addEventListener("input", () => {
+    for (const control of form.querySelectorAll("input, select")) control.setCustomValidity("");
+  });
+  form.append(actions);
+  card.append(form);
+  container.append(card);
+}
+
 export function createAgentDrawer({ payload, doc = document, storage = browserStorage(doc), transportFactory = createAgentTransport, pageTitle = doc.title, pageURL = doc.location.href } = {}) {
   const preferences = readAgentPreferences(storage);
-  const state = createAgentState();
+  let selectedProvider = preferences.provider;
+  let state;
+  let transport;
+  let controller;
+  const controllers = new Map();
   let open = preferences.open;
   let port = preferences.port;
   let baseWidth = preferences.width;
@@ -1331,7 +1636,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let contextAccepted = false;
   let contextCommandID = null;
   let contextDeliveryUnknown = false;
-  let reconnectTimer;
   let destroyed = false;
   let handoffCommandID = null;
   let pendingSubmitCommandID = null;
@@ -1382,16 +1686,26 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   headerCopy.className = "agent-header-copy";
   const heading = doc.createElement("h2");
   heading.textContent = "Page agent";
-  const headerSubtitle = doc.createElement("p");
+  const headerSubtitle = doc.createElement("div");
   headerSubtitle.className = "agent-header-subtitle";
-  headerSubtitle.textContent = "Content-only · Local Pi";
+  const providerSelect = doc.createElement("select");
+  providerSelect.className = "agent-provider-select";
+  providerSelect.setAttribute("aria-label", "Conversation provider");
+  for (const [value, label] of [["pi", "Pi"], ["codex", "Codex"]]) {
+    const option = doc.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    providerSelect.append(option);
+  }
+  providerSelect.value = selectedProvider;
   const backButton = doc.createElement("button");
   backButton.type = "button";
   backButton.className = "agent-back-button";
-  backButton.textContent = "Back to conversation";
+  backButton.setAttribute("aria-label", "Back to conversation");
+  backButton.textContent = "‹";
   backButton.hidden = true;
-  headerCopy.append(heading, headerSubtitle, backButton);
-  headerIdentity.append(agentGlyph, headerCopy);
+  headerCopy.append(heading, headerSubtitle);
+  headerIdentity.append(agentGlyph, backButton, headerCopy);
   const headerActions = doc.createElement("div");
   headerActions.className = "agent-header-actions";
   const close = doc.createElement("button");
@@ -1400,8 +1714,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   close.setAttribute("aria-label", "Close local agent");
   close.textContent = "×";
 
-  const statusBar = doc.createElement("div");
-  statusBar.className = "agent-status-bar";
   const statusCopy = doc.createElement("div");
   statusCopy.className = "agent-status-copy";
   const headerStatusDot = doc.createElement("span");
@@ -1414,9 +1726,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   liveStatus.textContent = "Checking local broker…";
   const providerLabel = doc.createElement("span");
   providerLabel.className = "agent-provider-label";
-  providerLabel.textContent = `Port ${port}`;
   statusCopy.append(headerStatusDot, liveStatus);
-  statusBar.append(statusCopy, providerLabel);
+  headerSubtitle.append(statusCopy, providerLabel);
 
   const setup = doc.createElement("section");
   setup.className = "agent-setup";
@@ -1433,7 +1744,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   settings.className = "agent-settings";
   settings.hidden = true;
   const settingsHeading = doc.createElement("h3");
-  settingsHeading.textContent = "Connection settings";
+  settingsHeading.textContent = "Local connection";
   const portLabel = doc.createElement("label");
   portLabel.textContent = "Broker port";
   const portInput = doc.createElement("input");
@@ -1452,7 +1763,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const contextListItem = doc.createElement("li");
   contextListItem.textContent = "Complete Markdown and creator notes on the first message";
   const accessListItem = doc.createElement("li");
-  accessListItem.textContent = "No tools, files, network, or project access";
+  accessListItem.textContent = "Pi has no tools, files, network, or project access";
   consentList.append(contextListItem, accessListItem);
   consentList.hidden = true;
   const guidance = doc.createElement("p");
@@ -1475,18 +1786,24 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   setupButtons.className = "agent-setup-buttons";
   setupButtons.append(setupCheckButton, directSettingsButton, connectButton);
   setupBody.append(setupIcon, setupHeading, consentDisclosure, consentList, setupButtons);
-  const contextDisclosure = doc.createElement("div");
+  const contextDisclosure = doc.createElement("button");
+  contextDisclosure.type = "button";
   contextDisclosure.className = "agent-context-disclosure";
+  const contextDisclosureIcon = doc.createElement("span");
+  contextDisclosureIcon.className = "agent-context-disclosure-icon";
+  contextDisclosureIcon.setAttribute("aria-hidden", "true");
+  contextDisclosureIcon.textContent = "≡";
   const contextDisclosureCopy = doc.createElement("div");
   const contextDisclosureHeading = doc.createElement("strong");
   contextDisclosureHeading.textContent = "Page context";
   const contextDisclosureDescription = doc.createElement("span");
-  contextDisclosureDescription.textContent = "Full Markdown + creator notes";
+  contextDisclosureDescription.textContent = "Markdown + creator notes";
   contextDisclosureCopy.append(contextDisclosureHeading, contextDisclosureDescription);
-  const reviewContextButton = doc.createElement("button");
-  reviewContextButton.type = "button";
-  reviewContextButton.textContent = "Review";
-  contextDisclosure.append(contextDisclosureCopy, reviewContextButton);
+  const contextDisclosureChevron = doc.createElement("span");
+  contextDisclosureChevron.className = "agent-context-disclosure-chevron";
+  contextDisclosureChevron.setAttribute("aria-hidden", "true");
+  contextDisclosureChevron.textContent = "›";
+  contextDisclosure.append(contextDisclosureIcon, contextDisclosureCopy, contextDisclosureChevron);
   setup.append(setupBody, contextDisclosure);
   settings.append(settingsHeading, portLabel, guidance, checkButton);
 
@@ -1531,17 +1848,44 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const settingsMenuButton = menuButton("Connection settings", () => showView("settings"));
   const contextMenuButton = menuButton("Inspect page context", () => showView("context"));
   overflow.append(overflowButton, overflowMenu);
-  headerActions.append(close, overflow);
+  headerActions.append(providerSelect, close, overflow);
   header.append(headerIdentity, headerActions);
 
-  const contextDetails = doc.createElement("details");
+  const contextDetails = doc.createElement("section");
   contextDetails.className = "agent-context";
-  const contextSummary = doc.createElement("summary"); contextSummary.textContent = "Page context";
-  const markdownLabel = doc.createElement("h3"); markdownLabel.textContent = "Page Markdown";
-  const markdownContext = doc.createElement("pre"); markdownContext.textContent = payload.markdown; markdownContext.setAttribute("aria-label", "Page Markdown");
-  const creatorLabel = doc.createElement("h3"); creatorLabel.textContent = "Creator context";
-  const creatorContext = doc.createElement("pre"); creatorContext.textContent = payload.context; creatorContext.setAttribute("aria-label", "Creator context");
-  contextDetails.append(contextSummary, markdownLabel, markdownContext, creatorLabel, creatorContext);
+  const contextIntro = doc.createElement("div");
+  contextIntro.className = "agent-context-intro";
+  const contextIntroHeading = doc.createElement("h3");
+  contextIntroHeading.textContent = "What the agent receives";
+  const contextIntroCopy = doc.createElement("p");
+  contextIntroCopy.textContent = "Review the page material. Expand only the part you need.";
+  contextIntro.append(contextIntroHeading, contextIntroCopy);
+  const contextCard = ({ title, description, content, label, open = false }) => {
+    const details = doc.createElement("details");
+    details.className = "agent-context-card";
+    details.open = open;
+    const summary = doc.createElement("summary");
+    const summaryCopy = doc.createElement("span");
+    const summaryTitle = doc.createElement("strong");
+    summaryTitle.textContent = title;
+    const summaryDescription = doc.createElement("span");
+    summaryDescription.textContent = description;
+    summaryCopy.append(summaryTitle, summaryDescription);
+    summary.append(summaryCopy);
+    const preview = doc.createElement("pre");
+    preview.className = "agent-context-content";
+    preview.textContent = content;
+    preview.tabIndex = 0;
+    preview.setAttribute("aria-label", label);
+    details.append(summary, preview);
+    return details;
+  };
+  const markdownCard = contextCard({ title: "Page Markdown", description: "Original page content", content: payload.markdown, label: "Page Markdown", open: true });
+  const creatorCard = contextCard({ title: "Creator notes", description: "Notes supplied by the creator", content: payload.context, label: "Creator notes" });
+  const contextPrivacy = doc.createElement("p");
+  contextPrivacy.className = "agent-context-privacy";
+  contextPrivacy.textContent = "Context is included with the next message that needs it—not when you simply open this panel.";
+  contextDetails.append(contextIntro, markdownCard, creatorCard, contextPrivacy);
 
   const timeline = doc.createElement("section");
   timeline.className = "agent-timeline";
@@ -1602,95 +1946,130 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   separator.setAttribute("aria-valuenow", String(effectiveWidth));
   separator.setAttribute("aria-label", "Resize Page agent pane");
 
-  drawer.append(header, statusBar, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
+  drawer.append(header, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
   doc.body.append(overlay, drawer, toggle);
 
-  const transport = transportFactory({
-    payload,
-    port,
-    onEvent(event) {
-      if (!applyAgentEvent(state, event)) return;
-      if (event.type === "command_result" && event.payload.command_id === handoffCommandID && event.payload.status === "rejected") handoffCommandID = null;
-      if (event.type === "command_result" && event.payload.command_id === pendingSubmitCommandID) pendingSubmitCommandID = null;
-      if (event.type === "command_result" && event.payload.command_id === contextCommandID && event.payload.status === "rejected") contextCommandID = null;
-      if (event.type === "snapshot" && contextDeliveryUnknown) {
-        if (contextCommandID !== null) state.pendingCommandIDs.delete(contextCommandID);
-        contextCommandID = null;
-        contextDeliveryUnknown = false;
-      }
-      if ((event.type === "context" && ["accepted", "unchanged"].includes(event.payload.state)) || (event.type === "snapshot" && ["accepted", "unchanged"].includes(event.payload.context_state))) {
-        contextAccepted = true;
-        contextRevision = undefined;
-        contextCommandID = null;
-        contextDeliveryUnknown = false;
-      }
-      if (event.type === "context" && event.payload.state === "pending" && contextAccepted) contextRevision = "replacement";
-      if (event.type === "timeline" && state.contextState === "pending" && contextRevision === undefined && contextCommandID === null) contextRevision = state.timeline.length > 0 ? "replacement" : "initial";
-      render();
-    },
-    onDisconnect(error) {
-      state.connected = false;
-      state.lifecycle = "unavailable";
-      brokerState = "offline";
-      brokerCode = error?.protocolViolation ? "protocol_violation" : "broker_unavailable";
-      brokerGuidance = error?.protocolViolation
-        ? "The local broker sent an incompatible event stream. Update or restart it before reconnecting. No page content has been shared again."
-        : "The local broker connection was interrupted. Check that it is running on this device, then try again.";
-      pendingSubmitCommandID = null;
-      if (contextCommandID !== null) {
-        contextDeliveryUnknown = true;
-        resetForFreshSnapshot({ preserveContextDelivery: true });
-      }
-      if (handoffCommandID !== null) {
-        transport.resetConversation();
-        state.conversationID = null;
-        state.seenEventIDs.clear();
-        state.timeline = [];
-        state.queue = [];
-        state.timelineCursor = null;
-        state.pendingCommandIDs.clear();
-        state.knownCommandIDs.clear();
-        state.freshArchiveCommandIDs.clear();
-        state.contextState = "pending";
-        state.contextDigest = null;
-        contextAccepted = false;
-        contextRevision = undefined;
-        contextCommandID = null;
-        contextDeliveryUnknown = false;
-        handoffCommandID = null;
-      }
-      render();
-      if (error?.protocolViolation) return;
-      if (transport.consented) scheduleReconnect();
-    },
-  });
-
-  function resetForFreshSnapshot({ preserveContextDelivery = false } = {}) {
-    transport.resetReplay();
-    state.seenEventIDs.clear();
-    state.lastEventID = null;
-    state.timeline = [];
-    state.timelineCursor = null;
-    state.pendingCommandIDs.clear();
-    state.knownCommandIDs.clear();
-    state.freshArchiveCommandIDs.clear();
-    if (!preserveContextDelivery) {
-      contextRevision = undefined;
-      contextCommandID = null;
-      contextDeliveryUnknown = false;
-    }
+  function buildController(provider) {
+    const owned = { provider, state: createAgentState(provider), transport: null, reconnectTimer: null, connecting: false, contextRevision: undefined, contextAccepted: false, contextCommandID: null, contextDeliveryUnknown: false, handoffCommandID: null, pendingSubmitCommandID: null };
+    owned.transport = transportFactory({
+      payload,
+      provider,
+      port,
+      onEvent(event) {
+        if (!applyAgentEvent(owned.state, event)) return;
+        if (event.type === "command_result" && event.payload.command_id === owned.handoffCommandID && event.payload.status === "rejected") owned.handoffCommandID = null;
+        if (event.type === "command_result" && event.payload.command_id === owned.pendingSubmitCommandID) owned.pendingSubmitCommandID = null;
+        if (event.type === "command_result" && event.payload.command_id === owned.contextCommandID && event.payload.status === "rejected") owned.contextCommandID = null;
+        if (event.type === "snapshot" && owned.contextDeliveryUnknown) {
+          if (owned.contextCommandID !== null) owned.state.pendingCommandIDs.delete(owned.contextCommandID);
+          owned.contextCommandID = null;
+          owned.contextDeliveryUnknown = false;
+        }
+        if ((event.type === "context" && ["accepted", "unchanged"].includes(event.payload.state)) || (event.type === "snapshot" && ["accepted", "unchanged"].includes(event.payload.context_state))) {
+          owned.contextAccepted = true;
+          owned.contextRevision = undefined;
+          owned.contextCommandID = null;
+          owned.contextDeliveryUnknown = false;
+        }
+        if (event.type === "context" && event.payload.state === "pending" && owned.contextAccepted) owned.contextRevision = "replacement";
+        if (event.type === "timeline" && owned.state.contextState === "pending" && owned.contextRevision === undefined && owned.contextCommandID === null) owned.contextRevision = owned.state.timeline.length > 0 ? "replacement" : "initial";
+        if (owned !== controller) return;
+        loadController(owned);
+        render();
+      },
+      onDisconnect(error) {
+        owned.connecting = false;
+        owned.state.connected = false;
+        owned.state.lifecycle = "unavailable";
+        owned.pendingSubmitCommandID = null;
+        if (owned.contextCommandID !== null) {
+          owned.contextDeliveryUnknown = true;
+          resetControllerForFreshSnapshot(owned, { preserveContextDelivery: true });
+        }
+        if (owned.handoffCommandID !== null) {
+          owned.transport.resetConversation();
+          owned.state.conversationID = null;
+          owned.state.seenEventIDs.clear();
+          owned.state.timeline = [];
+          owned.state.queue = [];
+          owned.state.interactions = [];
+          owned.state.timelineCursor = null;
+          owned.state.pendingCommandIDs.clear();
+          owned.state.knownCommandIDs.clear();
+          owned.state.freshArchiveCommandIDs.clear();
+          owned.state.contextState = "pending";
+          owned.state.contextDigest = null;
+          owned.contextAccepted = false;
+          owned.contextRevision = undefined;
+          owned.contextCommandID = null;
+          owned.contextDeliveryUnknown = false;
+          owned.handoffCommandID = null;
+        }
+        if (owned === controller) {
+          brokerState = "offline";
+          brokerCode = error?.protocolViolation ? "protocol_violation" : "broker_unavailable";
+          brokerGuidance = error?.protocolViolation
+            ? "The local broker sent an incompatible event stream. Update or restart it before reconnecting. No page content has been shared again."
+            : "The local broker connection was interrupted. Check that it is running on this device, then try again.";
+          loadController(owned);
+          render();
+        }
+        if (!error?.protocolViolation && owned.transport.consented) scheduleReconnect(owned);
+      },
+    });
+    controllers.set(provider, owned);
+    return owned;
   }
 
-  function scheduleReconnect() {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(async () => {
+  function saveController() {
+    if (!controller) return;
+    Object.assign(controller, { contextRevision, contextAccepted, contextCommandID, contextDeliveryUnknown, handoffCommandID, pendingSubmitCommandID });
+  }
+
+  function loadController(next) {
+    controller = next;
+    state = next.state;
+    transport = next.transport;
+    ({ contextRevision, contextAccepted, contextCommandID, contextDeliveryUnknown, handoffCommandID, pendingSubmitCommandID } = next);
+  }
+
+  loadController(buildController(selectedProvider));
+
+  function resetControllerForFreshSnapshot(target, { preserveContextDelivery = false } = {}) {
+    target.transport.resetReplay();
+    target.state.seenEventIDs.clear();
+    target.state.lastEventID = null;
+    target.state.timeline = [];
+    target.state.interactions = [];
+    target.state.timelineCursor = null;
+    target.state.pendingCommandIDs.clear();
+    target.state.knownCommandIDs.clear();
+    target.state.freshArchiveCommandIDs.clear();
+    if (!preserveContextDelivery) {
+      target.contextRevision = undefined;
+      target.contextCommandID = null;
+      target.contextDeliveryUnknown = false;
+    }
+    if (target === controller) loadController(target);
+  }
+
+  function resetForFreshSnapshot(options) {
+    saveController();
+    resetControllerForFreshSnapshot(controller, options);
+  }
+
+  function scheduleReconnect(target = controller) {
+    clearTimeout(target.reconnectTimer);
+    target.reconnectTimer = setTimeout(async () => {
       if (destroyed) return;
       try {
-        await transport.reconnect();
-        if (state.timeline.length === 0) void sendCommand("history_page", { limit: 50 });
+        await target.transport.reconnect();
+        brokerState = "ready";
+        if (target === controller) render();
+        if (target.state.timeline.length === 0) void sendControllerCommand(target, "history_page", { limit: 50 });
       } catch (error) {
-        if (error?.code === "replay_window_unavailable") resetForFreshSnapshot();
-        if (!destroyed) scheduleReconnect();
+        if (error?.code === "replay_window_unavailable") resetControllerForFreshSnapshot(target);
+        if (!destroyed) scheduleReconnect(target);
       }
     }, 1000);
   }
@@ -1830,21 +2209,31 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function render() {
-    statusBar.removeAttribute("title");
+    saveController();
+    const providerName = selectedProvider === "codex" ? "Codex" : "Pi";
+    const connectionState = controller.connecting ? "connecting" : brokerState;
+    agentGlyph.textContent = providerName[0];
+    connectButton.textContent = `Connect to ${providerName}`;
+    message.setAttribute("aria-label", `Message ${providerName} about this whiteboard`);
+    composerFineprint.textContent = `${providerName} can make mistakes. Review important details.`;
+    accessListItem.textContent = selectedProvider === "codex"
+      ? "Uses your current Codex tools, approvals, sandbox, and configuration"
+      : "Pi has no tools, files, network, or project access";
+    headerSubtitle.removeAttribute("title");
     if (!timeline.hidden) {
       timelineScrollTop = timeline.scrollTop;
       followTimeline = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= 48;
     }
     const statusState = state.connected
       ? state.lifecycle
-      : brokerState === "ready"
+      : connectionState === "ready"
         ? "ready"
-        : brokerState === "connecting" ? "connecting" : "unavailable";
+        : connectionState === "connecting" ? "connecting" : "unavailable";
     statusDot.dataset.state = statusState;
     headerStatusDot.dataset.state = statusState;
-    statusBar.dataset.state = statusState;
+    headerSubtitle.dataset.state = statusState;
     if (state.connected) {
-      providerLabel.textContent = state.provider.model || "Pi";
+      providerLabel.textContent = state.provider.model || providerName;
       providerLabel.hidden = false;
       liveStatus.textContent = state.lifecycle === "responding"
         ? "Responding"
@@ -1852,16 +2241,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           ? "Sending"
           : "Connected";
     } else {
-      providerLabel.hidden = false;
-      if (brokerState === "checking") {
+      providerLabel.hidden = true;
+      if (connectionState === "checking") {
         liveStatus.textContent = "Checking local broker…";
-        providerLabel.textContent = `Port ${port}`;
-      } else if (brokerState === "connecting") {
+      } else if (connectionState === "connecting") {
         liveStatus.textContent = "Connecting…";
-        providerLabel.textContent = "Local Pi";
-      } else if (brokerState === "ready") {
-        liveStatus.textContent = "Pi ready";
-        providerLabel.textContent = "Not connected";
+      } else if (connectionState === "ready") {
+        liveStatus.textContent = `${providerName} ready`;
       } else {
         const shortStatus = {
           wrong_port: "Broker not found",
@@ -1872,25 +2258,24 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           broker_unavailable: "Broker unavailable",
         };
         liveStatus.textContent = shortStatus[brokerCode] ?? shortStatus.broker_unavailable;
-        providerLabel.textContent = `Port ${port}`;
       }
     }
     setup.hidden = state.connected || activeView !== "conversation";
-    setup.dataset.state = brokerState;
+    setup.dataset.state = connectionState;
     if (!state.connected) {
-      const ready = brokerState === "ready" || brokerState === "connecting";
+      const ready = connectionState === "ready" || connectionState === "connecting";
       setupIcon.textContent = ready ? "✓" : "⌁";
       setupHeading.textContent = ready
-        ? brokerState === "connecting" ? "Connecting to Pi…" : "Ready to connect"
-        : brokerState === "checking" ? "Checking local broker…" : "Pi isn’t available on this device";
+        ? connectionState === "connecting" ? `Connecting to ${providerName}…` : "Ready to connect"
+        : connectionState === "checking" ? "Checking local broker…" : `${providerName} isn’t available on this device`;
       consentDisclosure.textContent = ready
-        ? "Connecting starts or resumes a local Pi conversation and sends no page content. Complete context is included only with the next message that needs it."
+        ? `Connecting starts or resumes a local ${providerName} conversation and sends no page content. Complete context is included only with the next message that needs it.`
         : brokerGuidance;
       consentList.hidden = !ready;
-      setupCheckButton.hidden = brokerState !== "offline";
+      setupCheckButton.hidden = connectionState !== "offline";
       directSettingsButton.hidden = ready;
       connectButton.hidden = !ready;
-      connectButton.disabled = brokerState === "connecting";
+      connectButton.disabled = connectionState === "connecting";
     }
     settings.hidden = activeView !== "settings";
     newMenuButton.disabled = !state.connected;
@@ -1900,8 +2285,15 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     timeline.hidden = !state.connected || activeView !== "conversation";
     queue.hidden = !state.connected || activeView !== "conversation" || state.queue.length === 0;
     actions.hidden = true;
-    backButton.hidden = activeView === "conversation";
-    headerSubtitle.hidden = activeView !== "conversation";
+    const alternateView = activeView !== "conversation";
+    const viewTitles = { settings: "Connection settings", context: "Page context", archives: "Archives" };
+    heading.textContent = viewTitles[activeView] ?? "Page agent";
+    agentGlyph.hidden = alternateView;
+    backButton.hidden = !alternateView;
+    headerSubtitle.hidden = alternateView;
+    providerSelect.hidden = alternateView;
+    overflow.hidden = alternateView;
+    overflowButton.hidden = alternateView;
     contextDetails.hidden = activeView !== "context";
     contextDetails.classList.toggle("agent-view-hidden", activeView !== "context");
     contextDetails.setAttribute("aria-hidden", String(activeView !== "context"));
@@ -1944,7 +2336,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       timeline.append(older);
     }
     for (const item of state.timeline) {
-      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item);
+      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName);
+      else if (item.kind === "tool") appendToolActivity(doc, timeline, item);
       else {
         const details = doc.createElement("details");
         details.className = `agent-activity agent-activity-${item.activity}`;
@@ -1968,23 +2361,26 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         details.append(summary, content); timeline.append(details);
       }
     }
+    for (const request of state.interactions) {
+      appendInteractionCard(doc, timeline, request, (optionID, answers) => respondToInteraction(request, optionID, answers));
+    }
     const hasActiveAssistant = state.activeTurnID !== null && state.timeline.some((item) => item.kind === "assistant" && item.turn_id === state.activeTurnID);
     if (state.lifecycle === "responding" && !hasActiveAssistant) {
       const loading = doc.createElement("div");
       loading.className = "agent-response-loading";
       loading.setAttribute("role", "status");
-      loading.setAttribute("aria-label", "Pi is responding");
+      loading.setAttribute("aria-label", `${providerName} is responding`);
       const loadingGlyph = doc.createElement("span");
       loadingGlyph.className = "agent-loading-glyph";
       loadingGlyph.setAttribute("aria-hidden", "true");
-      loadingGlyph.textContent = "P";
+      loadingGlyph.textContent = providerName[0];
       const loadingCopy = doc.createElement("span");
       loadingCopy.className = "agent-loading-copy";
       const loadingLabel = doc.createElement("strong");
-      loadingLabel.textContent = "Pi";
+      loadingLabel.textContent = providerName;
       const loadingText = doc.createElement("span");
       loadingText.className = "agent-response-text";
-      loadingText.textContent = "Pi is responding";
+      loadingText.textContent = `${providerName} is responding`;
       const dots = doc.createElement("span");
       dots.className = "agent-response-dots";
       dots.setAttribute("aria-hidden", "true");
@@ -2052,24 +2448,73 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   function showTransientStatus(summary, detail, explanation) {
     liveStatus.textContent = summary;
     providerLabel.textContent = detail;
-    if (explanation) statusBar.title = explanation;
+    providerLabel.hidden = detail.length === 0;
+    if (explanation) headerSubtitle.title = explanation;
   }
 
   async function sendCommand(type, commandPayload, { handoff = false, freshArchivePage = false } = {}) {
-    const command = createAgentCommand({ type, payload: commandPayload, clientID: transport.clientID, conversationID: transport.conversationID });
-    registerAgentCommand(state, command);
-    if (handoff) handoffCommandID = command.command_id;
-    if (freshArchivePage) state.freshArchiveCommandIDs.add(command.command_id);
-    try { await transport.send(command); }
+    saveController();
+    const target = controller;
+    const command = createAgentCommand({ type, payload: commandPayload, clientID: target.transport.clientID, conversationID: target.transport.conversationID });
+    registerAgentCommand(target.state, command);
+    if (handoff) target.handoffCommandID = command.command_id;
+    if (freshArchivePage) target.state.freshArchiveCommandIDs.add(command.command_id);
+    try { await target.transport.send(command); }
     catch (error) {
       if (error?.code) {
-        state.pendingCommandIDs.delete(command.command_id);
-        state.freshArchiveCommandIDs.delete(command.command_id);
+        target.state.pendingCommandIDs.delete(command.command_id);
+        target.state.freshArchiveCommandIDs.delete(command.command_id);
       }
-      if (handoffCommandID === command.command_id) handoffCommandID = null;
-      showTransientStatus("Action failed", "Retry", browserErrorText(error.code, doc, "The local broker is unavailable."));
+      if (target.handoffCommandID === command.command_id) target.handoffCommandID = null;
+      if (target === controller) {
+        loadController(target);
+        showTransientStatus("Action failed", "Retry", browserErrorText(error.code, doc, "The local broker is unavailable."));
+      }
     }
     return command;
+  }
+
+  async function sendControllerCommand(target, type, commandPayload) {
+    const command = createAgentCommand({ type, payload: commandPayload, clientID: target.transport.clientID, conversationID: target.transport.conversationID });
+    registerAgentCommand(target.state, command);
+    try {
+      await target.transport.send(command);
+    } catch (error) {
+      if (error?.code) target.state.pendingCommandIDs.delete(command.command_id);
+      if (target === controller) showTransientStatus("Action failed", "Retry", browserErrorText(error.code, doc, "The local broker is unavailable."));
+    }
+    return command;
+  }
+
+  async function respondToInteraction(request, optionID, answers) {
+    saveController();
+    const target = controller;
+    const current = target.state.interactions.find((item) => item.request_id === request.request_id);
+    if (!current || current.resolved || current.submitting) return;
+    const command = createAgentCommand({
+      type: "interaction_respond",
+      payload: { request_id: current.request_id, kind: current.kind, option_id: optionID, answers },
+      clientID: target.transport.clientID,
+      conversationID: target.transport.conversationID,
+    });
+    registerAgentCommand(target.state, command);
+    current.submitting = true;
+    current.responseCommandID = command.command_id;
+    render();
+    try {
+      await target.transport.send(command);
+    } catch (error) {
+      if (error?.code) {
+        target.state.pendingCommandIDs.delete(command.command_id);
+        const pending = target.state.interactions.find((item) => item.request_id === request.request_id);
+        if (pending) Object.assign(pending, { submitting: false, responseCommandID: null });
+      }
+      if (target === controller) {
+        loadController(target);
+        showTransientStatus("Response failed", "Retry", browserErrorText(error.code, doc, "The response outcome is unknown; reconnect before responding again."));
+      }
+    }
+    if (target === controller) render();
   }
 
   async function forcedConversationCommand(type, commandPayload) {
@@ -2120,7 +2565,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   showView = (view, { focus = true } = {}) => {
     const previousView = activeView;
     activeView = ["conversation", "settings", "context", "archives"].includes(view) ? view : "conversation";
-    if (activeView === "context") contextDetails.open = true;
+    if (activeView === "context") markdownCard.open = true;
     if (activeView === "archives" && previousView !== "archives" && state.connected) void sendCommand("archive_list", { limit: 50 }, { freshArchivePage: true });
     render();
     if (!focus) return;
@@ -2130,9 +2575,21 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   };
   backButton.addEventListener("click", () => showView("conversation"));
   contextChip.addEventListener("click", () => showView("context"));
-  reviewContextButton.addEventListener("click", () => showView("context"));
+  contextDisclosure.addEventListener("click", () => showView("context"));
   directSettingsButton.addEventListener("click", () => showView("settings"));
   queueChip.addEventListener("click", () => queue.querySelector("textarea")?.focus());
+  providerSelect.addEventListener("change", () => {
+    const nextProvider = providerSelect.value;
+    if (!PROVIDERS.has(nextProvider) || nextProvider === selectedProvider) return;
+    saveController();
+    selectedProvider = nextProvider;
+    persistAgentPreference(storage, AGENT_PROVIDER_STORAGE_KEY, selectedProvider);
+    loadController(controllers.get(selectedProvider) ?? buildController(selectedProvider));
+    activeView = "conversation";
+    overflowMenu.hidden = true;
+    overflowButton.setAttribute("aria-expanded", "false");
+    render();
+  });
   function enabledOverflowItems() {
     return [...overflowMenu.querySelectorAll('[role="menuitem"]:not([disabled])')];
   }
@@ -2156,24 +2613,31 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     portInput.setCustomValidity("");
     port = normalized;
     persistAgentPreference(storage, AGENT_PORT_STORAGE_KEY, port);
-    transport.setPort(port);
+    for (const owned of controllers.values()) owned.transport.setPort(port);
     void probe();
   });
   checkButton.addEventListener("click", () => void probe());
   setupCheckButton.addEventListener("click", () => void probe());
   connectButton.addEventListener("click", async () => {
-    transport.grantConsent();
-    brokerState = "connecting";
+    saveController();
+    const target = controller;
+    target.transport.grantConsent();
+    target.connecting = true;
     render();
     try {
-      await transport.connect();
-      render();
-      void sendCommand("history_page", { limit: 50 });
+      await target.transport.connect();
+      target.connecting = false;
+      brokerState = "ready";
+      if (target === controller) render();
+      void sendControllerCommand(target, "history_page", { limit: 50 });
     } catch (error) {
-      brokerState = "offline";
-      brokerCode = error?.code ?? "broker_unavailable";
-      brokerGuidance = `Unable to connect: ${browserErrorText(error.code, doc, "check the broker, port, Local Network Access, and trust.")} No page content has been shared.`;
-      render();
+      target.connecting = false;
+      if (target === controller) {
+        brokerState = "offline";
+        brokerCode = error?.code ?? "broker_unavailable";
+        brokerGuidance = `Unable to connect: ${browserErrorText(error.code, doc, "check the broker, port, Local Network Access, and trust.")} No page content has been shared.`;
+        render();
+      }
     }
   });
   function resizeComposer() {
@@ -2197,31 +2661,43 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     event.preventDefault();
     const text = message.value;
     if (!validText(text, MAX_AGENT_MESSAGE_BYTES)) { message.setCustomValidity("Enter a message no larger than 64 KiB."); message.reportValidity(); return; }
-    if (state.contextState === "pending" && contextRevision === undefined) {
+    saveController();
+    const target = controller;
+    if (target.state.contextState === "pending" && target.contextRevision === undefined) {
       showTransientStatus("Context pending", "Please wait", "Wait for the broker to determine whether this page context is initial or replacement.");
       return;
     }
-    if (contextCommandID !== null || contextDeliveryUnknown) {
+    if (target.contextCommandID !== null || target.contextDeliveryUnknown) {
       showTransientStatus("Context pending", "Reconnect", "Wait for the complete context handoff to be confirmed before sending another message.");
       return;
     }
     message.setCustomValidity("");
-    const revision = state.contextState === "pending" ? contextRevision : undefined;
-    const command = createSubmitCommand({ message: text, payload, clientID: transport.clientID, conversationID: transport.conversationID, title: pageTitle, url: pageURL, revision });
-    registerAgentCommand(state, command);
-    pendingSubmitCommandID = command.command_id;
-    if (revision !== undefined) contextCommandID = command.command_id;
+    const revision = target.state.contextState === "pending" ? target.contextRevision : undefined;
+    const command = createSubmitCommand({ message: text, payload, clientID: target.transport.clientID, conversationID: target.transport.conversationID, title: pageTitle, url: pageURL, revision });
+    registerAgentCommand(target.state, command);
+    target.pendingSubmitCommandID = command.command_id;
+    if (revision !== undefined) target.contextCommandID = command.command_id;
+    loadController(target);
     render();
-    try { await transport.send(command); message.value = ""; resizeComposer(); }
-    catch (error) {
-      pendingSubmitCommandID = null;
-      if (error?.code) state.pendingCommandIDs.delete(command.command_id);
-      if (contextCommandID === command.command_id) {
-        if (error?.code) contextCommandID = null;
-        else contextDeliveryUnknown = true;
+    try {
+      await target.transport.send(command);
+      if (target === controller && message.value === text) {
+        message.value = "";
+        resizeComposer();
       }
-      render();
-      showTransientStatus("Send failed", "Retry", browserErrorText(error.code, doc, "the delivery outcome is unknown; reconnect before trying again."));
+    }
+    catch (error) {
+      target.pendingSubmitCommandID = null;
+      if (error?.code) target.state.pendingCommandIDs.delete(command.command_id);
+      if (target.contextCommandID === command.command_id) {
+        if (error?.code) target.contextCommandID = null;
+        else target.contextDeliveryUnknown = true;
+      }
+      if (target === controller) {
+        loadController(target);
+        render();
+        showTransientStatus("Send failed", "Retry", browserErrorText(error.code, doc, "the delivery outcome is unknown; reconnect before trying again."));
+      }
     }
   });
   stopButton.addEventListener("click", () => { if (state.activeTurnID) void sendCommand("interrupt", { turn_id: state.activeTurnID }); });
@@ -2269,7 +2745,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
     if (event.key === "Escape" && open) { setOpen(false); return; }
     if (event.key !== "Tab" || !open || isDockedViewport()) return;
-    const focusable = [...drawer.querySelectorAll("button:not([disabled]), input:not([disabled]), textarea:not([disabled]), summary")].filter((element) => element.closest("[hidden]") === null);
+    const available = [...drawer.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary")].filter((element) => element.closest("[hidden]") === null);
+    const focusable = [close, ...available.filter((element) => element !== close)];
     if (focusable.length === 0) return;
     const first = focusable[0];
     const last = focusable.at(-1);
@@ -2285,18 +2762,18 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   void probe();
 
   return {
-    state,
-    transport,
-    elements: { toggle, drawer, close, overlay, separator, overflowButton, overflowMenu, backButton, headerActions, setup, settings, contextDetails, portInput, connectButton, composerWrap, composer, message, sendButton, stopButton, timeline, queue, archives },
+    get state() { return state; },
+    get transport() { return transport; },
+    elements: { toggle, drawer, close, overlay, separator, overflowButton, overflowMenu, backButton, headerActions, providerSelect, setup, settings, contextDetails, portInput, connectButton, composerWrap, composer, message, sendButton, stopButton, timeline, queue, archives },
     get open() { return open; },
     setOpen,
     probe,
     sendCommand,
     destroy() {
       destroyed = true;
-      clearTimeout(reconnectTimer);
+      for (const owned of controllers.values()) clearTimeout(owned.reconnectTimer);
       finishResize({ persist: false });
-      transport.close();
+      for (const owned of controllers.values()) owned.transport.close();
       doc.removeEventListener("keydown", onKeydown);
       doc.removeEventListener("pointerdown", onOverflowOutsidePointerDown);
       doc.defaultView?.removeEventListener("resize", onViewportResize);

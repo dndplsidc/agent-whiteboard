@@ -93,7 +93,7 @@ func (actor *conversation) runRecovery(ctx context.Context, generation uint64, m
 		return
 	}
 	request := provider.ResumeRequest{
-		Provider: provider.NamePi, Access: provider.AccessContentOnly,
+		Provider: actor.identity.Provider, Access: accessForProvider(actor.identity.Provider),
 		NativeSession: mapping.Current.NativeSession, Workspace: workspace,
 	}
 	if request.Validate() != nil {
@@ -109,7 +109,7 @@ func (actor *conversation) runRecovery(ctx context.Context, generation uint64, m
 		results <- result
 		return
 	}
-	if _, err := validateProviderSession(handle, &mapping.Current.NativeSession); err != nil {
+	if _, err := validateProviderSession(handle, &mapping.Current.NativeSession, actor.identity.Provider); err != nil {
 		actor.retainSession(handle)
 		results <- result
 		return

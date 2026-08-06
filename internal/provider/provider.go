@@ -33,11 +33,21 @@ const (
 
 type Name string
 
-const NamePi Name = "pi"
+const (
+	NamePi    Name = "pi"
+	NameCodex Name = "codex"
+)
+
+func (name Name) Valid() bool { return name == NamePi || name == NameCodex }
+
+func AllNames() []Name { return []Name{NamePi, NameCodex} }
 
 type AccessMode string
 
-const AccessContentOnly AccessMode = "content-only"
+const (
+	AccessContentOnly AccessMode = "content-only"
+	AccessConfigured  AccessMode = "configured"
+)
 
 type ProviderErrorCode string
 
@@ -132,7 +142,7 @@ type Readiness struct {
 }
 
 func (r Readiness) Validate() error {
-	if !r.State.Valid() || r.Provider != NamePi || !validBoundedText(r.Model, MaxTitleBytes, false) || (r.State == Ready && r.Model == "") {
+	if !r.State.Valid() || !r.Provider.Valid() || !validBoundedText(r.Model, MaxTitleBytes, false) || (r.State == Ready && r.Model == "") {
 		return errors.New("invalid provider readiness")
 	}
 	return nil
@@ -165,7 +175,7 @@ type NativeSession struct {
 }
 
 func (s NativeSession) Validate() error {
-	if !s.Ref.Valid() || s.Provider != NamePi || !validBoundedText(s.Model, MaxTitleBytes, true) || s.CreatedAt.IsZero() || s.UpdatedAt.IsZero() || s.UpdatedAt.Before(s.CreatedAt) {
+	if !s.Ref.Valid() || !s.Provider.Valid() || !validBoundedText(s.Model, MaxTitleBytes, true) || s.CreatedAt.IsZero() || s.UpdatedAt.IsZero() || s.UpdatedAt.Before(s.CreatedAt) {
 		return errors.New("invalid native session metadata")
 	}
 	return nil
@@ -207,7 +217,7 @@ type InspectRequest struct {
 }
 
 func (r InspectRequest) Validate() error {
-	if r.Provider != NamePi || !r.NativeSession.Valid() {
+	if !r.Provider.Valid() || !r.NativeSession.Valid() {
 		return errors.New("invalid provider inspect request")
 	}
 	return nil
@@ -219,7 +229,7 @@ type DeleteRequest struct {
 }
 
 func (r DeleteRequest) Validate() error {
-	if r.Provider != NamePi || !r.NativeSession.Valid() {
+	if !r.Provider.Valid() || !r.NativeSession.Valid() {
 		return errors.New("invalid provider delete request")
 	}
 	return nil
@@ -523,14 +533,17 @@ func validateHistory(items []HistoryItem) error {
 type EventKind string
 
 const (
-	EventUserMessage      EventKind = "user_message"
-	EventAssistantDelta   EventKind = "assistant_delta"
-	EventAssistantMessage EventKind = "assistant_message"
-	EventActivity         EventKind = "activity"
-	EventBlocked          EventKind = "blocked"
-	EventCompletion       EventKind = "completion"
-	EventInterruption     EventKind = "interruption"
-	EventTerminalFailure  EventKind = "terminal_failure"
+	EventUserMessage         EventKind = "user_message"
+	EventAssistantDelta      EventKind = "assistant_delta"
+	EventAssistantMessage    EventKind = "assistant_message"
+	EventActivity            EventKind = "activity"
+	EventToolActivity        EventKind = "tool_activity"
+	EventInteractionRequest  EventKind = "interaction_request"
+	EventInteractionResolved EventKind = "interaction_resolved"
+	EventBlocked             EventKind = "blocked"
+	EventCompletion          EventKind = "completion"
+	EventInterruption        EventKind = "interruption"
+	EventTerminalFailure     EventKind = "terminal_failure"
 )
 
 type ActivityKind string
@@ -567,6 +580,9 @@ type Event struct {
 	Blocked      BlockedKind
 	Interruption InterruptionReason
 	Failure      ProviderError
+	Tool         *ToolActivity
+	Interaction  *InteractionRequest
+	Resolution   *InteractionResolution
 }
 
 func NewUserMessageEvent(turnID, messageID, text string, at time.Time) Event {
@@ -581,6 +597,18 @@ func NewAssistantMessageEvent(turnID, messageID, text string, at time.Time) Even
 func NewActivityEvent(turnID string, kind ActivityKind, summary string) Event {
 	return Event{Kind: EventActivity, TurnID: turnID, Activity: kind, Text: summary}
 }
+func NewToolActivityEvent(activity ToolActivity) Event {
+	copyOfActivity := activity
+	return Event{Kind: EventToolActivity, TurnID: activity.TurnID, Tool: &copyOfActivity}
+}
+func NewInteractionRequestEvent(request InteractionRequest) Event {
+	copyOfRequest := request
+	return Event{Kind: EventInteractionRequest, TurnID: request.TurnID, Interaction: &copyOfRequest}
+}
+func NewInteractionResolvedEvent(resolution InteractionResolution) Event {
+	copyOfResolution := resolution
+	return Event{Kind: EventInteractionResolved, Resolution: &copyOfResolution}
+}
 func NewBlockedEvent(turnID string, kind BlockedKind) Event {
 	return Event{Kind: EventBlocked, TurnID: turnID, Blocked: kind, Text: blockedMessage(kind)}
 }
@@ -592,36 +620,49 @@ func NewTerminalFailureEvent(turnID string, failure ProviderError) Event {
 	return Event{Kind: EventTerminalFailure, TurnID: turnID, Failure: failure}
 }
 func (e Event) Validate() error {
+	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil
 	switch e.Kind {
 	case EventUserMessage, EventAssistantMessage:
-		if !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, true) || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, true) || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider message event")
 		}
 	case EventAssistantDelta:
-		if !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxDeltaBytes, true) || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxDeltaBytes, true) || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider delta event")
 		}
 	case EventActivity:
-		if (e.TurnID != "" && !validID(e.TurnID)) || e.MessageID != "" || !validActivity(e.Activity) || !validBoundedText(e.Text, MaxSummaryBytes, true) || !e.Timestamp.IsZero() || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		if structured || (e.TurnID != "" && !validID(e.TurnID)) || e.MessageID != "" || !validActivity(e.Activity) || !validBoundedText(e.Text, MaxSummaryBytes, true) || !e.Timestamp.IsZero() || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider activity event")
 		}
 	case EventBlocked:
-		if !validID(e.TurnID) || e.MessageID != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		if structured || !validID(e.TurnID) || e.MessageID != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider blocked event turn")
 		}
 		if message := blockedMessage(e.Blocked); message == "" || e.Text != message {
 			return errors.New("invalid provider blocked event")
 		}
+	case EventToolActivity:
+		if e.Tool == nil || e.Tool.Validate() != nil || e.TurnID != e.Tool.TurnID || e.Interaction != nil || e.Resolution != nil || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+			return errors.New("invalid provider tool activity event")
+		}
+	case EventInteractionRequest:
+		if e.Interaction == nil || e.Interaction.Validate() != nil || e.TurnID != e.Interaction.TurnID || e.Tool != nil || e.Resolution != nil || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+			return errors.New("invalid provider interaction request event")
+		}
+	case EventInteractionResolved:
+		if e.Resolution == nil || e.Resolution.Validate() != nil || e.Tool != nil || e.Interaction != nil || e.TurnID != "" || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+			return errors.New("invalid provider interaction resolved event")
+		}
 	case EventCompletion:
-		if !validID(e.TurnID) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		if structured || !validID(e.TurnID) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider completion event")
 		}
 	case EventInterruption:
-		if !validID(e.TurnID) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || !validInterruption(e.Interruption) || e.Failure != (ProviderError{}) {
+		if structured || !validID(e.TurnID) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || !validInterruption(e.Interruption) || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider interruption event")
 		}
 	case EventTerminalFailure:
-		if (e.TurnID != "" && !validID(e.TurnID)) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || !e.Failure.Valid() {
+		if structured || (e.TurnID != "" && !validID(e.TurnID)) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || !e.Failure.Valid() {
 			return errors.New("invalid provider terminal failure event")
 		}
 	default:
@@ -634,7 +675,8 @@ func (Event) MarshalJSON() ([]byte, error) {
 }
 
 func validateProviderAccess(name Name, access AccessMode) error {
-	if name != NamePi || access != AccessContentOnly {
+	valid := (name == NamePi && access == AccessContentOnly) || (name == NameCodex && access == AccessConfigured)
+	if !valid {
 		return errors.New("invalid provider access")
 	}
 	return nil
