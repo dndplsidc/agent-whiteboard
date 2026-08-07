@@ -19,9 +19,9 @@ func TestBuildLaunchRequestIsExactAndClonesEnvironment(t *testing.T) {
 	require.Equal(t, executable, request.Executable)
 	require.Equal(t, workspace, request.WorkingDirectory)
 	require.Equal(t, []string{
-		"--mode", "rpc", "--system-prompt", contentOnlySystemPrompt,
-		"--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-themes", "--no-approve", "--offline",
-		"--session-dir", sessions, "--session", session,
+		"--mode", "rpc",
+		"--session-dir", sessions,
+		"--session", session,
 	}, request.Arguments)
 	require.Equal(t, environment, request.Environment)
 	environment[0] = "CHANGED=yes"

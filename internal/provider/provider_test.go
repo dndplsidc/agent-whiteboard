@@ -320,9 +320,9 @@ func TestDriverLifecycleOperationsAreExplicitAndRejectZeroReferences(t *testing.
 	require.NoError(t, err)
 	workspace := t.TempDir()
 
-	create := provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}
+	create := provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace}
 	require.NoError(t, create.Validate())
-	resume := provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: ref, Workspace: workspace}
+	resume := provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, NativeSession: ref, Workspace: workspace}
 	require.NoError(t, resume.Validate())
 	inspect := provider.InspectRequest{Provider: provider.NamePi, NativeSession: ref}
 	require.NoError(t, inspect.Validate())
@@ -350,10 +350,10 @@ func TestProviderNamesAndAccessModesAreClosed(t *testing.T) {
 	require.Equal(t, []provider.Name{provider.NamePi, provider.NameCodex}, provider.AllNames())
 
 	workspace := t.TempDir()
-	require.NoError(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}).Validate())
+	require.NoError(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
 	require.NoError(t, (provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
+	require.Error(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}).Validate())
 	require.Error(t, (provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessContentOnly, Workspace: workspace}).Validate())
-	require.Error(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
 }
 
 func TestRegistryRejectsUnknownOrNilDrivers(t *testing.T) {
@@ -554,13 +554,13 @@ func TestCompileTimeFakesHaveBehaviorallyUsableSignatures(t *testing.T) {
 	require.NoError(t, readiness.Validate())
 
 	workspace := t.TempDir()
-	created, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace})
+	created, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace})
 	require.NoError(t, err)
 	require.NoError(t, created.NativeSession().Validate())
 	require.NotNil(t, created.Child())
 
 	ref := created.NativeSession().Ref
-	resumed, err := driver.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: ref, Workspace: workspace})
+	resumed, err := driver.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, NativeSession: ref, Workspace: workspace})
 	require.NoError(t, err)
 	require.NoError(t, resumed.NativeSession().Validate())
 	state, err := resumed.Reconcile(context.Background(), provider.TurnReference{TurnID: idA})

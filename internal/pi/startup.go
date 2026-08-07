@@ -45,70 +45,17 @@ type startupRPCState struct {
 	SessionID           *string         `json:"sessionId"`
 }
 
-type startupCommand struct {
-	Name   string `json:"name"`
-	Source string `json:"source"`
-}
-
-type startupCommands struct {
-	Commands []startupCommand `json:"commands"`
-}
-
-type startupAnswer struct {
-	command  string
-	response rpcResponse
-	err      error
-}
-
 func startup(ctx context.Context, client *rpcClient, expectedSessionFile, workspace string) (startupState, error) {
 	if client == nil || !validLaunchPath(expectedSessionFile) || !validLaunchPath(workspace) || filepath.Dir(expectedSessionFile) == expectedSessionFile {
 		return startupState{}, provider.NewProviderError(provider.ErrorStartupFailed)
 	}
-	if startupHasEvent(client) {
-		return startupState{}, provider.NewProviderError(provider.ErrorContentOnlyUnavailable)
-	}
-	answers := make(chan startupAnswer, 2)
-	for _, command := range []string{"get_state", "get_commands"} {
-		command := command
-		go func() {
-			response, _, err := client.call(ctx, command, nil)
-			answers <- startupAnswer{command: command, response: response, err: err}
-		}()
-	}
-	responses := make(map[string]rpcResponse, 2)
-	for range 2 {
-		select {
-		case answer := <-answers:
-			if answer.err != nil || requireSuccessfulResponse(answer.response, answer.command) != nil {
-				return startupState{}, provider.NewProviderError(provider.ErrorStartupFailed)
-			}
-			responses[answer.command] = answer.response
-		case <-ctx.Done():
-			return startupState{}, provider.NewProviderError(provider.ErrorStartupFailed)
-		case _, ok := <-client.events:
-			if !ok {
-				return startupState{}, provider.NewProviderError(provider.ErrorStartupFailed)
-			}
-			return startupState{}, provider.NewProviderError(provider.ErrorContentOnlyUnavailable)
-		}
-	}
-	if startupHasEvent(client) {
-		return startupState{}, provider.NewProviderError(provider.ErrorContentOnlyUnavailable)
-	}
-	response, _, err := client.call(ctx, "set_auto_retry", map[string]any{"enabled": false})
-	if err != nil || requireSuccessfulResponse(response, "set_auto_retry") != nil {
+	response, _, err := client.call(ctx, "get_state", nil)
+	if err != nil || requireSuccessfulResponse(response, "get_state") != nil {
 		return startupState{}, provider.NewProviderError(provider.ErrorStartupFailed)
 	}
-	if startupHasEvent(client) {
-		return startupState{}, provider.NewProviderError(provider.ErrorContentOnlyUnavailable)
-	}
 
-	var commands startupCommands
-	if decodeStartupData(responses["get_commands"].Data, &commands) != nil || !contentOnlyCommands(commands.Commands) {
-		return startupState{}, provider.NewProviderError(provider.ErrorContentOnlyUnavailable)
-	}
 	var native startupRPCState
-	if decodeStartupData(responses["get_state"].Data, &native) != nil || native.IsStreaming == nil || native.IsCompacting == nil || native.PendingMessageCount == nil || native.SessionFile == nil || native.SessionID == nil {
+	if decodeStartupData(response.Data, &native) != nil || native.IsStreaming == nil || native.IsCompacting == nil || native.PendingMessageCount == nil || native.SessionFile == nil || native.SessionID == nil {
 		return startupState{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
 	if *native.IsStreaming || *native.IsCompacting || *native.PendingMessageCount != 0 {
@@ -132,21 +79,7 @@ func startup(ctx context.Context, client *rpcClient, expectedSessionFile, worksp
 	if err := validateSessionFile(expectedSessionFile, state.SessionID, workspace); err != nil {
 		return startupState{}, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	if startupHasEvent(client) {
-		return startupState{}, provider.NewProviderError(provider.ErrorContentOnlyUnavailable)
-	}
 	return state, nil
-}
-
-func contentOnlyCommands(commands []startupCommand) bool {
-	if commands == nil || len(commands) == 0 {
-		return commands != nil
-	}
-	// Pi 0.82.1 always registers its bundled /llama command even under
-	// --no-extensions. In RPC mode that handler only reports that it is TUI-only
-	// and cannot access its model-management client. No discovered command is
-	// permitted.
-	return len(commands) == 1 && commands[0].Name == "llama" && commands[0].Source == "extension"
 }
 
 func decodeStartupData(data json.RawMessage, destination any) error {
@@ -162,15 +95,6 @@ func decodeStartupData(data json.RawMessage, destination any) error {
 		return errors.New("invalid Pi startup response")
 	}
 	return nil
-}
-
-func startupHasEvent(client *rpcClient) bool {
-	select {
-	case _, ok := <-client.events:
-		return ok
-	default:
-		return false
-	}
 }
 
 func validStartupText(value string, limit int) bool {

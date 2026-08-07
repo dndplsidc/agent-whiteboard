@@ -430,15 +430,6 @@ func startM1Pi(t *testing.T, environment *m1PiEnvironment, sessionFile string) *
 	piPath := m1PinnedPiPath(t)
 	args := []string{
 		"--mode", "rpc",
-		"--system-prompt", "Answer only from content supplied in user messages. No tools or external resources are available.",
-		"--no-tools",
-		"--no-extensions",
-		"--no-skills",
-		"--no-prompt-templates",
-		"--no-context-files",
-		"--no-themes",
-		"--no-approve",
-		"--offline",
 		"--session-dir", environment.sessionDir,
 	}
 	if sessionFile != "" {
@@ -672,7 +663,7 @@ func (p *m1PiProcess) cleanup(t *testing.T) {
 	}
 }
 
-func requireM1ContentOnlyRequest(t *testing.T, environment *m1PiEnvironment, request m1ModelRequest) {
+func requireM1ConfiguredRequest(t *testing.T, environment *m1PiEnvironment, request m1ModelRequest) {
 	t.Helper()
 	require.Equal(t, http.MethodPost, request.Method)
 	require.Equal(t, "/v1/chat/completions", request.Path)
@@ -681,14 +672,8 @@ func requireM1ContentOnlyRequest(t *testing.T, environment *m1PiEnvironment, req
 	require.JSONEq(t, `"agent-whiteboard-m1"`, string(request.Fields["model"]))
 	require.JSONEq(t, `true`, string(request.Fields["stream"]))
 	require.NotEmpty(t, request.Fields["messages"])
-	if tools, present := request.Fields["tools"]; present {
-		require.JSONEq(t, `[]`, string(tools), "model request must not expose any callable tool definitions: %s", request.Body)
-	}
 	require.NotContains(t, string(request.Body), environment.configDir)
 	require.NotContains(t, string(request.Body), environment.sessionDir)
-	require.NotContains(t, string(request.Body), "pi-coding-agent")
-	require.NotContains(t, string(request.Body), "M1_PROJECT_RESOURCE_MUST_NOT_REACH_MODEL")
-	require.NotContains(t, string(request.Body), "M1_EXTENSION_SIDE_EFFECT")
 }
 
 func TestM1PiStartupStreamingPersistenceResumeAndCleanShutdown(t *testing.T) {
@@ -711,7 +696,7 @@ func TestM1PiStartupStreamingPersistenceResumeAndCleanShutdown(t *testing.T) {
 	require.Equal(t, "hello from pinned Pi", firstResult.text)
 	require.Equal(t, []string{"hello ", "from pinned Pi"}, firstResult.deltas)
 	request := model.waitRequest(t)
-	requireM1ContentOnlyRequest(t, environment, request)
+	requireM1ConfiguredRequest(t, environment, request)
 	state := first.command(t, "m1-state", "get_state", nil)
 	sessionFile, ok := state["sessionFile"].(string)
 	require.True(t, ok)
@@ -732,7 +717,7 @@ func TestM1PiStartupStreamingPersistenceResumeAndCleanShutdown(t *testing.T) {
 	require.Equal(t, "resumed successfully", resumedResult.text)
 	require.Equal(t, []string{"resumed ", "successfully"}, resumedResult.deltas)
 	resumedRequest := model.waitRequest(t)
-	requireM1ContentOnlyRequest(t, environment, resumedRequest)
+	requireM1ConfiguredRequest(t, environment, resumedRequest)
 	require.Contains(t, string(resumedRequest.Body), "first reader message")
 	require.Contains(t, string(resumedRequest.Body), "hello from pinned Pi")
 	resumed.stop(t)
@@ -748,7 +733,7 @@ func TestM1PiAbortInterruptsWithoutAutomaticReplay(t *testing.T) {
 
 	process.send(t, map[string]any{"id": "m1-delayed", "type": "prompt", "message": "delayed reader message"})
 	request := model.waitRequest(t)
-	requireM1ContentOnlyRequest(t, environment, request)
+	requireM1ConfiguredRequest(t, environment, request)
 	abortRecords := process.abortAndWaitSettled(t, "m1-abort")
 	encodedAbort, err := json.Marshal(abortRecords)
 	require.NoError(t, err)
@@ -771,12 +756,12 @@ func TestM1PiModelErrorIsNotAutomaticallyReplayed(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(encodedError), "scripted model error")
 	request := model.waitRequest(t)
-	requireM1ContentOnlyRequest(t, environment, request)
+	requireM1ConfiguredRequest(t, environment, request)
 	model.requireNoRequest(t, 500*time.Millisecond)
 	process.stop(t)
 }
 
-func TestM1PiMaliciousToolAttemptHasNoAuthorityOrSideEffect(t *testing.T) {
+func TestM1PiConfiguredToolAttemptUsesNativeAuthority(t *testing.T) {
 	model := newM1ModelServer(t)
 	environment := newM1PiEnvironment(t, model.URL())
 	model.enqueue(m1ModelScript{kind: m1AttemptToolCall})
@@ -786,7 +771,7 @@ func TestM1PiMaliciousToolAttemptHasNoAuthorityOrSideEffect(t *testing.T) {
 	result := process.prompt(t, "m1-tool-attempt", "attempt a malicious tool")
 	require.Equal(t, "continued without tool authority", result.text)
 
-	var completedCall, rejectedTool m1RPCRecord
+	var completedCall, completedTool m1RPCRecord
 	for _, record := range result.records {
 		if record["type"] == "message_update" {
 			update, _ := record["assistantMessageEvent"].(map[string]any)
@@ -795,30 +780,24 @@ func TestM1PiMaliciousToolAttemptHasNoAuthorityOrSideEffect(t *testing.T) {
 			}
 		}
 		if record["type"] == "tool_execution_end" && record["toolCallId"] == "call_malicious" {
-			rejectedTool = record
+			completedTool = record
 		}
 	}
 	encodedCall, err := json.Marshal(completedCall)
 	require.NoError(t, err)
 	require.Contains(t, string(encodedCall), "call_malicious")
 	require.Contains(t, string(encodedCall), "M1_MALICIOUS_SIDE_EFFECT")
-	require.NotNil(t, rejectedTool, "completed tool call did not reach Pi's rejection boundary")
-	require.Equal(t, "bash", rejectedTool["toolName"])
-	require.Equal(t, true, rejectedTool["isError"])
-	encodedRejection, err := json.Marshal(rejectedTool)
-	require.NoError(t, err)
-	require.Contains(t, string(encodedRejection), "Tool bash not found")
+	require.NotNil(t, completedTool, "completed tool call did not reach Pi's native tool boundary")
+	require.Equal(t, "bash", completedTool["toolName"])
+	require.Equal(t, false, completedTool["isError"])
 
 	firstRequest := model.waitRequest(t)
 	continuationRequest := model.waitRequest(t)
-	requireM1ContentOnlyRequest(t, environment, firstRequest)
-	require.NotContains(t, firstRequest.Fields, "tools", "initial model request must omit the tools field")
-	requireM1ContentOnlyRequest(t, environment, continuationRequest)
-	require.JSONEq(t, `[]`, string(continuationRequest.Fields["tools"]), "tool-rejection continuation must expose no callable tools")
-	require.Contains(t, string(continuationRequest.Body), "Tool bash not found")
+	requireM1ConfiguredRequest(t, environment, firstRequest)
+	requireM1ConfiguredRequest(t, environment, continuationRequest)
 	require.Contains(t, string(continuationRequest.Body), "M1_MALICIOUS_SIDE_EFFECT")
 	model.requireNoRequest(t, 500*time.Millisecond)
-	require.NoFileExists(t, filepath.Join(environment.workspace, "M1_MALICIOUS_SIDE_EFFECT"))
+	require.FileExists(t, filepath.Join(environment.workspace, "M1_MALICIOUS_SIDE_EFFECT"))
 	require.NoFileExists(t, filepath.Join(environment.workspace, "M1_EXTENSION_SIDE_EFFECT"))
 	process.stop(t)
 }
@@ -842,7 +821,7 @@ func TestPiAdapterRealCLILifecycleThroughProviderContract(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, provider.Ready, driver.Readiness(ctx).State)
 
-	session, err := driver.Create(ctx, provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace})
+	session, err := driver.Create(ctx, provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace})
 	require.NoError(t, err)
 	require.NoError(t, session.NativeSession().Validate())
 	t.Cleanup(func() {
@@ -916,7 +895,7 @@ settled:
 	require.Equal(t, "adapter answer", delta.String())
 	require.Equal(t, "adapter answer", assistantText)
 	request := model.waitRequest(t)
-	requireM1ContentOnlyRequest(t, environment, request)
+	requireM1ConfiguredRequest(t, environment, request)
 	expectedEnvelope, err := piadapter.BuildEnvelope(turn)
 	require.NoError(t, err)
 	var requestMessages []struct {
@@ -965,7 +944,7 @@ settled:
 
 	native := session.NativeSession()
 	require.NoError(t, session.Shutdown(ctx))
-	resumed, err := driver.Resume(ctx, provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: native.Ref, Workspace: workspace})
+	resumed, err := driver.Resume(ctx, provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, NativeSession: native.Ref, Workspace: workspace})
 	require.NoError(t, err)
 	require.Equal(t, native.Ref, resumed.NativeSession().Ref)
 	t.Cleanup(func() {

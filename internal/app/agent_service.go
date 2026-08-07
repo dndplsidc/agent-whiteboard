@@ -369,7 +369,7 @@ func defaultCodexEnvironment(override []string) ([]string, error) {
 	return cloned, nil
 }
 
-func providerEnvironment(home string, override []string) ([]string, error) {
+func providerEnvironment(_ string, override []string) ([]string, error) {
 	if override != nil {
 		cloned := make([]string, len(override))
 		copy(cloned, override)
@@ -378,33 +378,7 @@ func providerEnvironment(home string, override []string) ([]string, error) {
 		}
 		return cloned, nil
 	}
-	if home == "" {
-		var err error
-		home, err = os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve provider home: %w", err)
-		}
-	}
-	absoluteHome, err := filepath.Abs(home)
-	if err != nil {
-		return nil, fmt.Errorf("resolve provider home: %w", err)
-	}
-	absoluteHome = filepath.Clean(absoluteHome)
-	environment := []string{
-		"HOME=" + absoluteHome,
-		"USERPROFILE=" + absoluteHome,
-		"PATH=" + os.Getenv("PATH"),
-	}
-	for _, name := range []string{"TMPDIR", "LANG", "LC_ALL"} {
-		if value := os.Getenv(name); value != "" {
-			environment = append(environment, name+"="+value)
-		}
-	}
-	environment = append(environment,
-		"PI_OFFLINE=1",
-		"PI_SKIP_VERSION_CHECK=1",
-		"PI_TELEMETRY=0",
-	)
+	environment := os.Environ()
 	if err := validateEnvironment(environment); err != nil {
 		return nil, err
 	}

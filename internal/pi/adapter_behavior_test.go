@@ -39,7 +39,7 @@ func TestSessionPreflightUsesConservativeNativeUsage(t *testing.T) {
 		require.NoError(t, resolved.err)
 		envelope, err := BuildEnvelope(request.Turn)
 		require.NoError(t, err)
-		require.Equal(t, len(contentOnlySystemPrompt)+len(envelope), resolved.result.EstimatedInputTokens)
+		require.Equal(t, len(envelope), resolved.result.EstimatedInputTokens)
 		require.Equal(t, 16384, resolved.result.SafetyMarginTokens)
 		require.Equal(t, 16384, resolved.result.EffectiveCapacityTokens)
 	})
@@ -151,21 +151,19 @@ func TestSessionSubmitNegativeAndAmbiguousAcceptance(t *testing.T) {
 	}
 }
 
-func TestSessionBlocksToolOnceAndInterruptWaitsForSettlement(t *testing.T) {
-	t.Run("tool", func(t *testing.T) {
+func TestSessionToleratesConfiguredToolActivityAndInterruptWaitsForSettlement(t *testing.T) {
+	t.Run("tool activity", func(t *testing.T) {
 		session, child := newBehaviorSession(t)
 		turn := installBehaviorTurn(session, 30)
 		child.writeRecord(t, map[string]any{"type": "message_update", "assistantMessageEvent": map[string]any{"type": "toolcall_start", "toolCall": map[string]any{"arguments": "secret"}}})
 		child.writeRecord(t, map[string]any{"type": "tool_execution_start", "args": map[string]any{"token": "secret"}})
-		abort := child.readCommand(t)
-		require.Equal(t, "abort", abort["type"])
-		child.writeRecord(t, responseRecord(abort, nil))
 		child.writeRecord(t, map[string]any{"type": "agent_settled"})
-		events := receiveProviderEvents(t, session.Events(), 2)
-		require.Equal(t, provider.EventBlocked, events[0].Kind)
-		require.Equal(t, provider.EventTerminalFailure, events[1].Kind)
-		require.Equal(t, provider.ErrorContentOnlyUnavailable, events[1].Failure.Code())
-		require.NotContains(t, events[0].Text, "secret")
+		events := receiveProviderEvents(t, session.Events(), 3)
+		require.Equal(t, []provider.EventKind{provider.EventActivity, provider.EventActivity, provider.EventCompletion}, []provider.EventKind{events[0].Kind, events[1].Kind, events[2].Kind})
+		for _, event := range events[:2] {
+			require.Equal(t, provider.ActivityStatus, event.Activity)
+			require.NotContains(t, event.Text, "secret")
+		}
 		<-turn.settled
 	})
 
@@ -469,7 +467,7 @@ func TestDriverRetainsChildReturnedWithLaunchError(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		session, createErr := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace})
+		session, createErr := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace})
 		result <- struct {
 			session provider.Session
 			err     error
@@ -507,7 +505,7 @@ func TestDriverCreateInspectShutdownAndDelete(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		session, createErr := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace})
+		session, createErr := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace})
 		result <- struct {
 			session provider.Session
 			err     error
@@ -516,16 +514,9 @@ func TestDriverCreateInspectShutdownAndDelete(t *testing.T) {
 	launch := <-launcher.requests
 	sessionFile := launch.Arguments[len(launch.Arguments)-1]
 	writeStartupHeader(t, sessionFile, "native-session", workspace)
-	for range 2 {
-		command := child.readCommand(t)
-		data := any(map[string]any{"commands": []any{map[string]any{"name": "llama", "source": "extension"}}})
-		if command["type"] == "get_state" {
-			data = map[string]any{"model": map[string]any{"provider": "model-provider", "id": "model-id", "contextWindow": 32768, "maxTokens": 1024}, "isStreaming": false, "isCompacting": false, "pendingMessageCount": 0, "sessionFile": sessionFile, "sessionId": "native-session"}
-		}
-		child.writeRecord(t, responseRecord(command, data))
-	}
-	auto := child.readCommand(t)
-	child.writeRecord(t, responseRecord(auto, nil))
+	command := child.readCommand(t)
+	require.Equal(t, "get_state", command["type"])
+	child.writeRecord(t, responseRecord(command, map[string]any{"model": map[string]any{"provider": "model-provider", "id": "model-id", "contextWindow": 32768, "maxTokens": 1024}, "isStreaming": false, "isCompacting": false, "pendingMessageCount": 0, "sessionFile": sessionFile, "sessionId": "native-session"}))
 	created := <-result
 	require.NoError(t, created.err)
 	require.NoError(t, created.session.NativeSession().Validate())

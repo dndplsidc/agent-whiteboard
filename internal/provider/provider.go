@@ -675,7 +675,7 @@ func (Event) MarshalJSON() ([]byte, error) {
 }
 
 func validateProviderAccess(name Name, access AccessMode) error {
-	valid := (name == NamePi && access == AccessContentOnly) || (name == NameCodex && access == AccessConfigured)
+	valid := (name == NamePi || name == NameCodex) && access == AccessConfigured
 	if !valid {
 		return errors.New("invalid provider access")
 	}

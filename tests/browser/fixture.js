@@ -1179,7 +1179,7 @@ export const test = base.extend({
         }, null, 2)}\n`, { mode: 0o600 }),
       ]);
       const configPath = path.join(root, "config.yaml");
-      await fs.writeFile(configPath, `version: 1\nagent:\n  trusted_origins:\n    - "${localAgentSidebar.origin}"\n  provider_idle_timeout: 10m\n  shutdown_timeout: 10s\n  default_access: content-only\n`, { mode: 0o600 });
+      await fs.writeFile(configPath, `version: 1\nagent:\n  trusted_origins:\n    - "${localAgentSidebar.origin}"\n  provider_idle_timeout: 10m\n  shutdown_timeout: 10s\n  default_access: configured\n`, { mode: 0o600 });
       const agentPort = await reserveLoopbackPort();
       const piExecutable = path.join(projectRoot, "node_modules", ".bin", "pi");
       const env = { ...isolatedEnvironment(home), TMPDIR: temporary };

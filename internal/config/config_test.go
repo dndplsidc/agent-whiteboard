@@ -99,7 +99,7 @@ agent:
     - https://other.example:8443
   provider_idle_timeout: 2h
   shutdown_timeout: 12s
-  default_access: content-only
+  default_access: configured
 `)
 
 	loaded, err := config.Load(path)
@@ -168,7 +168,7 @@ agent:
 	require.Equal(t, 12*time.Second, agentShutdown)
 	access, set := loaded.Agent().DefaultAccess()
 	require.True(t, set)
-	require.Equal(t, config.AccessContentOnly, access)
+	require.Equal(t, config.AccessConfigured, access)
 }
 
 func TestBuiltins(t *testing.T) {
@@ -195,7 +195,7 @@ func TestBuiltins(t *testing.T) {
 	require.Empty(t, defaults.Agent.TrustedOrigins)
 	require.Equal(t, 60*time.Minute, defaults.Agent.ProviderIdleTimeout)
 	require.Equal(t, 10*time.Second, defaults.Agent.ShutdownTimeout)
-	require.Equal(t, config.AccessContentOnly, defaults.Agent.DefaultAccess)
+	require.Equal(t, config.AccessConfigured, defaults.Agent.DefaultAccess)
 }
 
 func TestResolvePath(t *testing.T) {

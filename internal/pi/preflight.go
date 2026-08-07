@@ -69,7 +69,7 @@ func (s *Session) Preflight(ctx context.Context, request provider.PreflightReque
 				return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 			}
 		}
-		nativeTokens = conservativeTokenBound(len(contentOnlySystemPrompt))
+		nativeTokens = 0
 	} else {
 		var usage contextUsage
 		if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || decodeStartupData(stats.ContextUsage, &usage) != nil || usage.Tokens == nil || *usage.Tokens <= 0 || (usage.ContextWindow != nil && *usage.ContextWindow != model.ContextWindow) {

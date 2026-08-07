@@ -234,7 +234,7 @@ func TestRegistryRoutesSameWhiteboardToIndependentProviderDrivers(t *testing.T) 
 	require.NotEqual(t, piConnection.ConversationID(), codexConnection.ConversationID())
 
 	piDriver.mu.Lock()
-	require.Equal(t, []provider.CreateRequest{{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: "/tmp/agent-whiteboard-test/" + piConnection.ConversationID()}}, piDriver.creates)
+	require.Equal(t, []provider.CreateRequest{{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: "/tmp/agent-whiteboard-test/" + piConnection.ConversationID()}}, piDriver.creates)
 	piDriver.mu.Unlock()
 	codexDriver.mu.Lock()
 	require.Equal(t, []provider.CreateRequest{{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: "/tmp/agent-whiteboard-test/" + codexConnection.ConversationID()}}, codexDriver.creates)
@@ -456,7 +456,7 @@ func TestDifferentIdentitiesCreateIsolatedSessionsAndExistingMappingResumesExact
 	require.Len(t, driver.creates, 2)
 	for _, request := range driver.creates {
 		require.Equal(t, provider.NamePi, request.Provider)
-		require.Equal(t, provider.AccessContentOnly, request.Access)
+		require.Equal(t, provider.AccessConfigured, request.Access)
 		require.Contains(t, request.Workspace, "/tmp/agent-whiteboard-test/")
 	}
 	driver.mu.Unlock()

@@ -23,7 +23,6 @@ type activeTurn struct {
 	nativeSeen         bool
 	userEmitted        bool
 	abortSent          bool
-	policyBlocked      bool
 	providerFailed     bool
 	interruptRequested bool
 	assistantEmitted   bool
@@ -161,7 +160,7 @@ func (s *Session) Interrupt(ctx context.Context, accepted provider.AcceptedTurn)
 
 func (s *Session) rollbackInterrupt(turn *activeTurn) {
 	s.mu.Lock()
-	if s.active == turn && !turn.policyBlocked {
+	if s.active == turn {
 		turn.interruptRequested = false
 		turn.abortSent = false
 	}

@@ -10,8 +10,6 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/provider"
 )
 
-const contentOnlySystemPrompt = "Answer only from content supplied in user messages. No tools or external resources are available."
-
 type launchConfig struct {
 	Executable  string
 	Environment []string
@@ -27,9 +25,6 @@ func buildLaunchRequest(config launchConfig, workspace, sessionsDirectory, sessi
 		Executable: config.Executable,
 		Arguments: []string{
 			"--mode", "rpc",
-			"--system-prompt", contentOnlySystemPrompt,
-			"--no-tools", "--no-extensions", "--no-skills", "--no-prompt-templates",
-			"--no-context-files", "--no-themes", "--no-approve", "--offline",
 			"--session-dir", sessionsDirectory,
 			"--session", sessionFile,
 		},

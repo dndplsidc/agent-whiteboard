@@ -4,7 +4,6 @@ package pi
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"strings"
 	"time"
@@ -45,22 +44,6 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 		turn.nativeSeen = true
 	}
 	s.mu.Unlock()
-	if isBlockedNative(event.Type) {
-		if turn != nil {
-			if !s.turnHasValidatedUser(turn) {
-				s.failMalformed(turn)
-				return
-			}
-			kind := provider.BlockedTool
-			if event.Type == "extension_ui_request" || strings.Contains(event.Type, "permission") || strings.Contains(event.Type, "approval") {
-				kind = provider.BlockedPermission
-			}
-			if s.abortBlocked(turn, event) {
-				s.emit(provider.NewBlockedEvent(turn.request.TurnID, kind))
-			}
-		}
-		return
-	}
 	switch event.Type {
 	case "message_start":
 		if turn == nil {
@@ -127,14 +110,10 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 			s.mu.Unlock()
 			return
 		case "toolcall_start", "toolcall_delta", "toolcall_end":
-			if s.abortBlocked(turn, event) {
-				s.emit(provider.NewBlockedEvent(turn.request.TurnID, provider.BlockedTool))
-			}
+			s.emitConfiguredActivity(turn, event.Type)
 		default:
 			if strings.HasPrefix(update.Type, "tool") {
-				if s.abortBlocked(turn, event) {
-					s.emit(provider.NewBlockedEvent(turn.request.TurnID, provider.BlockedTool))
-				}
+				s.emitConfiguredActivity(turn, update.Type)
 				return
 			}
 			s.failMalformed(turn)
@@ -201,19 +180,16 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 		}
 		s.mu.Lock()
 		requested := turn.interruptRequested
-		blocked := turn.policyBlocked
 		failed := turn.providerFailed
 		s.mu.Unlock()
-		if blocked {
-			s.emit(provider.NewTerminalFailureEvent(turn.request.TurnID, provider.NewProviderError(provider.ErrorContentOnlyUnavailable)))
-		} else if requested {
+		if requested {
 			s.emit(provider.NewInterruptionEvent(turn.request.TurnID, provider.InterruptionRequested))
 		} else if failed {
 			s.emit(provider.NewTerminalFailureEvent(turn.request.TurnID, provider.NewProviderError(provider.ErrorProtocolFailure)))
 		} else {
 			s.emit(provider.NewCompletionEvent(turn.request.TurnID))
 		}
-		s.finishTurn(turn, requested || blocked)
+		s.finishTurn(turn, requested)
 	case "agent_start", "agent_end", "turn_start", "turn_end", "entry_appended", "session_info_changed", "thinking_level_changed":
 		return
 	case "status", "queue_update", "retry", "compaction", "compaction_start", "compaction_end", "auto_compaction_start", "auto_compaction_end", "auto_retry_start", "auto_retry_end", "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished":
@@ -235,9 +211,15 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 			s.emit(provider.NewActivityEvent(turn.request.TurnID, kind, summary))
 		}
 	case "extension_ui_request", "permission_request", "approval_request":
-		// handled above
+		if turn != nil && s.turnHasValidatedUser(turn) {
+			s.emitConfiguredActivity(turn, event.Type)
+		}
 	default:
-		if authorityType(event.Type) {
+		if configuredActivityType(event.Type) {
+			if turn != nil && s.turnHasValidatedUser(turn) {
+				s.emitConfiguredActivity(turn, event.Type)
+			}
+		} else if authorityType(event.Type) {
 			if turn != nil {
 				s.failMalformed(turn)
 			} else {
@@ -295,8 +277,8 @@ func eventTime(value any, fallback time.Time) time.Time {
 	}
 	return fallback.UTC()
 }
-func isBlockedNative(t string) bool {
-	return strings.HasPrefix(t, "tool") || t == "extension_ui_request" || strings.Contains(t, "permission") || strings.Contains(t, "approval")
+func configuredActivityType(t string) bool {
+	return strings.HasPrefix(t, "tool") || strings.HasPrefix(t, "toolcall") || strings.HasPrefix(t, "extension_ui_") || strings.Contains(t, "permission") || strings.Contains(t, "approval")
 }
 func authorityType(t string) bool {
 	return strings.HasPrefix(t, "tool_") || strings.HasPrefix(t, "toolcall") || strings.HasPrefix(t, "extension_ui_") || strings.HasPrefix(t, "permission") || strings.HasPrefix(t, "approval") || strings.HasPrefix(t, "message_") || strings.HasPrefix(t, "agent_")
@@ -313,6 +295,13 @@ func normalizedSummary(kind, status string) string {
 		return ""
 	}
 }
+func (s *Session) emitConfiguredActivity(turn *activeTurn, kind string) {
+	summary := "The provider used configured capabilities."
+	if strings.Contains(kind, "permission") || strings.Contains(kind, "approval") || strings.HasPrefix(kind, "extension_ui_") {
+		summary = "The provider requested configured interaction."
+	}
+	s.emit(provider.NewActivityEvent(turn.request.TurnID, provider.ActivityStatus, summary))
+}
 func (s *Session) failMalformed(turn *activeTurn) {
 	s.mu.Lock()
 	if turn.terminalEmitted {
@@ -323,27 +312,4 @@ func (s *Session) failMalformed(turn *activeTurn) {
 	s.mu.Unlock()
 	s.emit(provider.NewTerminalFailureEvent(turn.request.TurnID, provider.NewProviderError(provider.ErrorMalformedStream)))
 	s.rpc.finish(provider.NewProviderError(provider.ErrorMalformedStream))
-}
-func (s *Session) abortBlocked(turn *activeTurn, event nativeEvent) bool {
-	s.mu.Lock()
-	if turn.abortSent {
-		s.mu.Unlock()
-		return false
-	}
-	turn.abortSent = true
-	turn.policyBlocked = true
-	s.mu.Unlock()
-	go func() {
-		if event.Type == "extension_ui_request" {
-			id := event.ID
-			if id == "" {
-				id = event.RequestID
-			}
-			if id != "" {
-				_ = s.rpc.notify(context.Background(), map[string]any{"type": "extension_ui_response", "id": id, "cancelled": true})
-			}
-		}
-		_, _, _ = s.rpc.call(context.Background(), "abort", nil)
-	}()
-	return true
 }

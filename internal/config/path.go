@@ -78,7 +78,7 @@ func Builtins() (BuiltinValues, error) {
 			TrustedOrigins:      []string{},
 			ProviderIdleTimeout: 60 * time.Minute,
 			ShutdownTimeout:     10 * time.Second,
-			DefaultAccess:       AccessContentOnly,
+			DefaultAccess:       AccessConfigured,
 		},
 	}, nil
 }

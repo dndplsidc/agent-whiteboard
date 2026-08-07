@@ -35,6 +35,9 @@ const (
 	ContentOnlyInitialInstructions      = contentOnlyInitial
 	ContentOnlyReplacementInstructions  = contentOnlyReplacement
 	ContentOnlyContinuationInstructions = contentOnlyContinuation
+	ConfiguredInitialInstructions       = configuredInitial
+	ConfiguredReplacementInstructions   = configuredReplacement
+	ConfiguredContinuationInstructions  = configuredContinuation
 )
 
 type Policy string

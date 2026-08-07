@@ -106,7 +106,7 @@ func TestServingGenerationRecoveryDeduplicatesFailureAndRecoversLaterGeneration(
 	require.Len(t, driver.requests, 3)
 	for _, request := range driver.requests {
 		require.Equal(t, provider.NamePi, request.Provider)
-		require.Equal(t, provider.AccessContentOnly, request.Access)
+		require.Equal(t, provider.AccessConfigured, request.Access)
 		require.Equal(t, mapping.Current.NativeSession, request.NativeSession)
 		require.Equal(t, "/tmp/agent-whiteboard-test/"+mapping.Current.ConversationID, request.Workspace)
 	}

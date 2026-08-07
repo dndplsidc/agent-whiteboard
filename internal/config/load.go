@@ -377,8 +377,8 @@ func parseAgent(node *yaml.Node, agent *Agent) error {
 		if err != nil {
 			return err
 		}
-		if value != AccessContentOnly {
-			return fmt.Errorf("agent.default_access must be %q", AccessContentOnly)
+		if value != AccessConfigured && value != AccessContentOnly {
+			return fmt.Errorf("agent.default_access must be %q or %q", AccessConfigured, AccessContentOnly)
 		}
 		agent.defaultAccess = present(value)
 	}

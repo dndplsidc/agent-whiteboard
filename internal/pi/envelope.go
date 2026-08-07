@@ -10,9 +10,9 @@ type Envelope = contentturn.Envelope
 const (
 	envelopeHeader           = contentturn.Header
 	envelopeFooter           = contentturn.Footer
-	initialInstructions      = contentturn.ContentOnlyInitialInstructions
-	replacementInstructions  = contentturn.ContentOnlyReplacementInstructions
-	continuationInstructions = contentturn.ContentOnlyContinuationInstructions
+	initialInstructions      = contentturn.ConfiguredInitialInstructions
+	replacementInstructions  = contentturn.ConfiguredReplacementInstructions
+	continuationInstructions = contentturn.ConfiguredContinuationInstructions
 )
 
 var envelopeLabels = func() [14]string {
@@ -22,7 +22,7 @@ var envelopeLabels = func() [14]string {
 }()
 
 func BuildEnvelope(request provider.TurnRequest) ([]byte, error) {
-	return contentturn.Build(request, contentturn.PolicyContentOnly)
+	return contentturn.Build(request, contentturn.PolicyConfigured)
 }
 
 func ParseEnvelope(encoded []byte) (Envelope, error) { return contentturn.Parse(encoded) }

@@ -43,7 +43,7 @@ func TestConfigTrustSourceHonorsCanceledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestProviderEnvironmentIsExplicitAndOverrideIsCloned(t *testing.T) {
+func TestProviderEnvironmentInheritsAmbientAndOverrideIsCloned(t *testing.T) {
 	t.Setenv("HOME", "/host/home")
 	t.Setenv("USERPROFILE", "/host/profile")
 	t.Setenv("PATH", "/safe/bin")
@@ -56,14 +56,12 @@ func TestProviderEnvironmentIsExplicitAndOverrideIsCloned(t *testing.T) {
 
 	environment, err := providerEnvironment("/isolated/home", nil)
 	require.NoError(t, err)
-	require.Contains(t, environment, "HOME=/isolated/home")
-	require.Contains(t, environment, "USERPROFILE=/isolated/home")
+	require.Contains(t, environment, "HOME=/host/home")
+	require.Contains(t, environment, "USERPROFILE=/host/profile")
 	require.Contains(t, environment, "PATH=/safe/bin")
-	require.NotContains(t, environment, "OPENAI_API_KEY=host-secret")
-	require.NotContains(t, environment, "HTTP_PROXY=http://user:password@proxy.invalid")
-	for _, entry := range environment {
-		require.NotContains(t, entry, "AGENT_WHITEBOARD_AGENT_PORT")
-	}
+	require.Contains(t, environment, "OPENAI_API_KEY=host-secret")
+	require.Contains(t, environment, "HTTP_PROXY=http://user:password@proxy.invalid")
+	require.Contains(t, environment, "AGENT_WHITEBOARD_AGENT_PORT=host-control")
 
 	override := []string{"HOME=/override", "TOKEN=kept"}
 	cloned, err := providerEnvironment("/ignored", override)

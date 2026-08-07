@@ -72,18 +72,18 @@ agent:
     - https://whiteboard.example
   provider_idle_timeout: 60m
   shutdown_timeout: 10s
-  default_access: content-only
+  default_access: configured
 ```
 
 The current release validates the complete schema, uses `client` and `server` for publication behavior, supports editing `agent.trusted_origins`, and provides foreground `agent serve` for the local agent API. On macOS, `agent serve --daemon` installs or updates and starts a per-user LaunchAgent; `agent daemon status|restart|stop|uninstall` manages it. `stop` retains the plist and `uninstall` removes it. Managed daemon operations are unsupported on Linux, where foreground `agent serve` is the supported mode.
 
 Pi and Codex executable selection is intentionally not stored in YAML. Foreground `agent serve` uses an explicit provider flag first, then the matching non-empty environment variable, then resolves `pi` or `codex` from `PATH`. An explicitly supplied empty executable flag is invalid. A missing provider executable marks only that provider unavailable; it does not prevent the broker or the other provider from starting.
 
-Codex inherits the foreground process environment so `codex app-server` uses the normal effective user Codex home, authentication, model, tools, MCP servers, apps, hooks, skills, approval policy, sandbox, and other configuration. Agent Whiteboard does not set a production `CODEX_HOME`, edit `~/.codex/config.toml`, copy authentication, or pass per-thread overrides for those settings. App Server experimental APIs remain disabled.
+Pi and Codex inherit the foreground process environment so providers use the normal effective user home, authentication, model, tools, extensions, apps, hooks, skills, approval policy, sandbox, project trust, and other native configuration. Agent Whiteboard does not set a production `CODEX_HOME`, edit provider configuration files, copy authentication, or pass per-thread overrides for those settings. App Server experimental APIs remain disabled for Codex.
 
-With `--daemon`, `--pi-executable` and `--codex-executable` and their matching environment variables select executable paths during installation. The foreground-only `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` flags are rejected because the managed child reads them from Agent Whiteboard configuration at startup. The LaunchAgent records the absolute Agent Whiteboard and configuration paths and resolved provider executable paths; it does not copy Pi or Codex configuration, authentication, or the installing shell's ambient environment. Managed Codex therefore uses the same effective default user configuration as foreground Codex, without editing `config.toml`.
+With `--daemon`, `--pi-executable` and `--codex-executable` and their matching environment variables select executable paths during installation. The foreground-only `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` flags are rejected because the managed child reads them from Agent Whiteboard configuration at startup. The LaunchAgent records the absolute Agent Whiteboard and configuration paths and resolved provider executable paths; it does not copy Pi or Codex configuration, authentication, or the installing shell's ambient environment. Managed providers therefore use the same effective default user configuration as foreground providers, without editing provider configuration files.
 
-Durations use Go duration syntax and must be positive. `server.port` accepts 0–65535; YAML `agent.port` accepts 1–65535, while `agent serve --port` also accepts 0 for an ephemeral listener. `default_expires_in` and byte limits are nonnegative integers. Zero default expiration means permanent resources. A zero byte limit selects that limit's built-in value; it does not disable the limit. The effective image request limit cannot be smaller than the effective per-image limit. `log_mode` is `console` or `json`, and `default_access` is currently only `content-only`.
+Durations use Go duration syntax and must be positive. `server.port` accepts 0–65535; YAML `agent.port` accepts 1–65535, while `agent serve --port` also accepts 0 for an ephemeral listener. `default_expires_in` and byte limits are nonnegative integers. Zero default expiration means permanent resources. A zero byte limit selects that limit's built-in value; it does not disable the limit. The effective image request limit cannot be smaller than the effective per-image limit. `log_mode` is `console` or `json`, and `default_access` is `configured`. Existing `content-only` values remain parseable for compatibility but do not create a provider sandbox.
 
 | Setting | Built-in |
 | --- | ---: |
@@ -105,7 +105,7 @@ Durations use Go duration syntax and must be positive. `server.port` accepts 0�
 | Trusted origins | empty |
 | Provider idle timeout | `60m` |
 | Agent shutdown timeout | `10s` |
-| Agent default access | `content-only` |
+| Agent default access | `configured` |
 
 ## Strict parsing and file safety
 

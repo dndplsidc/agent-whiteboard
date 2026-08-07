@@ -5,6 +5,7 @@ import "time"
 const (
 	Version1                  = 1
 	AccessContentOnly         = "content-only"
+	AccessConfigured          = "configured"
 	DefaultMaxWhiteboardBytes = 10 << 20
 	DefaultMaxContextBytes    = 1 << 20
 )

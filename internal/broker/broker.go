@@ -637,10 +637,7 @@ func (broker *Broker) newConversation(identity agentstate.Identity, mapping agen
 }
 
 func accessForProvider(name provider.Name) provider.AccessMode {
-	if name == provider.NameCodex {
-		return provider.AccessConfigured
-	}
-	return provider.AccessContentOnly
+	return provider.AccessConfigured
 }
 
 // Close stops admissions before synchronously asking every actor to detach its

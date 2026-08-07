@@ -66,7 +66,7 @@ func TestCommandNewHandsOffTwoTabsAndPublishesExactDurableCurrent(t *testing.T) 
 	require.Equal(t, *mapping.Current, state.newSessions[0])
 	state.muArchive.Unlock()
 	driver.mu.Lock()
-	require.Equal(t, provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: "/tmp/agent-whiteboard-test/" + mapping.Current.ConversationID}, driver.createRequests[0])
+	require.Equal(t, provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: "/tmp/agent-whiteboard-test/" + mapping.Current.ConversationID}, driver.createRequests[0])
 	driver.mu.Unlock()
 
 	reconnectedRaw, err := broker.Connect(context.Background(), identity.Origin, lifecycleConnect(sequenceID(2113), identity.CapabilityID))
@@ -140,7 +140,7 @@ func TestCommandArchiveRestoreUsesStableWorkspaceWithoutHistoryAndHandsOff(t *te
 	driver.mu.Lock()
 	lastResume := driver.resumeRequests[len(driver.resumeRequests)-1]
 	driver.mu.Unlock()
-	require.Equal(t, provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, NativeSession: mapping.Current.NativeSession, Workspace: "/tmp/agent-whiteboard-test/" + archiveID}, lastResume)
+	require.Equal(t, provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, NativeSession: mapping.Current.NativeSession, Workspace: "/tmp/agent-whiteboard-test/" + archiveID}, lastResume)
 	require.Zero(t, candidate.historyCalls.Load(), "restore must not request provider history or preview content")
 
 	reconnectedRaw, err := broker.Connect(context.Background(), identity.Origin, lifecycleConnect(sequenceID(2153), identity.CapabilityID))
