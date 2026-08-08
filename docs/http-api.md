@@ -80,6 +80,12 @@ Public GET responses set `Cache-Control: no-store`, `X-Content-Type-Options: nos
 
 Creator context is not embedded in the current browser-rendering Markdown shell, but it is available from the machine retrieval route to anyone with the capability ID. It is not a private, hidden, or authorization-protected channel. Never include hidden reasoning, credentials, personal or sensitive data, private source, or raw tool output.
 
+## Private loopback Page Agent images
+
+`agent serve` exposes a separate browser-only endpoint at `POST /api/v1/agent/images` and `GET|DELETE /api/v1/agent/images/{image_id}`. This is not part of the public publishing API and must not be used to create shareable image URLs. Requests require local API version `2`, the exact authorized Origin, attached client and conversation IDs, and—on upload—the selected provider. Upload bodies are one raw image; successful JSON returns only an opaque image ID, detected media type, and byte length. Submit commands later claim ordered `{image_id, name}` references atomically.
+
+The browser protocol uses WebSocket subprotocol `agent-whiteboard.v2`. Image commands and events contain only bounded opaque references/descriptors—never bytes or private filesystem paths. Version-1 viewers and brokers are intentionally incompatible with this contract; upgrade and restart `agent serve` or its managed daemon before reconnecting.
+
 ## curl
 
 Create a temporary context file before publishing Markdown:

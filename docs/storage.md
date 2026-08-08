@@ -43,3 +43,9 @@ Locks are process-local and granular by namespace plus capability ID. Unrelated 
 All traversal is rooted through verified `os.Root` handles. Capability IDs and internal filenames are validated; symlink roots/resources, non-directories, traversal, identity swaps, and name collisions are rejected. Metadata and source/context/content generations are opened and reverified as regular files.
 
 Custom stores must honor contexts, support concurrent calls, preserve `Context` and immutable identity/creation time on replacement, treat expiration consistently, return stable error codes, implement readiness, and make close idempotent. They must require Markdown source/context pairs while permitting legacy empty-context records to be read and migrated on first update. Atomic replacement, crash-safe durability, cleanup, and `UncertainCreateError` behavior are the custom implementation's responsibility.
+
+## Private Page Agent image workspaces
+
+Page Agent attachments use the separate owner-only agent state tree, not the public `images/` capability store above. Each native conversation workspace may contain a guarded `.agent-images/` directory with a `0600` manifest and validated PNG, JPEG, GIF, or WebP originals. The directory and its parents are `0700`; browser display names are metadata only and never become filesystem names.
+
+Unclaimed uploads expire after 15 minutes. Startup and bounded periodic sweeping remove expired staging and recognized unreferenced files without following links or crossing the conversation workspace. Claimed images remain for queued messages, browser history previews, and provider-native resume, up to 512 MiB per workspace. Queue removal and definitive pre-acceptance rejection release the relevant files; uncertain acceptance retains them. Starting a new conversation archives the prior workspace, and archive deletion removes the complete workspace through the guarded conversation cleanup path.
