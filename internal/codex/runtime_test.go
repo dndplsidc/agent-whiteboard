@@ -39,6 +39,8 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 			case "initialized":
 			case "account/read":
 				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"account": map[string]any{"type": "apiKey"}, "requiresOpenaiAuth": true}})
+			case "model/list":
+				sendModelList(t, child, request)
 			case "thread/start":
 				var params map[string]json.RawMessage
 				require.NoError(t, json.Unmarshal(request["params"], &params))
@@ -323,6 +325,8 @@ func TestDriverSharesOneRuntimeAcrossConcurrentThreadsAndStopsAfterLastDetach(t 
 			case "initialized":
 			case "account/read":
 				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"account": map[string]any{"type": "apiKey"}, "requiresOpenaiAuth": true}})
+			case "model/list":
+				sendModelList(t, child, request)
 			case "thread/start":
 				threadMu.Lock()
 				threadCount++
@@ -1227,11 +1231,21 @@ func readyLauncher(t *testing.T, handle func(*scriptedChild, map[string]json.Raw
 			case "initialized":
 			case "account/read":
 				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"account": map[string]any{"type": "apiKey"}, "requiresOpenaiAuth": true}})
+			case "model/list":
+				sendModelList(t, child, request)
 			default:
 				handle(child, request, method)
 			}
 		}
 	}}
+}
+
+func sendModelList(t *testing.T, child *scriptedChild, request map[string]json.RawMessage) {
+	t.Helper()
+	child.send(t, map[string]any{"id": request["id"], "result": map[string]any{
+		"data":       []map[string]any{{"id": "gpt-fixture", "model": "gpt-fixture", "inputModalities": []string{"text", "image"}}},
+		"nextCursor": nil,
+	}})
 }
 
 func pipeRuntime(t *testing.T) (*runtime, <-chan map[string]json.RawMessage, *scriptedChild) {

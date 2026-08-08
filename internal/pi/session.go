@@ -63,12 +63,18 @@ func (s *Session) start() {
 
 func (s *Session) NativeSession() provider.NativeSession { return s.native }
 func (s *Session) Model() string                         { return s.state.Model }
-func (s *Session) Events() <-chan provider.Event         { return s.events }
-func (s *Session) Child() provider.ManagedChild          { return s.child }
+func (s *Session) Capabilities() provider.Capabilities {
+	return provider.Capabilities{Images: s.state.SupportsImages}
+}
+func (s *Session) Events() <-chan provider.Event { return s.events }
+func (s *Session) Child() provider.ManagedChild  { return s.child }
 
 func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (provider.AcceptedTurn, error) {
 	if request.Validate() != nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	if len(request.Images) != 0 && !s.state.SupportsImages {
+		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
 	}
 	envelope, err := BuildEnvelope(request)
 	if err != nil {
@@ -83,7 +89,12 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 	}
 	s.active = turn
 	s.mu.Unlock()
-	response, wrote, err := s.rpc.call(ctx, "prompt", map[string]any{"message": string(envelope)})
+	fields, err := buildPromptFields(envelope, request.Images)
+	if err != nil {
+		s.clearTurn(turn)
+		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageStorageFailure)
+	}
+	response, wrote, err := s.rpc.call(ctx, "prompt", fields)
 	if err != nil {
 		if wrote {
 			return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)

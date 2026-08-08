@@ -98,7 +98,7 @@ func (driver *Driver) Create(ctx context.Context, request provider.CreateRequest
 	if err != nil {
 		return nil, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
-	return driver.activate(runtime, thread.ID, thread.Model)
+	return driver.activate(runtime, thread.ID, thread.Model, request.Workspace)
 }
 
 func (driver *Driver) Resume(ctx context.Context, request provider.ResumeRequest) (provider.Session, error) {
@@ -118,7 +118,7 @@ func (driver *Driver) Resume(ctx context.Context, request provider.ResumeRequest
 	if err != nil || thread.ID != request.NativeSession.Value() {
 		return nil, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	return driver.activate(runtime, thread.ID, thread.Model)
+	return driver.activate(runtime, thread.ID, thread.Model, request.Workspace)
 }
 
 func (driver *Driver) Inspect(ctx context.Context, request provider.InspectRequest) (provider.NativeSession, error) {
@@ -238,7 +238,7 @@ func (driver *Driver) releaseRuntime(runtime *runtime) {
 	}
 }
 
-func (driver *Driver) activate(runtime *runtime, threadID, model string) (*Session, error) {
+func (driver *Driver) activate(runtime *runtime, threadID, model, workspace string) (*Session, error) {
 	if threadID == "" || model == "" {
 		return nil, provider.NewProviderError(provider.ErrorNoUsableModel)
 	}
@@ -246,7 +246,11 @@ func (driver *Driver) activate(runtime *runtime, threadID, model string) (*Sessi
 	if err != nil {
 		return nil, err
 	}
-	session := newSession(driver, runtime, native)
+	capabilities, known := runtime.models[model]
+	if !known {
+		capabilities = provider.Capabilities{}
+	}
+	session := newSession(driver, runtime, native, workspace, capabilities)
 	if err := runtime.register(session); err != nil {
 		return nil, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}

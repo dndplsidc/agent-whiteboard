@@ -13,14 +13,15 @@ import (
 )
 
 type startupState struct {
-	SessionID     string
-	SessionFile   string
-	Workspace     string
-	Model         string
-	ModelProvider string
-	ModelID       string
-	ContextWindow int
-	MaxTokens     int
+	SessionID      string
+	SessionFile    string
+	Workspace      string
+	Model          string
+	ModelProvider  string
+	ModelID        string
+	ContextWindow  int
+	MaxTokens      int
+	SupportsImages bool
 }
 
 func (state startupState) valid() bool {
@@ -30,10 +31,11 @@ func (state startupState) valid() bool {
 }
 
 type startupModel struct {
-	Provider      string `json:"provider"`
-	ID            string `json:"id"`
-	ContextWindow int    `json:"contextWindow"`
-	MaxTokens     int    `json:"maxTokens"`
+	Provider      string   `json:"provider"`
+	ID            string   `json:"id"`
+	ContextWindow int      `json:"contextWindow"`
+	MaxTokens     int      `json:"maxTokens"`
+	Input         []string `json:"input"`
 }
 
 type startupRPCState struct {
@@ -72,6 +74,7 @@ func startup(ctx context.Context, client *rpcClient, expectedSessionFile, worksp
 		SessionID: *native.SessionID, SessionFile: *native.SessionFile, Workspace: workspace,
 		ModelProvider: model.Provider, ModelID: model.ID, Model: model.Provider + "/" + model.ID,
 		ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens,
+		SupportsImages: modelSupportsImages(model.Input),
 	}
 	if !state.valid() || state.SessionFile != expectedSessionFile {
 		return startupState{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
@@ -80,6 +83,15 @@ func startup(ctx context.Context, client *rpcClient, expectedSessionFile, worksp
 		return startupState{}, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
 	return state, nil
+}
+
+func modelSupportsImages(modalities []string) bool {
+	for _, modality := range modalities {
+		if modality == "image" {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeStartupData(data json.RawMessage, destination any) error {

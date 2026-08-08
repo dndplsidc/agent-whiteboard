@@ -30,6 +30,9 @@ func (s *Session) Preflight(ctx context.Context, request provider.PreflightReque
 	if request.Validate() != nil {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
+	if len(request.Turn.Images) != 0 && !s.state.SupportsImages {
+		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
+	}
 	envelope, err := BuildEnvelope(request.Turn)
 	if err != nil {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
@@ -48,7 +51,7 @@ func (s *Session) Preflight(ctx context.Context, request provider.PreflightReque
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	resolved := model.Provider + "/" + model.ID
-	if resolved != s.state.Model || model.ContextWindow != s.state.ContextWindow || model.MaxTokens != s.state.MaxTokens {
+	if resolved != s.state.Model || model.ContextWindow != s.state.ContextWindow || model.MaxTokens != s.state.MaxTokens || modelSupportsImages(model.Input) != s.state.SupportsImages {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
 	statsResponse, _, err := s.rpc.call(ctx, "get_session_stats", nil)

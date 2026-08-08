@@ -46,12 +46,14 @@ type nativePermissionChoice struct {
 }
 
 type Session struct {
-	driver   *Driver
-	runtime  *runtime
-	native   provider.NativeSession
-	threadID string
-	events   chan provider.Event
-	view     *sessionChild
+	driver       *Driver
+	runtime      *runtime
+	native       provider.NativeSession
+	threadID     string
+	events       chan provider.Event
+	view         *sessionChild
+	workspace    string
+	capabilities provider.Capabilities
 
 	mu           sync.Mutex
 	active       *nativeTurn
@@ -64,22 +66,26 @@ type Session struct {
 	eventsClosed bool
 }
 
-func newSession(driver *Driver, runtime *runtime, native provider.NativeSession) *Session {
+func newSession(driver *Driver, runtime *runtime, native provider.NativeSession, workspace string, capabilities provider.Capabilities) *Session {
 	view := newSessionChild()
 	return &Session{
-		driver: driver, runtime: runtime, native: native, threadID: native.Ref.Value(), events: make(chan provider.Event, 512), view: view,
+		driver: driver, runtime: runtime, native: native, threadID: native.Ref.Value(), events: make(chan provider.Event, 512), view: view, workspace: workspace, capabilities: capabilities,
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 }
 
 func (session *Session) NativeSession() provider.NativeSession { return session.native }
 func (session *Session) Model() string                         { return session.native.Model }
+func (session *Session) Capabilities() provider.Capabilities   { return session.capabilities }
 func (session *Session) Events() <-chan provider.Event         { return session.events }
 func (session *Session) Child() provider.ManagedChild          { return session.view }
 
 func (session *Session) Preflight(_ context.Context, request provider.PreflightRequest) (provider.PreflightResult, error) {
 	if request.Validate() != nil {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	if len(request.Turn.Images) != 0 && !session.capabilities.Images {
+		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
 	}
 	// App Server owns compaction and capacity enforcement. These values satisfy
 	// the legacy neutral contract without estimating a Codex context window.
@@ -89,6 +95,9 @@ func (session *Session) Preflight(_ context.Context, request provider.PreflightR
 func (session *Session) Submit(ctx context.Context, request provider.TurnRequest) (provider.AcceptedTurn, error) {
 	if request.Validate() != nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	if len(request.Images) != 0 && !session.capabilities.Images {
+		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
 	}
 	envelope, err := contentturn.Build(request, contentturn.PolicyConfigured)
 	if err != nil {
@@ -103,9 +112,18 @@ func (session *Session) Submit(ctx context.Context, request provider.TurnRequest
 	}
 	session.active = turn
 	session.mu.Unlock()
+	input, err := buildTurnInput(session.workspace, envelope, request.Images)
+	if err != nil {
+		session.mu.Lock()
+		if session.active == turn {
+			session.active = nil
+		}
+		session.mu.Unlock()
+		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageStorageFailure)
+	}
 	result, releaseStream, err := session.runtime.callOrdered(ctx, "turn/start", map[string]any{
 		"threadId": session.threadID,
-		"input":    []any{map[string]any{"type": "text", "text": string(envelope)}},
+		"input":    input,
 	})
 	if err != nil {
 		session.mu.Lock()

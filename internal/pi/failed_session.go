@@ -32,6 +32,7 @@ func newFailedSession(driver *Driver, native provider.NativeSession, child provi
 
 func (session *failedSession) NativeSession() provider.NativeSession { return session.native }
 func (session *failedSession) Model() string                         { return session.native.Model }
+func (*failedSession) Capabilities() provider.Capabilities           { return provider.Capabilities{} }
 func (session *failedSession) Events() <-chan provider.Event         { return session.events }
 func (session *failedSession) Child() provider.ManagedChild          { return session.child }
 func (*failedSession) History(context.Context, provider.HistoryRequest) (provider.HistoryPage, error) {
