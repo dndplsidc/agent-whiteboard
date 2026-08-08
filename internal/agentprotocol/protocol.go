@@ -9,16 +9,19 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/edocsss/agent-whiteboard/internal/agentlimits"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
+	"github.com/edocsss/agent-whiteboard/internal/raster"
 )
 
 const (
-	APIVersion           = "1"
+	APIVersion           = "2"
 	Namespace            = "/api/v1/agent"
 	StatusPath           = Namespace + "/status"
 	ConnectPath          = Namespace + "/connect"
-	WebSocketSubprotocol = "agent-whiteboard.v1"
+	ImagesPath           = Namespace + "/images"
+	WebSocketSubprotocol = "agent-whiteboard.v2"
 	APIVersionHeader     = "X-Agent-Whiteboard-API-Version"
 
 	// MaxContextCommandBytes retains ample room for the complete default context.
@@ -28,21 +31,26 @@ const (
 	MaxMessageBytes        = 64 << 10
 	// Three times the logical message limit covers worst-case 2x JSON string
 	// escaping plus the complete ordinary command envelope.
-	MaxOrdinaryCommandBytes = 3 * MaxMessageBytes
-	MaxMarkdownBytes        = 10 << 20
-	MaxCreatorContextBytes  = 1 << 20
-	MaxTitleBytes           = 512
-	MaxURLBytes             = 8 << 10
-	MaxSummaryBytes         = 8 << 10
-	MaxQueueItems           = 64
-	MaxQueueBytes           = 96 << 10
-	MaxTimelineBytes        = 96 << 10
-	MaxEventBytes           = 256 << 10
-	MaxDeltaBytes           = 32 << 10
-	MaxReplayEvents         = 2048
-	MaxReplayBytes          = 8 << 20
-	MaxPageSize             = 100
-	DefaultPageSize         = 50
+	MaxOrdinaryCommandBytes   = 3 * MaxMessageBytes
+	MaxMarkdownBytes          = 10 << 20
+	MaxCreatorContextBytes    = 1 << 20
+	MaxTitleBytes             = 512
+	MaxURLBytes               = 8 << 10
+	MaxSummaryBytes           = 8 << 10
+	MaxQueueItems             = 64
+	MaxQueueBytes             = 96 << 10
+	MaxTimelineBytes          = 96 << 10
+	MaxEventBytes             = 256 << 10
+	MaxDeltaBytes             = 32 << 10
+	MaxReplayEvents           = 2048
+	MaxReplayBytes            = 8 << 20
+	MaxPageSize               = 100
+	DefaultPageSize           = 50
+	MaxImagesPerTurn          = agentlimits.MaxImagesPerTurn
+	MaxImageBytes             = agentlimits.MaxImageBytes
+	MaxTurnImageBytes         = agentlimits.MaxTurnImageBytes
+	MaxConversationImageBytes = agentlimits.MaxConversationImageBytes
+	MaxImageNameBytes         = agentlimits.MaxImageNameBytes
 )
 
 var (
@@ -134,13 +142,28 @@ type ConnectPayload struct {
 func (ConnectPayload) commandPayload() {}
 
 type SubmitPayload struct {
-	TurnID    string       `json:"turn_id"`
-	MessageID string       `json:"message_id"`
-	Message   string       `json:"message"`
-	Context   *PageContext `json:"context,omitempty"`
+	TurnID    string           `json:"turn_id"`
+	MessageID string           `json:"message_id"`
+	Message   string           `json:"message"`
+	Images    []ImageReference `json:"images,omitempty"`
+	Context   *PageContext     `json:"context,omitempty"`
 }
 
 func (SubmitPayload) commandPayload() {}
+
+// ImageReference is a one-use staged image reference supplied by a reader.
+// It intentionally contains neither bytes nor a local filesystem path.
+type ImageReference struct {
+	ImageID string `json:"image_id"`
+	Name    string `json:"name"`
+}
+
+// ImageDescriptor is safe browser-visible metadata for a claimed image.
+type ImageDescriptor struct {
+	ImageID   string `json:"image_id"`
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+}
 
 type QueueEditPayload struct {
 	MessageID string `json:"message_id"`
@@ -348,7 +371,7 @@ func validateCommand(command Command) error {
 			return invalid(nil)
 		}
 	case SubmitPayload:
-		if command.Type != CommandSubmit || !validID(payload.TurnID) || !validID(payload.MessageID) || !validMessage(payload.Message) {
+		if command.Type != CommandSubmit || !validID(payload.TurnID) || !validID(payload.MessageID) || !validTurnContent(payload.Message, payload.Images) {
 			return invalid(nil)
 		}
 		if payload.Context != nil && validatePageContext(*payload.Context) != nil {
@@ -428,6 +451,44 @@ func validPageURL(value string) bool {
 	return common.ValidPageURL(value)
 }
 func validMessage(value string) bool { return validBoundedText(value, MaxMessageBytes, true) }
+func validTurnContent(value string, images []ImageReference) bool {
+	return validBoundedText(value, MaxMessageBytes, false) && (value != "" || len(images) != 0) && validateImageReferences(images) == nil
+}
+func validateImageReferences(images []ImageReference) error {
+	if len(images) > MaxImagesPerTurn {
+		return ErrMessageTooLarge
+	}
+	seen := make(map[string]struct{}, len(images))
+	for _, image := range images {
+		if !validID(image.ImageID) || !validBoundedText(image.Name, MaxImageNameBytes, true) {
+			return invalid(nil)
+		}
+		if _, exists := seen[image.ImageID]; exists {
+			return invalid(nil)
+		}
+		seen[image.ImageID] = struct{}{}
+	}
+	return nil
+}
+func validateImageDescriptors(images []ImageDescriptor) error {
+	if len(images) > MaxImagesPerTurn {
+		return ErrMessageTooLarge
+	}
+	seen := make(map[string]struct{}, len(images))
+	for _, image := range images {
+		if !validID(image.ImageID) || !validBoundedText(image.Name, MaxImageNameBytes, true) || !validImageMediaType(image.MediaType) {
+			return invalid(nil)
+		}
+		if _, exists := seen[image.ImageID]; exists {
+			return invalid(nil)
+		}
+		seen[image.ImageID] = struct{}{}
+	}
+	return nil
+}
+func validImageMediaType(mediaType string) bool {
+	return raster.SupportedMediaType(mediaType)
+}
 func validBoundedText(value string, max int, nonempty bool) bool {
 	return validBoundedUTF8(value, max, nonempty) && !hasDisallowedC0(value)
 }
