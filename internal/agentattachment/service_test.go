@@ -2,6 +2,7 @@ package agentattachment_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image"
 	"image/color"
@@ -130,6 +131,24 @@ func TestSweepExpiresOnlyUnclaimedImagesAndRepairsTemporaryFiles(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(workspace, ".agent-images", "orphan.uploading"))
 }
 
+func TestRemovedConversationWorkspaceCannotBeRecreatedByAStaleUpload(t *testing.T) {
+	service, workspace := newService(t)
+	_, err := service.Stage(t.Context(), agentattachment.StageRequest{
+		Origin: origin, Provider: provider.NamePi, ConversationID: conversationID, ClientID: clientID,
+		Content: bytes.NewReader(encodedPNG(t)),
+	})
+	require.NoError(t, err)
+	require.NoError(t, service.RemoveWorkspace(t.Context(), conversationID))
+	require.NoDirExists(t, workspace)
+
+	_, err = service.Stage(t.Context(), agentattachment.StageRequest{
+		Origin: origin, Provider: provider.NamePi, ConversationID: conversationID, ClientID: clientID,
+		Content: bytes.NewReader(encodedPNG(t)),
+	})
+	require.ErrorIs(t, err, agentattachment.ErrStorage)
+	require.NoDirExists(t, workspace)
+}
+
 func TestSecurityRejectsSymlinkedAttachmentDirectory(t *testing.T) {
 	service, workspace := newService(t)
 	outside := t.TempDir()
@@ -139,6 +158,27 @@ func TestSecurityRejectsSymlinkedAttachmentDirectory(t *testing.T) {
 	require.Empty(t, mustReadDir(t, outside))
 }
 
+func TestOperationsHonorCanceledContextBeforeOpeningWorkspace(t *testing.T) {
+	service, _ := newService(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	imageID := strings.Repeat("E", 32)
+
+	_, err := service.Read(ctx, agentattachment.ReadRequest{Origin: origin, ConversationID: conversationID, ClientID: clientID, ImageID: imageID})
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, service.DeleteStaged(ctx, agentattachment.DeleteRequest{Origin: origin, ConversationID: conversationID, ClientID: clientID, ImageID: imageID}), context.Canceled)
+	_, err = service.Claim(ctx, agentattachment.ClaimRequest{
+		Origin: origin, Provider: provider.NamePi, ConversationID: conversationID, ClientID: clientID,
+		TurnID: turnID, MessageID: messageID, Images: []agentprotocol.ImageReference{{ImageID: imageID, Name: "image.png"}},
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = service.ImagesForMessage(ctx, conversationID, messageID)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, service.ReleaseMessage(ctx, conversationID, messageID), context.Canceled)
+	require.ErrorIs(t, service.Sweep(ctx, conversationID), context.Canceled)
+	require.ErrorIs(t, service.RemoveWorkspace(ctx, conversationID), context.Canceled)
+}
+
 type workspaces struct{ path string }
 
 func (w workspaces) EnsureWorkspace(id string) (string, error) {
@@ -146,6 +186,13 @@ func (w workspaces) EnsureWorkspace(id string) (string, error) {
 		return "", errors.New("unknown conversation")
 	}
 	return w.path, nil
+}
+
+func (w workspaces) RemoveWorkspace(id string) error {
+	if id != conversationID {
+		return errors.New("unknown conversation")
+	}
+	return os.RemoveAll(w.path)
 }
 
 type sequenceIDs struct {

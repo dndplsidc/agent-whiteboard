@@ -123,7 +123,7 @@ func (actor *conversation) commandArchiveDelete(results chan<- archiveWorkerResu
 			results <- result
 			return
 		}
-		if err := actor.state.RemoveWorkspace(target.ConversationID); err != nil {
+		if err := removeImageWorkspace(actor.lifecycleCtx, actor.attachments, actor.state, target.ConversationID); err != nil {
 			result.code = agentprotocol.ErrorStateRepairFailed
 			results <- result
 			return

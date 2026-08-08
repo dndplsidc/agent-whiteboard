@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/agentattachment"
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
@@ -20,6 +21,9 @@ type brokerAttachmentStore struct {
 	descriptors map[string][]agentprotocol.ImageDescriptor
 	claimErr    error
 	releaseErr  error
+	sweepErr    error
+	swept       []string
+	removed     []string
 }
 
 func newBrokerAttachmentStore() *brokerAttachmentStore {
@@ -62,11 +66,28 @@ func (store *brokerAttachmentStore) ReleaseMessage(_ context.Context, _ string, 
 	return nil
 }
 
+func (store *brokerAttachmentStore) Sweep(_ context.Context, conversationID string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.swept = append(store.swept, conversationID)
+	return store.sweepErr
+}
+
+func (store *brokerAttachmentStore) RemoveWorkspace(_ context.Context, conversationID string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.removed = append(store.removed, conversationID)
+	return nil
+}
+
 func TestImageSubmitClaimsOrderedInputsAndDecoratesUserEventsAndHistory(t *testing.T) {
 	store := newBrokerAttachmentStore()
 	broker, _, session, connection, clientID, identity, resource, page := turnImageFixture(t, 8000, store, true)
 	defer broker.Close(context.Background())
 	conversationID := connection.ConversationID()
+	store.mu.Lock()
+	require.Equal(t, []string{conversationID}, store.swept)
+	store.mu.Unlock()
 	turnID := sequenceID(8002)
 	messageID := sequenceID(8003)
 	references := []agentprotocol.ImageReference{
@@ -118,6 +139,30 @@ func TestImageSubmitClaimsOrderedInputsAndDecoratesUserEventsAndHistory(t *testi
 	_ = resource
 }
 
+func TestConversationPeriodicallySweepsStagedImages(t *testing.T) {
+	store := newBrokerAttachmentStore()
+	timers := newManualTimerFactory()
+	broker, _, _, connection, _, _, _, _ := turnImageFixtureWithTimers(t, 8050, store, true, timers)
+	defer broker.Close(context.Background())
+
+	sweepTimer := receiveLifecycle(t, timers.created)
+	require.True(t, sweepTimer.fire())
+	require.Eventually(t, func() bool {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		return len(store.swept) == 2 && store.swept[1] == connection.ConversationID()
+	}, lifecycleTestTimeout, time.Millisecond)
+}
+
+func TestWorkspaceRemovalUsesAttachmentSerializationBoundary(t *testing.T) {
+	store := newBrokerAttachmentStore()
+	conversationID := sequenceID(8075)
+	require.NoError(t, removeImageWorkspace(t.Context(), store, nil, conversationID))
+	store.mu.Lock()
+	require.Equal(t, []string{conversationID}, store.removed)
+	store.mu.Unlock()
+}
+
 func TestQueuedImagesAreSharedAndReleasedWhenRemoved(t *testing.T) {
 	store := newBrokerAttachmentStore()
 	broker, _, session, connection, clientID, _, _, page := turnImageFixture(t, 8100, store, true)
@@ -151,6 +196,20 @@ func TestQueuedImagesAreSharedAndReleasedWhenRemoved(t *testing.T) {
 	store.mu.Lock()
 	require.Contains(t, store.released, queuedMessageID)
 	store.mu.Unlock()
+}
+
+func TestQueuedImageCaptionCanBeClearedWithoutChangingImages(t *testing.T) {
+	image := provider.ImageInput{ID: sequenceID(8150), Name: "queued.png", MediaType: "image/png", Bytes: 4, Path: filepath.Join("/private/tmp", sequenceID(8150)+".png")}
+	descriptor := agentprotocol.ImageDescriptor{ImageID: image.ID, Name: image.Name, MediaType: image.MediaType}
+	queue := NewQueue()
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(8151), MessageID: sequenceID(8152), Message: "caption", Images: []provider.ImageInput{image}, Descriptors: []agentprotocol.ImageDescriptor{descriptor}}))
+
+	require.NoError(t, queue.Edit(sequenceID(8152), ""))
+	require.Equal(t, []agentprotocol.QueueItem{{TurnID: sequenceID(8151), MessageID: sequenceID(8152), Message: "", Images: []agentprotocol.ImageDescriptor{descriptor}}}, queue.Items())
+	request, ok := queue.Dequeue()
+	require.True(t, ok)
+	require.Empty(t, request.Message)
+	require.Equal(t, []provider.ImageInput{image}, request.Images)
 }
 
 func TestImageCapabilityAndDefiniteProviderRejectionDoNotLeakClaims(t *testing.T) {
@@ -232,6 +291,10 @@ func TestCommandFingerprintIncludesOrderedImageReferences(t *testing.T) {
 }
 
 func turnImageFixture(t *testing.T, base uint64, attachments AttachmentStore, supportsImages bool) (*Broker, *repairState, *turnSession, *Connection, string, agentstate.Identity, agentprotocol.Resource, agentprotocol.PageContext) {
+	return turnImageFixtureWithTimers(t, base, attachments, supportsImages, RealTimerFactory{})
+}
+
+func turnImageFixtureWithTimers(t *testing.T, base uint64, attachments AttachmentStore, supportsImages bool, timers TimerFactory) (*Broker, *repairState, *turnSession, *Connection, string, agentstate.Identity, agentprotocol.Resource, agentprotocol.PageContext) {
 	t.Helper()
 	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(base))
 	resource := testResource(identity.CapabilityID)
@@ -243,6 +306,7 @@ func turnImageFixture(t *testing.T, base uint64, attachments AttachmentStore, su
 	session.capabilities.Images = supportsImages
 	config := validLifecycleConfig(state, &hardeningDriver{resumeSession: session}, &lockedIDs{next: base + 100})
 	config.Attachments = attachments
+	config.Timers = timers
 	broker, err := New(config)
 	require.NoError(t, err)
 	clientID := sequenceID(base + 1)

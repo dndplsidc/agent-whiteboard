@@ -162,17 +162,15 @@ func (queue *Queue) Edit(messageID, message string) error {
 	if queue == nil {
 		return errors.New("nil queue")
 	}
-	if err := (provider.TurnRequest{TurnID: validQueueID, MessageID: messageID, Message: message}).Validate(); err != nil {
-		// The synthetic turn ID above is valid and exists only to reuse provider
-		// message validation without duplicating its UTF-8/control-byte rules.
-		if messageID == "" || len(message) == 0 {
-			return ErrQueueInvalid
-		}
-		return ErrQueueInvalid
-	}
 	for index := range queue.items {
 		if queue.items[index].messageID != messageID {
 			continue
+		}
+		// The synthetic turn ID exists only to reuse provider validation while
+		// preserving the queued images. An empty edited caption remains valid
+		// when the queued turn still contains at least one image.
+		if err := (provider.TurnRequest{TurnID: validQueueID, MessageID: messageID, Message: message, Images: queue.items[index].images}).Validate(); err != nil {
+			return ErrQueueInvalid
 		}
 		newBytes := queue.bytes - len(queue.items[index].message) + len(message)
 		if newBytes > MaxQueueBytes {

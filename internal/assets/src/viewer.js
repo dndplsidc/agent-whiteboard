@@ -744,7 +744,7 @@ export function createSubmitCommand({ message, images = [], payload, clientID, c
 export function createAgentCommand({ type, payload, clientID, conversationID, idFactory = generateAgentID }) {
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const validators = {
-    queue_edit: () => exactObject(payload, ["message_id", "message"]) && validID(payload.message_id) && validText(payload.message, MAX_AGENT_MESSAGE_BYTES),
+    queue_edit: () => exactObject(payload, ["message_id", "message"]) && validID(payload.message_id) && validText(payload.message, MAX_AGENT_MESSAGE_BYTES, true),
     queue_remove: () => exactObject(payload, ["message_id"]) && validID(payload.message_id),
     interrupt: () => exactObject(payload, ["turn_id"]) && validID(payload.turn_id),
     new: () => exactObject(payload, []),
@@ -2323,9 +2323,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   doc.defaultView?.addEventListener("resize", onViewportResize);
 
   function setOpen(next, { focus = true } = {}) {
+    const wasOpen = open;
     if (next && focus) restoreFocus = doc.activeElement;
     if (!next && resizing) finishResize({ persist: false });
     open = next;
+    if (wasOpen && !open) clearDraftAttachments();
     const modal = open && !isDockedViewport();
     drawer.classList.toggle("is-open", open);
     overlay.classList.toggle("is-open", open && modal);
@@ -2721,8 +2723,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       const save = doc.createElement("button"); save.type = "button"; save.textContent = "Save";
       const remove = doc.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
       save.addEventListener("click", () => {
-        if (!validText(input.value, MAX_AGENT_MESSAGE_BYTES)) {
-          input.setCustomValidity("Enter a queued message no larger than 64 KiB.");
+        if (!validText(input.value, MAX_AGENT_MESSAGE_BYTES, true) || input.value.length === 0 && !item.images?.length) {
+          input.setCustomValidity("Enter a queued message or keep at least one image attached.");
           input.reportValidity();
           return;
         }

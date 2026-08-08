@@ -46,6 +46,7 @@ var (
 
 type WorkspaceProvider interface {
 	EnsureWorkspace(conversationID string) (string, error)
+	RemoveWorkspace(conversationID string) error
 }
 
 type Service struct {
@@ -53,13 +54,14 @@ type Service struct {
 	workspaces WorkspaceProvider
 	clock      common.Clock
 	ids        common.IDGenerator
+	removed    map[string]struct{}
 }
 
 func New(workspaces WorkspaceProvider, clock common.Clock, ids common.IDGenerator) (*Service, error) {
 	if common.IsNil(workspaces) || common.IsNil(clock) || common.IsNil(ids) {
 		return nil, ErrInvalid
 	}
-	return &Service{workspaces: workspaces, clock: clock, ids: ids}, nil
+	return &Service{workspaces: workspaces, clock: clock, ids: ids, removed: make(map[string]struct{})}, nil
 }
 
 type StageRequest struct {
@@ -219,7 +221,9 @@ func (service *Service) Stage(ctx context.Context, request StageRequest) (Staged
 		ClientID: request.ClientID, State: stagedLifecycle, CreatedAt: now, ExpiresAt: now.Add(stagedLifetime),
 	})
 	if err := saveManifest(root, state, service.ids); err != nil {
-		_ = root.Remove(filename)
+		// Publication may have reached the manifest rename before a directory
+		// sync failed. Preserve the image in either case: it is then either the
+		// staged record's live file or a recognized orphan removed by Sweep.
 		return Staged{}, ErrStorage
 	}
 	return Staged{ImageID: id, MediaType: format.MediaType, Bytes: written}, nil
@@ -231,6 +235,9 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (Image, e
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Image{}, err
+	}
 	root, _, err := service.open(request.ConversationID)
 	if err != nil {
 		return Image{}, ErrMissing
@@ -261,6 +268,9 @@ func (service *Service) DeleteStaged(ctx context.Context, request DeleteRequest)
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	root, _, err := service.open(request.ConversationID)
 	if err != nil {
 		return ErrMissing
@@ -291,6 +301,9 @@ func (service *Service) Claim(ctx context.Context, request ClaimRequest) (Claime
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Claimed{}, err
+	}
 	root, directory, err := service.open(request.ConversationID)
 	if err != nil {
 		return Claimed{}, ErrMissing
@@ -348,6 +361,9 @@ func (service *Service) ImagesForMessage(ctx context.Context, conversationID, me
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	root, _, err := service.open(conversationID)
 	if err != nil {
 		return []agentprotocol.ImageDescriptor{}, nil
@@ -372,6 +388,9 @@ func (service *Service) ReleaseMessage(ctx context.Context, conversationID, mess
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	root, _, err := service.open(conversationID)
 	if err != nil {
 		return nil
@@ -411,6 +430,9 @@ func (service *Service) Sweep(ctx context.Context, conversationID string) error 
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	root, _, err := service.open(conversationID)
 	if err != nil {
 		return ErrStorage
@@ -458,7 +480,29 @@ func (service *Service) Sweep(ctx context.Context, conversationID string) error 
 	return syncRoot(root)
 }
 
+// RemoveWorkspace serializes conversation deletion with every staged-image
+// operation. A request authorized just before deletion therefore cannot
+// recreate the removed workspace after cleanup completes.
+func (service *Service) RemoveWorkspace(ctx context.Context, conversationID string) error {
+	if service == nil || common.ValidateID(conversationID) != nil {
+		return ErrInvalid
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := service.workspaces.RemoveWorkspace(conversationID); err != nil {
+		return ErrStorage
+	}
+	service.removed[conversationID] = struct{}{}
+	return nil
+}
+
 func (service *Service) open(conversationID string) (*os.Root, string, error) {
+	if _, removed := service.removed[conversationID]; removed {
+		return nil, "", ErrStorage
+	}
 	workspace, err := service.workspaces.EnsureWorkspace(conversationID)
 	if err != nil || !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace {
 		return nil, "", ErrStorage

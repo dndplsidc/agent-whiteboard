@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"errors"
 
 	"github.com/edocsss/agent-whiteboard/internal/agentattachment"
@@ -45,7 +46,14 @@ func (actor *conversation) releaseMessageImages(messageID string) error {
 	if common.IsNil(actor.attachments) || actor.mapping.Current == nil {
 		return nil
 	}
-	return actor.attachments.ReleaseMessage(actor.lifecycleCtx, actor.mapping.Current.ConversationID, messageID)
+	return actor.attachments.ReleaseMessage(context.WithoutCancel(actor.lifecycleCtx), actor.mapping.Current.ConversationID, messageID)
+}
+
+func removeImageWorkspace(ctx context.Context, attachments AttachmentStore, state StateStore, conversationID string) error {
+	if !common.IsNil(attachments) {
+		return attachments.RemoveWorkspace(ctx, conversationID)
+	}
+	return state.RemoveWorkspace(conversationID)
 }
 
 func mapAttachmentError(err error) agentprotocol.BrowserErrorCode {

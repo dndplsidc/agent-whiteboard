@@ -1130,6 +1130,34 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
+  test("removes staged images and revokes previews when the drawer closes", async () => {
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(), readImage: vi.fn(),
+      uploadImage: vi.fn(async () => ({ image_id: agentIDs.archive, media_type: "image/png", bytes: 4 })),
+      deleteImage: vi.fn(async () => {}),
+    };
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(window.URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => "blob:close") },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null, supports_images: true }));
+    drawer.setOpen(true, { focus: false });
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "close.png", { type: "image/png" });
+    Object.defineProperty(drawer.elements.imagePicker, "files", { configurable: true, value: [file] });
+    drawer.elements.imagePicker.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(drawer.elements.attachmentList.children).toHaveLength(1));
+
+    drawer.setOpen(false, { focus: false });
+    await vi.waitFor(() => expect(transport.deleteImage).toHaveBeenCalledWith(agentIDs.archive, agentIDs.conversation));
+    expect(drawer.elements.attachmentList.children).toHaveLength(0);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:close");
+    drawer.destroy();
+  });
+
   test("keeps failed uploads visible for retry and deletes removed staged images", async () => {
     let options;
     const failure = Object.assign(new Error("image_storage_failure"), { code: "image_storage_failure" });
@@ -1260,8 +1288,8 @@ describe("local agent rendering and controls", () => {
     };
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
     options.onEvent(snapshotEvent());
-    options.onEvent(agentEvent("queue", { items: [{ turn_id: agentIDs.turn, message_id: agentIDs.message, message: "queued" }] }, { event_id: "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ" }));
-    drawer.elements.queue.querySelector("textarea").value = "edited";
+    options.onEvent(agentEvent("queue", { items: [{ turn_id: agentIDs.turn, message_id: agentIDs.message, message: "queued", images: [{ image_id: agentIDs.archive, name: "queued.png", media_type: "image/png" }] }] }, { event_id: "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ" }));
+    drawer.elements.queue.querySelector("textarea").value = "";
     drawer.elements.queue.querySelector("button").click();
     drawer.elements.queue.querySelectorAll("button")[1].click();
 
@@ -1276,7 +1304,7 @@ describe("local agent rendering and controls", () => {
     drawer.elements.archives.querySelectorAll("button")[1].click();
     await vi.waitFor(() => expect(calls).toHaveLength(4));
     expect(calls.map((command) => command.type)).toEqual(["queue_edit", "queue_remove", "archive_restore", "archive_delete"]);
-    expect(calls[0].payload).toEqual({ message_id: agentIDs.message, message: "edited" });
+    expect(calls[0].payload).toEqual({ message_id: agentIDs.message, message: "" });
     expect(confirm).toHaveBeenCalledTimes(2);
     drawer.destroy();
     confirm.mockRestore();

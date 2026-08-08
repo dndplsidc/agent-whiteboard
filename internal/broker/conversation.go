@@ -255,6 +255,8 @@ type shutdownWorkerResult struct {
 	err        error
 }
 
+const attachmentSweepInterval = 5 * time.Minute
+
 func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session *sessionHandle, state StateStore, attachments AttachmentStore, driver provider.Driver, retainSession func(*sessionHandle), ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
 	if mapping.Validate(identity) != nil || mapping.Current == nil || session == nil || common.IsNil(session.session) || common.IsNil(state) || common.IsNil(driver) || retainSession == nil || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
 		return nil, errors.New("invalid conversation actor")
@@ -303,6 +305,10 @@ func (actor *conversation) run() {
 	shutdownActive := false
 	var shutdownWaiters []chan error
 	var idleTimer Timer
+	var attachmentSweepTimer Timer
+	if !common.IsNil(actor.attachments) {
+		attachmentSweepTimer = actor.timers.NewTimer(attachmentSweepInterval)
+	}
 	startShutdown := func(request *closeConversationRequest, attempt *actorShutdown, cancel context.CancelFunc) {
 		generation := actor.generation
 		go func() {
@@ -313,6 +319,9 @@ func (actor *conversation) run() {
 	defer func() {
 		if idleTimer != nil {
 			idleTimer.Stop()
+		}
+		if attachmentSweepTimer != nil {
+			attachmentSweepTimer.Stop()
 		}
 		for _, messageID := range actor.queue.imageMessageIDs() {
 			_ = actor.releaseMessageImages(messageID)
@@ -342,6 +351,10 @@ func (actor *conversation) run() {
 		var idleChannel <-chan time.Time
 		if idleTimer != nil {
 			idleChannel = idleTimer.C()
+		}
+		var attachmentSweepChannel <-chan time.Time
+		if attachmentSweepTimer != nil {
+			attachmentSweepChannel = attachmentSweepTimer.C()
 		}
 		select {
 		case raw := <-actor.requests:
@@ -518,6 +531,9 @@ func (actor *conversation) run() {
 			idleShutdownCtx, cancel := context.WithTimeout(context.Background(), actor.shutdownTimeout)
 			request := &closeConversationRequest{ctx: idleShutdownCtx, response: make(chan error, 1)}
 			startShutdown(request, actor.shutdownAttempt, cancel)
+		case <-attachmentSweepChannel:
+			_ = actor.attachments.Sweep(actor.lifecycleCtx, actor.mapping.Current.ConversationID)
+			attachmentSweepTimer = actor.timers.NewTimer(attachmentSweepInterval)
 		case event, open := <-providerEvents:
 			if !open {
 				providerEvents = nil

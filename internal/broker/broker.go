@@ -34,6 +34,8 @@ type AttachmentStore interface {
 	Claim(context.Context, agentattachment.ClaimRequest) (agentattachment.Claimed, error)
 	ImagesForMessage(context.Context, string, string) ([]agentprotocol.ImageDescriptor, error)
 	ReleaseMessage(context.Context, string, string) error
+	Sweep(context.Context, string) error
+	RemoveWorkspace(context.Context, string) error
 }
 
 type Config struct {
@@ -589,7 +591,7 @@ func (broker *Broker) performCleanup(ctx context.Context, cleanup *pendingCleanu
 		if cleanup.deleteRequired && !cleanup.deleteDone {
 			return false
 		}
-		if err := broker.state.RemoveWorkspace(cleanup.conversationID); err != nil {
+		if err := removeImageWorkspace(ctx, broker.attachments, broker.state, cleanup.conversationID); err != nil {
 			return false
 		}
 		cleanup.workspaceDone = true
@@ -636,6 +638,12 @@ func (broker *Broker) newConversation(identity agentstate.Identity, mapping agen
 	if common.IsNil(driver) {
 		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderMissing)
+	}
+	if !common.IsNil(broker.attachments) && mapping.Current != nil {
+		if err := broker.attachments.Sweep(broker.lifecycleCtx, mapping.Current.ConversationID); err != nil {
+			broker.retainStop(identity, handle)
+			return nil, NewBrokerError(agentprotocol.ErrorImageStorageFailure)
+		}
 	}
 	actor, err := newConversation(identity, mapping, handle, broker.state, broker.attachments, driver, func(candidate *sessionHandle) {
 		broker.retainStop(identity, candidate)

@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/edocsss/agent-whiteboard/internal/agentattachment"
 	"github.com/edocsss/agent-whiteboard/internal/agentstate"
 	"github.com/edocsss/agent-whiteboard/internal/broker"
 	"github.com/edocsss/agent-whiteboard/internal/codex"
@@ -61,6 +62,17 @@ type providerRegistryConfig struct {
 
 type unavailableProviderDriver struct{ name provider.Name }
 
+type serializedAgentIDs struct {
+	mu  sync.Mutex
+	raw common.IDGenerator
+}
+
+func (ids *serializedAgentIDs) NewID() (string, error) {
+	ids.mu.Lock()
+	defer ids.mu.Unlock()
+	return ids.raw.NewID()
+}
+
 // unavailableProviderDriver keeps every closed provider name dispatchable when
 // its default executable is absent, so the broker can return provider_missing
 // without preventing another provider from serving conversations.
@@ -87,6 +99,7 @@ func (unavailableProviderDriver) Delete(context.Context, provider.DeleteRequest)
 // AgentService owns the agent state, provider broker, and local API listener.
 type AgentService struct {
 	state           *agentstate.Store
+	attachments     *agentattachment.Service
 	broker          *broker.Broker
 	local           *localapi.Server
 	shutdownTimeout time.Duration
@@ -115,6 +128,7 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 	if common.IsNil(ids) {
 		ids = common.CryptoIDGenerator{}
 	}
+	ids = &serializedAgentIDs{raw: ids}
 	clock := config.Clock
 	if common.IsNil(clock) {
 		clock = common.SystemClock{}
@@ -156,8 +170,12 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 	if err != nil {
 		return cleanupState(err)
 	}
+	attachments, err := agentattachment.New(state, clock, ids)
+	if err != nil {
+		return cleanupState(fmt.Errorf("create agent attachment store: %w", err))
+	}
 	backend, err := broker.New(broker.Config{
-		State: state, Drivers: registry, IDs: ids, Clock: clock, Timers: timers,
+		State: state, Attachments: attachments, Drivers: registry, IDs: ids, Clock: clock, Timers: timers,
 		IdleTimeout: config.IdleTimeout, ShutdownTimeout: config.ShutdownTimeout,
 	})
 	if err != nil {
@@ -169,12 +187,12 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 		return nil, errors.Join(constructionErr, backend.Close(closeCtx), state.Close())
 	}
 	local, err := localapi.Listen(localapi.Config{
-		Port: config.Port, TrustSource: configTrustSource{selectedPath: config.ConfigPath}, Backend: backend,
+		Port: config.Port, TrustSource: configTrustSource{selectedPath: config.ConfigPath}, Backend: backend, Images: attachments,
 	})
 	if err != nil {
 		return cleanupBroker(fmt.Errorf("create local API: %w", err))
 	}
-	return &AgentService{state: state, broker: backend, local: local, shutdownTimeout: config.ShutdownTimeout}, nil
+	return &AgentService{state: state, attachments: attachments, broker: backend, local: local, shutdownTimeout: config.ShutdownTimeout}, nil
 }
 
 func newProviderRegistry(config providerRegistryConfig) (provider.Registry, error) {

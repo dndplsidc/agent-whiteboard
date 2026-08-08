@@ -261,6 +261,18 @@ func TestAcceptedExactBoundMessagesAndQueuesAlwaysFitWireFrames(t *testing.T) {
 	}
 }
 
+func TestQueueEditAllowsEmptyCaptionForBrokerValidationAgainstQueuedImages(t *testing.T) {
+	conversationID := idC
+	command := agentprotocol.Command{
+		APIVersion: agentprotocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: agentprotocol.CommandQueueEdit,
+		Payload: agentprotocol.QueueEditPayload{MessageID: makeID(200), Message: ""},
+	}
+	encoded, err := agentprotocol.EncodeCommand(command)
+	require.NoError(t, err)
+	_, err = agentprotocol.DecodeCommand(encoded)
+	require.NoError(t, err)
+}
+
 func TestAcceptedPageBoundariesFitEventFrame(t *testing.T) {
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
 	timeline := make([]agentprotocol.TimelineItem, agentprotocol.MaxPageSize)

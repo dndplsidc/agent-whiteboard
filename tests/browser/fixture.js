@@ -381,12 +381,12 @@ function createLoopbackBroker(initialAllowedOrigin) {
         record,
         200,
         { ...corsHeaders(), "Content-Type": "application/json", "Cache-Control": "no-store" },
-        '{"available":true,"api_version":"1"}',
+        '{"available":true,"api_version":"2"}',
       );
       return;
     }
     if (request.method === "POST" && request.url === "/api/v1/agent/connect") {
-      if (request.headers["x-agent-whiteboard-api-version"] !== "1") {
+      if (request.headers["x-agent-whiteboard-api-version"] !== "2") {
         send(response, record, 400, corsHeaders(), '{"error":"unsupported API version"}');
         return;
       }
@@ -468,6 +468,9 @@ function createSidebarBroker(initialAllowedOrigin) {
   const interactionResults = [];
   let allowedOrigin = initialAllowedOrigin;
   let webSocketEnabled = false;
+  const fixtureImages = new Map();
+  let imageSequence = 300;
+  let nextImageFailure = null;
   const providerDefinitions = {
     pi: { conversationID: protocolID(201), model: "fixture-model", sequence: 1, identitySequence: 40, archiveID: protocolID(220) },
     codex: { conversationID: protocolID(202), model: "fixture-codex-model", sequence: 101, identitySequence: 80, archiveID: protocolID(221) },
@@ -478,6 +481,7 @@ function createSidebarBroker(initialAllowedOrigin) {
       provider,
       ...definition,
       available: true,
+      supportsImages: true,
       contextState: "pending",
       contextDigest: "0".repeat(64),
       holdResponses: false,
@@ -506,8 +510,16 @@ function createSidebarBroker(initialAllowedOrigin) {
     if (!state) throw new Error("unknown sidebar conversation");
     return state;
   };
+  const claimFixtureImage = (state, command, reference) => {
+    const image = fixtureImages.get(reference.image_id);
+    if (!image || image.state !== "staged" || image.clientID !== command.client_id || image.conversationID !== state.conversationID || image.provider !== state.provider) throw new Error("missing staged fixture image");
+    image.state = "claimed";
+    image.messageID = command.payload.message_id;
+    image.name = reference.name;
+    return { image_id: image.id, name: image.name, media_type: image.mediaType };
+  };
   const nextEvent = (state, type, payload) => ({
-    api_version: "1",
+    api_version: "2",
     event_id: protocolID(state.sequence++),
     conversation_id: state.conversationID,
     type,
@@ -519,6 +531,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     queue: state.queue.map((item) => ({ ...item })),
     context_state: state.contextState,
     active_turn_id: state.activeTurn,
+    supports_images: state.supportsImages,
   });
   const archivePayload = (state) => ({
     archive_id: state.archiveID,
@@ -566,7 +579,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     }
     const events = [
       nextEvent(state, "snapshot", snapshotPayload(state)),
-      nextEvent(state, "provider", { provider: state.provider, state: "ready", model: state.model }),
+      nextEvent(state, "provider", { provider: state.provider, state: "ready", model: state.model, supports_images: state.supportsImages }),
     ];
     for (const event of events) state.eventPositions.set(event.event_id, state.eventLog.length);
     return events;
@@ -606,8 +619,12 @@ function createSidebarBroker(initialAllowedOrigin) {
     if (command.type === "history_page") {
       targetedEvent(state, "timeline", { command_id: command.command_id, items: [...state.history].reverse(), next_cursor: null }, command.client_id);
     } else if (command.type === "submit") {
+      if ((command.payload.images?.length ?? 0) > 0 && !state.supportsImages) {
+        return commandResult(state, command, { code: "image_input_unsupported", message: "The selected model does not support image input.", action: "configure_model" });
+      }
+      const imageDescriptors = (command.payload.images ?? []).map((image) => claimFixtureImage(state, command, image));
       if (state.activeTurn !== null) {
-        state.queue.push({ turn_id: command.payload.turn_id, message_id: command.payload.message_id, message: command.payload.message });
+        state.queue.push({ turn_id: command.payload.turn_id, message_id: command.payload.message_id, message: command.payload.message, ...(imageDescriptors.length ? { images: imageDescriptors } : {}) });
         emit(state, "queue", { items: state.queue.map((item) => ({ ...item })) });
       } else {
         if (command.payload.context) {
@@ -616,10 +633,10 @@ function createSidebarBroker(initialAllowedOrigin) {
           emit(state, "context", { digest: state.contextDigest, state: "accepted" });
         }
         const createdAt = "2026-07-27T03:04:05Z";
-        const user = { item_id: command.payload.message_id, kind: "user", turn_id: command.payload.turn_id, message_id: command.payload.message_id, text: command.payload.message, created_at: createdAt };
+        const user = { item_id: command.payload.message_id, kind: "user", turn_id: command.payload.turn_id, message_id: command.payload.message_id, text: command.payload.message, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt };
         state.history.push(user);
         state.activeTurn = command.payload.turn_id;
-        emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, text: user.text, created_at: createdAt });
+        emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, text: user.text, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt });
         emit(state, "lifecycle", { state: "responding", turn_id: command.payload.turn_id });
         const assistantID = protocolID(150 + state.history.length + (state.provider === "codex" ? 25 : 0));
         if (state.phaseResponses) {
@@ -637,7 +654,10 @@ function createSidebarBroker(initialAllowedOrigin) {
       emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
     } else if (command.type === "queue_remove") {
       const index = state.queue.findIndex((candidate) => candidate.message_id === command.payload.message_id);
-      if (index >= 0) state.queue.splice(index, 1);
+      if (index >= 0) {
+        for (const image of state.queue[index].images ?? []) fixtureImages.delete(image.image_id);
+        state.queue.splice(index, 1);
+      }
       emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
     } else if (command.type === "interrupt" && state.activeTurn === command.payload.turn_id) {
       emit(state, "interruption", { turn_id: state.activeTurn, reason: "requested" });
@@ -673,20 +693,61 @@ function createSidebarBroker(initialAllowedOrigin) {
       record.responseHeaders = {
         ...corsHeaders(),
         "Access-Control-Allow-Methods": request.headers["access-control-request-method"] ?? "POST",
-        "Access-Control-Allow-Headers": "content-type, x-agent-whiteboard-api-version",
+        "Access-Control-Allow-Headers": "content-type, x-agent-whiteboard-api-version, x-agent-whiteboard-client-id, x-agent-whiteboard-conversation-id, x-agent-whiteboard-provider",
       };
       response.writeHead(204, record.responseHeaders);
       response.end();
       return;
     }
     if (request.method === "GET" && request.url === "/api/v1/agent/status") {
-      sendJSON(response, record, 200, { available: true, api_version: "1", origin_trusted: true });
+      sendJSON(response, record, 200, { available: true, api_version: "2", origin_trusted: true });
       return;
     }
     const chunks = [];
     request.on("data", (chunk) => chunks.push(chunk));
     request.on("end", () => {
-      record.body = Buffer.concat(chunks).toString("utf8");
+      const content = Buffer.concat(chunks);
+      if (request.url === "/api/v1/agent/images" && request.method === "POST") {
+        record.body = `<${content.length} image bytes>`;
+        if (nextImageFailure) {
+          const failure = nextImageFailure;
+          nextImageFailure = null;
+          sendJSON(response, record, failure.status, { error: failure.error });
+          return;
+        }
+        const state = providerState(request.headers["x-agent-whiteboard-provider"]);
+        const imageID = protocolID(imageSequence++);
+        const mediaType = request.headers["content-type"];
+        fixtureImages.set(imageID, {
+          id: imageID, content, mediaType, provider: state.provider, conversationID: request.headers["x-agent-whiteboard-conversation-id"],
+          clientID: request.headers["x-agent-whiteboard-client-id"], state: "staged", name: "", messageID: "",
+        });
+        sendJSON(response, record, 201, { image_id: imageID, media_type: mediaType, bytes: content.length });
+        return;
+      }
+      const imageMatch = /^\/api\/v1\/agent\/images\/([A-Za-z0-9_-]{32})$/u.exec(request.url);
+      if (imageMatch && (request.method === "GET" || request.method === "DELETE")) {
+        const image = fixtureImages.get(imageMatch[1]);
+        const authorized = image && image.conversationID === request.headers["x-agent-whiteboard-conversation-id"] && (image.state === "claimed" || image.clientID === request.headers["x-agent-whiteboard-client-id"]);
+        if (!authorized) {
+          sendJSON(response, record, 404, { error: { code: "image_missing", message: "The selected image is no longer available.", action: "none" } });
+          return;
+        }
+        if (request.method === "DELETE") {
+          if (image.state === "staged") fixtureImages.delete(image.id);
+          record.status = 204;
+          record.responseHeaders = corsHeaders();
+          response.writeHead(204, record.responseHeaders);
+          response.end();
+          return;
+        }
+        record.status = 200;
+        record.responseHeaders = { ...corsHeaders(), "Content-Type": image.mediaType, "Content-Length": String(image.content.length), "Cache-Control": "no-store" };
+        response.writeHead(200, record.responseHeaders);
+        response.end(image.content);
+        return;
+      }
+      record.body = content.toString("utf8");
       let command;
       try { command = JSON.parse(record.body); }
       catch {
@@ -724,7 +785,7 @@ function createSidebarBroker(initialAllowedOrigin) {
   server.on("upgrade", (request, socket) => {
     const record = requestRecord(request);
     requests.push(record);
-    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v1") {
+    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v2") {
       record.status = 503;
       socket.end("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
       return;
@@ -732,13 +793,13 @@ function createSidebarBroker(initialAllowedOrigin) {
     const key = request.headers["sec-websocket-key"];
     const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
     record.status = 101;
-    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v1" };
+    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v2" };
     socket.write([
       "HTTP/1.1 101 Switching Protocols",
       "Upgrade: websocket",
       "Connection: Upgrade",
       `Sec-WebSocket-Accept: ${accept}`,
-      "Sec-WebSocket-Protocol: agent-whiteboard.v1",
+      "Sec-WebSocket-Protocol: agent-whiteboard.v2",
       "",
       "",
     ].join("\r\n"));
@@ -782,6 +843,10 @@ function createSidebarBroker(initialAllowedOrigin) {
     setPhaseResponses(value, provider = "pi") { providerState(provider).phaseResponses = value; },
     releaseResponsePhase: emitResponsePhase,
     setProviderAvailable(provider, value) { providerState(provider).available = value; },
+    setSupportsImages(provider, value) { providerState(provider).supportsImages = value; },
+    failNextImageUpload() {
+      nextImageFailure = { status: 500, error: { code: "image_storage_failure", message: "The selected image could not be stored safely.", action: "try_again" } };
+    },
     setHoldInteractionResolution(provider, value) { providerState(provider).holdInteractionResolution = value; },
     releaseInteraction(provider, requestID) {
       const state = providerState(provider);
@@ -838,6 +903,9 @@ function createSidebarBroker(initialAllowedOrigin) {
     },
     resetState() {
       for (const provider of Object.keys(providerDefinitions)) providers.set(provider, createProviderState(provider));
+      fixtureImages.clear();
+      imageSequence = 300;
+      nextImageFailure = null;
       interactionResults.splice(0);
     },
     resetRequests() { requests.splice(0); webSocketCommands.splice(0); interactionResults.splice(0); webSocketEnabled = false; },
@@ -1130,6 +1198,8 @@ export const test = base.extend({
           setPhaseResponses: broker.setPhaseResponses,
           releaseResponsePhase: broker.releaseResponsePhase,
           setProviderAvailable: broker.setProviderAvailable,
+          setSupportsImages: broker.setSupportsImages,
+          failNextImageUpload: broker.failNextImageUpload,
           disconnectProvider: broker.disconnectProvider,
           emitToolActivity: broker.emitToolActivity,
           emitInteraction: broker.emitInteraction,

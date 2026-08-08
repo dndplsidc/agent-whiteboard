@@ -381,7 +381,7 @@ func validateCommand(command Command) error {
 			return invalid(nil)
 		}
 	case QueueEditPayload:
-		if command.Type != CommandQueueEdit || !validID(payload.MessageID) || !validMessage(payload.Message) {
+		if command.Type != CommandQueueEdit || !validID(payload.MessageID) || !validBoundedText(payload.Message, MaxMessageBytes, false) {
 			return invalid(nil)
 		}
 	case MessageReferencePayload:
