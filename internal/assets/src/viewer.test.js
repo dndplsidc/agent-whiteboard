@@ -14,6 +14,7 @@ import {
   AGENT_DRAWER_WIDTH_STORAGE_KEY,
   AGENT_PORT_STORAGE_KEY,
   AGENT_PROVIDER_STORAGE_KEY,
+  AGENT_API_VERSION,
   AGENT_WEBSOCKET_PROTOCOL,
   DEFAULT_AGENT_PORT,
   DEFAULT_AGENT_DRAWER_WIDTH,
@@ -289,13 +290,16 @@ function agentPayload(overrides = {}) {
 }
 
 function agentEvent(type, payload, overrides = {}) {
+  const versionedPayload = type === "snapshot" || type === "provider"
+    ? { supports_images: true, ...payload }
+    : payload;
   return {
-    api_version: "1",
+    api_version: "2",
     event_id: agentIDs.event,
     conversation_id: agentIDs.conversation,
     type,
     timestamp: "2026-07-27T03:04:05Z",
-    payload,
+    payload: versionedPayload,
     ...overrides,
   };
 }
@@ -374,7 +378,7 @@ describe("local agent source and commands", () => {
   test("builds an exact context-free connect command", () => {
     const command = createConnectCommand({ payload: agentPayload(), clientID: agentIDs.message, replayAfter: agentIDs.event, idFactory: fixedIDFactory });
     expect(command).toEqual({
-      api_version: "1",
+      api_version: "2",
       command_id: agentIDs.command,
       client_id: agentIDs.message,
       conversation_id: null,
@@ -412,6 +416,18 @@ describe("local agent source and commands", () => {
     expect(initial.payload.message_id).toHaveLength(32);
   });
 
+  test("builds ordered multi-image and image-only submit commands", () => {
+    const common = { payload: agentPayload(), clientID: agentIDs.message, conversationID: agentIDs.conversation, title: "Agent board", url: "https://board.example/m/abc", idFactory: fixedIDFactory };
+    const images = [
+      { image_id: agentIDs.archive, name: "diagram.png" },
+      { image_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", name: "notes.webp" },
+    ];
+    expect(createSubmitCommand({ ...common, message: "", images }).payload).toMatchObject({ message: "", images });
+    expect(createSubmitCommand({ ...common, message: "Compare these", images }).payload.images).toEqual(images);
+    expect(() => createSubmitCommand({ ...common, message: "", images: [] })).toThrow(TypeError);
+    expect(() => createSubmitCommand({ ...common, message: "", images: Array.from({ length: 9 }, (_, index) => ({ image_id: String(index).padStart(32, "I"), name: `${index}.png` })) })).toThrow(TypeError);
+  });
+
   test("accepts only HTTPS or literal-loopback HTTP page context URLs", () => {
     const common = { message: "Question", payload: agentPayload(), clientID: agentIDs.message, conversationID: agentIDs.conversation, title: "Agent board", revision: "initial", idFactory: fixedIDFactory };
     expect(() => createSubmitCommand({ ...common, url: "http://127.0.0.1:8080/m/abc" })).not.toThrow();
@@ -435,7 +451,7 @@ describe("local agent source and commands", () => {
 
 describe("local agent transport and event state", () => {
   test("probes only the literal loopback status endpoint before consent", async () => {
-    const fetchImpl = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ available: true, api_version: "1", origin_trusted: true }) }));
+    const fetchImpl = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ available: true, api_version: "2", origin_trusted: true }) }));
     const transport = createAgentTransport({ payload: agentPayload(), port: 9123, clientID: agentIDs.message, fetchImpl, WebSocketImpl: undefined, idFactory: fixedIDFactory });
     await expect(transport.connect()).rejects.toThrow("consent");
     await expect(transport.probe()).resolves.toEqual({ ok: true, code: null });
@@ -469,6 +485,31 @@ describe("local agent transport and event state", () => {
     transport.close();
   });
 
+  test("stages, reads, and deletes images with exact private identity headers", async () => {
+    const png = new File([new Uint8Array([137, 80, 78, 71])], "board.png", { type: "image/png" });
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ image_id: agentIDs.archive, media_type: "image/png", bytes: png.size }), { status: 201, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(png, { status: 200, headers: { "Content-Type": "image/png" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const transport = createAgentTransport({ payload: agentPayload(), provider: "codex", port: 9123, clientID: agentIDs.message, fetchImpl, WebSocketImpl: undefined, idFactory: fixedIDFactory });
+    transport.acceptConversationForTest?.(agentIDs.conversation);
+    const staged = await transport.uploadImage(png, agentIDs.conversation);
+    expect(staged).toEqual({ image_id: agentIDs.archive, media_type: "image/png", bytes: png.size });
+    expect(fetchImpl.mock.calls[0][0]).toBe("http://127.0.0.1:9123/api/v1/agent/images");
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "POST", body: png, credentials: "omit", referrerPolicy: "no-referrer" });
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({
+      "Content-Type": "image/png",
+      "X-Agent-Whiteboard-API-Version": "2",
+      "X-Agent-Whiteboard-Client-ID": agentIDs.message,
+      "X-Agent-Whiteboard-Conversation-ID": agentIDs.conversation,
+      "X-Agent-Whiteboard-Provider": "codex",
+    });
+    await expect(transport.readImage(agentIDs.archive, agentIDs.conversation)).resolves.toBeInstanceOf(Blob);
+    await expect(transport.deleteImage(agentIDs.archive, agentIDs.conversation)).resolves.toBeUndefined();
+    expect(fetchImpl.mock.calls[1][1].headers).not.toHaveProperty("X-Agent-Whiteboard-Provider");
+    expect(fetchImpl.mock.calls[2][1].method).toBe("DELETE");
+  });
+
   test("falls back to POST NDJSON and frames commands with the API header", async () => {
     class RejectedWebSocket {
       constructor() { this.protocol = ""; this.listeners = {}; queueMicrotask(() => this.listeners.open?.forEach((listener) => listener({}))); }
@@ -486,7 +527,7 @@ describe("local agent transport and event state", () => {
     await transport.connect();
     expect(transport.transportKind).toBe("fallback");
     expect(fetchImpl.mock.calls[0][0]).toBe("http://127.0.0.1:8568/api/v1/agent/connect");
-    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": "1" });
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": "2" });
     expect(fetchImpl.mock.calls[0][1].body).not.toContain("Creator summary");
     transport.close();
   });
@@ -514,7 +555,7 @@ describe("local agent transport and event state", () => {
 
   test("strictly rejects unknown event fields, malformed IDs, and raw provider fields", () => {
     expect(() => decodeAgentEvent(JSON.stringify({ ...snapshotEvent(), extra: true }))).toThrow(TypeError);
-    expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"1"', '"api_version":"1","api_version":"1"'))).toThrow(TypeError);
+    expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"2"', '"api_version":"2","api_version":"2"'))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent({ event_id: "short" })))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "hello", reasoning: "secret" })))).toThrow(TypeError);
   });
@@ -594,7 +635,7 @@ describe("local agent transport and event state", () => {
       request_id: agentIDs.message, kind: "command_approval", option_id: "accept",
     }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
 
-    expect(state.provider).toEqual({ provider: "codex", state: "ready", model: "gpt-5" });
+    expect(state.provider).toEqual({ provider: "codex", state: "ready", model: "gpt-5", supportsImages: true });
     expect(state.timeline).toContainEqual(expect.objectContaining({ kind: "tool", status: "completed", summary: "Passed" }));
     expect(state.timeline.filter((item) => item.kind === "tool")).toHaveLength(1);
     expect(state.interactions).toEqual([expect.objectContaining({ title: "Approve command", resolved: true, option_id: "accept" })]);
@@ -636,6 +677,20 @@ describe("local agent transport and event state", () => {
     expect(state.queue[0].message).toBe("next");
     expect(state.lifecycle).toBe("ready");
     expect(state.lastEventID).toBe("MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM");
+  });
+
+  test("validates image descriptors and exposes model image capability", () => {
+    const state = createAgentState();
+    applyAgentEvent(state, snapshotEvent());
+    const images = [{ image_id: agentIDs.archive, name: "diagram.png", media_type: "image/png" }];
+    applyAgentEvent(state, agentEvent("user_message", {
+      turn_id: agentIDs.turn, message_id: agentIDs.message, text: "", images, created_at: "2026-07-27T03:04:05Z",
+    }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    expect(state.supportsImages).toBe(true);
+    expect(state.timeline[0]).toMatchObject({ kind: "user", text: "", images });
+    expect(() => decodeAgentEvent(JSON.stringify(agentEvent("user_message", {
+      turn_id: agentIDs.turn, message_id: agentIDs.message, text: "", images: [{ ...images[0], media_type: "image/svg+xml" }], created_at: "2026-07-27T03:04:05Z",
+    })))).toThrow(TypeError);
   });
 
   test("keeps command correlation when an HTTP result arrives before its streamed page", () => {
@@ -1017,6 +1072,92 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
+  test("stages multiple picked and pasted images, previews them, and sends ready references in order", async () => {
+    let options;
+    const ids = [agentIDs.archive, "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII"];
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+      uploadImage: vi.fn(async (file) => ({ image_id: ids[transport.uploadImage.mock.calls.length - 1], media_type: file.type, bytes: file.size })),
+      readImage: vi.fn(), deleteImage: vi.fn(async () => {}),
+    };
+    const createObjectURL = vi.fn((file) => `blob:${file.name}`);
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(window.URL, {
+      createObjectURL: { configurable: true, value: createObjectURL },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null, supports_images: true }));
+    const picker = drawer.elements.imagePicker;
+    const first = new File([new Uint8Array([137, 80, 78, 71])], "diagram.png", { type: "image/png" });
+    const second = new File([new Uint8Array([255, 216, 255])], "photo.jpg", { type: "image/jpeg" });
+    Object.defineProperty(picker, "files", { configurable: true, value: [first, second] });
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(transport.uploadImage).toHaveBeenCalledTimes(2));
+    expect(drawer.elements.attachmentList.querySelectorAll(".agent-attachment-preview")).toHaveLength(2);
+    expect([...drawer.elements.attachmentList.querySelectorAll("img")].map((image) => image.src)).toEqual(["blob:diagram.png", "blob:photo.jpg"]);
+
+    const pasted = new File([new Uint8Array([82, 73, 70, 70])], "paste.webp", { type: "image/webp" });
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { items: [{ kind: "string", type: "text/plain" }, { kind: "file", type: pasted.type, getAsFile: () => pasted }] } });
+    drawer.elements.message.dispatchEvent(paste);
+    await vi.waitFor(() => expect(transport.uploadImage).toHaveBeenCalledTimes(3));
+    expect(paste.defaultPrevented).toBe(false);
+
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    expect(transport.send.mock.calls[0][0].payload).toMatchObject({
+      message: "",
+      images: [
+        { image_id: agentIDs.archive, name: "diagram.png" },
+        { image_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", name: "photo.jpg" },
+        { image_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", name: "paste.webp" },
+      ],
+    });
+    expect(drawer.elements.attachmentList.children).toHaveLength(0);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(3);
+    drawer.destroy();
+  });
+
+  test("disables attachment input when the selected model does not support images", () => {
+    let options;
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(), uploadImage: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null, supports_images: false }));
+    expect(drawer.elements.imageButton.disabled).toBe(true);
+    expect(drawer.elements.imageButton.title).toContain("does not support image input");
+    drawer.destroy();
+  });
+
+  test("keeps failed uploads visible for retry and deletes removed staged images", async () => {
+    let options;
+    const failure = Object.assign(new Error("image_storage_failure"), { code: "image_storage_failure" });
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(), readImage: vi.fn(),
+      uploadImage: vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce({ image_id: agentIDs.archive, media_type: "image/png", bytes: 4 }),
+      deleteImage: vi.fn(async () => {}),
+    };
+    Object.defineProperties(window.URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => "blob:retry") },
+      revokeObjectURL: { configurable: true, value: vi.fn() },
+    });
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "retry.png", { type: "image/png" });
+    Object.defineProperty(drawer.elements.imagePicker, "files", { configurable: true, value: [file] });
+    drawer.elements.imagePicker.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(drawer.elements.attachmentList.querySelector(".agent-attachment-preview")?.dataset.state).toBe("failed"));
+    expect(drawer.elements.attachmentStatus.textContent).toContain("need attention");
+    drawer.elements.attachmentList.querySelector('button[aria-label="Retry retry.png"]').click();
+    await vi.waitFor(() => expect(drawer.elements.attachmentList.querySelector(".agent-attachment-preview")?.dataset.state).toBe("ready"));
+    drawer.elements.attachmentList.querySelector('button[aria-label="Remove retry.png"]').click();
+    await vi.waitFor(() => expect(transport.deleteImage).toHaveBeenCalledWith(agentIDs.archive, agentIDs.conversation));
+    expect(drawer.elements.attachmentList.children).toHaveLength(0);
+    drawer.destroy();
+  });
+
   test("discloses authority and gates complete context until revision and delivery are known", async () => {
     let options;
     const sent = [];
@@ -1047,7 +1188,7 @@ describe("local agent rendering and controls", () => {
     const historyCommand = createAgentCommand({ type: "history_page", payload: { limit: 50 }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
     registerAgentCommand(drawer.state, historyCommand);
     options.onEvent(agentEvent("timeline", { command_id: historyCommand.command_id, items: [], next_cursor: null }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
-    expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(false);
+    expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(true);
 
     drawer.elements.message.value = "first";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -1065,7 +1206,7 @@ describe("local agent rendering and controls", () => {
     expect(transport.resetReplay).toHaveBeenCalledOnce();
     expect(document.querySelector(".agent-context")?.textContent).not.toMatch(/digest|delivery outcome|initial or replacement/iu);
     options.onEvent(snapshotEvent({ event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
-    expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(false);
+    expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(true);
     drawer.destroy();
   });
 
