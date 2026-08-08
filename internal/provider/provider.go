@@ -433,6 +433,11 @@ type ImageInput struct {
 	Path      string
 }
 
+// Validate verifies one provider image input independently of a turn.
+func (image ImageInput) Validate() error {
+	return validateImageInputs([]ImageInput{image})
+}
+
 func (ImageInput) MarshalJSON() ([]byte, error) {
 	return nil, errors.New("provider image inputs cannot be serialized")
 }
