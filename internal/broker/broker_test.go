@@ -76,6 +76,12 @@ func TestProviderAndReadinessErrorsAreExhaustivelyMappedWithoutCauses(t *testing
 		provider.ErrorNativeSessionMissing:   agentprotocol.ErrorNativeSessionMissing,
 		provider.ErrorContextTooLarge:        agentprotocol.ErrorContextTooLarge,
 		provider.ErrorAcceptanceUnknown:      agentprotocol.ErrorAcceptanceOutcomeUnknown,
+		provider.ErrorImageInputUnsupported:  agentprotocol.ErrorImageInputUnsupported,
+		provider.ErrorImageUnsupported:       agentprotocol.ErrorImageUnsupported,
+		provider.ErrorImageTooLarge:          agentprotocol.ErrorImageTooLarge,
+		provider.ErrorImageTurnLimit:         agentprotocol.ErrorImageTurnLimit,
+		provider.ErrorImageMissing:           agentprotocol.ErrorImageMissing,
+		provider.ErrorImageStorageFailure:    agentprotocol.ErrorImageStorageFailure,
 	}
 	for _, code := range provider.AllProviderErrorCodes() {
 		failure := provider.NewProviderError(code)

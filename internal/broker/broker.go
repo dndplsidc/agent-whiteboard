@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/agentattachment"
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 	"github.com/edocsss/agent-whiteboard/internal/agentstate"
 	"github.com/edocsss/agent-whiteboard/internal/common"
@@ -29,9 +30,16 @@ type StateStore interface {
 	RemoveWorkspace(string) error
 }
 
+type AttachmentStore interface {
+	Claim(context.Context, agentattachment.ClaimRequest) (agentattachment.Claimed, error)
+	ImagesForMessage(context.Context, string, string) ([]agentprotocol.ImageDescriptor, error)
+	ReleaseMessage(context.Context, string, string) error
+}
+
 type Config struct {
-	State   StateStore
-	Drivers provider.Registry
+	State       StateStore
+	Attachments AttachmentStore
+	Drivers     provider.Registry
 	// Driver is retained as a Pi-only compatibility seam for embedders while
 	// composition migrates to Drivers. Supplying both is invalid.
 	Driver          provider.Driver
@@ -44,6 +52,7 @@ type Config struct {
 
 type Broker struct {
 	state           StateStore
+	attachments     AttachmentStore
 	drivers         provider.Registry
 	ids             *serializedIDs
 	clock           common.Clock
@@ -73,10 +82,11 @@ type Broker struct {
 // that return process-owned resources are called only while capturing the
 // handle; all later broker paths use these captured values.
 type sessionHandle struct {
-	session provider.Session
-	native  provider.NativeSession
-	events  <-chan provider.Event
-	child   provider.ManagedChild
+	session      provider.Session
+	native       provider.NativeSession
+	capabilities provider.Capabilities
+	events       <-chan provider.Event
+	child        provider.ManagedChild
 }
 
 func captureSession(session provider.Session) *sessionHandle {
@@ -84,10 +94,11 @@ func captureSession(session provider.Session) *sessionHandle {
 		return nil
 	}
 	return &sessionHandle{
-		session: session,
-		native:  session.NativeSession(),
-		events:  session.Events(),
-		child:   session.Child(),
+		session:      session,
+		native:       session.NativeSession(),
+		capabilities: session.Capabilities(),
+		events:       session.Events(),
+		child:        session.Child(),
 	}
 }
 
@@ -158,7 +169,7 @@ func New(config Config) (*Broker, error) {
 	}
 	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 	return &Broker{
-		state: config.State, drivers: registry,
+		state: config.State, attachments: config.Attachments, drivers: registry,
 		ids: &serializedIDs{raw: config.IDs}, clock: config.Clock,
 		timers: config.Timers, idleTimeout: config.IdleTimeout,
 		shutdownTimeout: config.ShutdownTimeout,
@@ -441,7 +452,7 @@ func validateProviderSession(handle *sessionHandle, expected *provider.NativeSes
 		return provider.NativeSession{}, errors.New("nil provider session")
 	}
 	native := handle.native
-	if native.Validate() != nil || native.Provider != expectedProvider || handle.session.Model() != native.Model || common.IsNil(handle.child) || handle.events == nil {
+	if native.Validate() != nil || native.Provider != expectedProvider || handle.session.Model() != native.Model || handle.capabilities.Validate() != nil || common.IsNil(handle.child) || handle.events == nil {
 		return native, errors.New("invalid provider session")
 	}
 	ref, err := agentstate.NativeSessionRef(native.Ref.Value())
@@ -626,7 +637,7 @@ func (broker *Broker) newConversation(identity agentstate.Identity, mapping agen
 		broker.retainStop(identity, handle)
 		return nil, NewBrokerError(agentprotocol.ErrorProviderMissing)
 	}
-	actor, err := newConversation(identity, mapping, handle, broker.state, driver, func(candidate *sessionHandle) {
+	actor, err := newConversation(identity, mapping, handle, broker.state, broker.attachments, driver, func(candidate *sessionHandle) {
 		broker.retainStop(identity, candidate)
 	}, broker.ids, broker.clock, broker.timers, broker.lifecycleCtx, broker.idleTimeout, broker.shutdownTimeout)
 	if err != nil {

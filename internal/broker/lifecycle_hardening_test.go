@@ -229,6 +229,7 @@ func (driver *hardeningDriver) Delete(context.Context, provider.DeleteRequest) e
 
 type hardeningSession struct {
 	native          provider.NativeSession
+	capabilities    provider.Capabilities
 	events          chan provider.Event
 	child           provider.ManagedChild
 	shutdownErr     error
@@ -250,6 +251,7 @@ func newHardeningSession(refValue string) *hardeningSession {
 }
 func (session *hardeningSession) NativeSession() provider.NativeSession { return session.native }
 func (session *hardeningSession) Model() string                         { return session.native.Model }
+func (session *hardeningSession) Capabilities() provider.Capabilities   { return session.capabilities }
 func (*hardeningSession) History(context.Context, provider.HistoryRequest) (provider.HistoryPage, error) {
 	return provider.HistoryPage{}, nil
 }

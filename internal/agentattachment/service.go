@@ -135,7 +135,7 @@ type manifest struct {
 }
 
 func (service *Service) Stage(ctx context.Context, request StageRequest) (Staged, error) {
-	if service == nil || ctx == nil || !validOrigin(request.Origin) || !request.Provider.Valid() || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.IsNil(request.Content) {
+	if service == nil || !validOrigin(request.Origin) || !request.Provider.Valid() || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.IsNil(request.Content) {
 		return Staged{}, ErrInvalid
 	}
 	service.mu.Lock()
@@ -226,7 +226,7 @@ func (service *Service) Stage(ctx context.Context, request StageRequest) (Staged
 }
 
 func (service *Service) Read(ctx context.Context, request ReadRequest) (Image, error) {
-	if service == nil || ctx == nil || !validOrigin(request.Origin) || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.ValidateID(request.ImageID) != nil {
+	if service == nil || !validOrigin(request.Origin) || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.ValidateID(request.ImageID) != nil {
 		return Image{}, ErrInvalid
 	}
 	service.mu.Lock()
@@ -256,7 +256,7 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (Image, e
 }
 
 func (service *Service) DeleteStaged(ctx context.Context, request DeleteRequest) error {
-	if service == nil || ctx == nil || !validOrigin(request.Origin) || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.ValidateID(request.ImageID) != nil {
+	if service == nil || !validOrigin(request.Origin) || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.ValidateID(request.ImageID) != nil {
 		return ErrInvalid
 	}
 	service.mu.Lock()
@@ -286,7 +286,7 @@ func (service *Service) DeleteStaged(ctx context.Context, request DeleteRequest)
 }
 
 func (service *Service) Claim(ctx context.Context, request ClaimRequest) (Claimed, error) {
-	if service == nil || ctx == nil || !validOrigin(request.Origin) || !request.Provider.Valid() || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.ValidateID(request.TurnID) != nil || common.ValidateID(request.MessageID) != nil || len(request.Images) == 0 || len(request.Images) > agentlimits.MaxImagesPerTurn {
+	if service == nil || !validOrigin(request.Origin) || !request.Provider.Valid() || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.ValidateID(request.TurnID) != nil || common.ValidateID(request.MessageID) != nil || len(request.Images) == 0 || len(request.Images) > agentlimits.MaxImagesPerTurn {
 		return Claimed{}, ErrInvalid
 	}
 	service.mu.Lock()
@@ -343,7 +343,7 @@ func (service *Service) Claim(ctx context.Context, request ClaimRequest) (Claime
 }
 
 func (service *Service) ImagesForMessage(ctx context.Context, conversationID, messageID string) ([]agentprotocol.ImageDescriptor, error) {
-	if service == nil || ctx == nil || common.ValidateID(conversationID) != nil || common.ValidateID(messageID) != nil {
+	if service == nil || common.ValidateID(conversationID) != nil || common.ValidateID(messageID) != nil {
 		return nil, ErrInvalid
 	}
 	service.mu.Lock()
@@ -367,7 +367,7 @@ func (service *Service) ImagesForMessage(ctx context.Context, conversationID, me
 }
 
 func (service *Service) ReleaseMessage(ctx context.Context, conversationID, messageID string) error {
-	if service == nil || ctx == nil || common.ValidateID(conversationID) != nil || common.ValidateID(messageID) != nil {
+	if service == nil || common.ValidateID(conversationID) != nil || common.ValidateID(messageID) != nil {
 		return ErrInvalid
 	}
 	service.mu.Lock()
@@ -406,7 +406,7 @@ func (service *Service) ReleaseMessage(ctx context.Context, conversationID, mess
 }
 
 func (service *Service) Sweep(ctx context.Context, conversationID string) error {
-	if service == nil || ctx == nil || common.ValidateID(conversationID) != nil {
+	if service == nil || common.ValidateID(conversationID) != nil {
 		return ErrInvalid
 	}
 	service.mu.Lock()

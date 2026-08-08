@@ -17,6 +17,7 @@ type conversation struct {
 	identity                agentstate.Identity
 	mapping                 agentstate.Mapping
 	state                   StateStore
+	attachments             AttachmentStore
 	driver                  provider.Driver
 	retainSession           func(*sessionHandle)
 	session                 *sessionHandle
@@ -254,7 +255,7 @@ type shutdownWorkerResult struct {
 	err        error
 }
 
-func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session *sessionHandle, state StateStore, driver provider.Driver, retainSession func(*sessionHandle), ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
+func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, session *sessionHandle, state StateStore, attachments AttachmentStore, driver provider.Driver, retainSession func(*sessionHandle), ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
 	if mapping.Validate(identity) != nil || mapping.Current == nil || session == nil || common.IsNil(session.session) || common.IsNil(state) || common.IsNil(driver) || retainSession == nil || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
 		return nil, errors.New("invalid conversation actor")
 	}
@@ -263,7 +264,7 @@ func newConversation(identity agentstate.Identity, mapping agentstate.Mapping, s
 		return nil, err
 	}
 	actor := &conversation{
-		identity: identity, mapping: cloneMapping(mapping), state: state, driver: driver, retainSession: retainSession,
+		identity: identity, mapping: cloneMapping(mapping), state: state, attachments: attachments, driver: driver, retainSession: retainSession,
 		session: session, generation: 1,
 		factory: factory, replay: NewReplayLog(), requests: make(chan any),
 		done: make(chan struct{}), start: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
@@ -312,6 +313,9 @@ func (actor *conversation) run() {
 	defer func() {
 		if idleTimer != nil {
 			idleTimer.Stop()
+		}
+		for _, messageID := range actor.queue.imageMessageIDs() {
+			_ = actor.releaseMessageImages(messageID)
 		}
 		actor.queue.Clear()
 		if actor.active != nil {
@@ -728,7 +732,7 @@ func (actor *conversation) snapshot(contextState agentprotocol.ContextState) (ag
 	}
 	return actor.factory.New(agentprotocol.SnapshotPayload{
 		Lifecycle: actor.lifecycle, Queue: actor.queue.Items(),
-		ContextState: contextState, ActiveTurnID: activeTurnID,
+		ContextState: contextState, ActiveTurnID: activeTurnID, SupportsImages: actor.session.capabilities.Images,
 	})
 }
 
@@ -777,12 +781,26 @@ func (actor *conversation) publishProviderEvent(attachments map[*attachment]stru
 	if providerEventTerminal(source) {
 		actor.expirePendingInteractions(attachments)
 	}
-	event, err := actor.factory.FromProvider(source)
+	var event agentprotocol.Event
+	var err error
+	if source.Kind == provider.EventUserMessage {
+		var images []agentprotocol.ImageDescriptor
+		images, err = actor.messageImages(source.MessageID)
+		if err == nil {
+			event, err = actor.factory.New(agentprotocol.UserMessagePayload{TurnID: source.TurnID, MessageID: source.MessageID, Text: source.Text, Images: images, CreatedAt: source.Timestamp})
+		}
+	} else {
+		event, err = actor.factory.FromProvider(source)
+	}
 	if err != nil {
 		if source.Kind == provider.EventInteractionRequest {
 			actor.forgetInteraction(source.Interaction.ID)
 		}
-		actor.publishBrowserError(attachments, agentprotocol.ErrorProviderMalformedStream)
+		code := agentprotocol.ErrorProviderMalformedStream
+		if source.Kind == provider.EventUserMessage {
+			code = agentprotocol.ErrorImageStorageFailure
+		}
+		actor.publishBrowserError(attachments, code)
 		return
 	}
 	if actor.replay.Append(event) != nil {

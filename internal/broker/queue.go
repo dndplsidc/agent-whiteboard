@@ -15,17 +15,21 @@ const (
 // QueuedTurn is the broker-owned form of one follow-up. Context is copied on
 // enqueue and remains private to the queue until a turn is dequeued.
 type QueuedTurn struct {
-	TurnID    string
-	MessageID string
-	Message   string
-	Context   *provider.PageContext
+	TurnID      string
+	MessageID   string
+	Message     string
+	Images      []provider.ImageInput
+	Descriptors []agentprotocol.ImageDescriptor
+	Context     *provider.PageContext
 }
 
 type queueItem struct {
-	turnID    string
-	messageID string
-	message   string
-	context   *provider.PageContext
+	turnID      string
+	messageID   string
+	message     string
+	images      []provider.ImageInput
+	descriptors []agentprotocol.ImageDescriptor
+	context     *provider.PageContext
 }
 
 // Queue is a pure, non-concurrent FIFO. Its byte bound counts UTF-8 message
@@ -122,10 +126,12 @@ func (queue *Queue) Enqueue(turn QueuedTurn) error {
 		return ErrQueueFull
 	}
 	queue.items = append(queue.items, queueItem{
-		turnID:    turn.TurnID,
-		messageID: turn.MessageID,
-		message:   turn.Message,
-		context:   cloneProviderContext(turn.Context),
+		turnID:      turn.TurnID,
+		messageID:   turn.MessageID,
+		message:     turn.Message,
+		images:      append([]provider.ImageInput(nil), turn.Images...),
+		descriptors: append([]agentprotocol.ImageDescriptor(nil), turn.Descriptors...),
+		context:     cloneProviderContext(turn.Context),
 	})
 	queue.bytes += len(turn.Message)
 	queue.hasContext = queue.hasContext || turn.Context != nil
@@ -133,9 +139,19 @@ func (queue *Queue) Enqueue(turn QueuedTurn) error {
 }
 
 func (turn QueuedTurn) validate() error {
-	request := provider.TurnRequest{TurnID: turn.TurnID, MessageID: turn.MessageID, Message: turn.Message, Context: turn.Context}
+	request := provider.TurnRequest{TurnID: turn.TurnID, MessageID: turn.MessageID, Message: turn.Message, Images: turn.Images, Context: turn.Context}
 	if err := request.Validate(); err != nil {
 		return ErrQueueInvalid
+	}
+	if len(turn.Images) != len(turn.Descriptors) {
+		return ErrQueueInvalid
+	}
+	for index := range turn.Images {
+		image := turn.Images[index]
+		descriptor := turn.Descriptors[index]
+		if descriptor.ImageID != image.ID || descriptor.Name != image.Name || descriptor.MediaType != image.MediaType {
+			return ErrQueueInvalid
+		}
 	}
 	return nil
 }
@@ -200,7 +216,7 @@ func (queue *Queue) peek() (provider.TurnRequest, bool) {
 		return provider.TurnRequest{}, false
 	}
 	item := queue.items[0]
-	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Context: item.context}, true
+	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Images: append([]provider.ImageInput(nil), item.images...), Context: item.context}, true
 }
 
 // Dequeue transfers ownership of the context to the caller. The queue itself
@@ -217,7 +233,7 @@ func (queue *Queue) Dequeue() (provider.TurnRequest, bool) {
 	if item.context != nil {
 		queue.hasContext = false
 	}
-	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Context: item.context}, true
+	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Images: append([]provider.ImageInput(nil), item.images...), Context: item.context}, true
 }
 
 // Items exposes only browser-safe queue values. Context bytes never enter the
@@ -228,9 +244,22 @@ func (queue *Queue) Items() []agentprotocol.QueueItem {
 	}
 	items := make([]agentprotocol.QueueItem, len(queue.items))
 	for index, item := range queue.items {
-		items[index] = agentprotocol.QueueItem{TurnID: item.turnID, MessageID: item.messageID, Message: item.message}
+		items[index] = agentprotocol.QueueItem{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Images: append([]agentprotocol.ImageDescriptor(nil), item.descriptors...)}
 	}
 	return items
+}
+
+func (queue *Queue) imageMessageIDs() []string {
+	if queue == nil {
+		return nil
+	}
+	result := make([]string, 0, len(queue.items))
+	for _, item := range queue.items {
+		if len(item.images) != 0 {
+			result = append(result, item.messageID)
+		}
+	}
+	return result
 }
 
 // Clear releases every queued item and erases owned page buffers.

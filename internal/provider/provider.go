@@ -598,7 +598,8 @@ func validateHistory(items []HistoryItem) error {
 	}
 	total := 0
 	for _, item := range items {
-		if !validID(item.TurnID) || !validID(item.MessageID) || (item.Role != HistoryUser && item.Role != HistoryAssistant) || !validBoundedText(item.Text, MaxHistoryItemBytes, true) || item.CreatedAt.IsZero() {
+		requireText := item.Role == HistoryAssistant
+		if !validID(item.TurnID) || !validID(item.MessageID) || (item.Role != HistoryUser && item.Role != HistoryAssistant) || !validBoundedText(item.Text, MaxHistoryItemBytes, requireText) || item.CreatedAt.IsZero() {
 			return errors.New("invalid history item")
 		}
 		total += len(item.Text)
@@ -702,7 +703,8 @@ func (e Event) Validate() error {
 	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil
 	switch e.Kind {
 	case EventUserMessage, EventAssistantMessage:
-		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, true) || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		requireText := e.Kind == EventAssistantMessage
+		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, requireText) || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider message event")
 		}
 	case EventAssistantDelta:

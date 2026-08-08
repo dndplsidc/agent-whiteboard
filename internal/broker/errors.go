@@ -93,6 +93,18 @@ func MapProviderError(failure provider.ProviderError) BrokerError {
 		code = agentprotocol.ErrorContextTooLarge
 	case provider.ErrorAcceptanceUnknown:
 		code = agentprotocol.ErrorAcceptanceOutcomeUnknown
+	case provider.ErrorImageInputUnsupported:
+		code = agentprotocol.ErrorImageInputUnsupported
+	case provider.ErrorImageUnsupported:
+		code = agentprotocol.ErrorImageUnsupported
+	case provider.ErrorImageTooLarge:
+		code = agentprotocol.ErrorImageTooLarge
+	case provider.ErrorImageTurnLimit:
+		code = agentprotocol.ErrorImageTurnLimit
+	case provider.ErrorImageMissing:
+		code = agentprotocol.ErrorImageMissing
+	case provider.ErrorImageStorageFailure:
+		code = agentprotocol.ErrorImageStorageFailure
 	default:
 		code = agentprotocol.ErrorProviderProtocolFailure
 	}

@@ -151,6 +151,7 @@ func (d *lifecycleDriver) Delete(_ context.Context, request provider.DeleteReque
 
 type lifecycleSession struct {
 	native        provider.NativeSession
+	capabilities  provider.Capabilities
 	events        chan provider.Event
 	shutdownCalls atomic.Int32
 	shutdownErr   error
@@ -166,6 +167,7 @@ func newLifecycleSessionForProvider(refValue string, name provider.Name) *lifecy
 }
 func (s *lifecycleSession) NativeSession() provider.NativeSession { return s.native }
 func (s *lifecycleSession) Model() string                         { return s.native.Model }
+func (s *lifecycleSession) Capabilities() provider.Capabilities   { return s.capabilities }
 func (s *lifecycleSession) History(context.Context, provider.HistoryRequest) (provider.HistoryPage, error) {
 	return provider.HistoryPage{}, nil
 }
