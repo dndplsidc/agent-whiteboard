@@ -169,6 +169,13 @@ func (r *attachmentRegistry) hasOrigin(origin string) bool {
 	return false
 }
 
+func (r *attachmentRegistry) has(key attachmentKey) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, exists := r.items[key]
+	return exists
+}
+
 func (s *Server) stream(response http.ResponseWriter, request *http.Request) {
 	origin, ok := s.authorizeMutation(response, request, true)
 	if !ok {

@@ -23,6 +23,9 @@ const (
 	ImagesPath           = Namespace + "/images"
 	WebSocketSubprotocol = "agent-whiteboard.v2"
 	APIVersionHeader     = "X-Agent-Whiteboard-API-Version"
+	ClientIDHeader       = "X-Agent-Whiteboard-Client-ID"
+	ConversationIDHeader = "X-Agent-Whiteboard-Conversation-ID"
+	ProviderHeader       = "X-Agent-Whiteboard-Provider"
 
 	// MaxContextCommandBytes retains ample room for the complete default context.
 	// Ordinary frames allow a valid message to expand under JSON escaping while

@@ -208,11 +208,11 @@ func TestListenerHostOriginAndMinimalStatus(t *testing.T) {
 	assert.Equal(t, trustedOrigin, response.Header.Get("Access-Control-Allow-Origin"))
 	assert.Empty(t, response.Header.Get("Access-Control-Allow-Credentials"))
 	assert.Equal(t, "no-store", response.Header.Get("Cache-Control"))
-	assert.Equal(t, map[string]any{"available": true, "api_version": "1", "origin_trusted": true}, readJSON(t, response))
+	assert.Equal(t, map[string]any{"available": true, "api_version": "2", "origin_trusted": true}, readJSON(t, response))
 
 	response = running.request(t, http.MethodGet, agentprotocol.StatusPath, otherOrigin, nil)
 	require.Equal(t, http.StatusOK, response.StatusCode)
-	assert.Equal(t, map[string]any{"available": true, "api_version": "1", "origin_trusted": false}, readJSON(t, response))
+	assert.Equal(t, map[string]any{"available": true, "api_version": "2", "origin_trusted": false}, readJSON(t, response))
 
 	for _, origin := range []string{"", "null", "http://whiteboard.example", "https://whiteboard.example/", "HTTPS://whiteboard.example", "https://whiteboard.example:443", "https://user@whiteboard.example"} {
 		request, err := http.NewRequest(http.MethodGet, running.baseURL+agentprotocol.StatusPath, nil)
@@ -246,13 +246,13 @@ func TestAutomaticLiteralLoopbackHTTPOrigin(t *testing.T) {
 		response := running.request(t, http.MethodGet, agentprotocol.StatusPath, origin, nil)
 		require.Equal(t, http.StatusOK, response.StatusCode)
 		assert.Equal(t, origin, response.Header.Get("Access-Control-Allow-Origin"))
-		assert.Equal(t, map[string]any{"available": true, "api_version": "1", "origin_trusted": true}, readJSON(t, response))
+		assert.Equal(t, map[string]any{"available": true, "api_version": "2", "origin_trusted": true}, readJSON(t, response))
 
 		withoutPort := "http://127.0.0.1"
 		response = running.request(t, http.MethodGet, agentprotocol.StatusPath, withoutPort, nil)
 		require.Equal(t, http.StatusOK, response.StatusCode)
 		assert.Equal(t, withoutPort, response.Header.Get("Access-Control-Allow-Origin"))
-		assert.Equal(t, map[string]any{"available": true, "api_version": "1", "origin_trusted": true}, readJSON(t, response))
+		assert.Equal(t, map[string]any{"available": true, "api_version": "2", "origin_trusted": true}, readJSON(t, response))
 
 		preflight, err := http.NewRequest(http.MethodOptions, running.baseURL+agentprotocol.ConnectPath, nil)
 		require.NoError(t, err)

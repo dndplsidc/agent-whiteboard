@@ -9,6 +9,12 @@ import (
 )
 
 var mutationHeaders = []string{"content-type", strings.ToLower(agentprotocol.APIVersionHeader)}
+var imageReadHeaders = []string{
+	strings.ToLower(agentprotocol.APIVersionHeader),
+	strings.ToLower(agentprotocol.ClientIDHeader),
+	strings.ToLower(agentprotocol.ConversationIDHeader),
+}
+var imageUploadHeaders = append(append([]string{}, imageReadHeaders...), "content-type", strings.ToLower(agentprotocol.ProviderHeader))
 
 func (s *Server) preflight(response http.ResponseWriter, request *http.Request) {
 	origin, err := s.requestOrigin(request)
@@ -38,8 +44,18 @@ func (s *Server) preflight(response http.ResponseWriter, request *http.Request) 
 		requiredHeaders = mutationHeaders
 		authorized = s.attachments.hasOrigin(origin) || s.trusted(request.Context(), origin)
 	default:
-		safeHTTPError(response, http.StatusNotFound, agentprotocol.ErrorInvalidCommand)
-		return
+		if request.URL.Path == agentprotocol.ImagesPath {
+			allowedMethod = http.MethodPost
+			requiredHeaders = imageUploadHeaders
+			authorized = s.attachments.hasOrigin(origin) || s.trusted(request.Context(), origin)
+		} else if _, ok := imageIDFromPath(request.URL.Path); ok && (methodValues[0] == http.MethodGet || methodValues[0] == http.MethodDelete) {
+			allowedMethod = methodValues[0]
+			requiredHeaders = imageReadHeaders
+			authorized = s.attachments.hasOrigin(origin) || s.trusted(request.Context(), origin)
+		} else {
+			safeHTTPError(response, http.StatusNotFound, agentprotocol.ErrorInvalidCommand)
+			return
+		}
 	}
 	if methodValues[0] != allowedMethod || !sameHeaderSet(request.Header.Values("Access-Control-Request-Headers"), requiredHeaders) {
 		safeHTTPError(response, http.StatusBadRequest, agentprotocol.ErrorInvalidCommand)
