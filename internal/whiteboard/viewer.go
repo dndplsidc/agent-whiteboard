@@ -34,15 +34,17 @@ func NewViewer(config ViewerConfig) (*Viewer, error) {
 
 	jsDigest := sha256.Sum256(config.JS)
 	connectSource := "'none'"
+	imageSource := "'self' data:"
 	if config.LocalAgentEnabled {
 		connectSource = "http://127.0.0.1:* ws://127.0.0.1:*"
+		imageSource += " blob:"
 	}
 	return &Viewer{
 		css:               append([]byte(nil), config.CSS...),
 		js:                append([]byte(nil), config.JS...),
 		localAgentEnabled: config.LocalAgentEnabled,
 		csp: "default-src 'none'; base-uri 'none'; connect-src " + connectSource +
-			"; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data:; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'sha256-" +
+			"; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src " + imageSource + "; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'sha256-" +
 			base64.StdEncoding.EncodeToString(jsDigest[:]) + "'; style-src 'unsafe-inline'; worker-src 'none'",
 	}, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/agentattachment"
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 	"github.com/edocsss/agent-whiteboard/internal/provider"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,6 +47,28 @@ func TestImageResourceUploadReadAndDeleteUsesExactAttachmentIdentity(t *testing.
 	require.Equal(t, images.staged.ImageID, images.read.ImageID)
 	require.Equal(t, images.staged.ImageID, images.deleted.ImageID)
 	images.mu.Unlock()
+}
+
+func TestImageResourceUsesWebSocketAttachmentIdentity(t *testing.T) {
+	images := &fakeImages{staged: agentattachment.Staged{ImageID: strings.Repeat("G", 32), MediaType: "image/png", Bytes: 3}}
+	running := startServerWithImages(t, images)
+	dialer := websocket.Dialer{Subprotocols: []string{agentprotocol.WebSocketSubprotocol}}
+	header := http.Header{"Origin": []string{trustedOrigin}}
+	socket, response, err := dialer.Dial("ws://"+strings.TrimPrefix(running.baseURL, "http://")+agentprotocol.ConnectPath, header)
+	require.NoError(t, err)
+	if response != nil {
+		response.Body.Close()
+	}
+	t.Cleanup(func() { socket.Close() })
+	require.NoError(t, socket.WriteMessage(websocket.TextMessage, encodeCommand(t, connectCommand())))
+	messageType, _, err := socket.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, websocket.TextMessage, messageType)
+
+	upload := imageRequest(t, running, http.MethodPost, agentprotocol.ImagesPath, trustedOrigin, []byte("png"), true)
+	require.Equal(t, http.StatusCreated, upload.StatusCode)
+	require.Equal(t, trustedOrigin, upload.Header.Get("Access-Control-Allow-Origin"))
+	upload.Body.Close()
 }
 
 func TestImageResourceRejectsMissingConnectionHeadersAndMismatches(t *testing.T) {

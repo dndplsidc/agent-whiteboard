@@ -383,7 +383,10 @@ func TestWebSocketAndFallbackParityTrustRemovalAndShutdown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentprotocol.EventCommandResult, wsResult.Type)
 
-	streamResponse := running.request(t, http.MethodPost, agentprotocol.ConnectPath, trustedOrigin, encodeCommand(t, connectCommand()))
+	streamClientID := strings.Repeat("I", 32)
+	streamConnect := connectCommand()
+	streamConnect.ClientID = streamClientID
+	streamResponse := running.request(t, http.MethodPost, agentprotocol.ConnectPath, trustedOrigin, encodeCommand(t, streamConnect))
 	require.Equal(t, http.StatusOK, streamResponse.StatusCode)
 	reader := bufio.NewReader(streamResponse.Body)
 	line, err := reader.ReadBytes('\n')
@@ -402,7 +405,9 @@ func TestWebSocketAndFallbackParityTrustRemovalAndShutdown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, preservedCommand.CommandID, preservedResult.Payload.(agentprotocol.CommandResultPayload).CommandID)
 
-	commandResponse := running.request(t, http.MethodPost, CommandsPath, trustedOrigin, encodeCommand(t, ordinaryCommand()))
+	streamCommand := ordinaryCommand()
+	streamCommand.ClientID = streamClientID
+	commandResponse := running.request(t, http.MethodPost, CommandsPath, trustedOrigin, encodeCommand(t, streamCommand))
 	require.Equal(t, http.StatusAccepted, commandResponse.StatusCode)
 	commandBytes, err := io.ReadAll(commandResponse.Body)
 	require.NoError(t, err)
