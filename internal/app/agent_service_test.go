@@ -281,6 +281,7 @@ func TestAgentServiceEphemeralLifecycleAndIdempotentClose(t *testing.T) {
 		IdleTimeout: time.Second, ShutdownTimeout: time.Second,
 	})
 	require.NoError(t, err)
+	require.NotNil(t, service.attachments)
 	require.NotNil(t, service.Addr())
 	require.Equal(t, "127.0.0.1", service.Addr().(*net.TCPAddr).IP.String())
 

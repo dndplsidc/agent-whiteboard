@@ -70,7 +70,7 @@ async function connectWithFallback(page, brokerOrigin) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Agent-Whiteboard-API-Version": "1",
+          "X-Agent-Whiteboard-API-Version": "2",
         },
         body: "{}",
       });
@@ -122,7 +122,7 @@ test("requires exact-origin Local Network Access permission before loopback stat
   expect(permission).toBe("granted");
 
   const status = await fetchStatus(page, broker.origin);
-  expect(status).toEqual({ ok: true, status: 200, body: { available: true, api_version: "1" } });
+  expect(status).toEqual({ ok: true, status: 200, body: { available: true, api_version: "2" } });
   expect(broker.requests).toHaveLength(1);
   expect(broker.requests[0]).toMatchObject({
     method: "GET",
@@ -169,7 +169,7 @@ test("streams over a real WebSocket and falls back to HTTP streaming after hands
         request.method === "POST" &&
         request.url === "/api/v1/agent/connect" &&
         request.headers.origin === source.origin &&
-        request.headers["x-agent-whiteboard-api-version"] === "1" &&
+        request.headers["x-agent-whiteboard-api-version"] === "2" &&
         request.status === 200,
     ),
   ).toBe(true);
@@ -190,7 +190,7 @@ test("enforces exact-origin ordinary CORS and legacy PNA preflight contracts", a
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Agent-Whiteboard-API-Version": "1",
+        "X-Agent-Whiteboard-API-Version": "2",
       },
       body: "{}",
     });

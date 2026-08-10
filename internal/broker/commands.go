@@ -143,6 +143,10 @@ func commandFingerprint(command agentprotocol.Command) ([sha256.Size]byte, error
 		writer.text(payload.TurnID)
 		writer.text(payload.MessageID)
 		writer.text(payload.Message)
+		for _, image := range payload.Images {
+			writer.text(image.ImageID)
+			writer.text(image.Name)
+		}
 		writer.boolean(payload.Context != nil)
 		if payload.Context != nil {
 			writer.text(string(payload.Context.Revision))

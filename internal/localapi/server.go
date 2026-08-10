@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/agentattachment"
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 )
 
@@ -32,6 +33,14 @@ type TrustSource interface {
 // Backend is the provider-neutral boundary consumed by the local transport.
 type Backend interface {
 	Connect(context.Context, string, agentprotocol.Command) (Connection, error)
+}
+
+// ImageBackend is the private staged-image boundary used only by the loopback
+// HTTP resource. Implementations must enforce the supplied identity again.
+type ImageBackend interface {
+	Stage(context.Context, agentattachment.StageRequest) (agentattachment.Staged, error)
+	Read(context.Context, agentattachment.ReadRequest) (agentattachment.Image, error)
+	DeleteStaged(context.Context, agentattachment.DeleteRequest) error
 }
 
 // Connection is one admitted browser attachment. Events begins with the
@@ -65,6 +74,7 @@ type Config struct {
 	Port        int
 	TrustSource TrustSource
 	Backend     Backend
+	Images      ImageBackend
 	Recorder    RequestRecorder
 }
 
@@ -74,6 +84,7 @@ type Server struct {
 	host     string
 	trust    TrustSource
 	backend  Backend
+	images   ImageBackend
 	recorder RequestRecorder
 
 	attachments attachmentRegistry
@@ -109,6 +120,7 @@ func Listen(config Config) (*Server, error) {
 		host:       net.JoinHostPort("127.0.0.1", strconv.Itoa(address.Port)),
 		trust:      config.TrustSource,
 		backend:    config.Backend,
+		images:     config.Images,
 		recorder:   config.Recorder,
 		transports: make(map[*transport]struct{}),
 		serveErr:   make(chan error, 1),

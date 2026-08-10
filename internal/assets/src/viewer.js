@@ -446,10 +446,14 @@ export const DEFAULT_AGENT_DRAWER_WIDTH = 420;
 export const MIN_AGENT_DRAWER_WIDTH = 360;
 export const MAX_AGENT_DRAWER_WIDTH = 720;
 export const AGENT_DRAWER_DOCK_BREAKPOINT = 64 * 16;
-export const AGENT_API_VERSION = "1";
-export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v1";
+export const AGENT_API_VERSION = "2";
+export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v2";
 export const MAX_AGENT_MESSAGE_BYTES = 64 * 1024;
 export const MAX_AGENT_EVENT_BYTES = 256 * 1024;
+export const MAX_AGENT_IMAGES_PER_TURN = 8;
+export const MAX_AGENT_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_AGENT_TURN_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_AGENT_IMAGE_NAME_BYTES = 255;
 
 const AGENT_CONNECT_TIMEOUT_MS = 30_000;
 const ID_PATTERN = /^[A-Za-z0-9_-]{32}$/u;
@@ -464,6 +468,7 @@ const MAX_RETAINED_INTERACTIONS = 64;
 const MAX_TIMELINE_TEXT_BYTES = 96 * 1024;
 const MAX_DELTA_BYTES = 32 * 1024;
 const PROVIDERS = new Set(["pi", "codex"]);
+const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const INTERACTION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u;
 const encoder = new TextEncoder();
 
@@ -497,6 +502,13 @@ const ERROR_DEFINITIONS = {
   provider_protocol_failure: ["The provider protocol operation failed.", "restart_provider"],
   provider_malformed_stream: ["The provider returned a malformed event stream.", "restart_provider"],
   acceptance_outcome_unknown: ["The provider turn acceptance outcome is unknown.", "refresh_state"],
+  image_input_unsupported: ["The selected model does not support image input.", "configure_model"],
+  image_unsupported: ["The selected file is not a supported image.", "none"],
+  image_too_large: ["The selected image is too large.", "none"],
+  image_turn_limit: ["The message has too many or too much image data.", "none"],
+  image_workspace_limit: ["This conversation has reached its image storage limit.", "none"],
+  image_missing: ["The selected image is no longer available.", "none"],
+  image_storage_failure: ["The selected image could not be stored safely.", "try_again"],
 };
 
 function isRecord(value) {
@@ -540,6 +552,26 @@ function validText(value, maximum, allowEmpty = false) {
     if (code < 0x20 && character !== "\t" && character !== "\n" && character !== "\r") return false;
   }
   return true;
+}
+
+function validImageName(value) {
+  return validText(value, MAX_AGENT_IMAGE_NAME_BYTES) && value !== "." && value !== "..";
+}
+
+function validImageReference(value) {
+  return exactObject(value, ["image_id", "name"]) && validID(value.image_id) && validImageName(value.name);
+}
+
+function validImageDescriptor(value) {
+  return exactObject(value, ["image_id", "name", "media_type"]) && validID(value.image_id) && validImageName(value.name) && IMAGE_MEDIA_TYPES.has(value.media_type);
+}
+
+function validImages(value, validator) {
+  return Array.isArray(value) && value.length <= MAX_AGENT_IMAGES_PER_TURN && value.every(validator) && new Set(value.map(({ image_id }) => image_id)).size === value.length;
+}
+
+function validTurnTextAndImages(text, images, validator = validImageDescriptor) {
+  return validText(text, MAX_AGENT_MESSAGE_BYTES, true) && validImages(images, validator) && (text.length > 0 || images.length > 0);
 }
 
 function validResource(value) {
@@ -695,13 +727,14 @@ export function createPageContext(payload, { title, url, revision }) {
   };
 }
 
-export function createSubmitCommand({ message, payload, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
-  if (!validText(message, MAX_AGENT_MESSAGE_BYTES) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
+export function createSubmitCommand({ message, images = [], payload, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
+  if (!validTurnTextAndImages(message, images, validImageReference) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const turnID = idFactory();
   const messageID = idFactory();
   if (!validID(turnID) || !validID(messageID)) throw new TypeError("invalid agent command identity");
   const submitPayload = { turn_id: turnID, message_id: messageID, message };
+  if (images.length > 0) submitPayload.images = images.map((image) => ({ ...image }));
   if (revision === "initial" || revision === "replacement") {
     submitPayload.context = createPageContext(payload, { title, url, revision });
   }
@@ -711,7 +744,7 @@ export function createSubmitCommand({ message, payload, clientID, conversationID
 export function createAgentCommand({ type, payload, clientID, conversationID, idFactory = generateAgentID }) {
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const validators = {
-    queue_edit: () => exactObject(payload, ["message_id", "message"]) && validID(payload.message_id) && validText(payload.message, MAX_AGENT_MESSAGE_BYTES),
+    queue_edit: () => exactObject(payload, ["message_id", "message"]) && validID(payload.message_id) && validText(payload.message, MAX_AGENT_MESSAGE_BYTES, true),
     queue_remove: () => exactObject(payload, ["message_id"]) && validID(payload.message_id),
     interrupt: () => exactObject(payload, ["turn_id"]) && validID(payload.turn_id),
     new: () => exactObject(payload, []),
@@ -733,13 +766,15 @@ function validBrowserError(value) {
 }
 
 function validQueueItem(item) {
-  return exactObject(item, ["turn_id", "message_id", "message"]) && validID(item.turn_id) && validID(item.message_id) && validText(item.message, MAX_AGENT_MESSAGE_BYTES);
+  return exactObject(item, ["turn_id", "message_id", "message"], ["images"]) && validID(item.turn_id) && validID(item.message_id) && validTurnTextAndImages(item.message, item.images ?? []);
 }
 
 function validTimelineItem(item) {
-  if (!exactObject(item, ["item_id", "kind", "text", "created_at"], ["turn_id", "message_id"]) || !validID(item.item_id) || !["user", "assistant", "activity"].includes(item.kind) || !validText(item.text, MAX_AGENT_MESSAGE_BYTES) || !validDate(item.created_at)) return false;
-  if (item.kind === "activity") return !Object.hasOwn(item, "message_id") && (!Object.hasOwn(item, "turn_id") || validID(item.turn_id));
-  return validID(item.turn_id) && validID(item.message_id);
+  if (!exactObject(item, ["item_id", "kind", "text", "created_at"], ["turn_id", "message_id", "images"]) || !validID(item.item_id) || !["user", "assistant", "activity"].includes(item.kind) || !validDate(item.created_at)) return false;
+  const images = item.images ?? [];
+  if (item.kind === "activity") return validText(item.text, MAX_AGENT_MESSAGE_BYTES) && images.length === 0 && !Object.hasOwn(item, "message_id") && (!Object.hasOwn(item, "turn_id") || validID(item.turn_id));
+  if (item.kind === "assistant") return validText(item.text, MAX_AGENT_MESSAGE_BYTES) && images.length === 0 && validID(item.turn_id) && validID(item.message_id);
+  return validTurnTextAndImages(item.text, images) && validID(item.turn_id) && validID(item.message_id);
 }
 
 function validArchiveItem(item) {
@@ -804,7 +839,7 @@ function validActiveTurn(lifecycle, turnID) {
 function validateEventPayload(type, payload) {
   switch (type) {
     case "snapshot":
-      return exactObject(payload, ["lifecycle", "queue", "context_state", "active_turn_id"]) && lifecycleValues.has(payload.lifecycle) && Array.isArray(payload.queue) && payload.queue.length <= MAX_QUEUE_ITEMS && payload.queue.every(validQueueItem) && contextValues.has(payload.context_state) && validActiveTurn(payload.lifecycle, payload.active_turn_id);
+      return exactObject(payload, ["lifecycle", "queue", "context_state", "active_turn_id", "supports_images"]) && lifecycleValues.has(payload.lifecycle) && Array.isArray(payload.queue) && payload.queue.length <= MAX_QUEUE_ITEMS && payload.queue.every(validQueueItem) && contextValues.has(payload.context_state) && validActiveTurn(payload.lifecycle, payload.active_turn_id) && typeof payload.supports_images === "boolean";
     case "command_result":
       return exactObject(payload, ["command_id", "status"], ["error"]) && validID(payload.command_id) && ["succeeded", "rejected"].includes(payload.status) && (payload.status === "succeeded" ? !Object.hasOwn(payload, "error") : validBrowserError(payload.error));
     case "timeline":
@@ -812,6 +847,7 @@ function validateEventPayload(type, payload) {
     case "history":
       return exactObject(payload, ["command_id", "items", "next_cursor"]) && validID(payload.command_id) && Array.isArray(payload.items) && payload.items.length <= 100 && payload.items.every(validArchiveItem) && (payload.next_cursor === null || validID(payload.next_cursor));
     case "user_message":
+      return exactObject(payload, ["turn_id", "message_id", "text", "created_at"], ["images"]) && validID(payload.turn_id) && validID(payload.message_id) && validTurnTextAndImages(payload.text, payload.images ?? []) && validDate(payload.created_at);
     case "assistant_message":
       return exactObject(payload, ["turn_id", "message_id", "text", "created_at"]) && validID(payload.turn_id) && validID(payload.message_id) && validText(payload.text, MAX_AGENT_MESSAGE_BYTES) && validDate(payload.created_at);
     case "assistant_delta":
@@ -821,7 +857,7 @@ function validateEventPayload(type, payload) {
     case "lifecycle":
       return exactObject(payload, ["state", "turn_id"]) && lifecycleValues.has(payload.state) && validActiveTurn(payload.state, payload.turn_id);
     case "provider":
-      return exactObject(payload, ["provider", "state"], ["model"]) && PROVIDERS.has(payload.provider) && providerValues.has(payload.state) && (!Object.hasOwn(payload, "model") || validText(payload.model, 512, true)) && (payload.state !== "ready" || validText(payload.model, 512));
+      return exactObject(payload, ["provider", "state", "supports_images"], ["model"]) && PROVIDERS.has(payload.provider) && providerValues.has(payload.state) && typeof payload.supports_images === "boolean" && (!Object.hasOwn(payload, "model") || validText(payload.model, 512, true)) && (payload.state !== "ready" || validText(payload.model, 512));
     case "context":
       return exactObject(payload, ["digest", "state"]) && DIGEST_PATTERN.test(payload.digest) && contextValues.has(payload.state);
     case "activity":
@@ -969,7 +1005,8 @@ export function createAgentState(provider = "pi") {
     activeTurnID: null,
     contextState: "pending",
     contextDigest: null,
-    provider: { provider, state: "starting", model: "" },
+    provider: { provider, state: "starting", model: "", supportsImages: false },
+    supportsImages: false,
     timeline: [],
     queue: [],
     archives: [],
@@ -989,7 +1026,7 @@ export function createAgentState(provider = "pi") {
 function appendTimeline(state, item) {
   const key = item.item_id ?? item.message_id ?? `${item.kind}-${state.lastEventID}`;
   if (state.timeline.some((current) => (current.item_id ?? current.message_id) === key)) return;
-  state.timeline.push({ ...item });
+  state.timeline.push({ ...item, images: item.images?.map((image) => ({ ...image })) });
   if (state.timeline.length > MAX_TIMELINE_ITEMS) state.timeline.splice(0, state.timeline.length - MAX_TIMELINE_ITEMS);
 }
 
@@ -1016,8 +1053,8 @@ export function applyAgentEvent(state, untrustedEvent) {
   const draft = {
     ...state,
     provider: { ...state.provider },
-    timeline: state.timeline.map((item) => ({ ...item })),
-    queue: state.queue.map((item) => ({ ...item })),
+    timeline: state.timeline.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) })),
+    queue: state.queue.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) })),
     archives: state.archives.map((item) => ({ ...item })),
     errors: state.errors.map((item) => ({ ...item })),
     seenEventIDs: new Set(state.seenEventIDs),
@@ -1047,12 +1084,14 @@ function applyAgentEventMutable(state, untrustedEvent) {
       state.lifecycle = payload.lifecycle;
       state.activeTurnID = payload.active_turn_id;
       state.contextState = payload.context_state;
-      state.queue = payload.queue.map((item) => ({ ...item }));
+      state.queue = payload.queue.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) }));
+      state.supportsImages = payload.supports_images;
+      state.provider.supportsImages = payload.supports_images;
       state.connected = true;
       break;
     case "timeline": {
       const known = new Set(state.timeline.map((item) => item.item_id ?? item.message_id));
-      const older = payload.items.filter((item) => !known.has(item.item_id)).map((item) => ({ ...item })).reverse();
+      const older = payload.items.filter((item) => !known.has(item.item_id)).map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) })).reverse();
       state.timeline = [...older, ...state.timeline].slice(-MAX_TIMELINE_ITEMS);
       state.timelineCursor = payload.next_cursor;
       break;
@@ -1085,11 +1124,12 @@ function applyAgentEventMutable(state, untrustedEvent) {
       else appendTimeline(state, { kind: "assistant", ...payload });
       break;
     }
-    case "queue": state.queue = payload.items.map((item) => ({ ...item })); break;
+    case "queue": state.queue = payload.items.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) })); break;
     case "lifecycle": state.lifecycle = payload.state; state.activeTurnID = payload.turn_id; break;
     case "provider":
       if (payload.provider !== state.provider.provider) throw new TypeError("agent provider changed unexpectedly");
-      state.provider = { provider: payload.provider, state: payload.state, model: payload.model ?? "" };
+      state.provider = { provider: payload.provider, state: payload.state, model: payload.model ?? "", supportsImages: payload.supports_images };
+      state.supportsImages = payload.supports_images;
       break;
     case "context": state.contextDigest = payload.digest; state.contextState = payload.state; break;
     case "activity": appendTimeline(state, { kind: "activity", activity: payload.kind, text: payload.summary, created_at: event.timestamp, item_id: event.event_id }); break;
@@ -1199,6 +1239,78 @@ export function createAgentTransport({
     if (body.api_version !== AGENT_API_VERSION) return { ok: false, code: "incompatible_api" };
     if (body.origin_trusted !== true) return { ok: false, code: "untrusted_origin" };
     return { ok: true, code: null };
+  }
+
+  function imageHeaders(targetConversationID, mediaType = null) {
+    if (!validID(targetConversationID)) throw new TypeError("invalid agent conversation");
+    const headers = {
+      "X-Agent-Whiteboard-API-Version": AGENT_API_VERSION,
+      "X-Agent-Whiteboard-Client-ID": clientID,
+      "X-Agent-Whiteboard-Conversation-ID": targetConversationID,
+    };
+    if (mediaType !== null) {
+      if (!IMAGE_MEDIA_TYPES.has(mediaType)) throw new TypeError("unsupported image type");
+      headers["Content-Type"] = mediaType;
+      headers["X-Agent-Whiteboard-Provider"] = provider;
+    }
+    return headers;
+  }
+
+  async function imageFailure(response, fallback) {
+    let body = null;
+    try { body = parseStrictJSONOrNull(await readBoundedResponseText(response, 4096)); } catch { body = null; }
+    const code = safeHTTPErrorCode(body, fallback);
+    const error = new Error(code);
+    error.code = code;
+    throw error;
+  }
+
+  async function uploadImage(file, targetConversationID = conversationID, signal) {
+    if (!file || typeof file.size !== "number" || file.size <= 0 || file.size > MAX_AGENT_IMAGE_BYTES || !IMAGE_MEDIA_TYPES.has(file.type)) throw new TypeError("invalid image");
+    const response = await fetchImpl(`${agentOrigin(currentPort)}/api/v1/agent/images`, {
+      method: "POST",
+      headers: imageHeaders(targetConversationID, file.type),
+      body: file,
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) return imageFailure(response, "image_storage_failure");
+    const body = parseStrictJSONOrNull(await readBoundedResponseText(response, 4096));
+    if (!exactObject(body, ["image_id", "media_type", "bytes"]) || !validID(body.image_id) || !IMAGE_MEDIA_TYPES.has(body.media_type) || !Number.isSafeInteger(body.bytes) || body.bytes <= 0 || body.bytes > MAX_AGENT_IMAGE_BYTES) throw new TypeError("invalid image response");
+    return body;
+  }
+
+  async function readImage(imageID, targetConversationID = conversationID, signal) {
+    if (!validID(imageID)) throw new TypeError("invalid image ID");
+    const response = await fetchImpl(`${agentOrigin(currentPort)}/api/v1/agent/images/${imageID}`, {
+      method: "GET",
+      headers: imageHeaders(targetConversationID),
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) return imageFailure(response, "image_missing");
+    const mediaType = response.headers?.get?.("Content-Type")?.split(";", 1)[0]?.trim();
+    if (!IMAGE_MEDIA_TYPES.has(mediaType)) throw new TypeError("invalid image response");
+    const blob = await response.blob();
+    if (blob.size <= 0 || blob.size > MAX_AGENT_IMAGE_BYTES) throw new TypeError("invalid image response");
+    return blob.type === mediaType ? blob : new Blob([blob], { type: mediaType });
+  }
+
+  async function deleteImage(imageID, targetConversationID = conversationID, signal) {
+    if (!validID(imageID)) throw new TypeError("invalid image ID");
+    const response = await fetchImpl(`${agentOrigin(currentPort)}/api/v1/agent/images/${imageID}`, {
+      method: "DELETE",
+      headers: imageHeaders(targetConversationID),
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) return imageFailure(response, "image_missing");
   }
 
   function connectCommand() {
@@ -1368,6 +1480,9 @@ export function createAgentTransport({
     resetConversation() { conversationID = null; lastEventID = null; seenEventIDs.clear(); },
     resetReplay() { lastEventID = null; seenEventIDs.clear(); },
     send,
+    uploadImage,
+    readImage,
+    deleteImage,
     close() { closed = true; socket?.close?.(); fallbackAbort?.abort(); transportKind = null; },
   };
 }
@@ -1406,7 +1521,7 @@ function browserErrorText(code, doc, fallback) {
   return guidance ? `${definition[0]} ${guidance}` : definition[0];
 }
 
-function appendAgentMessage(doc, container, item, providerName = "Pi") {
+function appendAgentMessage(doc, container, item, providerName = "Pi", appendImages = () => {}) {
   const article = doc.createElement("article");
   article.className = `agent-message agent-message-${item.kind}`;
   const label = doc.createElement("strong");
@@ -1415,6 +1530,7 @@ function appendAgentMessage(doc, container, item, providerName = "Pi") {
   body.className = "agent-message-body";
   body.innerHTML = renderAgentMarkdown(item.text, doc);
   article.append(label, body);
+  appendImages(article, item.images ?? []);
   container.append(article);
 }
 
@@ -1638,6 +1754,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let contextDeliveryUnknown = false;
   let destroyed = false;
   let handoffCommandID = null;
+  let attachmentSerial = 0;
+  let draftAttachments = [];
+  const imageObjectURLs = new Map();
+  const imageLoads = new Map();
   let pendingSubmitCommandID = null;
   let activeView = "conversation";
   let timelineScrollTop = 0;
@@ -1904,6 +2024,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   composerWrap.className = "agent-composer-wrap";
   const composer = doc.createElement("form");
   composer.className = "agent-composer";
+  const attachmentList = doc.createElement("div");
+  attachmentList.className = "agent-attachment-list";
+  attachmentList.setAttribute("aria-label", "Image attachments");
+  const attachmentStatus = doc.createElement("p");
+  attachmentStatus.className = "agent-attachment-status";
+  attachmentStatus.setAttribute("role", "status");
+  attachmentStatus.setAttribute("aria-live", "polite");
   const message = doc.createElement("textarea");
   message.maxLength = MAX_AGENT_MESSAGE_BYTES;
   message.rows = 2;
@@ -1911,6 +2038,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   message.setAttribute("aria-label", "Message Pi about this whiteboard");
   const composerBar = doc.createElement("div");
   composerBar.className = "agent-composer-bar";
+  const imagePicker = doc.createElement("input");
+  imagePicker.type = "file";
+  imagePicker.multiple = true;
+  imagePicker.accept = "image/png,image/jpeg,image/gif,image/webp";
+  imagePicker.className = "agent-image-picker";
+  imagePicker.tabIndex = -1;
+  const imageButton = doc.createElement("button");
+  imageButton.type = "button";
+  imageButton.className = "agent-image-button";
+  imageButton.setAttribute("aria-label", "Add images");
+  imageButton.textContent = "+";
   const contextChip = doc.createElement("button");
   contextChip.type = "button";
   contextChip.className = "agent-composer-chip";
@@ -1929,8 +2067,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   sendButton.className = "agent-send-button";
   sendButton.setAttribute("aria-label", "Send");
   sendButton.textContent = "↑";
-  composerBar.append(contextChip, queueChip, stopButton, sendButton);
-  composer.append(message, composerBar);
+  composerBar.append(imageButton, contextChip, queueChip, stopButton, sendButton);
+  composer.append(imagePicker, attachmentList, attachmentStatus, message, composerBar);
   const composerFineprint = doc.createElement("p");
   composerFineprint.className = "agent-composer-fineprint";
   composerFineprint.textContent = "Pi can make mistakes. Review important details.";
@@ -2185,9 +2323,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   doc.defaultView?.addEventListener("resize", onViewportResize);
 
   function setOpen(next, { focus = true } = {}) {
+    const wasOpen = open;
     if (next && focus) restoreFocus = doc.activeElement;
     if (!next && resizing) finishResize({ persist: false });
     open = next;
+    if (wasOpen && !open) clearDraftAttachments();
     const modal = open && !isDockedViewport();
     drawer.classList.toggle("is-open", open);
     overlay.classList.toggle("is-open", open && modal);
@@ -2206,6 +2346,180 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
 
   function submitBlocked() {
     return state.contextState === "pending" && contextRevision === undefined || contextCommandID !== null || contextDeliveryUnknown;
+  }
+
+  function revokeObjectURL(url) {
+    if (url) doc.defaultView?.URL?.revokeObjectURL?.(url);
+  }
+
+  function createObjectURL(value) {
+    return doc.defaultView?.URL?.createObjectURL?.(value) ?? "";
+  }
+
+  function attachmentSummary() {
+    const preparing = draftAttachments.filter((item) => item.status === "preparing").length;
+    const failed = draftAttachments.filter((item) => item.status === "failed").length;
+    if (preparing > 0) return `Preparing ${preparing} image${preparing === 1 ? "" : "s"}…`;
+    if (failed > 0) return `${failed} image${failed === 1 ? "" : "s"} need attention.`;
+    if (draftAttachments.length > 0) return `${draftAttachments.length} image${draftAttachments.length === 1 ? "" : "s"} ready.`;
+    return "";
+  }
+
+  function updateComposerAvailability() {
+    const preparing = draftAttachments.some((item) => item.status === "preparing");
+    const hasReadyImage = draftAttachments.some((item) => item.status === "ready");
+    const hasMessage = validText(message.value, MAX_AGENT_MESSAGE_BYTES);
+    sendButton.disabled = submitBlocked() || preparing || (!hasMessage && !hasReadyImage);
+  }
+
+  function renderDraftAttachments() {
+    attachmentList.replaceChildren();
+    attachmentStatus.textContent = attachmentSummary();
+    for (const item of draftAttachments) {
+      const preview = doc.createElement("article");
+      preview.className = "agent-attachment-preview";
+      preview.dataset.state = item.status;
+      const image = doc.createElement("img");
+      image.alt = "";
+      if (item.objectURL) image.src = item.objectURL;
+      const copy = doc.createElement("div");
+      const name = doc.createElement("strong");
+      name.textContent = item.name;
+      const status = doc.createElement("span");
+      status.textContent = item.status === "preparing" ? "Preparing…" : item.status === "ready" ? "Ready" : item.error;
+      copy.append(name, status);
+      const actions = doc.createElement("div");
+      actions.className = "agent-attachment-actions";
+      if (item.status === "failed" && item.retryable) {
+        const retry = doc.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Retry";
+        retry.setAttribute("aria-label", `Retry ${item.name}`);
+        retry.addEventListener("click", () => void stageAttachment(item));
+        actions.append(retry);
+      }
+      const remove = doc.createElement("button");
+      remove.type = "button";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Remove ${item.name}`);
+      remove.addEventListener("click", () => removeAttachment(item));
+      actions.append(remove);
+      preview.append(image, copy, actions);
+      attachmentList.append(preview);
+    }
+    updateComposerAvailability();
+  }
+
+  async function stageAttachment(item) {
+    if (!draftAttachments.includes(item) || destroyed) return;
+    const owner = item.owner;
+    item.abort?.abort();
+    item.abort = new AbortController();
+    item.status = "preparing";
+    item.error = "";
+    item.retryable = false;
+    renderDraftAttachments();
+    try {
+      if (typeof owner.transport.uploadImage !== "function") throw new Error("image_storage_failure");
+      const staged = await owner.transport.uploadImage(item.file, item.conversationID, item.abort.signal);
+      if (!draftAttachments.includes(item) || item.abort.signal.aborted) return;
+      item.imageID = staged.image_id;
+      item.mediaType = staged.media_type;
+      item.status = "ready";
+    } catch (error) {
+      if (!draftAttachments.includes(item) || item.abort.signal.aborted) return;
+      item.status = "failed";
+      item.error = browserErrorText(error?.code, doc, "Could not prepare this image.");
+      item.retryable = error?.code === "image_storage_failure" || !error?.code;
+    }
+    renderDraftAttachments();
+  }
+
+  function addImageFiles(files) {
+    if (!state.connected || !state.supportsImages) {
+      showTransientStatus("Images unavailable", "Choose another model", "The selected model does not support image input.");
+      return;
+    }
+    const owner = controller;
+    const conversationID = owner.transport.conversationID;
+    let aggregate = draftAttachments.reduce((total, item) => total + item.file.size, 0);
+    for (const file of files) {
+      if (!file || draftAttachments.length >= MAX_AGENT_IMAGES_PER_TURN) {
+        showTransientStatus("Image limit reached", `Maximum ${MAX_AGENT_IMAGES_PER_TURN}`, "Remove an image before adding another one.");
+        break;
+      }
+      if (!IMAGE_MEDIA_TYPES.has(file.type) || file.size <= 0 || file.size > MAX_AGENT_IMAGE_BYTES || !validImageName(file.name)) {
+        showTransientStatus("Image not added", "Unsupported file", "Use a PNG, JPEG, GIF, or WebP image up to 10 MiB.");
+        continue;
+      }
+      if (aggregate + file.size > MAX_AGENT_TURN_IMAGE_BYTES) {
+        showTransientStatus("Image limit reached", "Maximum 20 MiB", "Remove an image before adding another one.");
+        break;
+      }
+      aggregate += file.size;
+      const item = {
+        key: ++attachmentSerial,
+        owner,
+        conversationID,
+        file,
+        name: file.name,
+        objectURL: createObjectURL(file),
+        status: "preparing",
+        error: "",
+        retryable: false,
+        imageID: null,
+        mediaType: null,
+        abort: null,
+      };
+      draftAttachments.push(item);
+      void stageAttachment(item);
+    }
+    renderDraftAttachments();
+  }
+
+  function removeAttachment(item, { deleteStaged = true } = {}) {
+    if (!draftAttachments.includes(item)) return;
+    item.abort?.abort();
+    draftAttachments = draftAttachments.filter((candidate) => candidate !== item);
+    revokeObjectURL(item.objectURL);
+    if (deleteStaged && item.imageID && typeof item.owner.transport.deleteImage === "function") void item.owner.transport.deleteImage(item.imageID, item.conversationID).catch(() => {});
+    renderDraftAttachments();
+  }
+
+  function clearDraftAttachments({ deleteStaged = true } = {}) {
+    for (const item of [...draftAttachments]) removeAttachment(item, { deleteStaged });
+  }
+
+  function appendDescriptorImages(parent, images) {
+    if (images.length === 0) return;
+    const list = doc.createElement("div");
+    list.className = "agent-message-images";
+    for (const descriptor of images) {
+      const figure = doc.createElement("figure");
+      const image = doc.createElement("img");
+      image.alt = descriptor.name;
+      const caption = doc.createElement("figcaption");
+      caption.textContent = descriptor.name;
+      const conversationID = transport.conversationID;
+      const cacheKey = `${conversationID}:${descriptor.image_id}`;
+      const cached = imageObjectURLs.get(cacheKey);
+      if (cached) image.src = cached;
+      else if (conversationID && typeof transport.readImage === "function" && !imageLoads.has(cacheKey)) {
+        const load = transport.readImage(descriptor.image_id, conversationID)
+          .then((blob) => {
+            if (destroyed) return;
+            const url = createObjectURL(blob);
+            if (url) imageObjectURLs.set(cacheKey, url);
+            render();
+          })
+          .catch(() => {})
+          .finally(() => imageLoads.delete(cacheKey));
+        imageLoads.set(cacheKey, load);
+      }
+      figure.append(image, caption);
+      list.append(figure);
+    }
+    parent.append(list);
   }
 
   function render() {
@@ -2299,7 +2613,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     contextDetails.setAttribute("aria-hidden", String(activeView !== "context"));
     archives.hidden = activeView !== "archives";
     const contextAttached = state.contextState === "accepted" || state.contextState === "unchanged";
-    sendButton.disabled = submitBlocked();
+    imageButton.disabled = !state.connected || !state.supportsImages;
+    imageButton.title = state.supportsImages ? "Add PNG, JPEG, GIF, or WebP images" : "The selected model does not support image input.";
+    renderDraftAttachments();
     stopButton.disabled = state.activeTurnID === null;
     stopButton.hidden = state.activeTurnID === null;
     contextChip.textContent = `Context · ${contextAttached ? "current" : "available"}`;
@@ -2336,7 +2652,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       timeline.append(older);
     }
     for (const item of state.timeline) {
-      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName);
+      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages);
       else if (item.kind === "tool") appendToolActivity(doc, timeline, item);
       else {
         const details = doc.createElement("details");
@@ -2407,8 +2723,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       const save = doc.createElement("button"); save.type = "button"; save.textContent = "Save";
       const remove = doc.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
       save.addEventListener("click", () => {
-        if (!validText(input.value, MAX_AGENT_MESSAGE_BYTES)) {
-          input.setCustomValidity("Enter a queued message no larger than 64 KiB.");
+        if (!validText(input.value, MAX_AGENT_MESSAGE_BYTES, true) || input.value.length === 0 && !item.images?.length) {
+          input.setCustomValidity("Enter a queued message or keep at least one image attached.");
           input.reportValidity();
           return;
         }
@@ -2416,6 +2732,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         void sendCommand("queue_edit", { message_id: item.message_id, message: input.value });
       });
       remove.addEventListener("click", () => void sendCommand("queue_remove", { message_id: item.message_id }));
+      if (item.images?.length) appendDescriptorImages(row, item.images);
       row.append(input, save, remove); queue.append(row);
     }
     archives.replaceChildren();
@@ -2581,6 +2898,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   providerSelect.addEventListener("change", () => {
     const nextProvider = providerSelect.value;
     if (!PROVIDERS.has(nextProvider) || nextProvider === selectedProvider) return;
+    clearDraftAttachments();
     saveController();
     selectedProvider = nextProvider;
     persistAgentPreference(storage, AGENT_PROVIDER_STORAGE_KEY, selectedProvider);
@@ -2648,9 +2966,21 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     message.style.overflowY = message.scrollHeight > maximum ? "auto" : "hidden";
   }
   let composing = false;
+  imageButton.addEventListener("click", () => imagePicker.click());
+  imagePicker.addEventListener("change", () => {
+    addImageFiles([...imagePicker.files]);
+    imagePicker.value = "";
+  });
+  message.addEventListener("paste", (event) => {
+    const files = [...(event.clipboardData?.items ?? [])]
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+    if (files.length > 0) addImageFiles(files);
+  });
   message.addEventListener("compositionstart", () => { composing = true; });
   message.addEventListener("compositionend", () => { composing = false; });
-  message.addEventListener("input", resizeComposer);
+  message.addEventListener("input", () => { resizeComposer(); updateComposerAvailability(); });
   message.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" || event.shiftKey || composing || event.isComposing || event.keyCode === 229) return;
     event.preventDefault();
@@ -2660,7 +2990,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();
     const text = message.value;
-    if (!validText(text, MAX_AGENT_MESSAGE_BYTES)) { message.setCustomValidity("Enter a message no larger than 64 KiB."); message.reportValidity(); return; }
+    const sentAttachments = draftAttachments.filter((item) => item.status === "ready");
+    const imageReferences = sentAttachments.map((item) => ({ image_id: item.imageID, name: item.name }));
+    if (draftAttachments.some((item) => item.status === "preparing")) {
+      showTransientStatus("Preparing images", "Please wait", "Images must finish preparing before this message can be sent.");
+      return;
+    }
+    if (!validTurnTextAndImages(text, imageReferences, validImageReference)) { message.setCustomValidity("Enter a message or add at least one ready image."); message.reportValidity(); return; }
     saveController();
     const target = controller;
     if (target.state.contextState === "pending" && target.contextRevision === undefined) {
@@ -2673,7 +3009,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
     message.setCustomValidity("");
     const revision = target.state.contextState === "pending" ? target.contextRevision : undefined;
-    const command = createSubmitCommand({ message: text, payload, clientID: target.transport.clientID, conversationID: target.transport.conversationID, title: pageTitle, url: pageURL, revision });
+    const command = createSubmitCommand({ message: text, images: imageReferences, payload, clientID: target.transport.clientID, conversationID: target.transport.conversationID, title: pageTitle, url: pageURL, revision });
     registerAgentCommand(target.state, command);
     target.pendingSubmitCommandID = command.command_id;
     if (revision !== undefined) target.contextCommandID = command.command_id;
@@ -2685,6 +3021,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         message.value = "";
         resizeComposer();
       }
+      for (const item of sentAttachments) removeAttachment(item, { deleteStaged: false });
     }
     catch (error) {
       target.pendingSubmitCommandID = null;
@@ -2709,7 +3046,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     scheduleReconnect();
   });
   newButton.addEventListener("click", () => {
-    if (doc.defaultView?.confirm("Archive this conversation and start a new one?")) { showView("conversation"); void forcedConversationCommand("new", {}); }
+    if (doc.defaultView?.confirm("Archive this conversation and start a new one?")) { clearDraftAttachments(); showView("conversation"); void forcedConversationCommand("new", {}); }
   });
   historyButton.addEventListener("click", () => { showView("archives"); });
   function onOverflowOutsidePointerDown(event) {
@@ -2764,13 +3101,16 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   return {
     get state() { return state; },
     get transport() { return transport; },
-    elements: { toggle, drawer, close, overlay, separator, overflowButton, overflowMenu, backButton, headerActions, providerSelect, setup, settings, contextDetails, portInput, connectButton, composerWrap, composer, message, sendButton, stopButton, timeline, queue, archives },
+    elements: { toggle, drawer, close, overlay, separator, overflowButton, overflowMenu, backButton, headerActions, providerSelect, setup, settings, contextDetails, portInput, connectButton, composerWrap, composer, message, imagePicker, imageButton, attachmentList, attachmentStatus, sendButton, stopButton, timeline, queue, archives },
     get open() { return open; },
     setOpen,
     probe,
     sendCommand,
     destroy() {
       destroyed = true;
+      clearDraftAttachments();
+      for (const url of imageObjectURLs.values()) revokeObjectURL(url);
+      imageObjectURLs.clear();
       for (const owned of controllers.values()) clearTimeout(owned.reconnectTimer);
       finishResize({ persist: false });
       for (const owned of controllers.values()) owned.transport.close();

@@ -27,11 +27,14 @@ test("streams a consented Enter submission through the real broker and pinned Pi
   expect(realAgentSidebar.modelRequests).toHaveLength(0);
   await page.getByRole("button", { name: "Open Page agent" }).click();
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
-  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled({ timeout: 15_000 });
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  const send = page.locator('.agent-composer button[type="submit"]');
+  await expect(composer).toBeEnabled({ timeout: 15_000 });
+  await expect(send).toBeDisabled();
   expect(realAgentSidebar.modelRequests).toHaveLength(0);
 
-  const composer = page.getByLabel("Message Pi about this whiteboard");
   await composer.fill("Answer from the supplied content only.");
+  await expect(send).toBeEnabled();
   await composer.press("Enter");
   await expect(page.locator(".agent-response-loading")).toHaveAccessibleName("Pi is responding", { timeout: 15_000 });
   await expect(page.locator(".agent-live-status")).toHaveText("Responding");
@@ -82,10 +85,12 @@ test("automatically connects a literal loopback HTTP Markdown viewer", async ({
   await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
-  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled({ timeout: 15_000 });
-
   const composer = page.getByLabel("Message Pi about this whiteboard");
+  const send = page.locator('.agent-composer button[type="submit"]');
+  await expect(composer).toBeEnabled({ timeout: 15_000 });
+  await expect(send).toBeDisabled();
   await composer.fill("Confirm the local HTTP board content.");
+  await expect(send).toBeEnabled();
   await composer.press("Enter");
   await expect(page.locator(".agent-response-loading")).toHaveAccessibleName("Pi is responding", { timeout: 15_000 });
   await realAgentSidebar.releaseModelFirstDelta();

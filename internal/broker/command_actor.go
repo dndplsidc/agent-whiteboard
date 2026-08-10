@@ -78,6 +78,11 @@ func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, t
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
 			return
 		}
+		if actor.releaseMessageImages(payload.MessageID) != nil {
+			actor.publishShared(attachments, agentprotocol.QueuePayload{Items: actor.queue.Items()})
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorImageStorageFailure)
+			return
+		}
 		if !actor.publishShared(attachments, agentprotocol.QueuePayload{Items: actor.queue.Items()}) {
 			actor.failPendingCommand(request.command.CommandID)
 			return

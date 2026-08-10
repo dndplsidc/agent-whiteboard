@@ -38,6 +38,13 @@ const (
 	ErrorProviderProtocolFailure      BrowserErrorCode = "provider_protocol_failure"
 	ErrorProviderMalformedStream      BrowserErrorCode = "provider_malformed_stream"
 	ErrorAcceptanceOutcomeUnknown     BrowserErrorCode = "acceptance_outcome_unknown"
+	ErrorImageInputUnsupported        BrowserErrorCode = "image_input_unsupported"
+	ErrorImageUnsupported             BrowserErrorCode = "image_unsupported"
+	ErrorImageTooLarge                BrowserErrorCode = "image_too_large"
+	ErrorImageTurnLimit               BrowserErrorCode = "image_turn_limit"
+	ErrorImageWorkspaceLimit          BrowserErrorCode = "image_workspace_limit"
+	ErrorImageMissing                 BrowserErrorCode = "image_missing"
+	ErrorImageStorageFailure          BrowserErrorCode = "image_storage_failure"
 
 	// Compatibility names describe the same frozen wire outcomes.
 	ErrorActiveTurnBusy      = ErrorActiveTurnConflict
@@ -105,6 +112,13 @@ var browserErrorDefinitions = map[BrowserErrorCode]browserErrorDefinition{
 	ErrorProviderProtocolFailure:      {"The provider protocol operation failed.", ActionRestartProvider},
 	ErrorProviderMalformedStream:      {"The provider returned a malformed event stream.", ActionRestartProvider},
 	ErrorAcceptanceOutcomeUnknown:     {"The provider turn acceptance outcome is unknown.", ActionRefreshState},
+	ErrorImageInputUnsupported:        {"The selected model does not support image input.", ActionConfigureModel},
+	ErrorImageUnsupported:             {"The selected file is not a supported image.", ActionNone},
+	ErrorImageTooLarge:                {"The selected image is too large.", ActionNone},
+	ErrorImageTurnLimit:               {"The message has too many or too much image data.", ActionNone},
+	ErrorImageWorkspaceLimit:          {"This conversation has reached its image storage limit.", ActionNone},
+	ErrorImageMissing:                 {"The selected image is no longer available.", ActionNone},
+	ErrorImageStorageFailure:          {"The selected image could not be stored safely.", ActionTryAgain},
 }
 
 type BrowserError struct{ code BrowserErrorCode }
@@ -129,6 +143,8 @@ func AllBrowserErrorCodes() []BrowserErrorCode {
 		ErrorBoardRevisionMalformed, ErrorInvalidCommand, ErrorInvalidState, ErrorQueueFull, ErrorActiveTurnConflict,
 		ErrorStaleReference, ErrorReplayWindowUnavailable, ErrorStateRepairFailed, ErrorArchiveDeleteRetained,
 		ErrorBrokerShuttingDown, ErrorProviderProtocolFailure, ErrorProviderMalformedStream, ErrorAcceptanceOutcomeUnknown,
+		ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
+		ErrorImageWorkspaceLimit, ErrorImageMissing, ErrorImageStorageFailure,
 	}
 }
 

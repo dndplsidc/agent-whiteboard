@@ -1374,6 +1374,124 @@ body.agent-drawer-modal-open .agent-toggle {
   color: color-mix(in srgb, var(--awb-muted) 78%, transparent);
 }
 
+.agent-image-picker {
+  display: none;
+}
+
+.agent-attachment-status:empty {
+  display: none;
+}
+
+.agent-attachment-status {
+  color: var(--awb-muted);
+  font-size: 0.68rem;
+  margin: 0.15rem 0.25rem 0.35rem;
+}
+
+.agent-attachment-list,
+.agent-message-images {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding: 0.05rem 0.05rem 0.55rem;
+}
+
+.agent-attachment-preview {
+  align-items: center;
+  background: color-mix(in srgb, var(--awb-code-background) 84%, transparent);
+  border: 1px solid var(--awb-border);
+  border-radius: 0.72rem;
+  display: grid;
+  flex: 0 0 11.25rem;
+  gap: 0.48rem;
+  grid-template-columns: 2.65rem minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 0.32rem;
+}
+
+.agent-attachment-preview[data-state="failed"] {
+  border-color: color-mix(in srgb, #c2410c 55%, var(--awb-border));
+}
+
+.agent-attachment-preview > img {
+  background: var(--awb-surface);
+  border-radius: 0.5rem;
+  height: 2.65rem;
+  object-fit: cover;
+  width: 2.65rem;
+}
+
+.agent-attachment-preview > div:not(.agent-attachment-actions) {
+  display: grid;
+  min-width: 0;
+}
+
+.agent-attachment-preview strong,
+.agent-attachment-preview span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-attachment-preview strong {
+  font-size: 0.72rem;
+}
+
+.agent-attachment-preview span {
+  color: var(--awb-muted);
+  font-size: 0.64rem;
+}
+
+.agent-attachment-actions {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.agent-attachment-actions button,
+.agent-image-button {
+  background: transparent !important;
+  border: 0 !important;
+  color: var(--awb-muted) !important;
+  min-height: 1.8rem;
+  min-width: 1.8rem;
+  padding: 0.2rem !important;
+}
+
+.agent-attachment-actions button:hover,
+.agent-image-button:hover:not([disabled]) {
+  background: var(--awb-code-background) !important;
+}
+
+.agent-message-images {
+  margin-top: 0.55rem;
+  padding-bottom: 0;
+}
+
+.agent-message-images figure {
+  margin: 0;
+  min-width: 6.5rem;
+  width: 8rem;
+}
+
+.agent-message-images img {
+  background: var(--awb-code-background);
+  border: 1px solid var(--awb-border);
+  border-radius: 0.65rem;
+  display: block;
+  height: 6rem;
+  object-fit: cover;
+  width: 100%;
+}
+
+.agent-message-images figcaption {
+  color: var(--awb-muted);
+  font-size: 0.64rem;
+  margin-top: 0.22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-composer-bar {
   align-items: center;
   display: flex;
@@ -1441,6 +1559,11 @@ body.agent-drawer-modal-open .agent-toggle {
 .agent-drawer summary:focus-visible {
   outline: 0.18rem solid var(--awb-link);
   outline-offset: 0.12rem;
+}
+
+.agent-composer textarea:focus,
+.agent-composer textarea:focus-visible {
+  outline: 0;
 }
 
 @media (min-width: 64rem) {

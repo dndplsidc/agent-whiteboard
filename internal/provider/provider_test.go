@@ -430,6 +430,8 @@ func TestProviderErrorTaxonomyIsClosedStaticAndRedacted(t *testing.T) {
 		provider.ErrorNoUsableModel, provider.ErrorContentOnlyUnavailable, provider.ErrorProtocolIncompatible,
 		provider.ErrorProtocolFailure, provider.ErrorMalformedStream, provider.ErrorChildExited, provider.ErrorNativeSessionMissing,
 		provider.ErrorContextTooLarge, provider.ErrorAcceptanceUnknown,
+		provider.ErrorImageInputUnsupported, provider.ErrorImageUnsupported, provider.ErrorImageTooLarge,
+		provider.ErrorImageTurnLimit, provider.ErrorImageMissing, provider.ErrorImageStorageFailure,
 	}
 	require.Equal(t, codes, provider.AllProviderErrorCodes())
 	for _, code := range codes {
@@ -510,6 +512,7 @@ func validFakeSession() *fakeSession {
 	return &fakeSession{events: make(chan provider.Event), metadata: validNativeSession(), child: &fakeChild{}}
 }
 func (*fakeSession) Model() string                           { return "resolved-model" }
+func (*fakeSession) Capabilities() provider.Capabilities     { return provider.Capabilities{} }
 func (f *fakeSession) NativeSession() provider.NativeSession { return f.metadata }
 func (*fakeSession) History(context.Context, provider.HistoryRequest) (provider.HistoryPage, error) {
 	return provider.HistoryPage{Items: []provider.HistoryItem{}}, nil

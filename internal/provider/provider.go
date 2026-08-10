@@ -10,8 +10,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/edocsss/agent-whiteboard/internal/agentlimits"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
+	"github.com/edocsss/agent-whiteboard/internal/raster"
 )
 
 const (
@@ -29,6 +31,10 @@ const (
 	MaxSummaryBytes         = 8 << 10
 	MaxLaunchItems          = 1024
 	MaxLaunchAggregateBytes = 1 << 20
+	MaxImagesPerTurn        = agentlimits.MaxImagesPerTurn
+	MaxImageBytes           = agentlimits.MaxImageBytes
+	MaxTurnImageBytes       = agentlimits.MaxTurnImageBytes
+	MaxImageNameBytes       = agentlimits.MaxImageNameBytes
 )
 
 type Name string
@@ -66,6 +72,12 @@ const (
 	ErrorNativeSessionMissing   ProviderErrorCode = "native_session_missing"
 	ErrorContextTooLarge        ProviderErrorCode = "context_too_large"
 	ErrorAcceptanceUnknown      ProviderErrorCode = "acceptance_unknown"
+	ErrorImageInputUnsupported  ProviderErrorCode = "image_input_unsupported"
+	ErrorImageUnsupported       ProviderErrorCode = "image_unsupported"
+	ErrorImageTooLarge          ProviderErrorCode = "image_too_large"
+	ErrorImageTurnLimit         ProviderErrorCode = "image_turn_limit"
+	ErrorImageMissing           ProviderErrorCode = "image_missing"
+	ErrorImageStorageFailure    ProviderErrorCode = "image_storage_failure"
 )
 
 var providerErrorMessages = map[ProviderErrorCode]string{
@@ -83,6 +95,12 @@ var providerErrorMessages = map[ProviderErrorCode]string{
 	ErrorNativeSessionMissing:   "The native provider session is unavailable.",
 	ErrorContextTooLarge:        "The complete turn does not fit the effective model capacity.",
 	ErrorAcceptanceUnknown:      "The provider turn acceptance outcome is unknown.",
+	ErrorImageInputUnsupported:  "The resolved model does not support image input.",
+	ErrorImageUnsupported:       "The image input is unsupported or malformed.",
+	ErrorImageTooLarge:          "The image input exceeds the per-image limit.",
+	ErrorImageTurnLimit:         "The turn exceeds the image input limit.",
+	ErrorImageMissing:           "The image input is no longer available.",
+	ErrorImageStorageFailure:    "The image input could not be read safely.",
 }
 
 // ProviderError is a closed, provider-neutral failure. It intentionally carries
@@ -111,6 +129,8 @@ func AllProviderErrorCodes() []ProviderErrorCode {
 		ErrorNotReady, ErrorReadinessFailed, ErrorMissingExecutable, ErrorStartupFailed, ErrorAuthenticationRequired,
 		ErrorNoUsableModel, ErrorContentOnlyUnavailable, ErrorProtocolIncompatible, ErrorProtocolFailure, ErrorMalformedStream,
 		ErrorChildExited, ErrorNativeSessionMissing, ErrorContextTooLarge, ErrorAcceptanceUnknown,
+		ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
+		ErrorImageMissing, ErrorImageStorageFailure,
 	}
 }
 
@@ -248,6 +268,7 @@ type Session interface {
 	// NativeSession returns valid metadata for every successfully created or resumed session.
 	NativeSession() NativeSession
 	Model() string
+	Capabilities() Capabilities
 	History(context.Context, HistoryRequest) (HistoryPage, error)
 	// Preflight resolves the effective model and verifies complete turn sizing
 	// against the current native session before Submit is attempted.
@@ -381,17 +402,75 @@ type TurnRequest struct {
 	TurnID    string
 	MessageID string
 	Message   string
+	Images    []ImageInput
 	Context   *PageContext
 }
 
 func (r TurnRequest) Validate() error {
-	if !validID(r.TurnID) || !validID(r.MessageID) || !validBoundedText(r.Message, MaxTurnMessageBytes, true) {
+	if !validID(r.TurnID) || !validID(r.MessageID) || !validBoundedText(r.Message, MaxTurnMessageBytes, false) || (r.Message == "" && len(r.Images) == 0) || validateImageInputs(r.Images) != nil {
 		return errors.New("invalid turn request")
 	}
 	if r.Context != nil {
 		return r.Context.Validate()
 	}
 	return nil
+}
+
+// Capabilities describes input modalities of the resolved native model.
+type Capabilities struct {
+	Images bool
+}
+
+func (Capabilities) Validate() error { return nil }
+
+// ImageInput is private provider-neutral metadata for one already validated
+// conversation image. Path is never serialized or exposed to the browser.
+type ImageInput struct {
+	ID        string
+	Name      string
+	MediaType string
+	Bytes     int64
+	Path      string
+}
+
+// Validate verifies one provider image input independently of a turn.
+func (image ImageInput) Validate() error {
+	return validateImageInputs([]ImageInput{image})
+}
+
+func (ImageInput) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("provider image inputs cannot be serialized")
+}
+
+func validateImageInputs(images []ImageInput) error {
+	if len(images) > MaxImagesPerTurn {
+		return errors.New("too many provider image inputs")
+	}
+	seenIDs := make(map[string]struct{}, len(images))
+	seenPaths := make(map[string]struct{}, len(images))
+	var total int64
+	for _, image := range images {
+		if !validID(image.ID) || !validBoundedText(image.Name, MaxImageNameBytes, true) || !validImageMediaType(image.MediaType) || image.Bytes <= 0 || image.Bytes > MaxImageBytes || !validAbsoluteCleanPath(image.Path) {
+			return errors.New("invalid provider image input")
+		}
+		if _, exists := seenIDs[image.ID]; exists {
+			return errors.New("duplicate provider image id")
+		}
+		if _, exists := seenPaths[image.Path]; exists {
+			return errors.New("duplicate provider image path")
+		}
+		seenIDs[image.ID] = struct{}{}
+		seenPaths[image.Path] = struct{}{}
+		total += image.Bytes
+		if total > MaxTurnImageBytes {
+			return errors.New("provider image input exceeds aggregate limit")
+		}
+	}
+	return nil
+}
+
+func validImageMediaType(mediaType string) bool {
+	return raster.SupportedMediaType(mediaType)
 }
 
 type PreflightRequest struct {
@@ -519,7 +598,8 @@ func validateHistory(items []HistoryItem) error {
 	}
 	total := 0
 	for _, item := range items {
-		if !validID(item.TurnID) || !validID(item.MessageID) || (item.Role != HistoryUser && item.Role != HistoryAssistant) || !validBoundedText(item.Text, MaxHistoryItemBytes, true) || item.CreatedAt.IsZero() {
+		requireText := item.Role == HistoryAssistant
+		if !validID(item.TurnID) || !validID(item.MessageID) || (item.Role != HistoryUser && item.Role != HistoryAssistant) || !validBoundedText(item.Text, MaxHistoryItemBytes, requireText) || item.CreatedAt.IsZero() {
 			return errors.New("invalid history item")
 		}
 		total += len(item.Text)
@@ -623,7 +703,8 @@ func (e Event) Validate() error {
 	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil
 	switch e.Kind {
 	case EventUserMessage, EventAssistantMessage:
-		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, true) || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		requireText := e.Kind == EventAssistantMessage
+		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, requireText) || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider message event")
 		}
 	case EventAssistantDelta:

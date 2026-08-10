@@ -30,12 +30,12 @@ async function connectSidebar(page, provider = "pi") {
   if (await launcher.isVisible()) await launcher.click();
   await page.getByRole("button", { name: `Connect to ${providerName}`, exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toContainText(model);
-  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+  await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
 }
 
 function parsedCommands(requests) {
   return requests
-    .filter((request) => request.method === "POST" && typeof request.body === "string" && request.body !== "")
+    .filter((request) => request.method === "POST" && ["/api/v1/agent/connect", "/api/v1/agent/commands"].includes(request.url) && typeof request.body === "string" && request.body !== "")
     .map((request) => JSON.parse(request.body));
 }
 
@@ -65,7 +65,7 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
 
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
-  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+  await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
   const connect = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "connect");
   expect(connect).toBeDefined();
   expect(connect.payload).not.toHaveProperty("context");
@@ -311,6 +311,66 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   const types = parsedCommands(localAgentSidebar.brokerRequests).map((command) => command.type);
   expect(types).toEqual(expect.arrayContaining(["submit", "queue_edit", "queue_remove", "interrupt"]));
   expect(types.filter((type) => type === "submit")).toHaveLength(2);
+});
+
+test("picks and pastes multiple images with previews, retry, queue, and styled focus", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Image composer\n", creatorContext: "Image context.\n" });
+  localAgentSidebar.setHoldResponses(true);
+  await connectSidebar(page);
+
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  await composer.focus();
+  expect(await composer.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+
+  const picker = page.locator(".agent-image-picker");
+  await picker.setInputFiles([
+    { name: "diagram.png", mimeType: "image/png", buffer: Buffer.from([137, 80, 78, 71]) },
+    { name: "photo.jpg", mimeType: "image/jpeg", buffer: Buffer.from([255, 216, 255, 217]) },
+  ]);
+  await expect(page.locator('.agent-attachment-preview[data-state="ready"]')).toHaveCount(2);
+  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+  await page.locator('.agent-composer button[type="submit"]').click();
+  await expect(page.locator(".agent-message-user .agent-message-images img")).toHaveCount(2);
+  await expect(page.locator(".agent-attachment-preview")).toHaveCount(0);
+
+  await composer.fill("Queued with a pasted image.");
+  await composer.evaluate((element) => {
+    const clipboard = new DataTransfer();
+    clipboard.items.add(new File([new Uint8Array([82, 73, 70, 70])], "paste.webp", { type: "image/webp" }));
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
+  });
+  await expect(composer).toHaveValue("Queued with a pasted image.");
+  await expect(page.locator('.agent-attachment-preview[data-state="ready"]')).toHaveCount(1);
+  await composer.press("Enter");
+  await expect(page.getByLabel("Edit queued message")).toHaveValue("Queued with a pasted image.");
+  await expect(page.locator(".agent-queue .agent-message-images img")).toHaveCount(1);
+
+  localAgentSidebar.failNextImageUpload();
+  await picker.setInputFiles({ name: "retry.png", mimeType: "image/png", buffer: Buffer.from([137, 80, 78, 71]) });
+  const failed = page.locator('.agent-attachment-preview[data-state="failed"]');
+  await expect(failed).toContainText("could not be stored safely");
+  await failed.getByRole("button", { name: "Retry retry.png" }).click();
+  await expect(page.locator('.agent-attachment-preview[data-state="ready"]')).toHaveCount(1);
+  await page.getByRole("button", { name: "Remove retry.png" }).click();
+  await expect(page.locator(".agent-attachment-preview")).toHaveCount(0);
+  await expect.poll(() => localAgentSidebar.brokerRequests.some((request) => request.method === "DELETE" && request.url.startsWith("/api/v1/agent/images/"))).toBe(true);
+
+  const submits = parsedCommands(localAgentSidebar.brokerRequests).filter((command) => command.type === "submit");
+  expect(submits[0].payload).toMatchObject({ message: "", images: [{ name: "diagram.png" }, { name: "photo.jpg" }] });
+  expect(submits[1].payload).toMatchObject({ message: "Queued with a pasted image.", images: [{ name: "paste.webp" }] });
+});
+
+test("explains when the selected model cannot accept images", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Text model\n", creatorContext: "Text only.\n" });
+  localAgentSidebar.setSupportsImages("pi", false);
+  await connectSidebar(page);
+  const imageButton = page.getByRole("button", { name: "Add images" });
+  await expect(imageButton).toBeDisabled();
+  await expect(imageButton).toHaveAttribute("title", /does not support image input/u);
 });
 
 test("shows authoritative loading, progressive streaming, alternate views, and sanitized activity", async ({
@@ -724,5 +784,5 @@ test("replays Codex interaction activity after reconnect and isolates an unavail
   await page.getByLabel("Conversation provider").selectOption("pi");
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
-  await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+  await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
 });

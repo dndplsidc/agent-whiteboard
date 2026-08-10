@@ -1,43 +1,16 @@
 package image
 
 import (
-	"bytes"
-	"image/gif"
-	"image/jpeg"
-	"image/png"
-	"net/http"
-
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	"golang.org/x/image/webp"
+	"github.com/edocsss/agent-whiteboard/internal/raster"
 )
 
 func DetectFormat(content []byte) (string, string, error) {
-	mediaType := http.DetectContentType(content)
-	reader := bytes.NewReader(content)
-
-	var err error
-	var extension string
-	switch mediaType {
-	case "image/png":
-		_, err = png.DecodeConfig(reader)
-		extension = ".png"
-	case "image/jpeg":
-		_, err = jpeg.DecodeConfig(reader)
-		extension = ".jpg"
-	case "image/gif":
-		_, err = gif.DecodeConfig(reader)
-		extension = ".gif"
-	case "image/webp":
-		_, err = webp.DecodeConfig(reader)
-		extension = ".webp"
-	default:
-		return "", "", unsupportedMediaType()
-	}
+	format, err := raster.Detect(content)
 	if err != nil {
 		return "", "", unsupportedMediaType()
 	}
-
-	return extension, mediaType, nil
+	return format.Extension, format.MediaType, nil
 }
 
 func unsupportedMediaType() error {

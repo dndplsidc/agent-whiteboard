@@ -67,16 +67,23 @@ func (s *Server) websocket(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	safe := newSafeConnection(connection)
+	item := &attachment{
+		key:        attachmentKey{origin: origin, clientID: connect.ClientID, conversationID: connection.ConversationID()},
+		connection: safe,
+		ctx:        ctx,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+	}
 	tracked := s.track(func(closeCtx context.Context) error {
-		cancel()
 		closeWebSocket(socket, websocket.CloseGoingAway, "broker shutting down")
 		socketErr := socket.Close()
 		if isClosedError(socketErr) {
 			socketErr = nil
 		}
-		return errors.Join(socketErr, safe.Close(closeCtx))
+		return errors.Join(socketErr, item.close(closeCtx))
 	})
 	defer func() {
+		s.attachments.remove(item)
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
 		defer closeCancel()
 		if tracked.close(closeCtx) == nil {
@@ -149,11 +156,19 @@ func (s *Server) websocket(response http.ResponseWriter, request *http.Request) 
 		workers.Wait()
 		return
 	}
-	if err = socket.WriteMessage(websocket.TextMessage, encodedFirst); err != nil {
+	old, err := s.attachments.activate(item, func() error {
+		return socket.WriteMessage(websocket.TextMessage, encodedFirst)
+	})
+	if err != nil {
 		cancel()
 		_ = socket.Close()
 		workers.Wait()
 		return
+	}
+	if old != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), transportCleanupTimeout)
+		_ = old.close(closeCtx)
+		closeCancel()
 	}
 
 	writerDone := make(chan error, 1)

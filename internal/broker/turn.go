@@ -64,14 +64,24 @@ func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, t
 		return false, agentprotocol.ErrorInvalidState
 	}
 
-	request, code := actor.convertSubmittedTurn(payload)
+	images, descriptors, code := actor.claimTurnImages(command, payload)
 	if code != "" {
 		return false, code
+	}
+	releaseOnFailure := func(code agentprotocol.BrowserErrorCode) agentprotocol.BrowserErrorCode {
+		if len(images) != 0 && actor.releaseMessageImages(payload.MessageID) != nil {
+			return agentprotocol.ErrorImageStorageFailure
+		}
+		return code
+	}
+	request, code := actor.convertSubmittedTurn(payload, images)
+	if code != "" {
+		return false, releaseOnFailure(code)
 	}
 	if actor.active == nil && actor.queue.Empty() {
 		if code := actor.prepareTurn(request); code != "" {
 			zeroProviderContext(request.Context)
-			return false, code
+			return false, releaseOnFailure(code)
 		}
 		actor.active = &activeTurn{request: request, phase: turnStarting, originCommandID: command.CommandID, originClientID: command.ClientID}
 		actor.startSubmitWorker(turnResults, request)
@@ -79,7 +89,7 @@ func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, t
 	}
 	if actor.active != nil && actor.active.phase != turnRunning && actor.active.phase != turnInterrupting && actor.active.phase != turnInterruptRequested {
 		zeroProviderContext(request.Context)
-		return false, agentprotocol.ErrorInvalidState
+		return false, releaseOnFailure(agentprotocol.ErrorInvalidState)
 	}
 	contextForHead := request.Context
 	if actor.queue.Empty() {
@@ -88,21 +98,21 @@ func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, t
 	if contextForHead != nil {
 		request.Context = nil
 	}
-	turn := QueuedTurn{TurnID: request.TurnID, MessageID: request.MessageID, Message: request.Message, Context: request.Context}
+	turn := QueuedTurn{TurnID: request.TurnID, MessageID: request.MessageID, Message: request.Message, Images: request.Images, Descriptors: descriptors, Context: request.Context}
 	if err := actor.queue.Enqueue(turn); err != nil {
 		zeroProviderContext(request.Context)
 		zeroProviderContext(contextForHead)
 		if errors.Is(err, ErrQueueFull) {
-			return false, agentprotocol.ErrorQueueFull
+			return false, releaseOnFailure(agentprotocol.ErrorQueueFull)
 		}
-		return false, agentprotocol.ErrorInvalidState
+		return false, releaseOnFailure(agentprotocol.ErrorInvalidState)
 	}
 	zeroProviderContext(request.Context)
 	if contextForHead != nil {
 		if err := actor.queue.attachContextToHead(contextForHead); err != nil {
 			_ = actor.queue.Remove(payload.MessageID)
 			zeroProviderContext(contextForHead)
-			return false, agentprotocol.ErrorInvalidState
+			return false, releaseOnFailure(agentprotocol.ErrorInvalidState)
 		}
 	}
 	if !actor.publishShared(attachments, agentprotocol.QueuePayload{Items: actor.queue.Items()}) {
@@ -110,7 +120,7 @@ func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, t
 		if contextForHead != nil {
 			actor.queue.discardContext()
 		}
-		return false, agentprotocol.ErrorBrokerUnavailable
+		return false, releaseOnFailure(agentprotocol.ErrorBrokerUnavailable)
 	}
 	if actor.active == nil {
 		actor.dispatchNext(attachments, turnResults)
@@ -118,13 +128,13 @@ func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, t
 	return false, ""
 }
 
-func (actor *conversation) convertSubmittedTurn(payload agentprotocol.SubmitPayload) (provider.TurnRequest, agentprotocol.BrowserErrorCode) {
+func (actor *conversation) convertSubmittedTurn(payload agentprotocol.SubmitPayload, images []provider.ImageInput) (provider.TurnRequest, agentprotocol.BrowserErrorCode) {
 	contextOwned := (actor.active != nil && actor.active.request.Context != nil) || actor.queue.hasContext
 	if actor.contextState != agentprotocol.ContextPending {
 		if payload.Context != nil {
 			return provider.TurnRequest{}, agentprotocol.ErrorInvalidState
 		}
-		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message}
+		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message, Images: images}
 		if request.Validate() != nil {
 			return provider.TurnRequest{}, agentprotocol.ErrorInvalidCommand
 		}
@@ -134,7 +144,7 @@ func (actor *conversation) convertSubmittedTurn(payload agentprotocol.SubmitPayl
 		if payload.Context != nil {
 			return provider.TurnRequest{}, agentprotocol.ErrorInvalidState
 		}
-		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message}
+		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message, Images: images}
 		if request.Validate() != nil {
 			return provider.TurnRequest{}, agentprotocol.ErrorInvalidCommand
 		}
@@ -153,7 +163,7 @@ func (actor *conversation) convertSubmittedTurn(payload agentprotocol.SubmitPayl
 		zeroProviderContext(&converted)
 		return provider.TurnRequest{}, agentprotocol.ErrorInvalidState
 	}
-	request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message, Context: &converted}
+	request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message, Images: images, Context: &converted}
 	if request.Validate() != nil {
 		zeroProviderContext(&converted)
 		return provider.TurnRequest{}, agentprotocol.ErrorInvalidCommand
@@ -265,6 +275,9 @@ func (actor *conversation) handleSubmitResult(attachments map[*attachment]struct
 	active.request.Context = nil
 	if result.err != nil {
 		code := MapError(result.err).Code()
+		if code != agentprotocol.ErrorAcceptanceOutcomeUnknown && len(active.request.Images) != 0 && actor.releaseMessageImages(active.request.MessageID) != nil {
+			code = agentprotocol.ErrorImageStorageFailure
+		}
 		if activeHasPrepared(actor.mapping.Current, active.request.TurnID) && code != agentprotocol.ErrorAcceptanceOutcomeUnknown {
 			if !actor.rejectPrepared(active.request.TurnID) {
 				code = agentprotocol.ErrorStateRepairFailed

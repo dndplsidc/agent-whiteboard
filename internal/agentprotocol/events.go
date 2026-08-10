@@ -108,17 +108,19 @@ const (
 )
 
 type QueueItem struct {
-	TurnID    string `json:"turn_id"`
-	MessageID string `json:"message_id"`
-	Message   string `json:"message"`
+	TurnID    string            `json:"turn_id"`
+	MessageID string            `json:"message_id"`
+	Message   string            `json:"message"`
+	Images    []ImageDescriptor `json:"images,omitempty"`
 }
 type TimelineItem struct {
-	ItemID    string           `json:"item_id"`
-	Kind      TimelineItemKind `json:"kind"`
-	TurnID    string           `json:"turn_id,omitempty"`
-	MessageID string           `json:"message_id,omitempty"`
-	Text      string           `json:"text"`
-	CreatedAt time.Time        `json:"created_at"`
+	ItemID    string            `json:"item_id"`
+	Kind      TimelineItemKind  `json:"kind"`
+	TurnID    string            `json:"turn_id,omitempty"`
+	MessageID string            `json:"message_id,omitempty"`
+	Text      string            `json:"text"`
+	Images    []ImageDescriptor `json:"images,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
 }
 type ArchiveItem struct {
 	ArchiveID string       `json:"archive_id"`
@@ -135,10 +137,11 @@ type EventPayload interface {
 }
 
 type SnapshotPayload struct {
-	Lifecycle    LifecycleState `json:"lifecycle"`
-	Queue        []QueueItem    `json:"queue"`
-	ContextState ContextState   `json:"context_state"`
-	ActiveTurnID *string        `json:"active_turn_id"`
+	Lifecycle      LifecycleState `json:"lifecycle"`
+	Queue          []QueueItem    `json:"queue"`
+	ContextState   ContextState   `json:"context_state"`
+	ActiveTurnID   *string        `json:"active_turn_id"`
+	SupportsImages bool           `json:"supports_images"`
 }
 
 func (SnapshotPayload) EventType() EventType { return EventSnapshot }
@@ -223,15 +226,16 @@ func (p HistoryPayload) validate() error {
 }
 
 type UserMessagePayload struct {
-	TurnID    string    `json:"turn_id"`
-	MessageID string    `json:"message_id"`
-	Text      string    `json:"text"`
-	CreatedAt time.Time `json:"created_at"`
+	TurnID    string            `json:"turn_id"`
+	MessageID string            `json:"message_id"`
+	Text      string            `json:"text"`
+	Images    []ImageDescriptor `json:"images,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
 }
 
 func (UserMessagePayload) EventType() EventType { return EventUserMessage }
 func (p UserMessagePayload) validate() error {
-	if !validID(p.TurnID) || !validID(p.MessageID) || !validMessage(p.Text) || p.CreatedAt.IsZero() {
+	if !validID(p.TurnID) || !validID(p.MessageID) || !validTextWithDescriptors(p.Text, p.Images) || p.CreatedAt.IsZero() {
 		return invalid(nil)
 	}
 	return nil
@@ -292,9 +296,10 @@ func (p LifecyclePayload) validate() error {
 }
 
 type ProviderPayload struct {
-	Provider ProviderName  `json:"provider"`
-	State    ProviderState `json:"state"`
-	Model    string        `json:"model,omitempty"`
+	Provider       ProviderName  `json:"provider"`
+	State          ProviderState `json:"state"`
+	Model          string        `json:"model,omitempty"`
+	SupportsImages bool          `json:"supports_images"`
 }
 
 func (ProviderPayload) EventType() EventType { return EventProvider }
@@ -517,7 +522,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	var required []string
 	switch kind {
 	case EventSnapshot:
-		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_turn_id"}
+		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_turn_id", "supports_images"}
 	case EventCommandResult:
 		target, required = &CommandResultPayload{}, []string{"command_id", "status"}
 	case EventTimeline:
@@ -535,7 +540,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	case EventLifecycle:
 		target, required = &LifecyclePayload{}, []string{"state", "turn_id"}
 	case EventProvider:
-		target, required = &ProviderPayload{}, []string{"provider", "state"}
+		target, required = &ProviderPayload{}, []string{"provider", "state", "supports_images"}
 	case EventContext:
 		target, required = &ContextPayload{}, []string{"digest", "state"}
 	case EventActivity:
@@ -643,7 +648,7 @@ func ValidateQueue(items []QueueItem) error {
 	seenMessages := make(map[string]struct{}, len(items))
 	seenTurns := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if !validID(item.TurnID) || !validID(item.MessageID) || !validMessage(item.Message) {
+		if !validID(item.TurnID) || !validID(item.MessageID) || !validTextWithDescriptors(item.Message, item.Images) {
 			return invalid(nil)
 		}
 		if _, exists := seenMessages[item.MessageID]; exists {
@@ -700,17 +705,22 @@ func validArchiveAction(value ArchiveAction) bool {
 	return value == ArchiveCreated || value == ArchiveRestored || value == ArchiveDeleted
 }
 func validTimelineItem(item TimelineItem) bool {
-	if !validID(item.ItemID) || item.CreatedAt.IsZero() || !validMessage(item.Text) {
+	if !validID(item.ItemID) || item.CreatedAt.IsZero() {
 		return false
 	}
 	switch item.Kind {
-	case TimelineUser, TimelineAssistant:
-		return validID(item.TurnID) && validID(item.MessageID)
+	case TimelineUser:
+		return validID(item.TurnID) && validID(item.MessageID) && validTextWithDescriptors(item.Text, item.Images)
+	case TimelineAssistant:
+		return validID(item.TurnID) && validID(item.MessageID) && validMessage(item.Text) && len(item.Images) == 0
 	case TimelineActivity:
-		return item.MessageID == "" && (item.TurnID == "" || validID(item.TurnID))
+		return item.MessageID == "" && (item.TurnID == "" || validID(item.TurnID)) && validMessage(item.Text) && len(item.Images) == 0
 	default:
 		return false
 	}
+}
+func validTextWithDescriptors(text string, images []ImageDescriptor) bool {
+	return validBoundedText(text, MaxMessageBytes, false) && (text != "" || len(images) != 0) && validateImageDescriptors(images) == nil
 }
 func validArchiveItem(item ArchiveItem) bool {
 	return validID(item.ArchiveID) && !item.CreatedAt.IsZero() && !item.UpdatedAt.IsZero() && !item.UpdatedAt.Before(item.CreatedAt) && item.Provider.Valid() && validBoundedText(item.Model, MaxTitleBytes, false) && validBoundedText(item.Preview, MaxTitleBytes, false) && utf8.ValidString(item.Preview)

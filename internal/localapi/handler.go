@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 )
@@ -68,6 +69,10 @@ func (s *Server) serveHTTP(response http.ResponseWriter, request *http.Request) 
 		}
 		s.command(response, request)
 	default:
+		if request.URL.Path == agentprotocol.ImagesPath || strings.HasPrefix(request.URL.Path, agentprotocol.ImagesPath+"/") {
+			s.imageResource(response, request)
+			return
+		}
 		safeHTTPError(response, http.StatusNotFound, agentprotocol.ErrorInvalidCommand)
 	}
 }
@@ -135,6 +140,9 @@ func canonicalRoute(path string) string {
 	case agentprotocol.StatusPath, agentprotocol.ConnectPath, CommandsPath:
 		return path
 	default:
+		if path == agentprotocol.ImagesPath || strings.HasPrefix(path, agentprotocol.ImagesPath+"/") {
+			return agentprotocol.ImagesPath
+		}
 		return "unknown"
 	}
 }

@@ -48,6 +48,18 @@ func (actor *conversation) handleHistoryResult(attachments map[*attachment]struc
 		actor.resumePendingDispatch(attachments, turnResults)
 		return
 	}
+	for index := range payload.Items {
+		if payload.Items[index].Kind != agentprotocol.TimelineUser {
+			continue
+		}
+		images, imageErr := actor.messageImages(payload.Items[index].MessageID)
+		if imageErr != nil {
+			actor.completePendingCommand(attachments, result.commandID, result.clientID, agentprotocol.ErrorImageStorageFailure)
+			actor.resumePendingDispatch(attachments, turnResults)
+			return
+		}
+		payload.Items[index].Images = images
+	}
 	event, err := actor.factory.New(payload)
 	if err != nil || actor.replay.AppendForClient(result.clientID, event) != nil {
 		actor.failPendingCommand(result.commandID)

@@ -1,0 +1,832 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Page agent · Image attachments prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --paper: #ffffff;
+      --surface: #ffffff;
+      --surface-2: #f3f5f7;
+      --ink: #17202a;
+      --muted: #66717d;
+      --border: #dce1e6;
+      --border-strong: #c5ccd4;
+      --accent: #1769e0;
+      --accent-soft: #eaf2ff;
+      --danger: #c8323e;
+      --danger-soft: #fff0f1;
+      --shadow: 0 18px 55px rgb(24 33 44 / 12%);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body { margin: 0; }
+
+    button, textarea, input { font: inherit; }
+    button { color: inherit; }
+
+    .prototype-shell {
+      min-height: 100vh;
+      padding: 28px;
+    }
+
+    .prototype-head {
+      align-items: end;
+      display: flex;
+      gap: 24px;
+      justify-content: space-between;
+      margin: 0 auto 18px;
+      max-width: 1240px;
+    }
+
+    .prototype-kicker {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: .09em;
+      margin: 0 0 6px;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      font-size: clamp(24px, 3vw, 36px);
+      letter-spacing: -.04em;
+      line-height: 1.08;
+      margin: 0;
+    }
+
+    .prototype-summary {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 8px 0 0;
+      max-width: 690px;
+    }
+
+    .state-nav {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+      max-width: 560px;
+    }
+
+    .state-nav button {
+      background: var(--paper);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 7px 11px;
+    }
+
+    .state-nav button:hover { border-color: var(--border-strong); }
+    .state-nav button[aria-pressed="true"] {
+      background: var(--ink);
+      border-color: var(--ink);
+      color: #fff;
+    }
+
+    .workspace {
+      background: var(--paper);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 420px;
+      margin: 0 auto;
+      max-width: 1240px;
+      min-height: 720px;
+      overflow: hidden;
+    }
+
+    .document-pane {
+      background:
+        radial-gradient(circle at 18% 10%, rgb(23 105 224 / 8%), transparent 30%),
+        var(--paper);
+      border-right: 1px solid var(--border);
+      padding: 62px clamp(34px, 6vw, 92px);
+    }
+
+    .doc-inner { margin: 0 auto; max-width: 650px; }
+    .doc-tag {
+      background: var(--accent-soft);
+      border-radius: 6px;
+      color: #1559ba;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 8px;
+    }
+
+    .document-pane h2 {
+      font-size: clamp(30px, 4vw, 48px);
+      letter-spacing: -.045em;
+      line-height: 1.05;
+      margin: 22px 0 16px;
+    }
+
+    .doc-lede {
+      color: #4d5965;
+      font-size: 18px;
+      line-height: 1.65;
+      margin: 0 0 34px;
+    }
+
+    .doc-card {
+      background: rgb(255 255 255 / 82%);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      display: grid;
+      gap: 11px;
+      grid-template-columns: 42px 1fr;
+      margin-top: 12px;
+      padding: 16px;
+    }
+
+    .doc-number {
+      align-items: center;
+      background: var(--surface-2);
+      border-radius: 10px;
+      display: flex;
+      font-size: 13px;
+      font-weight: 750;
+      height: 42px;
+      justify-content: center;
+    }
+
+    .doc-card strong { font-size: 14px; }
+    .doc-card p {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 4px 0 0;
+    }
+
+    .agent-pane {
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .agent-head {
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex: none;
+      height: 62px;
+      justify-content: space-between;
+      padding: 0 13px 0 17px;
+    }
+
+    .agent-identity { align-items: center; display: flex; gap: 10px; min-width: 0; }
+    .agent-mark {
+      align-items: center;
+      background: linear-gradient(145deg, #101827, #43516a);
+      border-radius: 9px;
+      color: white;
+      display: flex;
+      font-size: 11px;
+      font-weight: 800;
+      height: 30px;
+      justify-content: center;
+      width: 30px;
+    }
+
+    .agent-title { font-size: 14px; font-weight: 680; line-height: 1.2; }
+    .agent-status { align-items: center; color: var(--muted); display: flex; font-size: 11px; gap: 5px; margin-top: 2px; }
+    .status-dot { background: #26a269; border-radius: 50%; height: 6px; width: 6px; }
+    .head-actions { display: flex; gap: 2px; }
+    .icon-button {
+      align-items: center;
+      background: transparent;
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      height: 34px;
+      justify-content: center;
+      width: 34px;
+    }
+    .icon-button:hover { background: var(--surface-2); }
+
+    .timeline {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      gap: 18px;
+      overflow: auto;
+      padding: 24px 18px;
+    }
+
+    .empty-conversation {
+      color: var(--muted);
+      margin: auto;
+      max-width: 265px;
+      text-align: center;
+    }
+    .empty-icon {
+      align-items: center;
+      background: var(--surface-2);
+      border-radius: 14px;
+      display: flex;
+      font-size: 21px;
+      height: 52px;
+      justify-content: center;
+      margin: 0 auto 13px;
+      width: 52px;
+    }
+    .empty-conversation strong { color: var(--ink); display: block; font-size: 14px; }
+    .empty-conversation p { font-size: 12px; line-height: 1.55; margin: 5px 0 0; }
+
+    .sent-message {
+      align-self: flex-end;
+      background: #eef1f4;
+      border-radius: 15px 15px 4px 15px;
+      max-width: 84%;
+      padding: 8px;
+    }
+    .sent-grid { display: grid; gap: 4px; grid-template-columns: 1fr 1fr; }
+    .sent-thumb { border-radius: 9px; height: 96px; overflow: hidden; }
+    .sent-thumb:first-child:last-child { grid-column: 1 / -1; width: 170px; }
+    .sent-message p { font-size: 13px; line-height: 1.45; margin: 8px 6px 5px; }
+
+    .assistant-message { font-size: 13px; line-height: 1.55; max-width: 90%; }
+    .assistant-message strong { display: block; font-size: 12px; margin-bottom: 4px; }
+    .assistant-message p { margin: 0; }
+
+    .composer-wrap {
+      background: linear-gradient(transparent, var(--surface) 18%);
+      flex: none;
+      padding: 8px 14px 13px;
+    }
+
+    .paste-hint {
+      color: var(--muted);
+      font-size: 11px;
+      margin: 0 0 7px;
+      min-height: 16px;
+      text-align: center;
+    }
+
+    .composer {
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 16px;
+      box-shadow: 0 8px 25px rgb(25 35 45 / 8%);
+      padding: 9px 9px 7px;
+      position: relative;
+      transition: border-color 120ms ease, box-shadow 120ms ease;
+    }
+    .composer:focus-within {
+      border-color: #8b98a7;
+      box-shadow: 0 10px 29px rgb(25 35 45 / 12%);
+    }
+    .composer.is-drop-target {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgb(23 105 224 / 12%);
+    }
+
+    .attachment-strip {
+      display: flex;
+      gap: 8px;
+      margin: 0 1px 8px;
+      overflow-x: auto;
+      padding: 1px 1px 4px;
+      scrollbar-width: thin;
+    }
+    .attachment-strip[hidden] { display: none; }
+
+    .attachment {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      flex: 0 0 76px;
+      height: 76px;
+      overflow: visible;
+      position: relative;
+    }
+
+    .attachment-preview {
+      border-radius: 10px;
+      display: block;
+      height: 100%;
+      object-fit: cover;
+      overflow: hidden;
+      width: 100%;
+    }
+
+    .mock-photo { position: relative; }
+    .mock-photo::before, .mock-photo::after { content: ""; position: absolute; }
+    .photo-dashboard { background: linear-gradient(150deg, #e8eff8 0 52%, #ccdae8 52%); }
+    .photo-dashboard::before { background: #fff; border-radius: 5px; box-shadow: 18px 0 0 #fff, 36px 0 0 #fff; height: 22px; left: 7px; top: 11px; width: 13px; }
+    .photo-dashboard::after { background: #6c90b9; border-radius: 3px; bottom: 10px; height: 24px; left: 8px; width: 57px; }
+    .photo-chart { background: linear-gradient(145deg, #202b43, #516b94); }
+    .photo-chart::before { border-bottom: 3px solid #7de2bd; border-left: 3px solid transparent; border-radius: 40%; height: 35px; left: 11px; top: 14px; transform: rotate(-11deg); width: 51px; }
+    .photo-board { background: linear-gradient(140deg, #e2c9a3, #896e51); }
+    .photo-board::before { background: #fff6bf; box-shadow: 24px 8px 0 #d6f2dd, 9px 30px 0 #dce8ff; height: 23px; left: 9px; top: 10px; transform: rotate(-4deg); width: 22px; }
+    .photo-phone { background: linear-gradient(145deg, #d9e6ef, #a5b9cb); }
+    .photo-phone::before { background: #162336; border: 3px solid #f5f7fa; border-radius: 10px; height: 57px; left: 22px; top: 7px; transform: rotate(7deg); width: 32px; }
+
+    .remove-attachment {
+      align-items: center;
+      background: #26313d;
+      border: 2px solid var(--surface);
+      border-radius: 50%;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      font-size: 15px;
+      height: 22px;
+      justify-content: center;
+      line-height: 1;
+      opacity: 0;
+      padding: 0;
+      position: absolute;
+      right: -6px;
+      top: -6px;
+      transform: scale(.9);
+      transition: opacity 110ms ease, transform 110ms ease;
+      width: 22px;
+      z-index: 2;
+    }
+    .attachment:hover .remove-attachment,
+    .remove-attachment:focus-visible { opacity: 1; transform: scale(1); }
+
+    .attachment-state {
+      align-items: center;
+      background: rgb(18 25 34 / 58%);
+      border-radius: 10px;
+      color: white;
+      display: flex;
+      inset: 0;
+      justify-content: center;
+      position: absolute;
+    }
+    .spinner {
+      animation: spin .8s linear infinite;
+      border: 2px solid rgb(255 255 255 / 45%);
+      border-radius: 50%;
+      border-top-color: #fff;
+      height: 22px;
+      width: 22px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .attachment.is-error { border: 2px solid var(--danger); }
+    .attachment.is-error .attachment-state {
+      background: rgb(108 19 28 / 76%);
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .attachment-error {
+      align-items: center;
+      background: var(--danger-soft);
+      border-radius: 8px;
+      color: var(--danger);
+      display: flex;
+      font-size: 11px;
+      gap: 5px;
+      margin: 0 1px 8px;
+      padding: 6px 8px;
+    }
+    .attachment-error[hidden] { display: none; }
+    .attachment-error button {
+      background: transparent;
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 750;
+      margin-left: auto;
+      padding: 0;
+      text-decoration: underline;
+    }
+
+    .message-input {
+      background: transparent;
+      border: 0;
+      display: block;
+      line-height: 1.45;
+      max-height: 130px;
+      min-height: 49px;
+      outline: 0;
+      padding: 3px 5px;
+      resize: none;
+      width: 100%;
+    }
+    .message-input::placeholder { color: #89939e; }
+    .message-input:focus-visible { outline: 0; }
+
+    .composer-bar { align-items: center; display: flex; gap: 5px; min-height: 32px; }
+    .attach-button {
+      align-items: center;
+      background: transparent;
+      border: 0;
+      border-radius: 8px;
+      color: var(--muted);
+      cursor: pointer;
+      display: inline-flex;
+      height: 31px;
+      justify-content: center;
+      padding: 0;
+      width: 31px;
+    }
+    .attach-button:hover { background: var(--surface-2); color: var(--ink); }
+    .attach-button svg { height: 17px; width: 17px; }
+    .context-chip { color: var(--muted); font-size: 11px; margin-left: 1px; }
+    .attachment-count {
+      background: var(--accent-soft);
+      border-radius: 999px;
+      color: #1559ba;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 7px;
+    }
+    .attachment-count[hidden] { display: none; }
+
+    .send-button {
+      align-items: center;
+      background: var(--ink);
+      border: 0;
+      border-radius: 9px;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      font-size: 18px;
+      height: 32px;
+      justify-content: center;
+      margin-left: auto;
+      padding: 0;
+      width: 32px;
+    }
+    .send-button:disabled { background: #d9dee3; color: #919ba5; cursor: default; }
+
+    .fineprint { color: var(--muted); font-size: 10px; margin: 7px 0 0; text-align: center; }
+    .sr-only { clip: rect(0 0 0 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
+
+    .prototype-foot {
+      color: var(--muted);
+      display: flex;
+      font-size: 12px;
+      gap: 18px;
+      justify-content: space-between;
+      margin: 14px auto 0;
+      max-width: 1240px;
+    }
+    .prototype-foot p { margin: 0; }
+    .prototype-foot strong { color: var(--ink); }
+
+    :focus-visible { outline: 3px solid rgb(23 105 224 / 45%); outline-offset: 2px; }
+
+    @media (max-width: 860px) {
+      .prototype-shell { padding: 14px; }
+      .prototype-head { align-items: stretch; flex-direction: column; }
+      .state-nav { justify-content: flex-start; max-width: none; }
+      .workspace { grid-template-columns: 1fr; min-height: 700px; }
+      .document-pane { display: none; }
+      .agent-pane { min-height: 700px; }
+      .prototype-foot { flex-direction: column; gap: 5px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="prototype-shell">
+    <header class="prototype-head">
+      <div>
+        <p class="prototype-kicker">Interaction prototype</p>
+        <h1>Images in Page agent</h1>
+        <p class="prototype-summary">Pick several images at once or paste screenshots directly into the message. Previews stay close to the prompt, can be removed individually, and carry clear processing and failure feedback.</p>
+      </div>
+      <nav class="state-nav" aria-label="Preview state">
+        <button type="button" data-state="empty">Empty</button>
+        <button type="button" data-state="single">Single</button>
+        <button type="button" data-state="multiple" aria-pressed="true">Multiple</button>
+        <button type="button" data-state="uploading">Processing</button>
+        <button type="button" data-state="error">Failure</button>
+        <button type="button" data-state="sent">Sent</button>
+      </nav>
+    </header>
+
+    <section class="workspace" aria-label="Agent Whiteboard image attachment prototype">
+      <article class="document-pane">
+        <div class="doc-inner">
+          <span class="doc-tag">PROJECT BRIEF</span>
+          <h2>Launch dashboard review</h2>
+          <p class="doc-lede">A sample whiteboard gives the agent pane realistic context while you inspect how image attachment states fit the current workspace.</p>
+          <div class="doc-card">
+            <span class="doc-number">01</span>
+            <div><strong>Activation overview</strong><p>Compare the current dashboard against the approved interaction spec.</p></div>
+          </div>
+          <div class="doc-card">
+            <span class="doc-number">02</span>
+            <div><strong>Mobile capture</strong><p>Use screenshots to call out spacing, clipping, and responsive behavior.</p></div>
+          </div>
+          <div class="doc-card">
+            <span class="doc-number">03</span>
+            <div><strong>Design feedback</strong><p>Ask Page agent to reason about both the page and selected images together.</p></div>
+          </div>
+        </div>
+      </article>
+
+      <aside class="agent-pane" aria-label="Page agent">
+        <header class="agent-head">
+          <div class="agent-identity">
+            <span class="agent-mark" aria-hidden="true">A</span>
+            <div>
+              <div class="agent-title">Page agent</div>
+              <div class="agent-status"><span class="status-dot"></span>Ready <span>· Codex</span></div>
+            </div>
+          </div>
+          <div class="head-actions">
+            <button class="icon-button" type="button" aria-label="Open Page agent menu">•••</button>
+            <button class="icon-button" type="button" aria-label="Close Page agent">×</button>
+          </div>
+        </header>
+
+        <div class="timeline" id="timeline" aria-live="polite">
+          <div class="empty-conversation" id="emptyConversation">
+            <div class="empty-icon" aria-hidden="true">⌁</div>
+            <strong>Ask about this page</strong>
+            <p>Add screenshots, mockups, or photos when the visual detail matters.</p>
+          </div>
+          <div class="sent-message" id="sentMessage" hidden>
+            <div class="sent-grid" id="sentGrid"></div>
+            <p>Compare these screens and flag the most important inconsistencies.</p>
+          </div>
+          <div class="assistant-message" id="assistantMessage" hidden>
+            <strong>Page agent</strong>
+            <p>I can compare the attached screens alongside the whiteboard context.</p>
+          </div>
+        </div>
+
+        <div class="composer-wrap">
+          <p class="paste-hint" id="pasteHint">Tip: paste a screenshot anywhere in the message</p>
+          <form class="composer" id="composer">
+            <div class="attachment-strip" id="attachmentStrip" aria-label="Image attachments"></div>
+            <div class="attachment-error" id="attachmentError" role="alert" hidden>
+              <span aria-hidden="true">!</span>
+              <span>One image couldn’t be prepared.</span>
+              <button type="button" id="retryButton">Retry</button>
+            </div>
+            <textarea class="message-input" id="messageInput" rows="2" aria-label="Message Codex about this whiteboard" placeholder="Ask about this page…"></textarea>
+            <div class="composer-bar">
+              <input class="sr-only" id="imagePicker" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple>
+              <button class="attach-button" id="attachButton" type="button" aria-label="Attach images" title="Attach images">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m20.5 11.5-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.7 9.7a2 2 0 0 1-2.8-2.8l8.9-8.9"/></svg>
+              </button>
+              <span class="context-chip">Context · available</span>
+              <span class="attachment-count" id="attachmentCount" hidden></span>
+              <button class="send-button" id="sendButton" type="submit" aria-label="Send message">↑</button>
+            </div>
+          </form>
+          <p class="fineprint">Codex can make mistakes. Review important details.</p>
+        </div>
+      </aside>
+    </section>
+
+    <footer class="prototype-foot">
+      <p><strong>Try it:</strong> use the paperclip for multi-select, or focus the message and paste an image.</p>
+      <p id="stateDescription">Multiple · compact horizontal previews keep the composer height stable.</p>
+    </footer>
+  </main>
+
+  <script>
+    (() => {
+      const composer = document.querySelector('#composer');
+      const strip = document.querySelector('#attachmentStrip');
+      const picker = document.querySelector('#imagePicker');
+      const attachButton = document.querySelector('#attachButton');
+      const messageInput = document.querySelector('#messageInput');
+      const count = document.querySelector('#attachmentCount');
+      const error = document.querySelector('#attachmentError');
+      const retryButton = document.querySelector('#retryButton');
+      const sendButton = document.querySelector('#sendButton');
+      const pasteHint = document.querySelector('#pasteHint');
+      const emptyConversation = document.querySelector('#emptyConversation');
+      const sentMessage = document.querySelector('#sentMessage');
+      const sentGrid = document.querySelector('#sentGrid');
+      const assistantMessage = document.querySelector('#assistantMessage');
+      const description = document.querySelector('#stateDescription');
+      const stateButtons = [...document.querySelectorAll('[data-state]')];
+      let attachments = [];
+      let activeState = 'multiple';
+
+      const stateCopy = {
+        empty: 'Empty · the composer stays quiet until text or images are added.',
+        single: 'Single · the thumbnail sits above the prompt and can be removed on hover or focus.',
+        multiple: 'Multiple · compact horizontal previews keep the composer height stable.',
+        uploading: 'Processing · affected thumbnails show progress and Send waits until they are ready.',
+        error: 'Failure · the failed thumbnail remains identifiable with clear Retry and remove actions.',
+        sent: 'Sent · images travel with the user message and remain visible in the conversation.'
+      };
+
+      const mockAttachment = (name, photoClass, status = 'ready') => ({
+        id: `${Date.now()}-${Math.random()}`,
+        name,
+        photoClass,
+        status,
+        url: null
+      });
+
+      function cleanObjectURLs() {
+        attachments.forEach(item => { if (item.url) URL.revokeObjectURL(item.url); });
+      }
+
+      function mockSet(state) {
+        if (state === 'empty') return [];
+        if (state === 'single') return [mockAttachment('dashboard.png', 'photo-dashboard')];
+        if (state === 'uploading') return [
+          mockAttachment('dashboard.png', 'photo-dashboard'),
+          mockAttachment('mobile-capture.png', 'photo-phone', 'uploading')
+        ];
+        if (state === 'error') return [
+          mockAttachment('dashboard.png', 'photo-dashboard'),
+          mockAttachment('large-capture.webp', 'photo-board', 'error')
+        ];
+        return [
+          mockAttachment('dashboard.png', 'photo-dashboard'),
+          mockAttachment('trend-chart.png', 'photo-chart'),
+          mockAttachment('workshop-board.jpg', 'photo-board'),
+          mockAttachment('mobile-capture.png', 'photo-phone')
+        ];
+      }
+
+      function buildAttachment(item, removable = true) {
+        const tile = document.createElement('div');
+        tile.className = `attachment${item.status === 'error' ? ' is-error' : ''}`;
+        tile.title = item.name;
+
+        let preview;
+        if (item.url) {
+          preview = document.createElement('img');
+          preview.src = item.url;
+          preview.alt = '';
+          preview.className = 'attachment-preview';
+        } else {
+          preview = document.createElement('span');
+          preview.className = `attachment-preview mock-photo ${item.photoClass}`;
+        }
+        tile.append(preview);
+
+        if (item.status !== 'ready') {
+          const overlay = document.createElement('span');
+          overlay.className = 'attachment-state';
+          if (item.status === 'uploading') {
+            overlay.innerHTML = '<span class="spinner" aria-label="Preparing image"></span>';
+          } else {
+            overlay.textContent = '!';
+            overlay.setAttribute('aria-label', 'Image preparation failed');
+          }
+          tile.append(overlay);
+        }
+
+        if (removable) {
+          const remove = document.createElement('button');
+          remove.className = 'remove-attachment';
+          remove.type = 'button';
+          remove.setAttribute('aria-label', `Remove ${item.name}`);
+          remove.textContent = '×';
+          remove.addEventListener('click', () => {
+            if (item.url) URL.revokeObjectURL(item.url);
+            attachments = attachments.filter(candidate => candidate.id !== item.id);
+            activeState = 'custom';
+            render();
+            announce(`${item.name} removed`);
+          });
+          tile.append(remove);
+        }
+        return tile;
+      }
+
+      function announce(text) {
+        pasteHint.textContent = text;
+        window.setTimeout(() => { pasteHint.textContent = 'Tip: paste a screenshot anywhere in the message'; }, 2200);
+      }
+
+      function render() {
+        strip.replaceChildren(...attachments.map(item => buildAttachment(item)));
+        strip.hidden = attachments.length === 0;
+        const failed = attachments.some(item => item.status === 'error');
+        const preparing = attachments.some(item => item.status === 'uploading');
+        error.hidden = !failed;
+        count.hidden = attachments.length === 0;
+        count.textContent = `${attachments.length} image${attachments.length === 1 ? '' : 's'}`;
+        sendButton.disabled = preparing || (attachments.length === 0 && messageInput.value.trim() === '');
+        stateButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.state === activeState)));
+        description.textContent = stateCopy[activeState] || `Custom · ${attachments.length} selected image${attachments.length === 1 ? '' : 's'} ready to send.`;
+        emptyConversation.hidden = activeState === 'sent';
+        sentMessage.hidden = activeState !== 'sent';
+        assistantMessage.hidden = activeState !== 'sent';
+      }
+
+      function setState(state) {
+        cleanObjectURLs();
+        activeState = state;
+        attachments = state === 'sent' ? [] : mockSet(state);
+        messageInput.value = state === 'empty' ? '' : state === 'sent' ? '' : 'Compare these screens and flag the most important inconsistencies.';
+        if (state === 'sent') {
+          const sentItems = mockSet('multiple').slice(0, 2);
+          sentGrid.replaceChildren(...sentItems.map(item => buildAttachment(item, false)));
+        }
+        render();
+      }
+
+      function addFiles(fileList, source) {
+        const images = [...fileList].filter(file => file.type.startsWith('image/'));
+        if (!images.length) {
+          announce('No supported images found');
+          return;
+        }
+        if (activeState !== 'custom') cleanObjectURLs();
+        activeState = 'custom';
+        attachments = attachments.filter(item => item.url).concat(images.map(file => ({
+          id: `${Date.now()}-${Math.random()}`,
+          name: file.name || 'Pasted image',
+          status: 'ready',
+          url: URL.createObjectURL(file)
+        })));
+        render();
+        announce(`${images.length} image${images.length === 1 ? '' : 's'} added by ${source}`);
+      }
+
+      stateButtons.forEach(button => button.addEventListener('click', () => setState(button.dataset.state)));
+      attachButton.addEventListener('click', () => picker.click());
+      picker.addEventListener('change', () => { addFiles(picker.files, 'file picker'); picker.value = ''; });
+      messageInput.addEventListener('input', render);
+
+      messageInput.addEventListener('paste', event => {
+        const files = [...event.clipboardData.items]
+          .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+          .map(item => item.getAsFile())
+          .filter(Boolean);
+        if (files.length) {
+          event.preventDefault();
+          addFiles(files, 'paste');
+        }
+      });
+
+      ['dragenter', 'dragover'].forEach(type => composer.addEventListener(type, event => {
+        if ([...event.dataTransfer.items].some(item => item.kind === 'file' && item.type.startsWith('image/'))) {
+          event.preventDefault();
+          composer.classList.add('is-drop-target');
+        }
+      }));
+      ['dragleave', 'drop'].forEach(type => composer.addEventListener(type, event => {
+        composer.classList.remove('is-drop-target');
+        if (type === 'drop') {
+          event.preventDefault();
+          addFiles(event.dataTransfer.files, 'drop');
+        }
+      }));
+
+      retryButton.addEventListener('click', () => {
+        attachments = attachments.map(item => item.status === 'error' ? { ...item, status: 'uploading' } : item);
+        activeState = 'uploading';
+        render();
+        window.setTimeout(() => {
+          attachments = attachments.map(item => ({ ...item, status: 'ready' }));
+          activeState = 'custom';
+          render();
+          announce('Image is ready');
+        }, 1100);
+      });
+
+      composer.addEventListener('submit', event => {
+        event.preventDefault();
+        if (sendButton.disabled) return;
+        activeState = 'sent';
+        const sentItems = attachments.length ? attachments.slice(0, 2) : mockSet('multiple').slice(0, 2);
+        sentGrid.replaceChildren(...sentItems.map(item => buildAttachment(item, false)));
+        emptyConversation.hidden = true;
+        sentMessage.hidden = false;
+        assistantMessage.hidden = false;
+        attachments = [];
+        messageInput.value = '';
+        render();
+      });
+
+      window.addEventListener('beforeunload', cleanObjectURLs);
+      setState('multiple');
+    })();
+  </script>
+</body>
+</html>

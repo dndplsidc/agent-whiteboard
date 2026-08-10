@@ -57,6 +57,7 @@ type runtime struct {
 	barriers  map[int64]*responseBarrier
 	inbound   map[string]struct{}
 	sessions  map[string]*Session
+	models    map[string]provider.Capabilities
 	leases    int
 	done      chan struct{}
 	stopOnce  sync.Once
@@ -113,6 +114,12 @@ func startRuntime(ctx context.Context, driver *Driver) (*runtime, error) {
 		runtime.close()
 		return nil, provider.NewProviderError(provider.ErrorAuthenticationRequired)
 	}
+	models, err := loadModelCapabilities(ctx, runtime)
+	if err != nil {
+		runtime.close()
+		return nil, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	runtime.models = models
 	return runtime, nil
 }
 

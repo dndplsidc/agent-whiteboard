@@ -204,7 +204,7 @@ func cloneEvent(event agentprotocol.Event) agentprotocol.Event {
 func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload {
 	switch value := payload.(type) {
 	case agentprotocol.SnapshotPayload:
-		value.Queue = append([]agentprotocol.QueueItem{}, value.Queue...)
+		value.Queue = cloneQueueItems(value.Queue)
 		if value.ActiveTurnID != nil {
 			active := *value.ActiveTurnID
 			value.ActiveTurnID = &active
@@ -215,7 +215,7 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 			return (*agentprotocol.SnapshotPayload)(nil)
 		}
 		copyOfValue := *value
-		copyOfValue.Queue = append([]agentprotocol.QueueItem{}, value.Queue...)
+		copyOfValue.Queue = cloneQueueItems(value.Queue)
 		if value.ActiveTurnID != nil {
 			active := *value.ActiveTurnID
 			copyOfValue.ActiveTurnID = &active
@@ -238,17 +238,17 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 		}
 		return &copyOfValue
 	case agentprotocol.QueuePayload:
-		value.Items = append([]agentprotocol.QueueItem{}, value.Items...)
+		value.Items = cloneQueueItems(value.Items)
 		return value
 	case *agentprotocol.QueuePayload:
 		if value == nil {
 			return (*agentprotocol.QueuePayload)(nil)
 		}
 		copyOfValue := *value
-		copyOfValue.Items = append([]agentprotocol.QueueItem{}, value.Items...)
+		copyOfValue.Items = cloneQueueItems(value.Items)
 		return &copyOfValue
 	case agentprotocol.TimelinePayload:
-		value.Items = append([]agentprotocol.TimelineItem{}, value.Items...)
+		value.Items = cloneTimelineItems(value.Items)
 		if value.NextCursor != nil {
 			cursor := *value.NextCursor
 			value.NextCursor = &cursor
@@ -259,11 +259,21 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 			return (*agentprotocol.TimelinePayload)(nil)
 		}
 		copyOfValue := *value
-		copyOfValue.Items = append([]agentprotocol.TimelineItem{}, value.Items...)
+		copyOfValue.Items = cloneTimelineItems(value.Items)
 		if value.NextCursor != nil {
 			cursor := *value.NextCursor
 			copyOfValue.NextCursor = &cursor
 		}
+		return &copyOfValue
+	case agentprotocol.UserMessagePayload:
+		value.Images = append([]agentprotocol.ImageDescriptor(nil), value.Images...)
+		return value
+	case *agentprotocol.UserMessagePayload:
+		if value == nil {
+			return (*agentprotocol.UserMessagePayload)(nil)
+		}
+		copyOfValue := *value
+		copyOfValue.Images = append([]agentprotocol.ImageDescriptor(nil), value.Images...)
 		return &copyOfValue
 	case agentprotocol.HistoryPayload:
 		value.Items = append([]agentprotocol.ArchiveItem{}, value.Items...)
@@ -310,6 +320,22 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 	default:
 		return payload
 	}
+}
+
+func cloneQueueItems(items []agentprotocol.QueueItem) []agentprotocol.QueueItem {
+	result := append([]agentprotocol.QueueItem{}, items...)
+	for index := range result {
+		result[index].Images = append([]agentprotocol.ImageDescriptor(nil), items[index].Images...)
+	}
+	return result
+}
+
+func cloneTimelineItems(items []agentprotocol.TimelineItem) []agentprotocol.TimelineItem {
+	result := append([]agentprotocol.TimelineItem{}, items...)
+	for index := range result {
+		result[index].Images = append([]agentprotocol.ImageDescriptor(nil), items[index].Images...)
+	}
+	return result
 }
 
 func cloneInteractionRequestPayload(value agentprotocol.InteractionRequestPayload) agentprotocol.InteractionRequestPayload {
