@@ -32,7 +32,11 @@ func (s *Server) imageResource(response http.ResponseWriter, request *http.Reque
 			return
 		}
 		name := provider.Name(request.Header.Get(agentprotocol.ProviderHeader))
-		if !name.Valid() || request.ContentLength > int64(agentprotocol.MaxImageBytes) {
+		purpose := agentattachment.ImagePurpose(request.Header.Get(agentprotocol.ImagePurposeHeader))
+		if purpose == "" {
+			purpose = agentattachment.PurposeAttachment
+		}
+		if !name.Valid() || (purpose != agentattachment.PurposeAttachment && purpose != agentattachment.PurposeInlineReference) || request.ContentLength > int64(agentprotocol.MaxImageBytes) {
 			if request.ContentLength > int64(agentprotocol.MaxImageBytes) {
 				safeHTTPError(response, http.StatusRequestEntityTooLarge, agentprotocol.ErrorImageTooLarge)
 			} else {
@@ -41,7 +45,7 @@ func (s *Server) imageResource(response http.ResponseWriter, request *http.Reque
 			return
 		}
 		staged, err := s.images.Stage(request.Context(), agentattachment.StageRequest{
-			Origin: origin, Provider: name, ConversationID: conversationID, ClientID: clientID,
+			Origin: origin, Provider: name, ConversationID: conversationID, ClientID: clientID, Purpose: purpose,
 			Content: io.LimitReader(request.Body, int64(agentprotocol.MaxImageBytes)+1),
 		})
 		if err != nil {
@@ -118,7 +122,11 @@ func (s *Server) authorizeImage(response http.ResponseWriter, request *http.Requ
 			safeHTTPError(response, http.StatusBadRequest, agentprotocol.ErrorInvalidCommand)
 			return "", "", "", false
 		}
-	} else if len(request.Header.Values(agentprotocol.ProviderHeader)) != 0 {
+		if values := request.Header.Values(agentprotocol.ImagePurposeHeader); len(values) > 1 {
+			safeHTTPError(response, http.StatusBadRequest, agentprotocol.ErrorInvalidCommand)
+			return "", "", "", false
+		}
+	} else if len(request.Header.Values(agentprotocol.ProviderHeader)) != 0 || len(request.Header.Values(agentprotocol.ImagePurposeHeader)) != 0 {
 		safeHTTPError(response, http.StatusBadRequest, agentprotocol.ErrorInvalidCommand)
 		return "", "", "", false
 	}

@@ -26,6 +26,7 @@ const (
 	ClientIDHeader       = "X-Agent-Whiteboard-Client-ID"
 	ConversationIDHeader = "X-Agent-Whiteboard-Conversation-ID"
 	ProviderHeader       = "X-Agent-Whiteboard-Provider"
+	ImagePurposeHeader   = "X-Agent-Whiteboard-Image-Purpose"
 
 	// MaxContextCommandBytes retains ample room for the complete default context.
 	// Ordinary frames allow a valid message to expand under JSON escaping while

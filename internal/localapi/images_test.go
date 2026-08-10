@@ -44,8 +44,33 @@ func TestImageResourceUploadReadAndDeleteUsesExactAttachmentIdentity(t *testing.
 	require.Equal(t, conversation, images.stage.ConversationID)
 	require.Equal(t, clientID, images.stage.ClientID)
 	require.Equal(t, trustedOrigin, images.stage.Origin)
+	require.Equal(t, agentattachment.PurposeAttachment, images.stage.Purpose)
 	require.Equal(t, images.staged.ImageID, images.read.ImageID)
 	require.Equal(t, images.staged.ImageID, images.deleted.ImageID)
+	images.mu.Unlock()
+}
+
+func TestImageResourceAcceptsInlineReferencePurpose(t *testing.T) {
+	images := &fakeImages{staged: agentattachment.Staged{ImageID: strings.Repeat("G", 32), MediaType: "image/png", Bytes: 3}}
+	running := startServerWithImages(t, images)
+	stream := running.request(t, http.MethodPost, agentprotocol.ConnectPath, trustedOrigin, encodeCommand(t, connectCommand()))
+	require.Equal(t, http.StatusOK, stream.StatusCode)
+	t.Cleanup(func() { stream.Body.Close() })
+	request, err := http.NewRequest(http.MethodPost, running.baseURL+agentprotocol.ImagesPath, bytes.NewReader([]byte("png")))
+	require.NoError(t, err)
+	request.Header.Set("Origin", trustedOrigin)
+	request.Header.Set("Content-Type", "image/png")
+	request.Header.Set(agentprotocol.APIVersionHeader, agentprotocol.APIVersion)
+	request.Header.Set(agentprotocol.ClientIDHeader, clientID)
+	request.Header.Set(agentprotocol.ConversationIDHeader, conversation)
+	request.Header.Set(agentprotocol.ProviderHeader, string(provider.NamePi))
+	request.Header.Set(agentprotocol.ImagePurposeHeader, string(agentattachment.PurposeInlineReference))
+	response, err := running.client.Do(request)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, response.StatusCode)
+	response.Body.Close()
+	images.mu.Lock()
+	require.Equal(t, agentattachment.PurposeInlineReference, images.stage.Purpose)
 	images.mu.Unlock()
 }
 

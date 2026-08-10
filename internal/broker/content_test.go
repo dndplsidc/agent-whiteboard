@@ -2,10 +2,12 @@ package broker
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
+	"github.com/edocsss/agent-whiteboard/internal/provider"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,6 +87,30 @@ func TestSubmitRejectsReferenceFromStalePageRevision(t *testing.T) {
 	result, err := connection.Command(context.Background(), command)
 	require.NoError(t, err)
 	requireCommandResult(t, result, agentprotocol.CommandRejected, agentprotocol.ErrorBoardRevisionUnavailable)
+}
+
+func TestQueueEditReportsAndRemovesDeletedInlineVisual(t *testing.T) {
+	resource := agentprotocol.Resource{Kind: agentprotocol.ResourceMarkdown, ID: testID('R'), CreatedAt: testTime(), UpdatedAt: testTime()}
+	reference := agentprotocol.ContextReference{
+		ID: testID('I'), Kind: agentprotocol.ReferenceImage, Label: "Diagram",
+		Source: protocolTextReference(testID('X'), "source", "quote", resource, strings.Repeat("a", 64)).Source,
+		Visual: &agentprotocol.ReferenceVisual{ImageID: testID('V'), Name: "diagram.png", Alt: "Diagram"},
+	}
+	content, err := messageContentToProvider(agentprotocol.MessageContent{Parts: []agentprotocol.MessagePart{
+		{Type: agentprotocol.MessagePartReference, Reference: &reference},
+		{Type: agentprotocol.MessagePartText, Text: " explain this"},
+	}})
+	require.NoError(t, err)
+	input := provider.ImageInput{ID: testID('V'), Name: "diagram.png", MediaType: "image/png", Bytes: 4, Path: filepath.Join("/private/tmp", testID('V')+".png")}
+	descriptor := agentprotocol.ImageDescriptor{ImageID: input.ID, Name: input.Name, MediaType: input.MediaType}
+	queue := NewQueue()
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('T'), MessageID: testID('M'), Content: content, Images: []provider.ImageInput{input}, Descriptors: []agentprotocol.ImageDescriptor{descriptor}}))
+
+	removed, err := queue.EditAndRemovedImages(testID('M'), provider.TextMessage("explain without the diagram"))
+	require.NoError(t, err)
+	require.Equal(t, []string{testID('V')}, removed)
+	require.Empty(t, queue.Items()[0].Images)
+	require.Equal(t, "explain without the diagram", queue.Items()[0].Content.Parts[0].Text)
 }
 
 func protocolTextReference(id, label, quote string, resource agentprotocol.Resource, digest string) agentprotocol.ContextReference {

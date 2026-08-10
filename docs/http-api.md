@@ -78,13 +78,13 @@ If a whiteboard create fails after the server can no longer prove rollback, the 
 
 Public GET responses set `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, and `X-Robots-Tag: noindex, nofollow, noarchive`; images append `noimageindex` and set `Content-Disposition: inline` with filename `<id><detected-extension>`. Markdown HTML also contains the corresponding robots meta tag.
 
-Creator context is not embedded in the current browser-rendering Markdown shell, but it is available from the machine retrieval route to anyone with the capability ID. It is not a private, hidden, or authorization-protected channel. Never include hidden reasoning, credentials, personal or sensitive data, private source, or raw tool output.
+Creator context is available in the opt-in Page Agent disclosure and from the machine retrieval route to anyone with the capability ID. It is not a private, hidden, or authorization-protected channel. Never include hidden reasoning, credentials, personal or sensitive data, private source, or raw tool output.
 
 ## Private loopback Page Agent images
 
-`agent serve` exposes a separate browser-only endpoint at `POST /api/v1/agent/images` and `GET|DELETE /api/v1/agent/images/{image_id}`. This is not part of the public publishing API and must not be used to create shareable image URLs. Requests require local API version `2`, the exact authorized Origin, attached client and conversation IDs, and—on upload—the selected provider. Upload bodies are one raw image; successful JSON returns only an opaque image ID, detected media type, and byte length. Submit commands later claim ordered `{image_id, name}` references atomically.
+`agent serve` exposes a separate browser-only endpoint at `POST /api/v1/agent/images` and `GET|DELETE /api/v1/agent/images/{image_id}`. This is not part of the public publishing API and must not be used to create shareable image URLs. Requests require local API version `3`, the exact authorized Origin, attached client and conversation IDs, and—on upload—the selected provider plus `X-Agent-Whiteboard-Image-Purpose: attachment|inline_reference`. Upload bodies are one raw image; successful JSON returns only an opaque image ID, detected media type, and byte length. Submit commands later claim ordinary attachments and ordered inline image references atomically without allowing their purposes to be exchanged.
 
-The browser protocol uses WebSocket subprotocol `agent-whiteboard.v2`. Image commands and events contain only bounded opaque references/descriptors—never bytes or private filesystem paths. Version-1 viewers and brokers are intentionally incompatible with this contract; upgrade and restart `agent serve` or its managed daemon before reconnecting.
+The browser protocol uses WebSocket subprotocol `agent-whiteboard.v3`. Submit, queue, history, and user-message payloads carry `content.parts`: ordered text parts interleaved with revision-bound `text`, `section`, or `image` reference parts. Image commands and events contain only bounded opaque references/descriptors—never bytes or private filesystem paths. Older viewers and brokers are intentionally incompatible with this contract; upgrade and restart `agent serve` or its managed daemon before reconnecting.
 
 ## curl
 

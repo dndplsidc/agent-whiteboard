@@ -36,7 +36,7 @@ func NewViewer(config ViewerConfig) (*Viewer, error) {
 	connectSource := "'none'"
 	imageSource := "'self' data:"
 	if config.LocalAgentEnabled {
-		connectSource = "http://127.0.0.1:* ws://127.0.0.1:*"
+		connectSource = "'self' http://127.0.0.1:* ws://127.0.0.1:*"
 		imageSource += " blob:"
 	}
 	return &Viewer{

@@ -840,7 +840,7 @@ func TestPiAdapterRealCLILifecycleThroughProviderContract(t *testing.T) {
 	markdown := []byte("# Adapter integration\nExact context marker.")
 	creator := []byte("Creator context marker.")
 	turn := provider.TurnRequest{
-		TurnID: turnID, MessageID: messageID, Message: "Answer from this exact board.",
+		TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("Answer from this exact board."),
 		Context: &provider.PageContext{
 			Revision: provider.ContextInitial, Markdown: markdown, CreatorContext: creator,
 			Title: "Adapter board", URL: "https://example.test/adapter", Digest: contextdigest.Calculate(markdown, creator),
@@ -866,7 +866,7 @@ func TestPiAdapterRealCLILifecycleThroughProviderContract(t *testing.T) {
 			switch event.Kind {
 			case provider.EventUserMessage:
 				userCount++
-				userText = event.Text
+				userText = event.Content.PlainText()
 			case provider.EventAssistantDelta:
 				delta.WriteString(event.Text)
 			case provider.EventAssistantMessage:
@@ -891,7 +891,7 @@ settled:
 	require.Equal(t, 1, userCount)
 	require.Equal(t, 1, assistantCount)
 	require.Equal(t, 1, completionCount)
-	require.Equal(t, turn.Message, userText)
+	require.Equal(t, turn.Content.PlainText(), userText)
 	require.Equal(t, "adapter answer", delta.String())
 	require.Equal(t, "adapter answer", assistantText)
 	request := model.waitRequest(t)
@@ -940,7 +940,7 @@ settled:
 	require.Equal(t, provider.HistoryAssistant, history.Items[0].Role)
 	require.Equal(t, "adapter answer", history.Items[0].Text)
 	require.Equal(t, provider.HistoryUser, history.Items[1].Role)
-	require.Equal(t, turn.Message, history.Items[1].Text)
+	require.Equal(t, turn.Content, history.Items[1].Content)
 
 	native := session.NativeSession()
 	require.NoError(t, session.Shutdown(ctx))

@@ -186,7 +186,7 @@ func TestViewerEnabledRendersExactSafelyEscapedSourceContextAndFlag(t *testing.T
 	require.NotContains(t, raw, creatorContext)
 	digest := sha256.Sum256([]byte(testViewerJS))
 	require.Equal(t,
-		fmt.Sprintf("default-src 'none'; base-uri 'none'; connect-src http://127.0.0.1:* ws://127.0.0.1:*; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data: blob:; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'sha256-%s'; style-src 'unsafe-inline'; worker-src 'none'", base64.StdEncoding.EncodeToString(digest[:])),
+		fmt.Sprintf("default-src 'none'; base-uri 'none'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src 'self' data: blob:; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'sha256-%s'; style-src 'unsafe-inline'; worker-src 'none'", base64.StdEncoding.EncodeToString(digest[:])),
 		viewer.ContentSecurityPolicy(),
 	)
 	require.NotContains(t, viewer.ContentSecurityPolicy(), "https:")

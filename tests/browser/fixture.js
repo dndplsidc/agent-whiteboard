@@ -381,12 +381,12 @@ function createLoopbackBroker(initialAllowedOrigin) {
         record,
         200,
         { ...corsHeaders(), "Content-Type": "application/json", "Cache-Control": "no-store" },
-        '{"available":true,"api_version":"2"}',
+        '{"available":true,"api_version":"3"}',
       );
       return;
     }
     if (request.method === "POST" && request.url === "/api/v1/agent/connect") {
-      if (request.headers["x-agent-whiteboard-api-version"] !== "2") {
+      if (request.headers["x-agent-whiteboard-api-version"] !== "3") {
         send(response, record, 400, corsHeaders(), '{"error":"unsupported API version"}');
         return;
       }
@@ -519,7 +519,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     return { image_id: image.id, name: image.name, media_type: image.mediaType };
   };
   const nextEvent = (state, type, payload) => ({
-    api_version: "2",
+    api_version: "3",
     event_id: protocolID(state.sequence++),
     conversation_id: state.conversationID,
     type,
@@ -619,12 +619,19 @@ function createSidebarBroker(initialAllowedOrigin) {
     if (command.type === "history_page") {
       targetedEvent(state, "timeline", { command_id: command.command_id, items: [...state.history].reverse(), next_cursor: null }, command.client_id);
     } else if (command.type === "submit") {
-      if ((command.payload.images?.length ?? 0) > 0 && !state.supportsImages) {
+      const inlineReferences = command.payload.content.parts.filter((part) => part.type === "reference" && part.reference.kind === "image");
+      if ((command.payload.images?.length ?? 0) + inlineReferences.length > 0 && !state.supportsImages) {
         return commandResult(state, command, { code: "image_input_unsupported", message: "The selected model does not support image input.", action: "configure_model" });
+      }
+      const content = structuredClone(command.payload.content);
+      for (const part of content.parts) {
+        if (part.type !== "reference" || part.reference.kind !== "image") continue;
+        const descriptor = claimFixtureImage(state, command, part.reference.visual);
+        part.reference.visual.media_type = descriptor.media_type;
       }
       const imageDescriptors = (command.payload.images ?? []).map((image) => claimFixtureImage(state, command, image));
       if (state.activeTurn !== null) {
-        state.queue.push({ turn_id: command.payload.turn_id, message_id: command.payload.message_id, message: command.payload.message, ...(imageDescriptors.length ? { images: imageDescriptors } : {}) });
+        state.queue.push({ turn_id: command.payload.turn_id, message_id: command.payload.message_id, content, ...(imageDescriptors.length ? { images: imageDescriptors } : {}) });
         emit(state, "queue", { items: state.queue.map((item) => ({ ...item })) });
       } else {
         if (command.payload.context) {
@@ -633,10 +640,10 @@ function createSidebarBroker(initialAllowedOrigin) {
           emit(state, "context", { digest: state.contextDigest, state: "accepted" });
         }
         const createdAt = "2026-07-27T03:04:05Z";
-        const user = { item_id: command.payload.message_id, kind: "user", turn_id: command.payload.turn_id, message_id: command.payload.message_id, text: command.payload.message, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt };
+        const user = { item_id: command.payload.message_id, kind: "user", turn_id: command.payload.turn_id, message_id: command.payload.message_id, content, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt };
         state.history.push(user);
         state.activeTurn = command.payload.turn_id;
-        emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, text: user.text, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt });
+        emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, content: user.content, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt });
         emit(state, "lifecycle", { state: "responding", turn_id: command.payload.turn_id });
         const assistantID = protocolID(150 + state.history.length + (state.provider === "codex" ? 25 : 0));
         if (state.phaseResponses) {
@@ -650,7 +657,7 @@ function createSidebarBroker(initialAllowedOrigin) {
       }
     } else if (command.type === "queue_edit") {
       const item = state.queue.find((candidate) => candidate.message_id === command.payload.message_id);
-      if (item) item.message = command.payload.message;
+      if (item) item.content = structuredClone(command.payload.content);
       emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
     } else if (command.type === "queue_remove") {
       const index = state.queue.findIndex((candidate) => candidate.message_id === command.payload.message_id);
@@ -693,14 +700,14 @@ function createSidebarBroker(initialAllowedOrigin) {
       record.responseHeaders = {
         ...corsHeaders(),
         "Access-Control-Allow-Methods": request.headers["access-control-request-method"] ?? "POST",
-        "Access-Control-Allow-Headers": "content-type, x-agent-whiteboard-api-version, x-agent-whiteboard-client-id, x-agent-whiteboard-conversation-id, x-agent-whiteboard-provider",
+        "Access-Control-Allow-Headers": "content-type, x-agent-whiteboard-api-version, x-agent-whiteboard-client-id, x-agent-whiteboard-conversation-id, x-agent-whiteboard-provider, x-agent-whiteboard-image-purpose",
       };
       response.writeHead(204, record.responseHeaders);
       response.end();
       return;
     }
     if (request.method === "GET" && request.url === "/api/v1/agent/status") {
-      sendJSON(response, record, 200, { available: true, api_version: "2", origin_trusted: true });
+      sendJSON(response, record, 200, { available: true, api_version: "3", origin_trusted: true });
       return;
     }
     const chunks = [];
@@ -785,7 +792,7 @@ function createSidebarBroker(initialAllowedOrigin) {
   server.on("upgrade", (request, socket) => {
     const record = requestRecord(request);
     requests.push(record);
-    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v2") {
+    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v3") {
       record.status = 503;
       socket.end("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
       return;
@@ -793,13 +800,13 @@ function createSidebarBroker(initialAllowedOrigin) {
     const key = request.headers["sec-websocket-key"];
     const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
     record.status = 101;
-    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v2" };
+    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v3" };
     socket.write([
       "HTTP/1.1 101 Switching Protocols",
       "Upgrade: websocket",
       "Connection: Upgrade",
       `Sec-WebSocket-Accept: ${accept}`,
-      "Sec-WebSocket-Protocol: agent-whiteboard.v2",
+      "Sec-WebSocket-Protocol: agent-whiteboard.v3",
       "",
       "",
     ].join("\r\n"));

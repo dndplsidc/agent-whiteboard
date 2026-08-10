@@ -160,31 +160,46 @@ func (turn QueuedTurn) validate() error {
 // Edit changes only a still-queued message. Turn IDs and context are not
 // editable, and the aggregate bound is checked before mutation.
 func (queue *Queue) Edit(messageID string, content provider.MessageContent) error {
+	_, err := queue.EditAndRemovedImages(messageID, content)
+	return err
+}
+
+func (queue *Queue) EditAndRemovedImages(messageID string, content provider.MessageContent) ([]string, error) {
 	if queue == nil {
-		return errors.New("nil queue")
+		return nil, errors.New("nil queue")
 	}
 	for index := range queue.items {
 		if queue.items[index].messageID != messageID {
 			continue
 		}
 		if !referencesAreImmutable(queue.items[index].content, content) {
-			return ErrQueueInvalid
+			return nil, ErrQueueInvalid
 		}
 		images, descriptors, ok := reorderEditedImages(queue.items[index], content)
 		if !ok || (provider.TurnRequest{TurnID: validQueueID, MessageID: messageID, Content: content, Images: images}).Validate() != nil {
-			return ErrQueueInvalid
+			return nil, ErrQueueInvalid
 		}
 		newBytes := queue.bytes - queue.items[index].content.SemanticBytes() + content.SemanticBytes()
 		if newBytes > MaxQueueBytes {
-			return ErrQueueFull
+			return nil, ErrQueueFull
+		}
+		retained := make(map[string]struct{})
+		for _, id := range content.InlineImageIDs() {
+			retained[id] = struct{}{}
+		}
+		removed := make([]string, 0)
+		for _, id := range queue.items[index].content.InlineImageIDs() {
+			if _, exists := retained[id]; !exists {
+				removed = append(removed, id)
+			}
 		}
 		queue.bytes = newBytes
 		queue.items[index].content = content.Clone()
 		queue.items[index].images = images
 		queue.items[index].descriptors = descriptors
-		return nil
+		return removed, nil
 	}
-	return ErrQueueItemNotFound
+	return nil, ErrQueueItemNotFound
 }
 
 // Remove drops one still-queued message and best-effort erases any page bytes

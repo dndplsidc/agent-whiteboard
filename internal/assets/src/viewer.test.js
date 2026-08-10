@@ -290,11 +290,31 @@ function agentPayload(overrides = {}) {
 }
 
 function agentEvent(type, payload, overrides = {}) {
+  const textContent = (text) => ({ parts: text ? [{ type: "text", text }] : [] });
+  if (type === "queue") payload = { ...payload, items: payload.items.map((item) => {
+    if (!Object.hasOwn(item, "message")) return item;
+    const { message, ...rest } = item;
+    return { ...rest, content: textContent(message) };
+  }) };
+  if (type === "snapshot") payload = { ...payload, queue: payload.queue.map((item) => {
+    if (!Object.hasOwn(item, "message")) return item;
+    const { message, ...rest } = item;
+    return { ...rest, content: textContent(message) };
+  }) };
+  if (type === "user_message" && Object.hasOwn(payload, "text")) {
+    const { text, ...rest } = payload;
+    payload = { ...rest, content: textContent(text) };
+  }
+  if (type === "timeline") payload = { ...payload, items: payload.items.map((item) => {
+    if (item.kind !== "user" || !Object.hasOwn(item, "text")) return item;
+    const { text, ...rest } = item;
+    return { ...rest, content: textContent(text) };
+  }) };
   const versionedPayload = type === "snapshot" || type === "provider"
     ? { supports_images: true, ...payload }
     : payload;
   return {
-    api_version: "2",
+    api_version: "3",
     event_id: agentIDs.event,
     conversation_id: agentIDs.conversation,
     type,
@@ -378,7 +398,7 @@ describe("local agent source and commands", () => {
   test("builds an exact context-free connect command", () => {
     const command = createConnectCommand({ payload: agentPayload(), clientID: agentIDs.message, replayAfter: agentIDs.event, idFactory: fixedIDFactory });
     expect(command).toEqual({
-      api_version: "2",
+      api_version: "3",
       command_id: agentIDs.command,
       client_id: agentIDs.message,
       conversation_id: null,
@@ -422,7 +442,7 @@ describe("local agent source and commands", () => {
       { image_id: agentIDs.archive, name: "diagram.png" },
       { image_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", name: "notes.webp" },
     ];
-    expect(createSubmitCommand({ ...common, message: "", images }).payload).toMatchObject({ message: "", images });
+    expect(createSubmitCommand({ ...common, message: "", images }).payload).toMatchObject({ content: { parts: [] }, images });
     expect(createSubmitCommand({ ...common, message: "Compare these", images }).payload.images).toEqual(images);
     expect(() => createSubmitCommand({ ...common, message: "", images: [] })).toThrow(TypeError);
     expect(() => createSubmitCommand({ ...common, message: "", images: Array.from({ length: 9 }, (_, index) => ({ image_id: String(index).padStart(32, "I"), name: `${index}.png` })) })).toThrow(TypeError);
@@ -451,7 +471,7 @@ describe("local agent source and commands", () => {
 
 describe("local agent transport and event state", () => {
   test("probes only the literal loopback status endpoint before consent", async () => {
-    const fetchImpl = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ available: true, api_version: "2", origin_trusted: true }) }));
+    const fetchImpl = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ available: true, api_version: "3", origin_trusted: true }) }));
     const transport = createAgentTransport({ payload: agentPayload(), port: 9123, clientID: agentIDs.message, fetchImpl, WebSocketImpl: undefined, idFactory: fixedIDFactory });
     await expect(transport.connect()).rejects.toThrow("consent");
     await expect(transport.probe()).resolves.toEqual({ ok: true, code: null });
@@ -499,7 +519,7 @@ describe("local agent transport and event state", () => {
     expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "POST", body: png, credentials: "omit", referrerPolicy: "no-referrer" });
     expect(fetchImpl.mock.calls[0][1].headers).toEqual({
       "Content-Type": "image/png",
-      "X-Agent-Whiteboard-API-Version": "2",
+      "X-Agent-Whiteboard-API-Version": "3",
       "X-Agent-Whiteboard-Client-ID": agentIDs.message,
       "X-Agent-Whiteboard-Conversation-ID": agentIDs.conversation,
       "X-Agent-Whiteboard-Provider": "codex",
@@ -527,7 +547,7 @@ describe("local agent transport and event state", () => {
     await transport.connect();
     expect(transport.transportKind).toBe("fallback");
     expect(fetchImpl.mock.calls[0][0]).toBe("http://127.0.0.1:8568/api/v1/agent/connect");
-    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": "2" });
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": "3" });
     expect(fetchImpl.mock.calls[0][1].body).not.toContain("Creator summary");
     transport.close();
   });
@@ -555,7 +575,7 @@ describe("local agent transport and event state", () => {
 
   test("strictly rejects unknown event fields, malformed IDs, and raw provider fields", () => {
     expect(() => decodeAgentEvent(JSON.stringify({ ...snapshotEvent(), extra: true }))).toThrow(TypeError);
-    expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"2"', '"api_version":"2","api_version":"2"'))).toThrow(TypeError);
+    expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"3"', '"api_version":"3","api_version":"3"'))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent({ event_id: "short" })))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "hello", reasoning: "secret" })))).toThrow(TypeError);
   });
@@ -674,7 +694,7 @@ describe("local agent transport and event state", () => {
     applyAgentEvent(state, agentEvent("queue", { items: [{ turn_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ", message_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK", message: "next" }] }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
     applyAgentEvent(state, agentEvent("completion", { turn_id: agentIDs.turn }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
     expect(state.timeline[0]).toMatchObject({ kind: "assistant", text: "hello", streaming: true });
-    expect(state.queue[0].message).toBe("next");
+    expect(state.queue[0].content).toEqual({ parts: [{ type: "text", text: "next" }] });
     expect(state.lifecycle).toBe("ready");
     expect(state.lastEventID).toBe("MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM");
   });
@@ -687,7 +707,7 @@ describe("local agent transport and event state", () => {
       turn_id: agentIDs.turn, message_id: agentIDs.message, text: "", images, created_at: "2026-07-27T03:04:05Z",
     }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
     expect(state.supportsImages).toBe(true);
-    expect(state.timeline[0]).toMatchObject({ kind: "user", text: "", images });
+    expect(state.timeline[0]).toMatchObject({ kind: "user", content: { parts: [] }, images });
     expect(() => decodeAgentEvent(JSON.stringify(agentEvent("user_message", {
       turn_id: agentIDs.turn, message_id: agentIDs.message, text: "", images: [{ ...images[0], media_type: "image/svg+xml" }], created_at: "2026-07-27T03:04:05Z",
     })))).toThrow(TypeError);
@@ -715,7 +735,7 @@ describe("local agent transport and event state", () => {
       ],
       next_cursor: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ",
     }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
-    expect(state.timeline.map((item) => item.text)).toEqual(["older", "newer"]);
+    expect(state.timeline.map((item) => item.content?.parts[0]?.text ?? item.text)).toEqual(["older", "newer"]);
   });
 
   test("accepts empty archive previews and normalizes archive deletion", () => {
@@ -1108,7 +1128,7 @@ describe("local agent rendering and controls", () => {
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
     expect(transport.send.mock.calls[0][0].payload).toMatchObject({
-      message: "",
+      content: { parts: [] },
       images: [
         { image_id: agentIDs.archive, name: "diagram.png" },
         { image_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", name: "photo.jpg" },
@@ -1117,6 +1137,38 @@ describe("local agent rendering and controls", () => {
     });
     expect(drawer.elements.attachmentList.children).toHaveLength(0);
     expect(revokeObjectURL).toHaveBeenCalledTimes(3);
+    drawer.destroy();
+  });
+
+  test("stages a rendered image as an inline reference instead of an attachment", async () => {
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+      uploadImage: vi.fn(async (file) => ({ image_id: agentIDs.archive, media_type: file.type, bytes: file.size })),
+      deleteImage: vi.fn(async () => {}),
+    };
+    Object.defineProperty(window, "fetch", { configurable: true, value: vi.fn(async () => ({ ok: true, url: "data:image/png;base64,iVBORw0KGgo=", blob: async () => new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" }) })) });
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, pageURL: "https://board.example/m/abc", transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null, supports_images: true }));
+    const image = document.createElement("img");
+    image.src = "data:image/png;base64,iVBORw0KGgo=";
+    const metadata = { id: "2", ordinal: 1, alt: "Architecture", block: "2", startLine: 4, endLine: 5, headingPath: [{ level: 2, title: "Design", ordinal: 1 }], element: image, referenceID: "H".repeat(32) };
+
+    await drawer.addImageReference(metadata);
+
+    expect(transport.uploadImage).toHaveBeenCalledWith(expect.any(File), agentIDs.conversation, undefined, "inline_reference");
+    expect(drawer.elements.attachmentList.children).toHaveLength(0);
+    expect(drawer.elements.message.querySelector('[data-reference-kind="image"]')?.textContent).toBe("Architecture");
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    expect(transport.send.mock.calls[0][0].payload).toMatchObject({
+      content: { parts: [
+        { type: "reference", reference: { id: "H".repeat(32), kind: "image", label: "Architecture", visual: { image_id: agentIDs.archive, name: "image-1.png", alt: "Architecture" } } },
+        { type: "text", text: " " },
+      ] },
+    });
+    expect(transport.send.mock.calls[0][0].payload.images).toBeUndefined();
     drawer.destroy();
   });
 
@@ -1289,7 +1341,7 @@ describe("local agent rendering and controls", () => {
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
     options.onEvent(snapshotEvent());
     options.onEvent(agentEvent("queue", { items: [{ turn_id: agentIDs.turn, message_id: agentIDs.message, message: "queued", images: [{ image_id: agentIDs.archive, name: "queued.png", media_type: "image/png" }] }] }, { event_id: "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ" }));
-    drawer.elements.queue.querySelector("textarea").value = "";
+    drawer.elements.queue.querySelector(".agent-message-editor").value = "";
     drawer.elements.queue.querySelector("button").click();
     drawer.elements.queue.querySelectorAll("button")[1].click();
 
@@ -1304,7 +1356,7 @@ describe("local agent rendering and controls", () => {
     drawer.elements.archives.querySelectorAll("button")[1].click();
     await vi.waitFor(() => expect(calls).toHaveLength(4));
     expect(calls.map((command) => command.type)).toEqual(["queue_edit", "queue_remove", "archive_restore", "archive_delete"]);
-    expect(calls[0].payload).toEqual({ message_id: agentIDs.message, message: "" });
+    expect(calls[0].payload).toEqual({ message_id: agentIDs.message, content: { parts: [] } });
     expect(confirm).toHaveBeenCalledTimes(2);
     drawer.destroy();
     confirm.mockRestore();

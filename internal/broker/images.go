@@ -30,6 +30,7 @@ func (actor *conversation) claimTurnImages(command agentprotocol.Command, payloa
 		TurnID:         payload.TurnID,
 		MessageID:      payload.MessageID,
 		Images:         images,
+		InlineImages:   len(inline),
 	})
 	if err != nil {
 		return nil, nil, mapAttachmentError(err)
@@ -49,6 +50,19 @@ func (actor *conversation) releaseMessageImages(messageID string) error {
 		return nil
 	}
 	return actor.attachments.ReleaseMessage(context.WithoutCancel(actor.lifecycleCtx), actor.mapping.Current.ConversationID, messageID)
+}
+
+func (actor *conversation) releaseMessageImageSubset(messageID string, imageIDs []string) error {
+	if common.IsNil(actor.attachments) || actor.mapping.Current == nil || len(imageIDs) == 0 {
+		return nil
+	}
+	releaser, ok := actor.attachments.(interface {
+		ReleaseImages(context.Context, string, string, []string) error
+	})
+	if !ok {
+		return errors.New("attachment store cannot release individual images")
+	}
+	return releaser.ReleaseImages(context.WithoutCancel(actor.lifecycleCtx), actor.mapping.Current.ConversationID, messageID, imageIDs)
 }
 
 func removeImageWorkspace(ctx context.Context, attachments AttachmentStore, state StateStore, conversationID string) error {

@@ -74,7 +74,7 @@ func TestNewServiceWiresResolvedViewerLocalAgentFlag(t *testing.T) {
 			if enabled {
 				require.Contains(t, response.Body.String(), `"context":"creator context"`)
 				require.Contains(t, response.Body.String(), `"local_agent":{"enabled":true,`)
-				require.Contains(t, response.Header().Get("Content-Security-Policy"), "connect-src http://127.0.0.1:* ws://127.0.0.1:*")
+				require.Contains(t, response.Header().Get("Content-Security-Policy"), "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*")
 			} else {
 				require.NotContains(t, response.Body.String(), `"context"`)
 				require.NotContains(t, response.Body.String(), `"local_agent"`)

@@ -65,8 +65,18 @@ func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, t
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
 	case agentprotocol.QueueEditPayload:
 		content, err := messageContentToProvider(payload.Content)
-		if err != nil || !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) || actor.queue.Edit(payload.MessageID, content) != nil {
+		if err != nil || !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
+			return
+		}
+		removedImages, err := actor.queue.EditAndRemovedImages(payload.MessageID, content)
+		if err != nil {
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
+			return
+		}
+		if len(removedImages) != 0 && actor.releaseMessageImageSubset(payload.MessageID, removedImages) != nil {
+			actor.publishShared(attachments, agentprotocol.QueuePayload{Items: actor.queue.Items()})
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorImageStorageFailure)
 			return
 		}
 		if !actor.publishShared(attachments, agentprotocol.QueuePayload{Items: actor.queue.Items()}) {

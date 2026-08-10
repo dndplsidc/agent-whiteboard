@@ -14,7 +14,7 @@ var imageReadHeaders = []string{
 	strings.ToLower(agentprotocol.ClientIDHeader),
 	strings.ToLower(agentprotocol.ConversationIDHeader),
 }
-var imageUploadHeaders = append(append([]string{}, imageReadHeaders...), "content-type", strings.ToLower(agentprotocol.ProviderHeader))
+var imageUploadHeaders = append(append([]string{}, imageReadHeaders...), "content-type", strings.ToLower(agentprotocol.ProviderHeader), strings.ToLower(agentprotocol.ImagePurposeHeader))
 
 func (s *Server) preflight(response http.ResponseWriter, request *http.Request) {
 	origin, err := s.requestOrigin(request)
