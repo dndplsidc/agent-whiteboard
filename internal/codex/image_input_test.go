@@ -84,7 +84,7 @@ func TestSessionSubmitSendsStableLocalImageInputs(t *testing.T) {
 	}
 	runtime.sessions[session.threadID] = session
 	request := provider.TurnRequest{
-		TurnID: testID(900), MessageID: testID(901), Message: "compare",
+		TurnID: testID(900), MessageID: testID(901), Content: provider.TextMessage("compare"),
 		Images: []provider.ImageInput{{ID: strings.Repeat("A", 32), Name: "image.png", MediaType: "image/png", Bytes: 5, Path: path}},
 	}
 	result := make(chan error, 1)

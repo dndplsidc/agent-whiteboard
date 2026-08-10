@@ -21,7 +21,8 @@ func TestConfiguredEnvelopeAllowsHostCapabilitiesWithoutChangingContextFraming(t
 	require.NotContains(t, parsed.ApplicationInstructions, "Do not request or use tools")
 	require.Equal(t, request.TurnID, parsed.TurnID)
 	require.Equal(t, request.MessageID, parsed.MessageID)
-	require.Equal(t, request.Message, parsed.ReaderMessage)
+	require.Equal(t, request.Content, parsed.ReaderContent)
+	require.Equal(t, request.Content.PlainText(), parsed.ReaderMessage)
 	require.Equal(t, request.Context.Markdown, parsed.Markdown)
 	require.Equal(t, request.Context.CreatorContext, parsed.CreatorContext)
 
@@ -45,7 +46,7 @@ func configuredTurn() provider.TurnRequest {
 	markdown := []byte("# board\n")
 	creator := []byte("creator context")
 	return provider.TurnRequest{
-		TurnID: "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4", MessageID: "eHl6YWJjZGVmZ2hpamtsbW5vcHFyc3R1", Message: "use the available tools when useful",
+		TurnID: "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4", MessageID: "eHl6YWJjZGVmZ2hpamtsbW5vcHFyc3R1", Content: provider.TextMessage("use the available tools when useful"),
 		Context: &provider.PageContext{
 			Revision: provider.ContextInitial, Markdown: markdown, CreatorContext: creator, Title: "Board", URL: "https://example.test/board",
 			Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFB", CreatedAt: at, UpdatedAt: at},

@@ -803,7 +803,11 @@ func (actor *conversation) publishProviderEvent(attachments map[*attachment]stru
 		var images []agentprotocol.ImageDescriptor
 		images, err = actor.messageImages(source.MessageID)
 		if err == nil {
-			event, err = actor.factory.New(agentprotocol.UserMessagePayload{TurnID: source.TurnID, MessageID: source.MessageID, Text: source.Text, Images: images, CreatedAt: source.Timestamp})
+			var content agentprotocol.MessageContent
+			content, err = messageContentFromProvider(source.Content, images)
+			if err == nil {
+				event, err = actor.factory.New(agentprotocol.UserMessagePayload{TurnID: source.TurnID, MessageID: source.MessageID, Content: content, Images: ordinaryImageDescriptors(source.Content, images), CreatedAt: source.Timestamp})
+			}
 		}
 	} else {
 		event, err = actor.factory.FromProvider(source)
@@ -861,7 +865,7 @@ func (actor *conversation) bufferProviderEvent(source provider.Event) {
 }
 
 func bufferedProviderEventSize(source provider.Event) int {
-	size := len(source.Text) + len(source.TurnID) + len(source.MessageID) + 64
+	size := len(source.Text) + source.Content.SemanticBytes() + len(source.TurnID) + len(source.MessageID) + 64
 	if source.Tool != nil {
 		size += len(source.Tool.ID) + len(source.Tool.TurnID) + len(source.Tool.Kind) + len(source.Tool.Status) + len(source.Tool.Title) + len(source.Tool.Summary) + len(source.Tool.Detail)
 	}

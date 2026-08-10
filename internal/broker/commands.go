@@ -3,6 +3,7 @@ package broker
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"hash"
 	"sort"
@@ -142,7 +143,11 @@ func commandFingerprint(command agentprotocol.Command) ([sha256.Size]byte, error
 	case agentprotocol.SubmitPayload:
 		writer.text(payload.TurnID)
 		writer.text(payload.MessageID)
-		writer.text(payload.Message)
+		encoded, err := json.Marshal(payload.Content)
+		if err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		writer.bytes(encoded)
 		for _, image := range payload.Images {
 			writer.text(image.ImageID)
 			writer.text(image.Name)
@@ -157,7 +162,11 @@ func commandFingerprint(command agentprotocol.Command) ([sha256.Size]byte, error
 		}
 	case agentprotocol.QueueEditPayload:
 		writer.text(payload.MessageID)
-		writer.text(payload.Message)
+		encoded, err := json.Marshal(payload.Content)
+		if err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		writer.bytes(encoded)
 	case agentprotocol.MessageReferencePayload:
 		writer.text(payload.MessageID)
 	case agentprotocol.TurnReferencePayload:

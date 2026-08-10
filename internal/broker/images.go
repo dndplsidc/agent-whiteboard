@@ -11,7 +11,9 @@ import (
 )
 
 func (actor *conversation) claimTurnImages(command agentprotocol.Command, payload agentprotocol.SubmitPayload) ([]provider.ImageInput, []agentprotocol.ImageDescriptor, agentprotocol.BrowserErrorCode) {
-	if len(payload.Images) == 0 {
+	inline := payload.Content.InlineImages()
+	images := append(append([]agentprotocol.ImageReference(nil), inline...), payload.Images...)
+	if len(images) == 0 {
 		return nil, nil, ""
 	}
 	if !actor.session.capabilities.Images {
@@ -27,7 +29,7 @@ func (actor *conversation) claimTurnImages(command agentprotocol.Command, payloa
 		ClientID:       command.ClientID,
 		TurnID:         payload.TurnID,
 		MessageID:      payload.MessageID,
-		Images:         payload.Images,
+		Images:         images,
 	})
 	if err != nil {
 		return nil, nil, mapAttachmentError(err)

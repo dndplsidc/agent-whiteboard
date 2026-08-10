@@ -110,7 +110,7 @@ const (
 type QueueItem struct {
 	TurnID    string            `json:"turn_id"`
 	MessageID string            `json:"message_id"`
-	Message   string            `json:"message"`
+	Content   MessageContent    `json:"content"`
 	Images    []ImageDescriptor `json:"images,omitempty"`
 }
 type TimelineItem struct {
@@ -118,7 +118,8 @@ type TimelineItem struct {
 	Kind      TimelineItemKind  `json:"kind"`
 	TurnID    string            `json:"turn_id,omitempty"`
 	MessageID string            `json:"message_id,omitempty"`
-	Text      string            `json:"text"`
+	Text      string            `json:"text,omitempty"`
+	Content   *MessageContent   `json:"content,omitempty"`
 	Images    []ImageDescriptor `json:"images,omitempty"`
 	CreatedAt time.Time         `json:"created_at"`
 }
@@ -183,7 +184,11 @@ func (p TimelinePayload) validate() error {
 		if !validTimelineItem(item) {
 			return invalid(nil)
 		}
-		total += len(item.Text)
+		if item.Content != nil {
+			total += item.Content.SemanticBytes()
+		} else {
+			total += len(item.Text)
+		}
 		if total > MaxTimelineBytes {
 			return ErrMessageTooLarge
 		}
@@ -228,14 +233,14 @@ func (p HistoryPayload) validate() error {
 type UserMessagePayload struct {
 	TurnID    string            `json:"turn_id"`
 	MessageID string            `json:"message_id"`
-	Text      string            `json:"text"`
+	Content   MessageContent    `json:"content"`
 	Images    []ImageDescriptor `json:"images,omitempty"`
 	CreatedAt time.Time         `json:"created_at"`
 }
 
 func (UserMessagePayload) EventType() EventType { return EventUserMessage }
 func (p UserMessagePayload) validate() error {
-	if !validID(p.TurnID) || !validID(p.MessageID) || !validTextWithDescriptors(p.Text, p.Images) || p.CreatedAt.IsZero() {
+	if !validID(p.TurnID) || !validID(p.MessageID) || !validContentWithDescriptors(p.Content, p.Images) || p.CreatedAt.IsZero() {
 		return invalid(nil)
 	}
 	return nil
@@ -530,7 +535,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	case EventHistory:
 		target, required = &HistoryPayload{}, []string{"command_id", "items", "next_cursor"}
 	case EventUserMessage:
-		target, required = &UserMessagePayload{}, []string{"turn_id", "message_id", "text", "created_at"}
+		target, required = &UserMessagePayload{}, []string{"turn_id", "message_id", "content", "created_at"}
 	case EventAssistantDelta:
 		target, required = &AssistantDeltaPayload{}, []string{"turn_id", "message_id", "text"}
 	case EventAssistantMessage:
@@ -640,7 +645,7 @@ func ValidateQueue(items []QueueItem) error {
 	}
 	total := 0
 	for _, item := range items {
-		total += len(item.Message)
+		total += item.Content.SemanticBytes()
 		if total > MaxQueueBytes {
 			return ErrMessageTooLarge
 		}
@@ -648,7 +653,7 @@ func ValidateQueue(items []QueueItem) error {
 	seenMessages := make(map[string]struct{}, len(items))
 	seenTurns := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if !validID(item.TurnID) || !validID(item.MessageID) || !validTextWithDescriptors(item.Message, item.Images) {
+		if !validID(item.TurnID) || !validID(item.MessageID) || !validContentWithDescriptors(item.Content, item.Images) {
 			return invalid(nil)
 		}
 		if _, exists := seenMessages[item.MessageID]; exists {
@@ -710,17 +715,20 @@ func validTimelineItem(item TimelineItem) bool {
 	}
 	switch item.Kind {
 	case TimelineUser:
-		return validID(item.TurnID) && validID(item.MessageID) && validTextWithDescriptors(item.Text, item.Images)
+		return validID(item.TurnID) && validID(item.MessageID) && item.Text == "" && item.Content != nil && validContentWithDescriptors(*item.Content, item.Images)
 	case TimelineAssistant:
-		return validID(item.TurnID) && validID(item.MessageID) && validMessage(item.Text) && len(item.Images) == 0
+		return validID(item.TurnID) && validID(item.MessageID) && validMessage(item.Text) && item.Content == nil && len(item.Images) == 0
 	case TimelineActivity:
-		return item.MessageID == "" && (item.TurnID == "" || validID(item.TurnID)) && validMessage(item.Text) && len(item.Images) == 0
+		return item.MessageID == "" && (item.TurnID == "" || validID(item.TurnID)) && validMessage(item.Text) && item.Content == nil && len(item.Images) == 0
 	default:
 		return false
 	}
 }
 func validTextWithDescriptors(text string, images []ImageDescriptor) bool {
 	return validBoundedText(text, MaxMessageBytes, false) && (text != "" || len(images) != 0) && validateImageDescriptors(images) == nil
+}
+func validContentWithDescriptors(content MessageContent, images []ImageDescriptor) bool {
+	return content.ValidateEvent() == nil && (!content.Empty() || len(images) != 0) && validateImageDescriptors(images) == nil
 }
 func validArchiveItem(item ArchiveItem) bool {
 	return validID(item.ArchiveID) && !item.CreatedAt.IsZero() && !item.UpdatedAt.IsZero() && !item.UpdatedAt.Before(item.CreatedAt) && item.Provider.Valid() && validBoundedText(item.Model, MaxTitleBytes, false) && validBoundedText(item.Preview, MaxTitleBytes, false) && utf8.ValidString(item.Preview)

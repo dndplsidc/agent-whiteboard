@@ -42,23 +42,24 @@ func (actor *conversation) handleHistoryResult(attachments map[*attachment]struc
 		actor.resumePendingDispatch(attachments, turnResults)
 		return
 	}
-	payload, err := historyPayload(result.commandID, result.limit, result.page)
-	if err != nil {
-		actor.completePendingCommand(attachments, result.commandID, result.clientID, agentprotocol.ErrorProviderProtocolFailure)
-		actor.resumePendingDispatch(attachments, turnResults)
-		return
-	}
-	for index := range payload.Items {
-		if payload.Items[index].Kind != agentprotocol.TimelineUser {
+	descriptors := make(map[string][]agentprotocol.ImageDescriptor)
+	for _, item := range result.page.Items {
+		if item.Role != provider.HistoryUser {
 			continue
 		}
-		images, imageErr := actor.messageImages(payload.Items[index].MessageID)
+		images, imageErr := actor.messageImages(item.MessageID)
 		if imageErr != nil {
 			actor.completePendingCommand(attachments, result.commandID, result.clientID, agentprotocol.ErrorImageStorageFailure)
 			actor.resumePendingDispatch(attachments, turnResults)
 			return
 		}
-		payload.Items[index].Images = images
+		descriptors[item.MessageID] = images
+	}
+	payload, err := historyPayload(result.commandID, result.limit, result.page, descriptors)
+	if err != nil {
+		actor.completePendingCommand(attachments, result.commandID, result.clientID, agentprotocol.ErrorProviderProtocolFailure)
+		actor.resumePendingDispatch(attachments, turnResults)
+		return
 	}
 	event, err := actor.factory.New(payload)
 	if err != nil || actor.replay.AppendForClient(result.clientID, event) != nil {
@@ -96,7 +97,7 @@ func (actor *conversation) resumePendingDispatch(attachments map[*attachment]str
 	actor.dispatchNext(attachments, results)
 }
 
-func historyPayload(commandID string, limit int, page provider.HistoryPage) (agentprotocol.TimelinePayload, error) {
+func historyPayload(commandID string, limit int, page provider.HistoryPage, descriptorSets ...map[string][]agentprotocol.ImageDescriptor) (agentprotocol.TimelinePayload, error) {
 	if err := page.Validate(); err != nil || limit <= 0 || limit > agentprotocol.MaxPageSize || len(page.Items) > limit {
 		return agentprotocol.TimelinePayload{}, errors.New("invalid provider history page")
 	}
@@ -104,7 +105,11 @@ func historyPayload(commandID string, limit int, page provider.HistoryPage) (age
 	seen := make(map[string]struct{}, len(page.Items))
 	total := 0
 	for index, item := range page.Items {
-		total += len(item.Text)
+		if item.Role == provider.HistoryUser {
+			total += item.Content.SemanticBytes()
+		} else {
+			total += len(item.Text)
+		}
 		if total > agentprotocol.MaxTimelineBytes {
 			return agentprotocol.TimelinePayload{}, errors.New("provider history exceeds browser timeline limit")
 		}
@@ -113,9 +118,20 @@ func historyPayload(commandID string, limit int, page provider.HistoryPage) (age
 		}
 		seen[item.MessageID] = struct{}{}
 		var kind agentprotocol.TimelineItemKind
+		var content *agentprotocol.MessageContent
+		var images []agentprotocol.ImageDescriptor
 		switch item.Role {
 		case provider.HistoryUser:
 			kind = agentprotocol.TimelineUser
+			if len(descriptorSets) != 0 {
+				images = descriptorSets[0][item.MessageID]
+			}
+			converted, err := messageContentFromProvider(item.Content, images)
+			if err != nil {
+				return agentprotocol.TimelinePayload{}, errors.New("invalid provider history content")
+			}
+			content = &converted
+			images = ordinaryImageDescriptors(item.Content, images)
 		case provider.HistoryAssistant:
 			kind = agentprotocol.TimelineAssistant
 		default:
@@ -123,7 +139,7 @@ func historyPayload(commandID string, limit int, page provider.HistoryPage) (age
 		}
 		items[index] = agentprotocol.TimelineItem{
 			ItemID: item.MessageID, Kind: kind, TurnID: item.TurnID,
-			MessageID: item.MessageID, Text: item.Text, CreatedAt: item.CreatedAt,
+			MessageID: item.MessageID, Text: item.Text, Content: content, Images: images, CreatedAt: item.CreatedAt,
 		}
 	}
 	var next *string

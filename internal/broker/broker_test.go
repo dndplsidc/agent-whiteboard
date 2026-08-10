@@ -226,7 +226,7 @@ func TestReplayLogUsesWireBytesEvictsExactlyAndFiltersTargets(t *testing.T) {
 	clientA := testID('D')
 	clientB := testID('E')
 	now := testTime()
-	first := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(1), ConversationID: conversation, Type: agentprotocol.EventQueue, Timestamp: now, Payload: agentprotocol.QueuePayload{Items: []agentprotocol.QueueItem{{TurnID: testID('F'), MessageID: testID('G'), Message: "✓"}}}}
+	first := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(1), ConversationID: conversation, Type: agentprotocol.EventQueue, Timestamp: now, Payload: agentprotocol.QueuePayload{Items: []agentprotocol.QueueItem{{TurnID: testID('F'), MessageID: testID('G'), Content: agentprotocol.TextContent("✓")}}}}
 	encoded, err := agentprotocol.EncodeEvent(first)
 	require.NoError(t, err)
 	require.NoError(t, log.Append(first))
@@ -269,10 +269,10 @@ func TestReplayLogUsesWireBytesEvictsExactlyAndFiltersTargets(t *testing.T) {
 func TestReplayLogReturnsStablePayloadCopies(t *testing.T) {
 	log := NewReplayLog()
 	active := testID('D')
-	event := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: agentprotocol.EventSnapshot, Timestamp: testTime(), Payload: agentprotocol.SnapshotPayload{Lifecycle: agentprotocol.LifecycleResponding, Queue: []agentprotocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Message: "original"}}, ContextState: agentprotocol.ContextPending, ActiveTurnID: &active}}
+	event := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: agentprotocol.EventSnapshot, Timestamp: testTime(), Payload: agentprotocol.SnapshotPayload{Lifecycle: agentprotocol.LifecycleResponding, Queue: []agentprotocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Content: agentprotocol.TextContent("original")}}, ContextState: agentprotocol.ContextPending, ActiveTurnID: &active}}
 	require.NoError(t, log.Append(event))
 	payload := event.Payload.(agentprotocol.SnapshotPayload)
-	payload.Queue[0].Message = "changed"
+	payload.Queue[0].Content.Parts[0].Text = "changed"
 	*payload.ActiveTurnID = testID('E')
 
 	lifecycleTurn := testID('H')
@@ -283,7 +283,7 @@ func TestReplayLogReturnsStablePayloadCopies(t *testing.T) {
 	got, err := log.Replay(testID('G'), "")
 	require.NoError(t, err)
 	stored := got[0].Payload.(agentprotocol.SnapshotPayload)
-	require.Equal(t, "original", stored.Queue[0].Message)
+	require.Equal(t, "original", stored.Queue[0].Content.Parts[0].Text)
 	require.Equal(t, testID('D'), *stored.ActiveTurnID)
 	require.Equal(t, testID('H'), *got[1].Payload.(agentprotocol.LifecyclePayload).TurnID)
 	*stored.ActiveTurnID = testID('F')
@@ -348,19 +348,19 @@ func TestQueueFIFOBoundsDuplicatesEditRemoveAndContextErasure(t *testing.T) {
 	queue := NewQueue()
 	resource := provider.Resource{Kind: provider.ResourceMarkdown, ID: testID('H'), CreatedAt: testTime(), UpdatedAt: testTime().Add(time.Minute)}
 	context := testProviderContext(resource)
-	turnA := QueuedTurn{TurnID: testID('I'), MessageID: testID('J'), Message: "first", Context: &context}
-	turnB := QueuedTurn{TurnID: testID('K'), MessageID: testID('L'), Message: "second"}
+	turnA := QueuedTurn{TurnID: testID('I'), MessageID: testID('J'), Content: provider.TextMessage("first"), Context: &context}
+	turnB := QueuedTurn{TurnID: testID('K'), MessageID: testID('L'), Content: provider.TextMessage("second")}
 	require.NoError(t, queue.Enqueue(turnA))
 	require.NoError(t, queue.Enqueue(turnB))
 	require.Equal(t, len("first")+len("second"), queue.Bytes())
-	require.Equal(t, []agentprotocol.QueueItem{{TurnID: turnA.TurnID, MessageID: turnA.MessageID, Message: "first"}, {TurnID: turnB.TurnID, MessageID: turnB.MessageID, Message: "second"}}, queue.Items())
-	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: turnA.TurnID, MessageID: testID('M'), Message: "duplicate"}), ErrQueueDuplicateID)
-	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('N'), MessageID: turnB.MessageID, Message: "duplicate"}), ErrQueueDuplicateID)
+	require.Equal(t, []agentprotocol.QueueItem{{TurnID: turnA.TurnID, MessageID: turnA.MessageID, Content: agentprotocol.TextContent("first")}, {TurnID: turnB.TurnID, MessageID: turnB.MessageID, Content: agentprotocol.TextContent("second")}}, queue.Items())
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: turnA.TurnID, MessageID: testID('M'), Content: provider.TextMessage("duplicate")}), ErrQueueDuplicateID)
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('N'), MessageID: turnB.MessageID, Content: provider.TextMessage("duplicate")}), ErrQueueDuplicateID)
 	secondContext := testProviderContext(resource)
-	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('M'), MessageID: testID('N'), Message: "second context", Context: &secondContext}), ErrQueueContextConflict)
-	require.NoError(t, queue.Edit(turnA.MessageID, "edited"))
-	require.Equal(t, "edited", queue.Items()[0].Message)
-	require.ErrorIs(t, queue.Edit(testID('O'), "missing"), ErrQueueItemNotFound)
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('M'), MessageID: testID('N'), Content: provider.TextMessage("second context"), Context: &secondContext}), ErrQueueContextConflict)
+	require.NoError(t, queue.Edit(turnA.MessageID, provider.TextMessage("edited")))
+	require.Equal(t, "edited", queue.Items()[0].Content.Parts[0].Text)
+	require.ErrorIs(t, queue.Edit(testID('O'), provider.TextMessage("missing")), ErrQueueItemNotFound)
 
 	owned := queue.items[0].context
 	require.NotNil(t, owned)
@@ -373,7 +373,7 @@ func TestQueueFIFOBoundsDuplicatesEditRemoveAndContextErasure(t *testing.T) {
 	require.Equal(t, turnB.TurnID, dequeued.TurnID)
 	require.True(t, queue.Empty())
 
-	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('M'), MessageID: testID('N'), Message: "second context", Context: &secondContext}))
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('M'), MessageID: testID('N'), Content: provider.TextMessage("second context"), Context: &secondContext}))
 	secondOwned := queue.items[0].context
 	queue.Clear()
 	require.True(t, queue.Empty())
@@ -384,15 +384,15 @@ func TestQueueFIFOBoundsDuplicatesEditRemoveAndContextErasure(t *testing.T) {
 func TestQueueBoundsAreByteAndItemExact(t *testing.T) {
 	queue := NewQueue()
 	for index := 0; index < MaxQueueItems; index++ {
-		require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(uint64(index + 1)), MessageID: sequenceID(uint64(index + 1000)), Message: "x"}))
+		require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(uint64(index + 1)), MessageID: sequenceID(uint64(index + 1000)), Content: provider.TextMessage("x")}))
 	}
-	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(10000), MessageID: sequenceID(10001), Message: "x"}), ErrQueueFull)
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(10000), MessageID: sequenceID(10001), Content: provider.TextMessage("x")}), ErrQueueFull)
 
 	queue = NewQueue()
 	message := strings.Repeat("界", 49152/len("界"))
-	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('P'), MessageID: testID('Q'), Message: message}))
-	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('R'), MessageID: testID('S'), Message: message}))
-	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('W'), MessageID: testID('X'), Message: "x"}), ErrQueueFull)
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('P'), MessageID: testID('Q'), Content: provider.TextMessage(message)}))
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('R'), MessageID: testID('S'), Content: provider.TextMessage(message)}))
+	require.ErrorIs(t, queue.Enqueue(QueuedTurn{TurnID: testID('W'), MessageID: testID('X'), Content: provider.TextMessage("x")}), ErrQueueFull)
 }
 
 type testIDGenerator struct {
@@ -432,7 +432,7 @@ func (*nilClock) Now() time.Time { return time.Time{} }
 func TestEventFactoryValidatesAndConvertsEveryProviderEvent(t *testing.T) {
 	now := testTime()
 	providerEvents := []provider.Event{
-		provider.NewUserMessageEvent(testID('A'), testID('B'), "question", now),
+		provider.NewUserMessageEvent(testID('A'), testID('B'), provider.TextMessage("question"), now),
 		provider.NewAssistantDeltaEvent(testID('A'), testID('C'), "part"),
 		provider.NewAssistantMessageEvent(testID('A'), testID('C'), "answer", now),
 		provider.NewActivityEvent(testID('A'), provider.ActivityStatus, "working"),

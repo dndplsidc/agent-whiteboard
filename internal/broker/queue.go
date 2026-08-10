@@ -2,6 +2,7 @@ package broker
 
 import (
 	"errors"
+	"reflect"
 
 	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
 	"github.com/edocsss/agent-whiteboard/internal/provider"
@@ -17,7 +18,7 @@ const (
 type QueuedTurn struct {
 	TurnID      string
 	MessageID   string
-	Message     string
+	Content     provider.MessageContent
 	Images      []provider.ImageInput
 	Descriptors []agentprotocol.ImageDescriptor
 	Context     *provider.PageContext
@@ -26,7 +27,7 @@ type QueuedTurn struct {
 type queueItem struct {
 	turnID      string
 	messageID   string
-	message     string
+	content     provider.MessageContent
 	images      []provider.ImageInput
 	descriptors []agentprotocol.ImageDescriptor
 	context     *provider.PageContext
@@ -122,24 +123,24 @@ func (queue *Queue) Enqueue(turn QueuedTurn) error {
 	if turn.Context != nil && queue.hasContext {
 		return ErrQueueContextConflict
 	}
-	if len(queue.items) >= MaxQueueItems || queue.bytes+len(turn.Message) > MaxQueueBytes {
+	if len(queue.items) >= MaxQueueItems || queue.bytes+turn.Content.SemanticBytes() > MaxQueueBytes {
 		return ErrQueueFull
 	}
 	queue.items = append(queue.items, queueItem{
 		turnID:      turn.TurnID,
 		messageID:   turn.MessageID,
-		message:     turn.Message,
+		content:     turn.Content.Clone(),
 		images:      append([]provider.ImageInput(nil), turn.Images...),
 		descriptors: append([]agentprotocol.ImageDescriptor(nil), turn.Descriptors...),
 		context:     cloneProviderContext(turn.Context),
 	})
-	queue.bytes += len(turn.Message)
+	queue.bytes += turn.Content.SemanticBytes()
 	queue.hasContext = queue.hasContext || turn.Context != nil
 	return nil
 }
 
 func (turn QueuedTurn) validate() error {
-	request := provider.TurnRequest{TurnID: turn.TurnID, MessageID: turn.MessageID, Message: turn.Message, Images: turn.Images, Context: turn.Context}
+	request := provider.TurnRequest{TurnID: turn.TurnID, MessageID: turn.MessageID, Content: turn.Content, Images: turn.Images, Context: turn.Context}
 	if err := request.Validate(); err != nil {
 		return ErrQueueInvalid
 	}
@@ -158,7 +159,7 @@ func (turn QueuedTurn) validate() error {
 
 // Edit changes only a still-queued message. Turn IDs and context are not
 // editable, and the aggregate bound is checked before mutation.
-func (queue *Queue) Edit(messageID, message string) error {
+func (queue *Queue) Edit(messageID string, content provider.MessageContent) error {
 	if queue == nil {
 		return errors.New("nil queue")
 	}
@@ -166,18 +167,21 @@ func (queue *Queue) Edit(messageID, message string) error {
 		if queue.items[index].messageID != messageID {
 			continue
 		}
-		// The synthetic turn ID exists only to reuse provider validation while
-		// preserving the queued images. An empty edited caption remains valid
-		// when the queued turn still contains at least one image.
-		if err := (provider.TurnRequest{TurnID: validQueueID, MessageID: messageID, Message: message, Images: queue.items[index].images}).Validate(); err != nil {
+		if !referencesAreImmutable(queue.items[index].content, content) {
 			return ErrQueueInvalid
 		}
-		newBytes := queue.bytes - len(queue.items[index].message) + len(message)
+		images, descriptors, ok := reorderEditedImages(queue.items[index], content)
+		if !ok || (provider.TurnRequest{TurnID: validQueueID, MessageID: messageID, Content: content, Images: images}).Validate() != nil {
+			return ErrQueueInvalid
+		}
+		newBytes := queue.bytes - queue.items[index].content.SemanticBytes() + content.SemanticBytes()
 		if newBytes > MaxQueueBytes {
 			return ErrQueueFull
 		}
 		queue.bytes = newBytes
-		queue.items[index].message = message
+		queue.items[index].content = content.Clone()
+		queue.items[index].images = images
+		queue.items[index].descriptors = descriptors
 		return nil
 	}
 	return ErrQueueItemNotFound
@@ -198,7 +202,7 @@ func (queue *Queue) Remove(messageID string) error {
 			queue.hasContext = false
 		}
 		zeroProviderContext(item.context)
-		queue.bytes -= len(item.message)
+		queue.bytes -= item.content.SemanticBytes()
 		copy(queue.items[index:], queue.items[index+1:])
 		queue.items[len(queue.items)-1] = queueItem{}
 		queue.items = queue.items[:len(queue.items)-1]
@@ -214,7 +218,7 @@ func (queue *Queue) peek() (provider.TurnRequest, bool) {
 		return provider.TurnRequest{}, false
 	}
 	item := queue.items[0]
-	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Images: append([]provider.ImageInput(nil), item.images...), Context: item.context}, true
+	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Content: item.content.Clone(), Images: append([]provider.ImageInput(nil), item.images...), Context: item.context}, true
 }
 
 // Dequeue transfers ownership of the context to the caller. The queue itself
@@ -227,11 +231,11 @@ func (queue *Queue) Dequeue() (provider.TurnRequest, bool) {
 	item := queue.items[0]
 	queue.items[0] = queueItem{}
 	queue.items = queue.items[1:]
-	queue.bytes -= len(item.message)
+	queue.bytes -= item.content.SemanticBytes()
 	if item.context != nil {
 		queue.hasContext = false
 	}
-	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Images: append([]provider.ImageInput(nil), item.images...), Context: item.context}, true
+	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Content: item.content, Images: append([]provider.ImageInput(nil), item.images...), Context: item.context}, true
 }
 
 // Items exposes only browser-safe queue values. Context bytes never enter the
@@ -242,9 +246,88 @@ func (queue *Queue) Items() []agentprotocol.QueueItem {
 	}
 	items := make([]agentprotocol.QueueItem, len(queue.items))
 	for index, item := range queue.items {
-		items[index] = agentprotocol.QueueItem{TurnID: item.turnID, MessageID: item.messageID, Message: item.message, Images: append([]agentprotocol.ImageDescriptor(nil), item.descriptors...)}
+		content, err := messageContentFromProvider(item.content, item.descriptors)
+		if err != nil {
+			return []agentprotocol.QueueItem{}
+		}
+		items[index] = agentprotocol.QueueItem{TurnID: item.turnID, MessageID: item.messageID, Content: content, Images: ordinaryImageDescriptors(item.content, item.descriptors)}
 	}
 	return items
+}
+
+func referencesAreImmutable(before, after provider.MessageContent) bool {
+	old := make(map[string]provider.ContextReference)
+	for _, part := range before.Parts {
+		if part.Reference != nil {
+			reference := *part.Reference
+			if reference.Visual != nil {
+				reference.Visual.Ordinal = 0
+			}
+			old[reference.ID] = reference
+		}
+	}
+	for _, part := range after.Parts {
+		if part.Reference == nil {
+			continue
+		}
+		reference := *part.Reference
+		if reference.Visual != nil {
+			reference.Visual.Ordinal = 0
+		}
+		previous, exists := old[reference.ID]
+		if !exists || !reflect.DeepEqual(previous, reference) {
+			return false
+		}
+	}
+	return true
+}
+
+func reorderEditedImages(item queueItem, content provider.MessageContent) ([]provider.ImageInput, []agentprotocol.ImageDescriptor, bool) {
+	inputs := make(map[string]provider.ImageInput, len(item.images))
+	descriptors := make(map[string]agentprotocol.ImageDescriptor, len(item.descriptors))
+	for index, input := range item.images {
+		inputs[input.ID] = input
+		descriptors[input.ID] = item.descriptors[index]
+	}
+	oldInline := make(map[string]struct{})
+	for _, id := range item.content.InlineImageIDs() {
+		oldInline[id] = struct{}{}
+	}
+	orderedIDs := append([]string(nil), content.InlineImageIDs()...)
+	for _, input := range item.images {
+		if _, inline := oldInline[input.ID]; !inline {
+			orderedIDs = append(orderedIDs, input.ID)
+		}
+	}
+	resultInputs := make([]provider.ImageInput, 0, len(orderedIDs))
+	resultDescriptors := make([]agentprotocol.ImageDescriptor, 0, len(orderedIDs))
+	for _, id := range orderedIDs {
+		input, inputExists := inputs[id]
+		descriptor, descriptorExists := descriptors[id]
+		if !inputExists || !descriptorExists {
+			return nil, nil, false
+		}
+		resultInputs = append(resultInputs, input)
+		resultDescriptors = append(resultDescriptors, descriptor)
+	}
+	return resultInputs, resultDescriptors, true
+}
+
+func ordinaryImageDescriptors(content provider.MessageContent, descriptors []agentprotocol.ImageDescriptor) []agentprotocol.ImageDescriptor {
+	inline := make(map[string]struct{})
+	for _, id := range content.InlineImageIDs() {
+		inline[id] = struct{}{}
+	}
+	result := make([]agentprotocol.ImageDescriptor, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		if _, exists := inline[descriptor.ImageID]; !exists {
+			result = append(result, descriptor)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func (queue *Queue) imageMessageIDs() []string {

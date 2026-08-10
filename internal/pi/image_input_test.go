@@ -73,7 +73,7 @@ func TestSessionSubmitSendsNativePiImages(t *testing.T) {
 	driver := &Driver{config: Config{Clock: fixedClock{value: time.Unix(10, 0).UTC()}}}
 	session := newSession(driver, provider.NativeSession{}, startupState{Model: "p/m", SupportsImages: true}, child, client)
 	request := provider.TurnRequest{
-		TurnID: strings.Repeat("A", 32), MessageID: strings.Repeat("B", 32), Message: "compare",
+		TurnID: strings.Repeat("A", 32), MessageID: strings.Repeat("B", 32), Content: provider.TextMessage("compare"),
 		Images: []provider.ImageInput{{ID: strings.Repeat("C", 32), Name: "image.png", MediaType: "image/png", Bytes: 5, Path: path}},
 	}
 	result := make(chan error, 1)

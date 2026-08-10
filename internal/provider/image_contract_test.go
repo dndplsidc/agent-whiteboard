@@ -14,7 +14,7 @@ func TestTurnRequestValidatesImageOnlyAndMixedInput(t *testing.T) {
 	image := provider.ImageInput{ID: strings.Repeat("A", 32), Name: "screen.png", MediaType: "image/png", Bytes: 1024, Path: filepath.Join(root, "screen.png")}
 	for _, request := range []provider.TurnRequest{
 		{TurnID: strings.Repeat("B", 32), MessageID: strings.Repeat("C", 32), Images: []provider.ImageInput{image}},
-		{TurnID: strings.Repeat("B", 32), MessageID: strings.Repeat("C", 32), Message: "compare", Images: []provider.ImageInput{image}},
+		{TurnID: strings.Repeat("B", 32), MessageID: strings.Repeat("C", 32), Content: provider.TextMessage("compare"), Images: []provider.ImageInput{image}},
 	} {
 		require.NoError(t, request.Validate())
 	}
@@ -44,7 +44,7 @@ func TestTurnRequestRejectsInvalidImageBoundaries(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Error(t, (provider.TurnRequest{TurnID: strings.Repeat("B", 32), MessageID: strings.Repeat("C", 32), Message: tt.message, Images: tt.images}).Validate())
+			require.Error(t, (provider.TurnRequest{TurnID: strings.Repeat("B", 32), MessageID: strings.Repeat("C", 32), Content: provider.TextMessage(tt.message), Images: tt.images}).Validate())
 		})
 	}
 }

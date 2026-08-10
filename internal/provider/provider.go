@@ -401,13 +401,13 @@ func (p PageContext) Validate() error {
 type TurnRequest struct {
 	TurnID    string
 	MessageID string
-	Message   string
+	Content   MessageContent
 	Images    []ImageInput
 	Context   *PageContext
 }
 
 func (r TurnRequest) Validate() error {
-	if !validID(r.TurnID) || !validID(r.MessageID) || !validBoundedText(r.Message, MaxTurnMessageBytes, false) || (r.Message == "" && len(r.Images) == 0) || validateImageInputs(r.Images) != nil {
+	if !validID(r.TurnID) || !validID(r.MessageID) || r.Content.Validate() != nil || (r.Content.Empty() && len(r.Images) == 0) || validateImageInputs(r.Images) != nil || r.Content.ValidateImages(r.Images) != nil {
 		return errors.New("invalid turn request")
 	}
 	if r.Context != nil {
@@ -563,6 +563,7 @@ type HistoryItem struct {
 	MessageID string
 	Role      HistoryRole
 	Text      string
+	Content   MessageContent
 	CreatedAt time.Time
 }
 type HistoryRequest struct {
@@ -598,11 +599,17 @@ func validateHistory(items []HistoryItem) error {
 	}
 	total := 0
 	for _, item := range items {
-		requireText := item.Role == HistoryAssistant
-		if !validID(item.TurnID) || !validID(item.MessageID) || (item.Role != HistoryUser && item.Role != HistoryAssistant) || !validBoundedText(item.Text, MaxHistoryItemBytes, requireText) || item.CreatedAt.IsZero() {
+		// Image-only user messages have empty ordered content; their private image
+		// manifest is owned by the broker rather than the provider history item.
+		validBody := item.Role == HistoryUser && item.Text == "" && item.Content.Validate() == nil || item.Role == HistoryAssistant && item.Content.Empty() && validBoundedText(item.Text, MaxHistoryItemBytes, true)
+		if !validID(item.TurnID) || !validID(item.MessageID) || (item.Role != HistoryUser && item.Role != HistoryAssistant) || !validBody || item.CreatedAt.IsZero() {
 			return errors.New("invalid history item")
 		}
-		total += len(item.Text)
+		if item.Role == HistoryUser {
+			total += item.Content.SemanticBytes()
+		} else {
+			total += len(item.Text)
+		}
 		if total > MaxHistoryBytes {
 			return errors.New("provider history exceeds byte limit")
 		}
@@ -655,6 +662,7 @@ type Event struct {
 	MessageID    string
 	TurnID       string
 	Text         string
+	Content      MessageContent
 	Timestamp    time.Time
 	Activity     ActivityKind
 	Blocked      BlockedKind
@@ -665,8 +673,8 @@ type Event struct {
 	Resolution   *InteractionResolution
 }
 
-func NewUserMessageEvent(turnID, messageID, text string, at time.Time) Event {
-	return Event{Kind: EventUserMessage, TurnID: turnID, MessageID: messageID, Text: text, Timestamp: at}
+func NewUserMessageEvent(turnID, messageID string, content MessageContent, at time.Time) Event {
+	return Event{Kind: EventUserMessage, TurnID: turnID, MessageID: messageID, Content: content.Clone(), Timestamp: at}
 }
 func NewAssistantDeltaEvent(turnID, messageID, text string) Event {
 	return Event{Kind: EventAssistantDelta, TurnID: turnID, MessageID: messageID, Text: text}
@@ -700,15 +708,18 @@ func NewTerminalFailureEvent(turnID string, failure ProviderError) Event {
 	return Event{Kind: EventTerminalFailure, TurnID: turnID, Failure: failure}
 }
 func (e Event) Validate() error {
-	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil
+	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil || e.Kind != EventUserMessage && !e.Content.Empty()
 	switch e.Kind {
-	case EventUserMessage, EventAssistantMessage:
-		requireText := e.Kind == EventAssistantMessage
-		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, requireText) || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+	case EventUserMessage:
+		if structured || !validID(e.TurnID) || !validID(e.MessageID) || e.Text != "" || e.Content.Validate() != nil || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+			return errors.New("invalid provider message event")
+		}
+	case EventAssistantMessage:
+		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxEventTextBytes, true) || !e.Content.Empty() || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider message event")
 		}
 	case EventAssistantDelta:
-		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxDeltaBytes, true) || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		if structured || !validID(e.TurnID) || !validID(e.MessageID) || !validBoundedText(e.Text, MaxDeltaBytes, true) || !e.Content.Empty() || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
 			return errors.New("invalid provider delta event")
 		}
 	case EventActivity:

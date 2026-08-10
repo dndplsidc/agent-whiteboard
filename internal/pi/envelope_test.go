@@ -26,14 +26,14 @@ func TestBuildEnvelopeExactInitialBytes(t *testing.T) {
 		[]byte("A title"), []byte("https://example.test/board"), []byte("markdown"), []byte(testTurnID),
 		[]byte("2026-07-27T12:00:00.123456789Z"), []byte("2026-07-27T13:00:00.987654321Z"), []byte("2026-07-28T12:00:00Z"),
 		[]byte("creator\x00context\nwith delimiter: end-agent-whiteboard-turn-v1"),
-		[]byte("# Markdown\n\x01exact — 世界\nrevision 999\n"), []byte("reader\nmessage"),
+		[]byte("# Markdown\n\x01exact — 世界\nrevision 999\n"), []byte(`{"parts":[{"type":"text","text":"reader\nmessage"}]}`),
 	})
 	require.Equal(t, expected, encoded)
 	parsed, err := ParseEnvelope(encoded)
 	require.NoError(t, err)
 	require.Equal(t, request.Context.Markdown, parsed.Markdown)
 	require.Equal(t, request.Context.CreatorContext, parsed.CreatorContext)
-	require.Equal(t, request.Message, parsed.ReaderMessage)
+	require.Equal(t, request.Content, parsed.ReaderContent)
 	require.Equal(t, request.Context.Digest, contextdigest.Calculate(parsed.Markdown, parsed.CreatorContext))
 }
 
@@ -50,12 +50,12 @@ func TestBuildEnvelopeExactReplacementBytes(t *testing.T) {
 }
 
 func TestBuildEnvelopeExactContinuationBytes(t *testing.T) {
-	request := provider.TurnRequest{TurnID: testTurnID, MessageID: testMessageID, Message: "continue exactly"}
+	request := provider.TurnRequest{TurnID: testTurnID, MessageID: testMessageID, Content: provider.TextMessage("continue exactly")}
 	encoded, err := BuildEnvelope(request)
 	require.NoError(t, err)
 	expected := envelopeGolden([][]byte{
 		[]byte("continuation"), []byte(testTurnID), []byte(testMessageID), []byte(continuationInstructions),
-		nil, nil, nil, nil, nil, nil, nil, nil, nil, []byte("continue exactly"),
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, []byte(`{"parts":[{"type":"text","text":"continue exactly"}]}`),
 	})
 	require.Equal(t, expected, encoded)
 	parsed, err := ParseEnvelope(encoded)
@@ -136,7 +136,7 @@ func envelopeRequest(revision provider.ContextRevision) provider.TurnRequest {
 	markdown := []byte("# Markdown\n\x01exact — 世界\nrevision 999\n")
 	creator := []byte("creator\x00context\nwith delimiter: end-agent-whiteboard-turn-v1")
 	return provider.TurnRequest{
-		TurnID: testTurnID, MessageID: testMessageID, Message: "reader\nmessage",
+		TurnID: testTurnID, MessageID: testMessageID, Content: provider.TextMessage("reader\nmessage"),
 		Context: &provider.PageContext{
 			Revision: revision, Markdown: markdown, CreatorContext: creator, Title: "A title", URL: "https://example.test/board",
 			Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: testTurnID, CreatedAt: created, UpdatedAt: updated, ExpiresAt: &expires},

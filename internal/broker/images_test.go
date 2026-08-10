@@ -103,7 +103,7 @@ func TestImageSubmitClaimsOrderedInputsAndDecoratesUserEventsAndHistory(t *testi
 	require.NoError(t, err)
 	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
 	submitted := receiveLifecycle(t, session.submitted)
-	require.Empty(t, submitted.Message)
+	require.True(t, submitted.Content.Empty())
 	require.Equal(t, []string{references[0].ImageID, references[1].ImageID}, []string{submitted.Images[0].ID, submitted.Images[1].ID})
 	drainEvents(t, connection.Events(), 3)
 
@@ -114,7 +114,7 @@ func TestImageSubmitClaimsOrderedInputsAndDecoratesUserEventsAndHistory(t *testi
 	require.Equal(t, references, store.claims[0].Images)
 	store.mu.Unlock()
 
-	session.events <- provider.NewUserMessageEvent(turnID, messageID, "", testTime())
+	session.events <- provider.NewUserMessageEvent(turnID, messageID, provider.MessageContent{}, testTime())
 	user := receiveLifecycle(t, connection.Events())
 	require.Equal(t, agentprotocol.EventUserMessage, user.Type)
 	require.Equal(t, []agentprotocol.ImageDescriptor{
@@ -202,13 +202,13 @@ func TestQueuedImageCaptionCanBeClearedWithoutChangingImages(t *testing.T) {
 	image := provider.ImageInput{ID: sequenceID(8150), Name: "queued.png", MediaType: "image/png", Bytes: 4, Path: filepath.Join("/private/tmp", sequenceID(8150)+".png")}
 	descriptor := agentprotocol.ImageDescriptor{ImageID: image.ID, Name: image.Name, MediaType: image.MediaType}
 	queue := NewQueue()
-	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(8151), MessageID: sequenceID(8152), Message: "caption", Images: []provider.ImageInput{image}, Descriptors: []agentprotocol.ImageDescriptor{descriptor}}))
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: sequenceID(8151), MessageID: sequenceID(8152), Content: provider.TextMessage("caption"), Images: []provider.ImageInput{image}, Descriptors: []agentprotocol.ImageDescriptor{descriptor}}))
 
-	require.NoError(t, queue.Edit(sequenceID(8152), ""))
-	require.Equal(t, []agentprotocol.QueueItem{{TurnID: sequenceID(8151), MessageID: sequenceID(8152), Message: "", Images: []agentprotocol.ImageDescriptor{descriptor}}}, queue.Items())
+	require.NoError(t, queue.Edit(sequenceID(8152), provider.MessageContent{}))
+	require.Equal(t, []agentprotocol.QueueItem{{TurnID: sequenceID(8151), MessageID: sequenceID(8152), Content: agentprotocol.MessageContent{Parts: []agentprotocol.MessagePart{}}, Images: []agentprotocol.ImageDescriptor{descriptor}}}, queue.Items())
 	request, ok := queue.Dequeue()
 	require.True(t, ok)
-	require.Empty(t, request.Message)
+	require.True(t, request.Content.Empty())
 	require.Equal(t, []provider.ImageInput{image}, request.Images)
 }
 
@@ -276,7 +276,7 @@ func TestImageCapabilityAndDefiniteProviderRejectionDoNotLeakClaims(t *testing.T
 func TestCommandFingerprintIncludesOrderedImageReferences(t *testing.T) {
 	conversationID := sequenceID(8400)
 	base := agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: sequenceID(8401), ClientID: sequenceID(8402), ConversationID: &conversationID, Type: agentprotocol.CommandSubmit, Payload: agentprotocol.SubmitPayload{
-		TurnID: sequenceID(8403), MessageID: sequenceID(8404), Message: "compare",
+		TurnID: sequenceID(8403), MessageID: sequenceID(8404), Content: agentprotocol.TextContent("compare"),
 		Images: []agentprotocol.ImageReference{{ImageID: sequenceID(8405), Name: "a.png"}, {ImageID: sequenceID(8406), Name: "b.png"}},
 	}}
 	left, err := commandFingerprint(base)

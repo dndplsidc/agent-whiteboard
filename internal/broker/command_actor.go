@@ -64,7 +64,8 @@ func (actor *conversation) handleCommand(attachments map[*attachment]struct{}, t
 		}
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
 	case agentprotocol.QueueEditPayload:
-		if actor.queue.Edit(payload.MessageID, payload.Message) != nil {
+		content, err := messageContentToProvider(payload.Content)
+		if err != nil || !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) || actor.queue.Edit(payload.MessageID, content) != nil {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, agentprotocol.ErrorInvalidState)
 			return
 		}

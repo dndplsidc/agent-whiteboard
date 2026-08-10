@@ -16,12 +16,12 @@ import (
 )
 
 const (
-	APIVersion           = "2"
+	APIVersion           = "3"
 	Namespace            = "/api/v1/agent"
 	StatusPath           = Namespace + "/status"
 	ConnectPath          = Namespace + "/connect"
 	ImagesPath           = Namespace + "/images"
-	WebSocketSubprotocol = "agent-whiteboard.v2"
+	WebSocketSubprotocol = "agent-whiteboard.v3"
 	APIVersionHeader     = "X-Agent-Whiteboard-API-Version"
 	ClientIDHeader       = "X-Agent-Whiteboard-Client-ID"
 	ConversationIDHeader = "X-Agent-Whiteboard-Conversation-ID"
@@ -147,7 +147,7 @@ func (ConnectPayload) commandPayload() {}
 type SubmitPayload struct {
 	TurnID    string           `json:"turn_id"`
 	MessageID string           `json:"message_id"`
-	Message   string           `json:"message"`
+	Content   MessageContent   `json:"content"`
 	Images    []ImageReference `json:"images,omitempty"`
 	Context   *PageContext     `json:"context,omitempty"`
 }
@@ -169,8 +169,8 @@ type ImageDescriptor struct {
 }
 
 type QueueEditPayload struct {
-	MessageID string `json:"message_id"`
-	Message   string `json:"message"`
+	MessageID string         `json:"message_id"`
+	Content   MessageContent `json:"content"`
 }
 
 func (QueueEditPayload) commandPayload() {}
@@ -305,9 +305,9 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 	case CommandConnect:
 		target, required = &ConnectPayload{}, []string{"provider", "resource", "context_digest"}
 	case CommandSubmit:
-		target, required = &SubmitPayload{}, []string{"turn_id", "message_id", "message"}
+		target, required = &SubmitPayload{}, []string{"turn_id", "message_id", "content"}
 	case CommandQueueEdit:
-		target, required = &QueueEditPayload{}, []string{"message_id", "message"}
+		target, required = &QueueEditPayload{}, []string{"message_id", "content"}
 	case CommandQueueRemove:
 		target, required = &MessageReferencePayload{}, []string{"message_id"}
 	case CommandInterrupt, CommandRetry:
@@ -374,14 +374,14 @@ func validateCommand(command Command) error {
 			return invalid(nil)
 		}
 	case SubmitPayload:
-		if command.Type != CommandSubmit || !validID(payload.TurnID) || !validID(payload.MessageID) || !validTurnContent(payload.Message, payload.Images) {
+		if command.Type != CommandSubmit || !validID(payload.TurnID) || !validID(payload.MessageID) || payload.Content.ValidateCommand() != nil || payload.Content.Empty() && len(payload.Images) == 0 || validateImageReferences(payload.Images) != nil {
 			return invalid(nil)
 		}
 		if payload.Context != nil && validatePageContext(*payload.Context) != nil {
 			return invalid(nil)
 		}
 	case QueueEditPayload:
-		if command.Type != CommandQueueEdit || !validID(payload.MessageID) || !validBoundedText(payload.Message, MaxMessageBytes, false) {
+		if command.Type != CommandQueueEdit || !validID(payload.MessageID) || payload.Content.ValidateCommand() != nil {
 			return invalid(nil)
 		}
 	case MessageReferencePayload:
