@@ -6,15 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/edocsss/agent-whiteboard/internal/assets"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
 )
 
 func TestViewerRendersEmbeddedAssetsWithoutTerminatingInlineElements(t *testing.T) {
-	css := assets.ViewerCSS()
-	js := assets.ViewerJS()
+	css := whiteboard.ViewerCSS()
+	js := whiteboard.ViewerJS()
 	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{CSS: css, JS: js})
 	require.NoError(t, err)
 

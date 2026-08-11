@@ -17,8 +17,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/app"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
-	"github.com/edocsss/agent-whiteboard/internal/launchagent"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/spf13/cobra"
 )
 
@@ -48,7 +47,7 @@ type Dependencies struct {
 	NewClient             func(httpx.ClientConfig) (Client, error)
 	NewApplication        func(app.ServiceConfig, ...app.Option) (Application, error)
 	NewAgentApplication   func(app.AgentServiceConfig) (Application, error)
-	NewLaunchAgentManager func() (launchagent.Manager, error)
+	NewLaunchAgentManager func() (common.LaunchAgentManager, error)
 	ExecutablePath        func() (string, error)
 }
 
@@ -119,8 +118,8 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 		}
 	}
 	if common.IsNil(deps.NewLaunchAgentManager) {
-		deps.NewLaunchAgentManager = func() (launchagent.Manager, error) {
-			return launchagent.NewManager(launchagent.ExecRunner{})
+		deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) {
+			return common.NewLaunchAgentManager(common.LaunchAgentExecRunner{})
 		}
 	}
 	if common.IsNil(deps.ExecutablePath) {
@@ -200,9 +199,9 @@ type selectedProviderExecutableResolver struct{ pi, codex string }
 func (resolver selectedProviderExecutableResolver) LookPath(name string) (string, error) {
 	selected := ""
 	switch name {
-	case launchagent.ProviderPi:
+	case common.LaunchAgentProviderPi:
 		selected = resolver.pi
-	case launchagent.ProviderCodex:
+	case common.LaunchAgentProviderCodex:
 		selected = resolver.codex
 	default:
 		return "", exec.ErrNotFound

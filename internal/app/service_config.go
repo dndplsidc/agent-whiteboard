@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/assets"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
 	"github.com/edocsss/agent-whiteboard/internal/image"
@@ -234,8 +233,8 @@ func resolveServiceConfig(config ServiceConfig, options []Option) (resolvedServi
 	if values.idsSet {
 		ids = values.ids
 	}
-	viewerCSS := assets.ViewerCSS()
-	viewerJS := assets.ViewerJS()
+	viewerCSS := whiteboard.ViewerCSS()
+	viewerJS := whiteboard.ViewerJS()
 	if values.viewerAssetsSet {
 		viewerCSS = bytes.Clone(values.viewerCSS)
 		viewerJS = bytes.Clone(values.viewerJS)

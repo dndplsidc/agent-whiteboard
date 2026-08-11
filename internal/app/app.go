@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
 	"github.com/edocsss/agent-whiteboard/internal/image"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
 )
 

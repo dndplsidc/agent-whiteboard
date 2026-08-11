@@ -24,7 +24,7 @@ All reflection-based typed-nil helpers will be replaced with `common.IsNil`, inc
 
 - `internal/app`
 - `internal/cli`
-- `internal/http`
+- `internal/webapi`
 - `internal/image`
 - `internal/store`
 - `internal/whiteboard`

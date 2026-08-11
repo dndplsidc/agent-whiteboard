@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	commonmocks "github.com/edocsss/agent-whiteboard/internal/common/mocks"
+	"github.com/edocsss/agent-whiteboard/internal/testutil"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
-	whiteboardmocks "github.com/edocsss/agent-whiteboard/internal/whiteboard/mocks"
+
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -24,9 +24,9 @@ const (
 )
 
 func TestNewServiceRejectsInvalidConfiguration(t *testing.T) {
-	store := whiteboardmocks.NewMockStore(t)
-	clock := commonmocks.NewMockClock(t)
-	ids := commonmocks.NewMockIDGenerator(t)
+	store := testutil.NewMockWhiteboardStore(t)
+	clock := testutil.NewMockClock(t)
+	ids := testutil.NewMockIDGenerator(t)
 
 	tests := []struct {
 		name              string
@@ -590,11 +590,11 @@ const KindUnknown whiteboard.Kind = "unknown"
 
 type contextKey struct{}
 
-func newTestService(t *testing.T, defaultExpiration int64) (*whiteboard.Service, *whiteboardmocks.MockStore, *commonmocks.MockClock, *commonmocks.MockIDGenerator) {
+func newTestService(t *testing.T, defaultExpiration int64) (*whiteboard.Service, *testutil.MockWhiteboardStore, *testutil.MockClock, *testutil.MockIDGenerator) {
 	t.Helper()
-	store := whiteboardmocks.NewMockStore(t)
-	clock := commonmocks.NewMockClock(t)
-	ids := commonmocks.NewMockIDGenerator(t)
+	store := testutil.NewMockWhiteboardStore(t)
+	clock := testutil.NewMockClock(t)
+	ids := testutil.NewMockIDGenerator(t)
 	service, err := whiteboard.NewService(store, clock, ids, defaultExpiration)
 	require.NoError(t, err)
 	return service, store, clock, ids

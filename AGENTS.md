@@ -36,9 +36,9 @@ Keep repeated stress runs focused. Run an affected package normally first, then 
 For example:
 
 ```sh
-go test ./internal/pi
-go test ./internal/pi -run 'TestSessionSubmitNegativeAndAmbiguousAcceptance|TestNativeConcurrentExactFinalization' -count=20
-go test -race ./internal/pi
+go test ./internal/agent/pi
+go test ./internal/agent/pi -run 'TestSessionSubmitNegativeAndAmbiguousAcceptance|TestNativeConcurrentExactFinalization' -count=20
+go test -race ./internal/agent/pi
 ```
 
 Run the checks applicable to the change:

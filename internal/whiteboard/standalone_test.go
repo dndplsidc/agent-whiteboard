@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"

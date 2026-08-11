@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/agent"
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
@@ -170,7 +170,7 @@ func TestViewerEnabledRendersExactSafelyEscapedSourceContextAndFlag(t *testing.T
 	require.Equal(t, source, payload.Markdown)
 	require.Equal(t, creatorContext, payload.Context)
 	require.True(t, payload.LocalAgent.Enabled)
-	require.Equal(t, contextdigest.Calculate([]byte(source), []byte(creatorContext)), payload.LocalAgent.ContextDigest)
+	require.Equal(t, agent.CalculateContextDigest([]byte(source), []byte(creatorContext)), payload.LocalAgent.ContextDigest)
 	require.Equal(t, whiteboard.KindMarkdown, payload.LocalAgent.Resource.Kind)
 	require.Equal(t, testWhiteboardID, payload.LocalAgent.Resource.ID)
 	require.Equal(t, createdAt, payload.LocalAgent.Resource.CreatedAt)

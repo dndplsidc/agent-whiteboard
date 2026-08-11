@@ -8,7 +8,6 @@ import (
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
-	"github.com/edocsss/agent-whiteboard/internal/launchagent"
 	"github.com/spf13/cobra"
 )
 
@@ -16,13 +15,13 @@ const daemonConfigurationIndependentAnnotation = handlesConfigurationAnnotation
 
 type piProviderDescriptor struct{}
 
-func (piProviderDescriptor) ProviderName() string   { return launchagent.ProviderPi }
-func (piProviderDescriptor) ExecutableName() string { return launchagent.ProviderPi }
+func (piProviderDescriptor) ProviderName() string   { return common.LaunchAgentProviderPi }
+func (piProviderDescriptor) ExecutableName() string { return common.LaunchAgentProviderPi }
 
 type codexProviderDescriptor struct{}
 
-func (codexProviderDescriptor) ProviderName() string   { return launchagent.ProviderCodex }
-func (codexProviderDescriptor) ExecutableName() string { return launchagent.ProviderCodex }
+func (codexProviderDescriptor) ProviderName() string   { return common.LaunchAgentProviderCodex }
+func (codexProviderDescriptor) ExecutableName() string { return common.LaunchAgentProviderCodex }
 
 func (factory commandFactory) newAgentDaemonCommand() *cobra.Command {
 	command := &cobra.Command{
@@ -32,13 +31,13 @@ func (factory commandFactory) newAgentDaemonCommand() *cobra.Command {
 	}
 	command.AddCommand(
 		factory.newAgentDaemonStatusCommand(),
-		factory.newAgentDaemonMutationCommand("restart", func(ctx context.Context, manager launchagent.Manager) error {
+		factory.newAgentDaemonMutationCommand("restart", func(ctx context.Context, manager common.LaunchAgentManager) error {
 			return manager.Restart(ctx)
 		}),
-		factory.newAgentDaemonMutationCommand("stop", func(ctx context.Context, manager launchagent.Manager) error {
+		factory.newAgentDaemonMutationCommand("stop", func(ctx context.Context, manager common.LaunchAgentManager) error {
 			return manager.Stop(ctx)
 		}),
-		factory.newAgentDaemonMutationCommand("uninstall", func(ctx context.Context, manager launchagent.Manager) error {
+		factory.newAgentDaemonMutationCommand("uninstall", func(ctx context.Context, manager common.LaunchAgentManager) error {
 			return manager.Uninstall(ctx)
 		}),
 	)
@@ -64,7 +63,7 @@ func (factory commandFactory) newAgentDaemonStatusCommand() *cobra.Command {
 	}
 }
 
-func (factory commandFactory) newAgentDaemonMutationCommand(name string, operation func(context.Context, launchagent.Manager) error) *cobra.Command {
+func (factory commandFactory) newAgentDaemonMutationCommand(name string, operation func(context.Context, common.LaunchAgentManager) error) *cobra.Command {
 	return &cobra.Command{
 		Use:         name,
 		Args:        usageArgs(cobra.NoArgs),
@@ -82,7 +81,7 @@ func (factory commandFactory) newAgentDaemonMutationCommand(name string, operati
 	}
 }
 
-func (factory commandFactory) newLaunchAgentManager() (launchagent.Manager, error) {
+func (factory commandFactory) newLaunchAgentManager() (common.LaunchAgentManager, error) {
 	manager, err := factory.deps.NewLaunchAgentManager()
 	if err != nil {
 		return nil, err
@@ -117,16 +116,16 @@ func (factory commandFactory) installAgentDaemon(cmd *cobra.Command, piFlagValue
 	}
 	piSelected := piFlagValue
 	if !piFlagSet {
-		piSelected = factory.deps.Getenv(launchagent.PiExecutableEnvironment)
+		piSelected = factory.deps.Getenv(common.LaunchAgentPiExecutableEnvironment)
 	}
 	codexSelected := codexFlagValue
 	if !codexFlagSet {
-		codexSelected = factory.deps.Getenv(launchagent.CodexExecutableEnvironment)
+		codexSelected = factory.deps.Getenv(common.LaunchAgentCodexExecutableEnvironment)
 	}
-	install := launchagent.Config{
+	install := common.LaunchAgentConfig{
 		Executable:         executable,
 		ConfigPath:         configuration,
-		Providers:          []launchagent.ProviderDescriptor{piProviderDescriptor{}, codexProviderDescriptor{}},
+		Providers:          []common.LaunchAgentProviderDescriptor{piProviderDescriptor{}, codexProviderDescriptor{}},
 		ExecutableResolver: nil,
 	}
 	if piSelected != "" || codexSelected != "" {

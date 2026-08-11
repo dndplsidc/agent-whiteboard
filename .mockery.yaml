@@ -4,8 +4,8 @@ force-file-write: true
 packages:
   github.com/edocsss/agent-whiteboard/internal/cli:
     config:
-      dir: "{{.InterfaceDir}}/mocks"
-      pkgname: mocks
+      dir: internal/testutil
+      pkgname: testutil
     interfaces:
       Client:
         config:
@@ -13,8 +13,8 @@ packages:
           structname: MockClient
   github.com/edocsss/agent-whiteboard/internal/app:
     config:
-      dir: "{{.InterfaceDir}}/mocks"
-      pkgname: mocks
+      dir: internal/testutil
+      pkgname: testutil
     interfaces:
       Readiness:
         config:
@@ -22,8 +22,8 @@ packages:
           structname: MockReadiness
   github.com/edocsss/agent-whiteboard/internal/common:
     config:
-      dir: "{{.InterfaceDir}}/mocks"
-      pkgname: mocks
+      dir: internal/testutil
+      pkgname: testutil
     interfaces:
       Clock:
         config:
@@ -35,27 +35,27 @@ packages:
           structname: MockIDGenerator
   github.com/edocsss/agent-whiteboard/internal/whiteboard:
     config:
-      dir: "{{.InterfaceDir}}/mocks"
-      pkgname: mocks
+      dir: internal/testutil
+      pkgname: testutil
     interfaces:
       Operations:
         config:
-          filename: mock_operations.go
-          structname: MockOperations
+          filename: mock_whiteboard_operations.go
+          structname: MockWhiteboardOperations
       Store:
         config:
-          filename: mock_store.go
-          structname: MockStore
+          filename: mock_whiteboard_store.go
+          structname: MockWhiteboardStore
   github.com/edocsss/agent-whiteboard/internal/image:
     config:
-      dir: "{{.InterfaceDir}}/mocks"
-      pkgname: mocks
+      dir: internal/testutil
+      pkgname: testutil
     interfaces:
       Operations:
         config:
-          filename: mock_operations.go
-          structname: MockOperations
+          filename: mock_image_operations.go
+          structname: MockImageOperations
       Store:
         config:
-          filename: mock_store.go
-          structname: MockStore
+          filename: mock_image_store.go
+          structname: MockImageStore

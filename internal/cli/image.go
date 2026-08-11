@@ -4,7 +4,7 @@ import (
 	"errors"
 	"os"
 
-	"github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/spf13/cobra"
 )
 
@@ -23,7 +23,7 @@ func (factory commandFactory) newImageUploadCommand() *cobra.Command {
 			return err
 		}
 		opened := make([]*os.File, 0, len(args))
-		files := make([]http.File, 0, len(args))
+		files := make([]webapi.File, 0, len(args))
 		closeFiles := func() error {
 			var closeErr error
 			for _, file := range opened {

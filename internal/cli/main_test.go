@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	"github.com/edocsss/agent-whiteboard/internal/app"
-	"github.com/edocsss/agent-whiteboard/internal/cli/mocks"
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/testutil"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -53,7 +53,7 @@ func TestRunWithDependenciesExitMappingAndOutput(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := mocks.NewMockClient(t)
+			client := testutil.NewMockClient(t)
 			if test.clientErr != nil {
 				client.EXPECT().DeleteImage(mock.Anything, "abc").Return(test.clientErr).Once()
 			}
@@ -86,7 +86,7 @@ func TestRunGracefulCanceledServeReturnsZero(t *testing.T) {
 
 func TestRunMapsTypedNilFactoryResultsToInternal(t *testing.T) {
 	t.Run("client", func(t *testing.T) {
-		var client *mocks.MockClient
+		var client *testutil.MockClient
 		deps := validDependencies()
 		deps.NewClient = func(httpx.ClientConfig) (Client, error) { return client, nil }
 		var stdout, stderr bytes.Buffer

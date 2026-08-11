@@ -12,7 +12,7 @@ import (
 
 	"github.com/edocsss/agent-whiteboard/internal/app"
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 )
 
 const (
