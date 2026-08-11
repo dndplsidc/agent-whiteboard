@@ -19,11 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/agent"
+	piadapter "github.com/edocsss/agent-whiteboard/internal/agent/pi"
+	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
-	piadapter "github.com/edocsss/agent-whiteboard/internal/pi"
-	"github.com/edocsss/agent-whiteboard/internal/processgroup"
-	"github.com/edocsss/agent-whiteboard/internal/provider"
 	"github.com/stretchr/testify/require"
 )
 
@@ -816,7 +815,7 @@ func TestPiAdapterRealCLILifecycleThroughProviderContract(t *testing.T) {
 	require.NoError(t, os.Mkdir(providerRoot, 0o700))
 	driver, err := piadapter.NewDriver(piadapter.Config{
 		Executable: m1PinnedPiPath(t), Environment: environment.env, ProviderRoot: providerRoot,
-		Launcher: processgroup.NewLauncher(), IDs: common.CryptoIDGenerator{}, Clock: common.SystemClock{},
+		Launcher: common.NewProcessGroupLauncher(), IDs: common.CryptoIDGenerator{}, Clock: common.SystemClock{},
 	})
 	require.NoError(t, err)
 	require.Equal(t, provider.Ready, driver.Readiness(ctx).State)
@@ -843,7 +842,7 @@ func TestPiAdapterRealCLILifecycleThroughProviderContract(t *testing.T) {
 		TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("Answer from this exact board."),
 		Context: &provider.PageContext{
 			Revision: provider.ContextInitial, Markdown: markdown, CreatorContext: creator,
-			Title: "Adapter board", URL: "https://example.test/adapter", Digest: contextdigest.Calculate(markdown, creator),
+			Title: "Adapter board", URL: "https://example.test/adapter", Digest: agent.CalculateContextDigest(markdown, creator),
 			Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: resourceID, CreatedAt: now, UpdatedAt: now},
 		},
 	}

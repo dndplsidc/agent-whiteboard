@@ -9,27 +9,27 @@ import (
 	"testing"
 
 	"github.com/edocsss/agent-whiteboard/internal/app"
+	"github.com/edocsss/agent-whiteboard/internal/common"
 	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
-	"github.com/edocsss/agent-whiteboard/internal/launchagent"
 	"github.com/stretchr/testify/require"
 )
 
 type fakeLaunchAgentManager struct {
-	installConfig launchagent.Config
+	installConfig common.LaunchAgentConfig
 	installCtx    context.Context
-	status        launchagent.Status
+	status        common.LaunchAgentStatus
 	statusCtx     context.Context
 	operation     string
 	operationCtx  context.Context
 	err           error
 }
 
-func (manager *fakeLaunchAgentManager) Install(ctx context.Context, config launchagent.Config) error {
+func (manager *fakeLaunchAgentManager) Install(ctx context.Context, config common.LaunchAgentConfig) error {
 	manager.installCtx = ctx
 	manager.installConfig = config
 	return manager.err
 }
-func (manager *fakeLaunchAgentManager) Status(ctx context.Context) (launchagent.Status, error) {
+func (manager *fakeLaunchAgentManager) Status(ctx context.Context) (common.LaunchAgentStatus, error) {
 	manager.statusCtx = ctx
 	return manager.status, manager.err
 }
@@ -51,11 +51,11 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing
 	t.Setenv("HOME", home)
 	manager := &fakeLaunchAgentManager{}
 	deps := validDependencies()
-	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	deps.ExecutablePath = func() (string, error) { return "bin/agent-whiteboard", nil }
 	deps.Getenv = mapGetenv(map[string]string{
-		launchagent.PiExecutableEnvironment:    "/env/pi",
-		launchagent.CodexExecutableEnvironment: "/env/codex",
+		common.LaunchAgentPiExecutableEnvironment:    "/env/pi",
+		common.LaunchAgentCodexExecutableEnvironment: "/env/codex",
 	})
 	var foregroundCalls int
 	deps.NewAgentApplication = func(app.AgentServiceConfig) (Application, error) {
@@ -74,15 +74,15 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing
 	require.Equal(t, filepath.Join(mustWorkingDirectory(t), "bin", "agent-whiteboard"), manager.installConfig.Executable)
 	require.Equal(t, filepath.Join(mustWorkingDirectory(t), "relative", "config.yaml"), manager.installConfig.ConfigPath)
 	require.Len(t, manager.installConfig.Providers, 2)
-	require.Equal(t, launchagent.ProviderPi, manager.installConfig.Providers[0].ProviderName())
-	require.Equal(t, launchagent.ProviderPi, manager.installConfig.Providers[0].ExecutableName())
-	require.Equal(t, launchagent.ProviderCodex, manager.installConfig.Providers[1].ProviderName())
-	require.Equal(t, launchagent.ProviderCodex, manager.installConfig.Providers[1].ExecutableName())
+	require.Equal(t, common.LaunchAgentProviderPi, manager.installConfig.Providers[0].ProviderName())
+	require.Equal(t, common.LaunchAgentProviderPi, manager.installConfig.Providers[0].ExecutableName())
+	require.Equal(t, common.LaunchAgentProviderCodex, manager.installConfig.Providers[1].ProviderName())
+	require.Equal(t, common.LaunchAgentProviderCodex, manager.installConfig.Providers[1].ExecutableName())
 	require.NotNil(t, manager.installConfig.ExecutableResolver)
-	resolved, err := manager.installConfig.ExecutableResolver.LookPath(launchagent.ProviderPi)
+	resolved, err := manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentProviderPi)
 	require.NoError(t, err)
 	require.Equal(t, "/flag/pi", resolved)
-	resolved, err = manager.installConfig.ExecutableResolver.LookPath(launchagent.ProviderCodex)
+	resolved, err = manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentProviderCodex)
 	require.NoError(t, err)
 	require.Equal(t, "/flag/codex", resolved)
 	require.Same(t, ctx, manager.installCtx)
@@ -92,7 +92,7 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing
 func TestAgentDaemonInstallJSONSuccess(t *testing.T) {
 	manager := &fakeLaunchAgentManager{}
 	deps := validDependencies()
-	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	deps.ExecutablePath = func() (string, error) { return "/agent-whiteboard", nil }
 	var stdout bytes.Buffer
 	deps.Stdout = &stdout
@@ -108,21 +108,21 @@ func TestAgentDaemonInstallUsesEnvironmentProviderOverridesAndDefaultConfig(t *t
 	t.Setenv("HOME", home)
 	manager := &fakeLaunchAgentManager{}
 	deps := validDependencies()
-	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	deps.ExecutablePath = func() (string, error) { return "/agent-whiteboard", nil }
 	deps.Getenv = mapGetenv(map[string]string{
-		launchagent.PiExecutableEnvironment:    "/env/pi",
-		launchagent.CodexExecutableEnvironment: "/env/codex",
+		common.LaunchAgentPiExecutableEnvironment:    "/env/pi",
+		common.LaunchAgentCodexExecutableEnvironment: "/env/codex",
 	})
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
 	root.SetArgs([]string{"agent", "serve", "--daemon"})
 	require.NoError(t, root.ExecuteContext(context.Background()))
 	require.Equal(t, filepath.Join(home, ".agent-whiteboard", "config.yaml"), manager.installConfig.ConfigPath)
-	resolved, err := manager.installConfig.ExecutableResolver.LookPath(launchagent.ProviderPi)
+	resolved, err := manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentProviderPi)
 	require.NoError(t, err)
 	require.Equal(t, "/env/pi", resolved)
-	resolved, err = manager.installConfig.ExecutableResolver.LookPath(launchagent.ProviderCodex)
+	resolved, err = manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentProviderCodex)
 	require.NoError(t, err)
 	require.Equal(t, "/env/codex", resolved)
 }
@@ -130,7 +130,7 @@ func TestAgentDaemonInstallUsesEnvironmentProviderOverridesAndDefaultConfig(t *t
 func TestAgentDaemonInstallWithoutOverrideUsesOrdinaryResolver(t *testing.T) {
 	manager := &fakeLaunchAgentManager{}
 	deps := validDependencies()
-	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	deps.ExecutablePath = func() (string, error) { return "/agent-whiteboard", nil }
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
@@ -141,9 +141,9 @@ func TestAgentDaemonInstallWithoutOverrideUsesOrdinaryResolver(t *testing.T) {
 }
 
 func TestAgentDaemonStatusRedactsLaunchAgentDetails(t *testing.T) {
-	manager := &fakeLaunchAgentManager{status: launchagent.Status{Installed: true, Loaded: true, Running: true, PID: 1234}}
+	manager := &fakeLaunchAgentManager{status: common.LaunchAgentStatus{Installed: true, Loaded: true, Running: true, PID: 1234}}
 	deps := validDependencies()
-	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	var stdout bytes.Buffer
 	deps.Stdout = &stdout
 	root, err := NewRoot(deps)
@@ -163,7 +163,7 @@ func TestAgentDaemonStatusRedactsLaunchAgentDetails(t *testing.T) {
 }
 
 func TestAgentDaemonStatusRejectsInvalidPIDCombinations(t *testing.T) {
-	for name, status := range map[string]launchagent.Status{
+	for name, status := range map[string]common.LaunchAgentStatus{
 		"running without PID":    {Installed: true, Loaded: true, Running: true},
 		"running while unloaded": {Installed: true, Running: true, PID: 12},
 		"stopped with PID":       {Installed: true, Loaded: true, PID: 12},
@@ -171,7 +171,7 @@ func TestAgentDaemonStatusRejectsInvalidPIDCombinations(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			manager := &fakeLaunchAgentManager{status: status}
 			deps := validDependencies()
-			deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+			deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 			root, err := NewRoot(deps)
 			require.NoError(t, err)
 			root.SetArgs([]string{"--json", "agent", "daemon", "status"})
@@ -185,7 +185,7 @@ func TestAgentDaemonLifecycleDispatchesContextAndJSONMutation(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			manager := &fakeLaunchAgentManager{}
 			deps := validDependencies()
-			deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+			deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 			var stdout bytes.Buffer
 			deps.Stdout = &stdout
 			root, err := NewRoot(deps)
@@ -225,12 +225,12 @@ func TestSelectedProviderExecutableResolverRejectsMissingExplicitSelection(t *te
 	t.Setenv("PATH", t.TempDir())
 	resolver := selectedProviderExecutableResolver{codex: "missing-codex-selection"}
 
-	_, err := resolver.LookPath(launchagent.ProviderCodex)
+	_, err := resolver.LookPath(common.LaunchAgentProviderCodex)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, exec.ErrNotFound)
 	require.ErrorContains(t, err, "missing-codex-selection")
 
-	_, err = resolver.LookPath(launchagent.ProviderPi)
+	_, err = resolver.LookPath(common.LaunchAgentProviderPi)
 	require.ErrorIs(t, err, exec.ErrNotFound)
 }
 
@@ -238,7 +238,7 @@ func TestAgentDaemonRejectsForegroundSettingsAndNilManager(t *testing.T) {
 	for _, flag := range []string{"--port", "--provider-idle-timeout", "--shutdown-timeout"} {
 		t.Run(flag, func(t *testing.T) {
 			deps := validDependencies()
-			deps.NewLaunchAgentManager = func() (launchagent.Manager, error) {
+			deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) {
 				return nil, errors.New("manager must not be constructed")
 			}
 			root, err := NewRoot(deps)
@@ -250,7 +250,7 @@ func TestAgentDaemonRejectsForegroundSettingsAndNilManager(t *testing.T) {
 	}
 
 	deps := validDependencies()
-	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return nil, nil }
+	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return nil, nil }
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
 	root.SetArgs([]string{"agent", "daemon", "status"})
@@ -258,14 +258,14 @@ func TestAgentDaemonRejectsForegroundSettingsAndNilManager(t *testing.T) {
 }
 
 func TestAgentDaemonUnsupportedErrorKeepsExactGuidance(t *testing.T) {
-	manager := &fakeLaunchAgentManager{err: launchagent.ErrUnsupported}
+	manager := &fakeLaunchAgentManager{err: common.ErrLaunchAgentUnsupported}
 	deps := validDependencies()
-	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), &stdout, &stderr, mapGetenv(nil), []string{"agent", "daemon", "status"}, deps)
 	require.Equal(t, exitInternal, code)
 	require.Empty(t, stdout.String())
-	require.Equal(t, "Error: "+launchagent.ErrUnsupported.Error()+"\n", stderr.String())
+	require.Equal(t, "Error: "+common.ErrLaunchAgentUnsupported.Error()+"\n", stderr.String())
 }
 
 func TestAgentDaemonOperationsDoNotLoadConfiguration(t *testing.T) {
@@ -274,7 +274,7 @@ func TestAgentDaemonOperationsDoNotLoadConfiguration(t *testing.T) {
 		return generalconfig.Config{}, errors.New("configuration must not be loaded")
 	}
 	manager := &fakeLaunchAgentManager{}
-	deps.NewLaunchAgentManager = func() (launchagent.Manager, error) { return manager, nil }
+	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
 	for _, args := range [][]string{{"agent", "daemon", "status"}, {"agent", "daemon", "restart"}, {"agent", "serve", "--daemon"}} {

@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/testutil"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard/mocks"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -44,7 +44,7 @@ var whiteboardRoutes = []whiteboardRoute{
 
 func TestHandlerConstructorRejectsInvalidDependenciesAndLimits(t *testing.T) {
 	viewer := newViewer(t)
-	var typedNil *mocks.MockOperations
+	var typedNil *testutil.MockWhiteboardOperations
 
 	tests := []struct {
 		name            string
@@ -55,10 +55,10 @@ func TestHandlerConstructorRejectsInvalidDependenciesAndLimits(t *testing.T) {
 	}{
 		{name: "nil operations", viewer: viewer},
 		{name: "typed nil operations", operations: typedNil, viewer: viewer},
-		{name: "nil viewer", operations: mocks.NewMockOperations(t)},
-		{name: "negative max bytes", operations: mocks.NewMockOperations(t), viewer: viewer, maxBytes: -1},
-		{name: "negative max context bytes", operations: mocks.NewMockOperations(t), viewer: viewer, maxContextBytes: -1},
-		{name: "aggregate limit overflow", operations: mocks.NewMockOperations(t), viewer: viewer, maxBytes: int64(^uint64(0) >> 1), maxContextBytes: 1},
+		{name: "nil viewer", operations: testutil.NewMockWhiteboardOperations(t)},
+		{name: "negative max bytes", operations: testutil.NewMockWhiteboardOperations(t), viewer: viewer, maxBytes: -1},
+		{name: "negative max context bytes", operations: testutil.NewMockWhiteboardOperations(t), viewer: viewer, maxContextBytes: -1},
+		{name: "aggregate limit overflow", operations: testutil.NewMockWhiteboardOperations(t), viewer: viewer, maxBytes: int64(^uint64(0) >> 1), maxContextBytes: 1},
 	}
 
 	for _, tt := range tests {
@@ -76,7 +76,7 @@ func TestHandlerConstructorRejectsInvalidDependenciesAndLimits(t *testing.T) {
 }
 
 func TestHandlerConstructorAcceptsZeroLimit(t *testing.T) {
-	handler, err := whiteboard.NewHandler(mocks.NewMockOperations(t), newViewer(t), whiteboard.HandlerConfig{})
+	handler, err := whiteboard.NewHandler(testutil.NewMockWhiteboardOperations(t), newViewer(t), whiteboard.HandlerConfig{})
 
 	require.NoError(t, err)
 	require.NotNil(t, handler)
@@ -89,7 +89,7 @@ func TestHandlerCreateReturnsResourceAndPassesExactContext(t *testing.T) {
 
 	for _, route := range whiteboardRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockWhiteboardOperations(t)
 			ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
 			result := whiteboard.Result{
 				ID:        testWhiteboardID,
@@ -145,7 +145,7 @@ func TestHandlerCreateReturnsResourceAndPassesExactContext(t *testing.T) {
 
 func TestHandlerCreateReturnsCapabilityWithUncertainStorageError(t *testing.T) {
 	createdAt := time.Date(2026, time.July, 17, 3, 4, 5, 0, time.UTC)
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockWhiteboardOperations(t)
 	result := whiteboard.Result{
 		ID: testWhiteboardID, Kind: whiteboard.KindMarkdown, CreatedAt: createdAt, UpdatedAt: createdAt,
 	}
@@ -179,7 +179,7 @@ func TestHandlerUpdateReturnsResourceAndPassesExactContext(t *testing.T) {
 
 	for _, route := range whiteboardRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockWhiteboardOperations(t)
 			ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
 			operations.EXPECT().Update(
 				mock.MatchedBy(func(got context.Context) bool {
@@ -229,7 +229,7 @@ func TestHandlerUpdateReturnsResourceAndPassesExactContext(t *testing.T) {
 func TestHandlerDeleteReturnsNoContentAndPassesExactContext(t *testing.T) {
 	for _, route := range whiteboardRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockWhiteboardOperations(t)
 			ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
 			operations.EXPECT().Delete(
 				mock.MatchedBy(func(got context.Context) bool {
@@ -252,7 +252,7 @@ func TestHandlerDeleteReturnsNoContentAndPassesExactContext(t *testing.T) {
 
 func TestHandlerViewMarkdownRendersShellWithExactContextAndPublicHeaders(t *testing.T) {
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockWhiteboardOperations(t)
 	operations.EXPECT().Get(
 		mock.MatchedBy(func(got context.Context) bool {
 			return got == ctx && got.Value(handlerContextKey{}) == "sentinel"
@@ -283,7 +283,7 @@ func TestHandlerGetMarkdownReturnsExactPublicResourceMarkdownAndContext(t *testi
 	updatedAt := createdAt.Add(time.Hour)
 	expiresAt := updatedAt.Add(time.Hour)
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockWhiteboardOperations(t)
 	operations.EXPECT().Get(
 		mock.MatchedBy(func(got context.Context) bool { return got == ctx }),
 		testWhiteboardID,
@@ -311,7 +311,7 @@ func TestHandlerGetMarkdownReturnsExactPublicResourceMarkdownAndContext(t *testi
 }
 
 func TestHandlerGetMarkdownReturnsEmptyContextForLegacyResource(t *testing.T) {
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockWhiteboardOperations(t)
 	operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
 		ID:        testWhiteboardID,
 		Kind:      whiteboard.KindMarkdown,
@@ -338,16 +338,16 @@ func TestHandlerGetMarkdownHidesMalformedMissingExpiredAndWrongKindAsSameNotFoun
 	tests := []struct {
 		name       string
 		id         string
-		operations func(*testing.T) *mocks.MockOperations
+		operations func(*testing.T) *testutil.MockWhiteboardOperations
 	}{
 		{
 			name: "malformed", id: "malformed",
-			operations: func(t *testing.T) *mocks.MockOperations { return mocks.NewMockOperations(t) },
+			operations: func(t *testing.T) *testutil.MockWhiteboardOperations { return testutil.NewMockWhiteboardOperations(t) },
 		},
 		{
 			name: "missing", id: testWhiteboardID,
-			operations: func(t *testing.T) *mocks.MockOperations {
-				operations := mocks.NewMockOperations(t)
+			operations: func(t *testing.T) *testutil.MockWhiteboardOperations {
+				operations := testutil.NewMockWhiteboardOperations(t)
 				operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{},
 					common.NewError(common.CodeNotFound, "resource not found", errors.New("private missing path"))).Once()
 				return operations
@@ -355,8 +355,8 @@ func TestHandlerGetMarkdownHidesMalformedMissingExpiredAndWrongKindAsSameNotFoun
 		},
 		{
 			name: "expired", id: testWhiteboardID,
-			operations: func(t *testing.T) *mocks.MockOperations {
-				operations := mocks.NewMockOperations(t)
+			operations: func(t *testing.T) *testutil.MockWhiteboardOperations {
+				operations := testutil.NewMockWhiteboardOperations(t)
 				operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{},
 					common.NewError(common.CodeNotFound, "resource not found", errors.New("private expired generation"))).Once()
 				return operations
@@ -364,8 +364,8 @@ func TestHandlerGetMarkdownHidesMalformedMissingExpiredAndWrongKindAsSameNotFoun
 		},
 		{
 			name: "wrong kind", id: testWhiteboardID,
-			operations: func(t *testing.T) *mocks.MockOperations {
-				operations := mocks.NewMockOperations(t)
+			operations: func(t *testing.T) *testutil.MockWhiteboardOperations {
+				operations := testutil.NewMockWhiteboardOperations(t)
 				operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
 					ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: []byte("private html"),
 				}, nil).Once()
@@ -391,7 +391,7 @@ func TestHandlerGetMarkdownHidesMalformedMissingExpiredAndWrongKindAsSameNotFoun
 func TestHandlerViewHTMLOuterServesStaticSandboxWrapperWithoutStoredBytes(t *testing.T) {
 	source := []byte(`<!doctype html><script>globalThis.SUBMITTED_SECRET = "private"</script>`)
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockWhiteboardOperations(t)
 	operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
 		ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: source,
 	}, nil).Once()
@@ -414,7 +414,7 @@ func TestHandlerViewHTMLOuterServesStaticSandboxWrapperWithoutStoredBytes(t *tes
 func TestHandlerViewHTMLInnerServesStoredDocumentBytesUnchanged(t *testing.T) {
 	source := []byte("<!DOCTYPE html>\n<html><head><style>body { color: red; }</style></head>\n<body><script>globalThis.answer = 42;</script></body></html>\n")
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockWhiteboardOperations(t)
 	operations.EXPECT().Get(
 		mock.MatchedBy(func(got context.Context) bool {
 			return got == ctx && got.Value(handlerContextKey{}) == "sentinel"
@@ -445,7 +445,7 @@ func TestHandlerHTMLOuterAndInnerErrorsHaveSecurityHeadersAndIndistinguishableBo
 			for _, condition := range []string{"malformed", "missing", "expired", "wrong kind"} {
 				t.Run(condition, func(t *testing.T) {
 					id := testWhiteboardID
-					operations := mocks.NewMockOperations(t)
+					operations := testutil.NewMockWhiteboardOperations(t)
 					switch condition {
 					case "malformed":
 						id = "malformed"
@@ -479,20 +479,20 @@ func TestHandlerPublicViewsHideMalformedMissingExpiredAndWrongKindAsSameNotFound
 			tests := []struct {
 				name       string
 				id         string
-				operations func(*testing.T) *mocks.MockOperations
+				operations func(*testing.T) *testutil.MockWhiteboardOperations
 			}{
 				{
 					name: "malformed",
 					id:   "malformed",
-					operations: func(t *testing.T) *mocks.MockOperations {
-						return mocks.NewMockOperations(t)
+					operations: func(t *testing.T) *testutil.MockWhiteboardOperations {
+						return testutil.NewMockWhiteboardOperations(t)
 					},
 				},
 				{
 					name: "missing",
 					id:   testWhiteboardID,
-					operations: func(t *testing.T) *mocks.MockOperations {
-						operations := mocks.NewMockOperations(t)
+					operations: func(t *testing.T) *testutil.MockWhiteboardOperations {
+						operations := testutil.NewMockWhiteboardOperations(t)
 						operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(
 							whiteboard.Whiteboard{},
 							common.NewError(common.CodeNotFound, "resource not found", errors.New("missing private record")),
@@ -503,8 +503,8 @@ func TestHandlerPublicViewsHideMalformedMissingExpiredAndWrongKindAsSameNotFound
 				{
 					name: "expired",
 					id:   testWhiteboardID,
-					operations: func(t *testing.T) *mocks.MockOperations {
-						operations := mocks.NewMockOperations(t)
+					operations: func(t *testing.T) *testutil.MockWhiteboardOperations {
+						operations := testutil.NewMockWhiteboardOperations(t)
 						operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(
 							whiteboard.Whiteboard{},
 							common.NewError(common.CodeNotFound, "resource not found", errors.New("expired private record")),
@@ -515,8 +515,8 @@ func TestHandlerPublicViewsHideMalformedMissingExpiredAndWrongKindAsSameNotFound
 				{
 					name: "wrong kind",
 					id:   testWhiteboardID,
-					operations: func(t *testing.T) *mocks.MockOperations {
-						operations := mocks.NewMockOperations(t)
+					operations: func(t *testing.T) *testutil.MockWhiteboardOperations {
+						operations := testutil.NewMockWhiteboardOperations(t)
 						wrongKind := whiteboard.KindHTML
 						if route.kind == whiteboard.KindHTML {
 							wrongKind = whiteboard.KindMarkdown
@@ -654,7 +654,7 @@ func TestHandlerMarkdownWritesRejectInvalidPairsBeforeServiceCalls(t *testing.T)
 		t.Run(method, func(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
-					operations := mocks.NewMockOperations(t)
+					operations := testutil.NewMockWhiteboardOperations(t)
 					handler := newHandlerWithLimits(t, operations, tt.maxBytes, tt.maxContextBytes)
 					body, contentType := multipartRequestBody(t, tt.fields...)
 					path := httpx.APIWhiteboardMarkdown
@@ -676,7 +676,7 @@ func TestHandlerMarkdownWritesRejectInvalidPairsBeforeServiceCalls(t *testing.T)
 }
 
 func TestHandlerMarkdownMultipartAggregateAllowsConfiguredPayloadAndBoundsOverhead(t *testing.T) {
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockWhiteboardOperations(t)
 	operations.EXPECT().CreateMarkdown(mock.Anything, mock.MatchedBy(func(input whiteboard.CreateInput) bool {
 		return len(input.Source) == 64 && len(input.Context) == 32
 	})).Return(whiteboard.Result{ID: testWhiteboardID, Kind: whiteboard.KindMarkdown}, nil).Once()
@@ -702,7 +702,7 @@ func TestHandlerMarkdownMultipartAggregateAllowsConfiguredPayloadAndBoundsOverhe
 	req.Header.Set("Content-Type", contentType)
 	rr = httptest.NewRecorder()
 
-	handlerMux(t, newHandlerWithLimits(t, mocks.NewMockOperations(t), 1, 1)).ServeHTTP(rr, req)
+	handlerMux(t, newHandlerWithLimits(t, testutil.NewMockWhiteboardOperations(t), 1, 1)).ServeHTTP(rr, req)
 
 	require.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
 	require.Equal(t, "{\"error\":{\"code\":\"content_too_large\",\"message\":\"content too large\"}}\n", rr.Body.String())
@@ -752,7 +752,7 @@ func TestHandlerRejectsInvalidFormsBeforeServiceCalls(t *testing.T) {
 
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
-					operations := mocks.NewMockOperations(t)
+					operations := testutil.NewMockWhiteboardOperations(t)
 					handler := newHandler(t, operations, tt.maxBytes)
 					body, contentType := multipartRequestBody(t, tt.fields...)
 					req := httptest.NewRequest(http.MethodPost, route.apiPath, bytes.NewReader(body))
@@ -775,7 +775,7 @@ func TestHandlerHidesMalformedCapabilityIDsBeforeReadingFormsOrCallingService(t 
 		t.Run(route.name, func(t *testing.T) {
 			for _, method := range []string{http.MethodPut, http.MethodDelete} {
 				t.Run(method, func(t *testing.T) {
-					operations := mocks.NewMockOperations(t)
+					operations := testutil.NewMockWhiteboardOperations(t)
 					handler := newHandler(t, operations, defaultMaxBytes)
 					req := httptest.NewRequest(method, route.apiPath+"/malformed", strings.NewReader("not multipart"))
 					rr := httptest.NewRecorder()
@@ -796,7 +796,7 @@ func TestHandlerHidesMalformedCapabilityIDsBeforeReadingFormsOrCallingService(t 
 func TestHandlerMapsWrongKindServiceErrorsToNotFound(t *testing.T) {
 	for _, route := range whiteboardRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockWhiteboardOperations(t)
 			operations.EXPECT().Update(mock.Anything, mock.MatchedBy(func(got whiteboard.UpdateInput) bool {
 				return got.ID == testWhiteboardID && got.Kind == route.kind
 			})).Return(whiteboard.Result{}, common.NewError(common.CodeNotFound, "resource not found", errors.New("wrong kind"))).Once()
@@ -820,7 +820,7 @@ func TestHandlerMapsWrongKindServiceErrorsToNotFound(t *testing.T) {
 }
 
 func TestHandlerRegistersOnlyExactMutationAndPublicViewRoutes(t *testing.T) {
-	handler := newHandler(t, mocks.NewMockOperations(t), defaultMaxBytes)
+	handler := newHandler(t, testutil.NewMockWhiteboardOperations(t), defaultMaxBytes)
 	mux := handlerMux(t, handler)
 
 	for _, route := range whiteboardRoutes {
@@ -889,7 +889,7 @@ func TestHandlerPublicHeadResponsesUseExactRoutesHeadersAndNoBody(t *testing.T) 
 	}
 	for _, tt := range paths {
 		t.Run(tt.name, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockWhiteboardOperations(t)
 			operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
 				ID: testWhiteboardID, Kind: tt.kind, Source: []byte("must not be served"),
 			}, nil).Once()
@@ -909,7 +909,7 @@ func TestHandlerDoesNotLogRequestBodiesOrCapabilityIDs(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockWhiteboardOperations(t)
 	operations.EXPECT().Update(mock.Anything, mock.Anything).Return(
 		whiteboard.Result{},
 		common.NewError(common.CodeStorageUnavailable, "storage unavailable", errors.New("private backend failure")),

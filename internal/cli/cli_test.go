@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/app"
-	"github.com/edocsss/agent-whiteboard/internal/cli/mocks"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/testutil"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -42,7 +42,7 @@ func TestClientSettingsPrecedence(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var got httpx.ClientConfig
-			client := mocks.NewMockClient(t)
+			client := testutil.NewMockClient(t)
 			root, err := NewRoot(Dependencies{
 				Stdout: io.Discard, Stderr: io.Discard, Getenv: mapGetenv(test.env),
 				NewClient:      func(config httpx.ClientConfig) (Client, error) { got = config; return client, nil },
@@ -173,7 +173,7 @@ func TestGeneralConfigurationLoadsOncePerExecutionAndUsesSnapshot(t *testing.T) 
 		require.NoError(t, os.WriteFile(path, []byte("version: 1\nclient:\n  server: https://changed.test\n"), 0o600))
 		return loaded, nil
 	}
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().DeleteImage(mock.Anything, "abc").Return(nil).Once()
 	deps.NewClient = func(config httpx.ClientConfig) (Client, error) {
 		require.Equal(t, "https://snapshot.test", config.Server)
@@ -225,7 +225,7 @@ func TestExplicitInvalidConfigurationFailsUnrelatedCommands(t *testing.T) {
 		})
 	}
 
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().DeleteImage(mock.Anything, "abc").Return(nil).Once()
 	root := mustRoot(t, client, nil, io.Discard, io.Discard)
 	root.SetArgs([]string{"image", "delete", "abc"})
@@ -241,32 +241,32 @@ func TestApprovedClientCommands(t *testing.T) {
 	tests := []struct {
 		name   string
 		args   []string
-		expect func(*mocks.MockClient, *os.File)
+		expect func(*testutil.MockClient, *os.File)
 	}{
 		{name: "create markdown", args: []string{"create", "markdown", first, "--context", creatorContext, "--expires-in", "5"}, expect: expectCreateMarkdown("first.md", "first-content", "context.md", "context-content", int64Pointer(5))},
 		{name: "create html", args: []string{"create", "html", second}, expect: expectCreateWhiteboard(httpx.WhiteboardHTML, "second.html", "second-content", nil)},
 		{name: "update markdown", args: []string{"update", "markdown", "abc", first, "--context", creatorContext}, expect: expectUpdateMarkdown("abc", "first.md", "first-content", "context.md", "context-content")},
 		{name: "update html", args: []string{"update", "html", "abc", second}, expect: expectUpdateWhiteboard(httpx.WhiteboardHTML, "abc", "second.html", "second-content")},
-		{name: "delete markdown", args: []string{"delete", "markdown", "abc"}, expect: func(client *mocks.MockClient, _ *os.File) {
+		{name: "delete markdown", args: []string{"delete", "markdown", "abc"}, expect: func(client *testutil.MockClient, _ *os.File) {
 			client.EXPECT().DeleteWhiteboard(mock.Anything, httpx.WhiteboardMarkdown, "abc").Return(nil).Once()
 		}},
-		{name: "delete html", args: []string{"delete", "html", "abc"}, expect: func(client *mocks.MockClient, _ *os.File) {
+		{name: "delete html", args: []string{"delete", "html", "abc"}, expect: func(client *testutil.MockClient, _ *os.File) {
 			client.EXPECT().DeleteWhiteboard(mock.Anything, httpx.WhiteboardHTML, "abc").Return(nil).Once()
 		}},
-		{name: "image update", args: []string{"image", "update", "abc", first}, expect: func(client *mocks.MockClient, captured *os.File) {
+		{name: "image update", args: []string{"image", "update", "abc", first}, expect: func(client *testutil.MockClient, captured *os.File) {
 			client.EXPECT().UpdateImage(mock.Anything, "abc", mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ string, file httpx.File, _ *int64) (httpx.Resource, error) {
 				verifyFile(t, file, "first.md", "first-content", captured)
 				return resource("abc", "/images/abc", nil), nil
 			}).Once()
 		}},
-		{name: "image delete", args: []string{"image", "delete", "abc"}, expect: func(client *mocks.MockClient, _ *os.File) {
+		{name: "image delete", args: []string{"image", "delete", "abc"}, expect: func(client *testutil.MockClient, _ *os.File) {
 			client.EXPECT().DeleteImage(mock.Anything, "abc").Return(nil).Once()
 		}},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := mocks.NewMockClient(t)
+			client := testutil.NewMockClient(t)
 			var captured *os.File
 			test.expect(client, captured)
 			client.EXPECT().PublicURL(mock.Anything).RunAndReturn(func(path string) (string, error) { return "https://example.test" + path, nil }).Maybe()
@@ -277,7 +277,7 @@ func TestApprovedClientCommands(t *testing.T) {
 	}
 
 	t.Run("image upload preserves order and closes every handle", func(t *testing.T) {
-		client := mocks.NewMockClient(t)
+		client := testutil.NewMockClient(t)
 		var opened []*os.File
 		client.EXPECT().CreateImages(mock.Anything, mock.Anything, int64Pointer(0)).RunAndReturn(func(_ context.Context, files []httpx.File, _ *int64) ([]httpx.Resource, error) {
 			require.Len(t, files, 2)
@@ -302,7 +302,7 @@ func TestApprovedClientCommands(t *testing.T) {
 }
 
 func TestClientTimeoutUsesCommandContext(t *testing.T) {
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	parentKey := struct{}{}
 	parent := context.WithValue(context.Background(), parentKey, "present")
 	client.EXPECT().DeleteImage(mock.Anything, "abc").RunAndReturn(func(ctx context.Context, _ string) error {
@@ -344,7 +344,7 @@ func TestValidationHappensBeforeClientCreation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
-			root, err := NewRoot(Dependencies{Stdout: io.Discard, Stderr: io.Discard, Getenv: mapGetenv(nil), NewClient: func(httpx.ClientConfig) (Client, error) { calls++; return mocks.NewMockClient(t), nil }, NewApplication: unusedApplication})
+			root, err := NewRoot(Dependencies{Stdout: io.Discard, Stderr: io.Discard, Getenv: mapGetenv(nil), NewClient: func(httpx.ClientConfig) (Client, error) { calls++; return testutil.NewMockClient(t), nil }, NewApplication: unusedApplication})
 			require.NoError(t, err)
 			root.SetArgs(test.args)
 			require.Error(t, root.ExecuteContext(context.Background()))
@@ -375,7 +375,7 @@ func TestMarkdownCommandsRequireReadableContextBeforeClientCreation(t *testing.T
 			deps := validDependencies()
 			deps.NewClient = func(httpx.ClientConfig) (Client, error) {
 				calls++
-				return mocks.NewMockClient(t), nil
+				return testutil.NewMockClient(t), nil
 			}
 			root, err := NewRoot(deps)
 			require.NoError(t, err)
@@ -412,7 +412,7 @@ func TestGetMarkdownRequiresJSONWithoutCreatingClient(t *testing.T) {
 	deps := validDependencies()
 	deps.NewClient = func(httpx.ClientConfig) (Client, error) {
 		calls++
-		return mocks.NewMockClient(t), nil
+		return testutil.NewMockClient(t), nil
 	}
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
@@ -426,7 +426,7 @@ func TestGetMarkdownRequiresJSONWithoutCreatingClient(t *testing.T) {
 }
 
 func TestGetMarkdownWritesExactVersionedJSON(t *testing.T) {
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().GetMarkdown(mock.Anything, "abc").Return(httpx.MarkdownResponse{
 		Resource: httpx.Resource{ID: "abc", Path: "/whiteboards/markdown/abc", Permanent: true},
 		Markdown: "# exact source\n",
@@ -442,7 +442,7 @@ func TestGetMarkdownWritesExactVersionedJSON(t *testing.T) {
 }
 
 func TestGetMarkdownErrorKeepsStdoutEmptyAndDoesNotLeakContent(t *testing.T) {
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().GetMarkdown(mock.Anything, "abc").Return(httpx.MarkdownResponse{}, common.NewError(
 		common.CodeNotFound, "resource not found", errors.New("# private source; private creator context"),
 	)).Once()
@@ -544,7 +544,7 @@ func TestNewRootRejectsNilLikeDependencies(t *testing.T) {
 }
 
 func TestCommandRejectsTypedNilClient(t *testing.T) {
-	var client *mocks.MockClient
+	var client *testutil.MockClient
 	deps := validDependencies()
 	deps.NewClient = func(httpx.ClientConfig) (Client, error) { return client, nil }
 	root, err := NewRoot(deps)
@@ -578,21 +578,21 @@ func TestFileCommandsCloseHandles(t *testing.T) {
 	tests := []struct {
 		name   string
 		args   []string
-		expect func(*mocks.MockClient, *[]*os.File)
+		expect func(*testutil.MockClient, *[]*os.File)
 	}{
-		{name: "create", args: []string{"create", "markdown", fixture, "--context", contextFixture}, expect: func(client *mocks.MockClient, captured *[]*os.File) {
+		{name: "create", args: []string{"create", "markdown", fixture, "--context", contextFixture}, expect: func(client *testutil.MockClient, captured *[]*os.File) {
 			client.EXPECT().CreateMarkdown(mock.Anything, mock.Anything, mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, input httpx.File, creatorContext httpx.File, _ *int64) (httpx.Resource, error) {
 				*captured = append(*captured, input.Reader.(*os.File), creatorContext.Reader.(*os.File))
 				return resource("abc", "/whiteboards/markdown/abc", nil), nil
 			}).Once()
 		}},
-		{name: "whiteboard update", args: []string{"update", "markdown", "abc", fixture, "--context", contextFixture}, expect: func(client *mocks.MockClient, captured *[]*os.File) {
+		{name: "whiteboard update", args: []string{"update", "markdown", "abc", fixture, "--context", contextFixture}, expect: func(client *testutil.MockClient, captured *[]*os.File) {
 			client.EXPECT().UpdateMarkdown(mock.Anything, "abc", mock.Anything, mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ string, input httpx.File, creatorContext httpx.File, _ *int64) (httpx.Resource, error) {
 				*captured = append(*captured, input.Reader.(*os.File), creatorContext.Reader.(*os.File))
 				return resource("abc", "/whiteboards/markdown/abc", nil), nil
 			}).Once()
 		}},
-		{name: "image update", args: []string{"image", "update", "abc", fixture}, expect: func(client *mocks.MockClient, captured *[]*os.File) {
+		{name: "image update", args: []string{"image", "update", "abc", fixture}, expect: func(client *testutil.MockClient, captured *[]*os.File) {
 			client.EXPECT().UpdateImage(mock.Anything, "abc", mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ string, input httpx.File, _ *int64) (httpx.Resource, error) {
 				*captured = append(*captured, input.Reader.(*os.File))
 				return resource("abc", "/images/abc", nil), nil
@@ -601,7 +601,7 @@ func TestFileCommandsCloseHandles(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := mocks.NewMockClient(t)
+			client := testutil.NewMockClient(t)
 			var captured []*os.File
 			test.expect(client, &captured)
 			client.EXPECT().PublicURL(mock.Anything).Return("https://example.test/resource", nil).Once()
@@ -619,7 +619,7 @@ func TestFileCommandsCloseHandles(t *testing.T) {
 
 func TestImageUploadJSONAlwaysUsesResourcesArray(t *testing.T) {
 	fixture := writeFixture(t, t.TempDir(), "image.png", "content")
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().CreateImages(mock.Anything, mock.Anything, (*int64)(nil)).Return(
 		[]httpx.Resource{resource("id", "/images/id", nil)}, nil,
 	).Once()
@@ -635,7 +635,7 @@ func TestCreatePrintsCapabilityBeforeReturningUncertainError(t *testing.T) {
 	dir := t.TempDir()
 	fixture := writeFixture(t, dir, "board.md", "# board")
 	contextFixture := writeFixture(t, dir, "context.md", "creator context")
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	created := resource("abc", "/whiteboards/markdown/abc", nil)
 	uncertain := common.NewError(common.CodeStorageUnavailable, "storage unavailable", errors.New("private rollback detail"))
 	client.EXPECT().CreateMarkdown(mock.Anything, mock.Anything, mock.Anything, (*int64)(nil)).Return(created, uncertain).Once()
@@ -667,8 +667,8 @@ type interfaceRoot interface {
 	ExecuteContext(context.Context) error
 }
 
-func expectCreateWhiteboard(kind httpx.WhiteboardKind, name, content string, expires *int64) func(*mocks.MockClient, *os.File) {
-	return func(client *mocks.MockClient, _ *os.File) {
+func expectCreateWhiteboard(kind httpx.WhiteboardKind, name, content string, expires *int64) func(*testutil.MockClient, *os.File) {
+	return func(client *testutil.MockClient, _ *os.File) {
 		client.EXPECT().CreateWhiteboard(mock.Anything, kind, mock.Anything, expires).RunAndReturn(func(_ context.Context, _ httpx.WhiteboardKind, file httpx.File, _ *int64) (httpx.Resource, error) {
 			got, err := io.ReadAll(file.Reader)
 			if err != nil || file.Name != name || string(got) != content {
@@ -679,8 +679,8 @@ func expectCreateWhiteboard(kind httpx.WhiteboardKind, name, content string, exp
 	}
 }
 
-func expectCreateMarkdown(name, content, contextName, contextContent string, expires *int64) func(*mocks.MockClient, *os.File) {
-	return func(client *mocks.MockClient, _ *os.File) {
+func expectCreateMarkdown(name, content, contextName, contextContent string, expires *int64) func(*testutil.MockClient, *os.File) {
+	return func(client *testutil.MockClient, _ *os.File) {
 		client.EXPECT().CreateMarkdown(mock.Anything, mock.Anything, mock.Anything, expires).RunAndReturn(func(_ context.Context, file, creatorContext httpx.File, _ *int64) (httpx.Resource, error) {
 			if !fileMatches(file, name, content) || !fileMatches(creatorContext, contextName, contextContent) {
 				return httpx.Resource{}, errors.New("unexpected file pair")
@@ -690,8 +690,8 @@ func expectCreateMarkdown(name, content, contextName, contextContent string, exp
 	}
 }
 
-func expectUpdateMarkdown(id, name, content, contextName, contextContent string) func(*mocks.MockClient, *os.File) {
-	return func(client *mocks.MockClient, _ *os.File) {
+func expectUpdateMarkdown(id, name, content, contextName, contextContent string) func(*testutil.MockClient, *os.File) {
+	return func(client *testutil.MockClient, _ *os.File) {
 		client.EXPECT().UpdateMarkdown(mock.Anything, id, mock.Anything, mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ string, file, creatorContext httpx.File, _ *int64) (httpx.Resource, error) {
 			if !fileMatches(file, name, content) || !fileMatches(creatorContext, contextName, contextContent) {
 				return httpx.Resource{}, errors.New("unexpected file pair")
@@ -706,8 +706,8 @@ func fileMatches(file httpx.File, name, content string) bool {
 	return err == nil && file.Name == name && string(got) == content
 }
 
-func expectUpdateWhiteboard(kind httpx.WhiteboardKind, id, name, content string) func(*mocks.MockClient, *os.File) {
-	return func(client *mocks.MockClient, _ *os.File) {
+func expectUpdateWhiteboard(kind httpx.WhiteboardKind, id, name, content string) func(*testutil.MockClient, *os.File) {
+	return func(client *testutil.MockClient, _ *os.File) {
 		client.EXPECT().UpdateWhiteboard(mock.Anything, kind, id, mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ httpx.WhiteboardKind, _ string, file httpx.File, _ *int64) (httpx.Resource, error) {
 			got, err := io.ReadAll(file.Reader)
 			if err != nil || file.Name != name || string(got) != content {

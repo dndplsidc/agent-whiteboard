@@ -7,9 +7,9 @@
     "node": ">=24 <25"
   },
   "scripts": {
-    "test": "node --no-experimental-webstorage ./node_modules/vitest/vitest.mjs run --environment jsdom internal/assets/src/*.test.js",
-    "build": "node internal/assets/scripts/build.mjs",
-    "check:assets": "node internal/assets/scripts/check.mjs",
+    "test": "node --no-experimental-webstorage ./node_modules/vitest/vitest.mjs run --environment jsdom internal/whiteboard/assets/src/*.test.js",
+    "build": "node internal/whiteboard/assets/scripts/build.mjs",
+    "check:assets": "node internal/whiteboard/assets/scripts/check.mjs",
     "test:browser": "playwright test"
   },
   "dependencies": {

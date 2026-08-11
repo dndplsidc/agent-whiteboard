@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
 	"github.com/edocsss/agent-whiteboard/internal/image"
-	"github.com/edocsss/agent-whiteboard/internal/image/mocks"
+	"github.com/edocsss/agent-whiteboard/internal/testutil"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +32,7 @@ const (
 type handlerContextKey struct{}
 
 func TestHandlerConstructorRejectsInvalidDependenciesAndLimits(t *testing.T) {
-	var typedNil *mocks.MockOperations
+	var typedNil *testutil.MockImageOperations
 	tests := []struct {
 		name       string
 		operations image.Operations
@@ -40,11 +40,11 @@ func TestHandlerConstructorRejectsInvalidDependenciesAndLimits(t *testing.T) {
 	}{
 		{name: "nil operations"},
 		{name: "typed nil operations", operations: typedNil},
-		{name: "negative image limit", operations: mocks.NewMockOperations(t), config: image.HandlerConfig{MaxImageBytes: -1}},
-		{name: "negative request limit", operations: mocks.NewMockOperations(t), config: image.HandlerConfig{MaxRequestBytes: -1}},
+		{name: "negative image limit", operations: testutil.NewMockImageOperations(t), config: image.HandlerConfig{MaxImageBytes: -1}},
+		{name: "negative request limit", operations: testutil.NewMockImageOperations(t), config: image.HandlerConfig{MaxRequestBytes: -1}},
 		{
 			name:       "request limit below image limit",
-			operations: mocks.NewMockOperations(t),
+			operations: testutil.NewMockImageOperations(t),
 			config:     image.HandlerConfig{MaxImageBytes: 2, MaxRequestBytes: 1},
 		},
 	}
@@ -61,7 +61,7 @@ func TestHandlerConstructorRejectsInvalidDependenciesAndLimits(t *testing.T) {
 }
 
 func TestHandlerConstructorAcceptsZeroLimits(t *testing.T) {
-	handler, err := image.NewHandler(mocks.NewMockOperations(t), image.HandlerConfig{})
+	handler, err := image.NewHandler(testutil.NewMockImageOperations(t), image.HandlerConfig{})
 
 	require.NoError(t, err)
 	require.NotNil(t, handler)
@@ -72,7 +72,7 @@ func TestHandlerCreatePreservesOrderAndPassesExactContext(t *testing.T) {
 	expiresAt := createdAt.Add(5 * time.Minute)
 	expiresIn := int64(300)
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockImageOperations(t)
 	operations.EXPECT().CreateImages(
 		exactContext(ctx),
 		mock.MatchedBy(func(got image.CreateInput) bool {
@@ -149,7 +149,7 @@ func TestHandlerRejectsInvalidCreateFormsBeforeServiceCalls(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockImageOperations(t)
 			body, contentType := multipartRequestBody(t, tt.fields...)
 			req := httptest.NewRequest(http.MethodPost, httpx.APIImages, bytes.NewReader(body))
 			req.Header.Set("Content-Type", contentType)
@@ -165,7 +165,7 @@ func TestHandlerRejectsInvalidCreateFormsBeforeServiceCalls(t *testing.T) {
 
 func TestHandlerRejectsPerImageAndAggregateLimitsBeforeServiceCalls(t *testing.T) {
 	t.Run("per image", func(t *testing.T) {
-		operations := mocks.NewMockOperations(t)
+		operations := testutil.NewMockImageOperations(t)
 		body, contentType := multipartRequestBody(t,
 			multipartField{name: "images", filename: "large.png", value: "1234"},
 		)
@@ -180,7 +180,7 @@ func TestHandlerRejectsPerImageAndAggregateLimitsBeforeServiceCalls(t *testing.T
 	})
 
 	t.Run("aggregate request", func(t *testing.T) {
-		operations := mocks.NewMockOperations(t)
+		operations := testutil.NewMockImageOperations(t)
 		body, contentType := multipartRequestBody(t,
 			multipartField{name: "images", filename: "one.png", value: "1"},
 			multipartField{name: "images", filename: "two.png", value: "2"},
@@ -198,7 +198,7 @@ func TestHandlerRejectsPerImageAndAggregateLimitsBeforeServiceCalls(t *testing.T
 
 func TestHandlerImageLimitDoesNotApplyToExpirationField(t *testing.T) {
 	expiresIn := int64(60)
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockImageOperations(t)
 	operations.EXPECT().CreateImages(mock.Anything, mock.MatchedBy(func(got image.CreateInput) bool {
 		return len(got.Images) == 1 && bytes.Equal(got.Images[0].Content, []byte("x")) &&
 			got.Images[0].ExpiresInSeconds != nil && *got.Images[0].ExpiresInSeconds == expiresIn
@@ -219,7 +219,7 @@ func TestHandlerImageLimitDoesNotApplyToExpirationField(t *testing.T) {
 func TestHandlerPassesSignedExpirationAndMapsCreateErrors(t *testing.T) {
 	expiresIn := int64(-1)
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockImageOperations(t)
 	operations.EXPECT().CreateImages(
 		exactContext(ctx),
 		mock.MatchedBy(func(got image.CreateInput) bool {
@@ -245,7 +245,7 @@ func TestHandlerUpdateAcceptsExactlyOneFileAndPreservesPublicPath(t *testing.T) 
 	createdAt := time.Date(2026, time.July, 16, 3, 4, 5, 0, time.UTC)
 	updatedAt := createdAt.Add(time.Hour)
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockImageOperations(t)
 	operations.EXPECT().Update(
 		exactContext(ctx),
 		mock.MatchedBy(func(got image.UpdateInput) bool {
@@ -289,7 +289,7 @@ func TestHandlerUpdateRejectsInvalidFileCountsBeforeServiceCall(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockImageOperations(t)
 			body, contentType := multipartRequestBody(t, tt.fields...)
 			req := httptest.NewRequest(http.MethodPut, httpx.APIImages+"/"+testImageID, bytes.NewReader(body))
 			req.Header.Set("Content-Type", contentType)
@@ -305,7 +305,7 @@ func TestHandlerUpdateRejectsInvalidFileCountsBeforeServiceCall(t *testing.T) {
 
 func TestHandlerDeleteReturnsNoContentAndPassesExactContext(t *testing.T) {
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-	operations := mocks.NewMockOperations(t)
+	operations := testutil.NewMockImageOperations(t)
 	operations.EXPECT().Delete(exactContext(ctx), testImageID).Return(nil).Once()
 	req := httptest.NewRequest(http.MethodDelete, httpx.APIImages+"/"+testImageID, nil).WithContext(ctx)
 	rr := httptest.NewRecorder()
@@ -318,7 +318,7 @@ func TestHandlerDeleteReturnsNoContentAndPassesExactContext(t *testing.T) {
 
 func TestHandlerMapsMutationServiceErrorsAndCancellation(t *testing.T) {
 	t.Run("update not found", func(t *testing.T) {
-		operations := mocks.NewMockOperations(t)
+		operations := testutil.NewMockImageOperations(t)
 		operations.EXPECT().Update(mock.Anything, mock.Anything).Return(image.Result{}, common.NewError(common.CodeNotFound, "resource not found", errors.New("expired"))).Once()
 		body, contentType := multipartRequestBody(t, multipartField{name: "file", filename: "image.png", value: "replacement"})
 		req := httptest.NewRequest(http.MethodPut, httpx.APIImages+"/"+testImageID, bytes.NewReader(body))
@@ -334,7 +334,7 @@ func TestHandlerMapsMutationServiceErrorsAndCancellation(t *testing.T) {
 	t.Run("delete canceled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		operations := mocks.NewMockOperations(t)
+		operations := testutil.NewMockImageOperations(t)
 		operations.EXPECT().Delete(exactContext(ctx), testImageID).Return(context.Canceled).Once()
 		req := httptest.NewRequest(http.MethodDelete, httpx.APIImages+"/"+testImageID, nil).WithContext(ctx)
 		rr := httptest.NewRecorder()
@@ -349,7 +349,7 @@ func TestHandlerMapsMutationServiceErrorsAndCancellation(t *testing.T) {
 func TestHandlerHidesMalformedCapabilityIDsAsNotFoundBeforeCallingService(t *testing.T) {
 	for _, method := range []string{http.MethodPut, http.MethodDelete, http.MethodGet} {
 		t.Run(method, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockImageOperations(t)
 			path := httpx.APIImages + "/malformed"
 			if method == http.MethodGet {
 				path = httpx.PublicImages + "malformed"
@@ -381,7 +381,7 @@ func TestHandlerViewServesExactBytesAndDetectedMetadataAtExtensionlessPath(t *te
 	for _, format := range formats {
 		t.Run(format.name, func(t *testing.T) {
 			ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockImageOperations(t)
 			operations.EXPECT().Get(exactContext(ctx), testImageID).Return(image.Image{
 				ID: testImageID, Extension: format.extension, MediaType: format.mediaType, Content: format.content,
 			}, nil).Once()
@@ -404,7 +404,7 @@ func TestHandlerViewServesExactBytesAndDetectedMetadataAtExtensionlessPath(t *te
 func TestHandlerViewMapsMissingAndExpiredImagesToStableJSONNotFound(t *testing.T) {
 	for _, name := range []string{"missing", "expired"} {
 		t.Run(name, func(t *testing.T) {
-			operations := mocks.NewMockOperations(t)
+			operations := testutil.NewMockImageOperations(t)
 			operations.EXPECT().Get(mock.Anything, testImageID).Return(image.Image{}, common.NewError(common.CodeNotFound, "resource not found", errors.New(name))).Once()
 			req := httptest.NewRequest(http.MethodGet, httpx.PublicImages+testImageID, nil)
 			rr := httptest.NewRecorder()
@@ -421,7 +421,7 @@ func TestHandlerViewMapsMissingAndExpiredImagesToStableJSONNotFound(t *testing.T
 }
 
 func TestHandlerRegistersOnlyImageAPIAndExtensionlessPublicRoutes(t *testing.T) {
-	mux := newMux(t, newHandler(t, mocks.NewMockOperations(t), defaultImageLimit, defaultRequestLimit))
+	mux := newMux(t, newHandler(t, testutil.NewMockImageOperations(t), defaultImageLimit, defaultRequestLimit))
 
 	tests := []struct {
 		name      string

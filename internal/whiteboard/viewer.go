@@ -7,8 +7,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/edocsss/agent-whiteboard/internal/agent"
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/contextdigest"
 )
 
 type ViewerConfig struct {
@@ -81,7 +81,7 @@ func (v *Viewer) Render(w io.Writer, board Whiteboard) error {
 			} `json:"local_agent"`
 		}{Markdown: string(board.Source), Context: string(board.Context)}
 		payload.LocalAgent.Enabled = true
-		payload.LocalAgent.ContextDigest = contextdigest.Calculate(board.Source, board.Context)
+		payload.LocalAgent.ContextDigest = agent.CalculateContextDigest(board.Source, board.Context)
 		payload.LocalAgent.Resource.Kind = board.Kind
 		payload.LocalAgent.Resource.ID = board.ID
 		payload.LocalAgent.Resource.CreatedAt = board.CreatedAt

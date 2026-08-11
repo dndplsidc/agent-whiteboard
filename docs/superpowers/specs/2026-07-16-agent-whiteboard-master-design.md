@@ -75,11 +75,26 @@ pkg/agentwb/
   errors.go
 
 internal/
+  agent/
+    limits.go
+    context_digest.go
+    attachment/
+    broker/
+    codex/
+    pi/
+    protocol/
+    provider/
+    server/
+    state/
+
   common/
     clock.go
     id.go
     expiration.go
     errors.go
+    raster.go
+    process.go
+    launch_agent.go
 
   whiteboard/
     model.go
@@ -89,6 +104,11 @@ internal/
     html.go
     viewer.go
     handler.go
+    browser_assets.go
+    assets/
+      src/
+      dist/
+      licenses/
 
   image/
     model.go
@@ -100,13 +120,7 @@ internal/
   store/
     fs.go
 
-  assets/
-    assets.go
-    src/
-    dist/
-    licenses/
-
-  http/
+  webapi/
     http.go
     client.go
 
@@ -120,6 +134,9 @@ internal/
     whiteboard.go
     image.go
     output.go
+
+  testutil/
+    mock_*.go
 
 tests/
   integration/
@@ -140,20 +157,25 @@ skills/agent-whiteboard/
 - `expiration.go`: creation/update expiration calculation.
 - `errors.go`: stable domain error codes and wrapping.
 - `nil.go`: shared nil and typed-nil detection at dependency boundaries.
+- `raster.go`: small raster signature and media-type helpers.
+- `process*.go`: bounded child-process contracts and process-group lifecycle helpers.
+- `launch_agent*.go`: macOS LaunchAgent lifecycle support and non-macOS guidance.
 
-`internal/whiteboard` owns Markdown and HTML models, service operations, its required storage interface, document validation, viewer-shell generation, and whiteboard HTTP handlers.
+`internal/agent` owns shared agent limits and context digests. Its subpackages separate protocol, provider contracts/adapters, durable state, attachments, broker orchestration, loopback server transport, and the Codex and Pi implementations.
+
+`internal/whiteboard` owns Markdown and HTML models, service operations, its required storage interface, document validation, viewer-shell generation, whiteboard HTTP handlers, and the browser source, generated bundles, embedding, and third-party notices under `internal/whiteboard/assets`.
 
 `internal/image` owns image models, service operations, its required storage interface, signature detection, allowlisting, and image HTTP handlers.
 
 `internal/store/fs.go` contains the complete filesystem implementation: directory layout, metadata encoding, safe replacement, per-resource locks, expiration enforcement, cleanup, readiness, and closure. Because Go cannot overload the same method names for different domain record types, one `FS` exposes thin `Whiteboards()` and `Images()` views that implement the two domain-owned store interfaces while sharing the same filesystem state and lifecycle. The views and all implementation logic remain in `fs.go`.
 
-`internal/assets` owns browser source, compiled assets, embedding, and third-party license notices. Assets are not nested under the whiteboard domain.
-
-`internal/http` owns shared HTTP protocol structures, route constants, JSON helpers, multipart helpers, and the private outbound client used by the CLI. Domain handlers remain inside their business packages.
+`internal/webapi` owns shared HTTP protocol structures, route constants, JSON helpers, multipart helpers, and the private outbound client used by the CLI. Domain handlers remain inside their business packages.
 
 `internal/app` is the composition root. It injects stores and common dependencies into domain services, mounts domain handlers, exposes health endpoints, and coordinates server lifecycle.
 
 `internal/cli` owns argument parsing, configuration precedence, presentation, process signals, and server startup. `cmd/agent-whiteboard/main.go` only calls the CLI package.
+
+`internal/testutil` contains the single generated mock package used by unit tests. Production packages do not import it.
 
 ### 4.2 Dependency direction
 
@@ -733,7 +755,7 @@ pnpm test
 pnpm build
 ```
 
-The build test fails if committed `internal/assets/dist` output differs from regenerated assets.
+The build test fails if committed `internal/whiteboard/assets/dist` output differs from regenerated assets.
 
 ### 15.3 Full process integration
 

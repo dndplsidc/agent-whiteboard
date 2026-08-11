@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	commonmocks "github.com/edocsss/agent-whiteboard/internal/common/mocks"
 	imageDomain "github.com/edocsss/agent-whiteboard/internal/image"
-	imagemocks "github.com/edocsss/agent-whiteboard/internal/image/mocks"
+	"github.com/edocsss/agent-whiteboard/internal/testutil"
+
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -28,13 +28,13 @@ const (
 )
 
 func TestServiceConstructorRejectsInvalidConfiguration(t *testing.T) {
-	store := imagemocks.NewMockStore(t)
-	clock := commonmocks.NewMockClock(t)
-	ids := commonmocks.NewMockIDGenerator(t)
+	store := testutil.NewMockImageStore(t)
+	clock := testutil.NewMockClock(t)
+	ids := testutil.NewMockIDGenerator(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	var typedNilStore *imagemocks.MockStore
-	var typedNilClock *commonmocks.MockClock
-	var typedNilIDs *commonmocks.MockIDGenerator
+	var typedNilStore *testutil.MockImageStore
+	var typedNilClock *testutil.MockClock
+	var typedNilIDs *testutil.MockIDGenerator
 
 	tests := []struct {
 		name              string
@@ -476,11 +476,11 @@ func TestServiceCRUDValidatesIDsAndUpdateContentBeforeStore(t *testing.T) {
 
 type contextKey struct{}
 
-func newTestService(t *testing.T, defaultExpiration int64, logger *slog.Logger) (*imageDomain.Service, *imagemocks.MockStore, *commonmocks.MockClock, *commonmocks.MockIDGenerator) {
+func newTestService(t *testing.T, defaultExpiration int64, logger *slog.Logger) (*imageDomain.Service, *testutil.MockImageStore, *testutil.MockClock, *testutil.MockIDGenerator) {
 	t.Helper()
-	store := imagemocks.NewMockStore(t)
-	clock := commonmocks.NewMockClock(t)
-	ids := commonmocks.NewMockIDGenerator(t)
+	store := testutil.NewMockImageStore(t)
+	clock := testutil.NewMockClock(t)
+	ids := testutil.NewMockIDGenerator(t)
 	service, err := imageDomain.NewService(store, clock, ids, defaultExpiration, logger)
 	require.NoError(t, err)
 	return service, store, clock, ids

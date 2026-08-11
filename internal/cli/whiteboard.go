@@ -3,14 +3,14 @@ package cli
 import (
 	"os"
 
-	"github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/spf13/cobra"
 )
 
 func (factory commandFactory) newCreateCommand() *cobra.Command {
 	command := &cobra.Command{Use: "create", Args: usageArgs(cobra.NoArgs)}
 	command.AddCommand(factory.newCreateMarkdownCommand())
-	command.AddCommand(factory.newCreateWhiteboardCommand("html", http.WhiteboardHTML))
+	command.AddCommand(factory.newCreateWhiteboardCommand("html", webapi.WhiteboardHTML))
 	return command
 }
 
@@ -44,7 +44,7 @@ func (factory commandFactory) newCreateMarkdownCommand() *cobra.Command {
 	return command
 }
 
-func (factory commandFactory) newCreateWhiteboardCommand(name string, kind http.WhiteboardKind) *cobra.Command {
+func (factory commandFactory) newCreateWhiteboardCommand(name string, kind webapi.WhiteboardKind) *cobra.Command {
 	command := &cobra.Command{Use: name + " <file>", Args: usageArgs(cobra.ExactArgs(1))}
 	expires := expirationFlag(command)
 	command.RunE = func(cmd *cobra.Command, args []string) error {
@@ -72,7 +72,7 @@ func (factory commandFactory) newCreateWhiteboardCommand(name string, kind http.
 func (factory commandFactory) newUpdateCommand() *cobra.Command {
 	command := &cobra.Command{Use: "update", Args: usageArgs(cobra.NoArgs)}
 	command.AddCommand(factory.newUpdateMarkdownCommand())
-	command.AddCommand(factory.newUpdateWhiteboardCommand("html", http.WhiteboardHTML))
+	command.AddCommand(factory.newUpdateWhiteboardCommand("html", webapi.WhiteboardHTML))
 	return command
 }
 
@@ -109,7 +109,7 @@ func (factory commandFactory) newUpdateMarkdownCommand() *cobra.Command {
 	return command
 }
 
-func (factory commandFactory) newUpdateWhiteboardCommand(name string, kind http.WhiteboardKind) *cobra.Command {
+func (factory commandFactory) newUpdateWhiteboardCommand(name string, kind webapi.WhiteboardKind) *cobra.Command {
 	command := &cobra.Command{Use: name + " <id> <file>", Args: usageArgs(cobra.ExactArgs(2))}
 	expires := expirationFlag(command)
 	command.RunE = func(cmd *cobra.Command, args []string) error {
@@ -163,12 +163,12 @@ func (factory commandFactory) newGetCommand() *cobra.Command {
 
 func (factory commandFactory) newDeleteCommand() *cobra.Command {
 	command := &cobra.Command{Use: "delete", Args: usageArgs(cobra.NoArgs)}
-	command.AddCommand(factory.newDeleteWhiteboardCommand("markdown", http.WhiteboardMarkdown))
-	command.AddCommand(factory.newDeleteWhiteboardCommand("html", http.WhiteboardHTML))
+	command.AddCommand(factory.newDeleteWhiteboardCommand("markdown", webapi.WhiteboardMarkdown))
+	command.AddCommand(factory.newDeleteWhiteboardCommand("html", webapi.WhiteboardHTML))
 	return command
 }
 
-func (factory commandFactory) newDeleteWhiteboardCommand(name string, kind http.WhiteboardKind) *cobra.Command {
+func (factory commandFactory) newDeleteWhiteboardCommand(name string, kind webapi.WhiteboardKind) *cobra.Command {
 	return &cobra.Command{
 		Use:  name + " <id>",
 		Args: usageArgs(cobra.ExactArgs(1)),
@@ -186,7 +186,7 @@ func (factory commandFactory) newDeleteWhiteboardCommand(name string, kind http.
 	}
 }
 
-func (factory commandFactory) finishCreate(client Client, created http.Resource, createErr error) error {
+func (factory commandFactory) finishCreate(client Client, created webapi.Resource, createErr error) error {
 	if createErr == nil || created.ID != "" {
 		if err := writeResource(factory.deps.Stdout, factory.root.json, client, created); err != nil {
 			return stableCommandError(err)
@@ -208,15 +208,15 @@ func requireContextFlag(command *cobra.Command, path string) error {
 	return nil
 }
 
-func openMarkdownPair(sourcePath, contextPath string) (*os.File, http.File, *os.File, http.File, error) {
+func openMarkdownPair(sourcePath, contextPath string) (*os.File, webapi.File, *os.File, webapi.File, error) {
 	openedSource, source, err := openRegularFile(sourcePath)
 	if err != nil {
-		return nil, http.File{}, nil, http.File{}, err
+		return nil, webapi.File{}, nil, webapi.File{}, err
 	}
 	openedContext, creatorContext, err := openRegularFile(contextPath)
 	if err != nil {
 		_ = openedSource.Close()
-		return nil, http.File{}, nil, http.File{}, err
+		return nil, webapi.File{}, nil, webapi.File{}, err
 	}
 	return openedSource, source, openedContext, creatorContext, nil
 }

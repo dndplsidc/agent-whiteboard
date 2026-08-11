@@ -8,13 +8,13 @@ import (
 	"testing"
 
 	"github.com/edocsss/agent-whiteboard/internal/app"
-	appmocks "github.com/edocsss/agent-whiteboard/internal/app/mocks"
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
 	"github.com/edocsss/agent-whiteboard/internal/image"
-	imagemocks "github.com/edocsss/agent-whiteboard/internal/image/mocks"
+	"github.com/edocsss/agent-whiteboard/internal/testutil"
+
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
-	whiteboardmocks "github.com/edocsss/agent-whiteboard/internal/whiteboard/mocks"
+
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -46,7 +46,7 @@ func TestAppRoutesCoexistOnOneHandler(t *testing.T) {
 }
 
 func TestAppHealthStaysLiveWhileNotReady(t *testing.T) {
-	dependency := appmocks.NewMockReadiness(t)
+	dependency := testutil.NewMockReadiness(t)
 	application := newApp(t, dependency)
 
 	response := serveRequest(application.Handler(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -57,7 +57,7 @@ func TestAppHealthStaysLiveWhileNotReady(t *testing.T) {
 }
 
 func TestAppReadinessFollowsAcceptingState(t *testing.T) {
-	dependency := appmocks.NewMockReadiness(t)
+	dependency := testutil.NewMockReadiness(t)
 	application := newApp(t, dependency)
 
 	beforeStartup := serveRequest(application.Handler(), httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -76,8 +76,8 @@ func TestAppReadinessFollowsAcceptingState(t *testing.T) {
 
 func TestAppReadinessPassesExactContextInDependencyOrder(t *testing.T) {
 	ctx := context.WithValue(context.Background(), appContextKey{}, "sentinel")
-	first := appmocks.NewMockReadiness(t)
-	second := appmocks.NewMockReadiness(t)
+	first := testutil.NewMockReadiness(t)
+	second := testutil.NewMockReadiness(t)
 	order := make([]string, 0, 2)
 	exactContext := mock.MatchedBy(func(got context.Context) bool {
 		return got == ctx && got.Value(appContextKey{}) == "sentinel"
@@ -99,8 +99,8 @@ func TestAppReadinessPassesExactContextInDependencyOrder(t *testing.T) {
 }
 
 func TestAppReadinessShortCircuitsAndHidesDependencyErrors(t *testing.T) {
-	first := appmocks.NewMockReadiness(t)
-	second := appmocks.NewMockReadiness(t)
+	first := testutil.NewMockReadiness(t)
+	second := testutil.NewMockReadiness(t)
 	first.EXPECT().Ready(mock.Anything).Return(errors.New("database password leaked")).Once()
 	application := newApp(t, first, second)
 	application.SetReady(true)
@@ -119,7 +119,7 @@ func TestAppConstructorRejectsNilDependencies(t *testing.T) {
 	images := newImageHandler(t)
 	var typedNilWhiteboards *whiteboard.Handler
 	var typedNilImages *image.Handler
-	var typedNilReadiness *appmocks.MockReadiness
+	var typedNilReadiness *testutil.MockReadiness
 
 	tests := []struct {
 		name   string
@@ -161,7 +161,7 @@ func newWhiteboardHandler(t *testing.T) *whiteboard.Handler {
 
 	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{CSS: []byte("body{}"), JS: []byte("void 0")})
 	require.NoError(t, err)
-	handler, err := whiteboard.NewHandler(whiteboardmocks.NewMockOperations(t), viewer, whiteboard.HandlerConfig{})
+	handler, err := whiteboard.NewHandler(testutil.NewMockWhiteboardOperations(t), viewer, whiteboard.HandlerConfig{})
 	require.NoError(t, err)
 	return handler
 }
@@ -169,7 +169,7 @@ func newWhiteboardHandler(t *testing.T) *whiteboard.Handler {
 func newImageHandler(t *testing.T) *image.Handler {
 	t.Helper()
 
-	handler, err := image.NewHandler(imagemocks.NewMockOperations(t), image.HandlerConfig{})
+	handler, err := image.NewHandler(testutil.NewMockImageOperations(t), image.HandlerConfig{})
 	require.NoError(t, err)
 	return handler
 }

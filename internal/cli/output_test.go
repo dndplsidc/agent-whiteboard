@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/cli/mocks"
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	"github.com/edocsss/agent-whiteboard/internal/testutil"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/stretchr/testify/require"
 )
 
 func TestHumanSuccessWritesOnePublicURLPerLine(t *testing.T) {
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().PublicURL("/images/one").Return("https://example.test/images/one", nil).Once()
 	client.EXPECT().PublicURL("/images/two").Return("https://example.test/images/two", nil).Once()
 	var stdout bytes.Buffer
@@ -26,7 +26,7 @@ func TestHumanSuccessWritesOnePublicURLPerLine(t *testing.T) {
 }
 
 func TestJSONSuccessContract(t *testing.T) {
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().PublicURL("/images/id").Return("https://example.test/images/id", nil).Once()
 	var stdout bytes.Buffer
 	require.NoError(t, writeResource(&stdout, true, client, resource("id", "/images/id", nil)))
@@ -34,7 +34,7 @@ func TestJSONSuccessContract(t *testing.T) {
 }
 
 func TestJSONMultiImagePreservesOrder(t *testing.T) {
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().PublicURL("/images/two").Return("https://example.test/images/two", nil).Once()
 	client.EXPECT().PublicURL("/images/one").Return("https://example.test/images/one", nil).Once()
 	var stdout bytes.Buffer
@@ -53,7 +53,7 @@ func TestJSONMultiImagePreservesOrder(t *testing.T) {
 }
 
 func TestJSONImageListUsesResourcesForOneImage(t *testing.T) {
-	client := mocks.NewMockClient(t)
+	client := testutil.NewMockClient(t)
 	client.EXPECT().PublicURL("/images/id").Return("https://example.test/images/id", nil).Once()
 	var stdout bytes.Buffer
 	require.NoError(t, writeResourceList(&stdout, true, client, []httpx.Resource{resource("id", "/images/id", nil)}))

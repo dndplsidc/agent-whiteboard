@@ -13,16 +13,15 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/edocsss/agent-whiteboard/internal/agentattachment"
-	"github.com/edocsss/agent-whiteboard/internal/agentstate"
-	"github.com/edocsss/agent-whiteboard/internal/broker"
-	"github.com/edocsss/agent-whiteboard/internal/codex"
+	"github.com/edocsss/agent-whiteboard/internal/agent/attachment"
+	"github.com/edocsss/agent-whiteboard/internal/agent/broker"
+	"github.com/edocsss/agent-whiteboard/internal/agent/codex"
+	"github.com/edocsss/agent-whiteboard/internal/agent/pi"
+	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
+	"github.com/edocsss/agent-whiteboard/internal/agent/server"
+	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
-	"github.com/edocsss/agent-whiteboard/internal/localapi"
-	"github.com/edocsss/agent-whiteboard/internal/pi"
-	"github.com/edocsss/agent-whiteboard/internal/processgroup"
-	"github.com/edocsss/agent-whiteboard/internal/provider"
 )
 
 // AgentServiceConfig describes the foreground agent composition. Defaults for
@@ -47,7 +46,7 @@ type AgentServiceConfig struct {
 }
 
 type providerRegistryConfig struct {
-	state            *agentstate.Store
+	state            *statepkg.Store
 	piExecutable     string
 	piEnvironment    []string
 	piAvailable      bool
@@ -98,10 +97,10 @@ func (unavailableProviderDriver) Delete(context.Context, provider.DeleteRequest)
 
 // AgentService owns the agent state, provider broker, and local API listener.
 type AgentService struct {
-	state           *agentstate.Store
-	attachments     *agentattachment.Service
+	state           *statepkg.Store
+	attachments     *attachment.Service
 	broker          *broker.Broker
-	local           *localapi.Server
+	local           *server.Server
 	shutdownTimeout time.Duration
 
 	closeMu sync.Mutex
@@ -122,7 +121,7 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 
 	launcher := config.Launcher
 	if common.IsNil(launcher) {
-		launcher = processgroup.NewLauncher()
+		launcher = common.NewProcessGroupLauncher()
 	}
 	ids := config.IDs
 	if common.IsNil(ids) {
@@ -155,7 +154,7 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 		return nil, err
 	}
 
-	state, err := agentstate.Open(config.Home)
+	state, err := statepkg.Open(config.Home)
 	if err != nil {
 		return nil, fmt.Errorf("open agent state: %w", err)
 	}
@@ -170,7 +169,7 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 	if err != nil {
 		return cleanupState(err)
 	}
-	attachments, err := agentattachment.New(state, clock, ids)
+	attachments, err := attachment.New(state, clock, ids)
 	if err != nil {
 		return cleanupState(fmt.Errorf("create agent attachment store: %w", err))
 	}
@@ -186,7 +185,7 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 		defer cancel()
 		return nil, errors.Join(constructionErr, backend.Close(closeCtx), state.Close())
 	}
-	local, err := localapi.Listen(localapi.Config{
+	local, err := server.Listen(server.Config{
 		Port: config.Port, TrustSource: configTrustSource{selectedPath: config.ConfigPath}, Backend: backend, Images: attachments,
 	})
 	if err != nil {

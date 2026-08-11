@@ -4,7 +4,7 @@ import (
 	"io"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/http"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 )
 
 const (

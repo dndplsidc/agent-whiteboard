@@ -9,12 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agentprotocol"
-	"github.com/edocsss/agent-whiteboard/internal/agentstate"
-	"github.com/edocsss/agent-whiteboard/internal/broker"
+	"github.com/edocsss/agent-whiteboard/internal/agent/broker"
+	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
+	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/processgroup"
-	"github.com/edocsss/agent-whiteboard/internal/provider"
 	"github.com/stretchr/testify/require"
 )
 
@@ -191,7 +190,7 @@ func TestProviderEnvironmentCompositionRegistersAvailableProviders(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
-			state, err := agentstate.Open(home)
+			state, err := statepkg.Open(home)
 			require.NoError(t, err)
 			defer func() { require.NoError(t, state.Close()) }()
 
@@ -199,7 +198,7 @@ func TestProviderEnvironmentCompositionRegistersAvailableProviders(t *testing.T)
 			registry, err := newProviderRegistry(providerRegistryConfig{
 				state: state, piExecutable: executable, piEnvironment: []string{}, piAvailable: test.piAvailable,
 				codexExecutable: executable, codexEnvironment: []string{}, codexAvailable: test.codexAvailable,
-				launcher: processgroup.NewLauncher(), ids: common.CryptoIDGenerator{}, clock: common.SystemClock{},
+				launcher: common.NewProcessGroupLauncher(), ids: common.CryptoIDGenerator{}, clock: common.SystemClock{},
 				idleTimeout: time.Second,
 			})
 			require.NoError(t, err)
@@ -215,7 +214,7 @@ func TestProviderEnvironmentCompositionRegistersAvailableProviders(t *testing.T)
 				_, connectErr := backend.Connect(context.Background(), "https://page.example", unavailableProviderConnect(name))
 				var brokerErr broker.BrokerError
 				require.ErrorAs(t, connectErr, &brokerErr)
-				require.Equal(t, agentprotocol.ErrorProviderMissing, brokerErr.Code())
+				require.Equal(t, protocol.ErrorProviderMissing, brokerErr.Code())
 			}
 			require.NoError(t, backend.Close(context.Background()))
 
@@ -238,17 +237,17 @@ func TestProviderEnvironmentCompositionRegistersAvailableProviders(t *testing.T)
 	}
 }
 
-func unavailableProviderConnect(name provider.Name) agentprotocol.Command {
+func unavailableProviderConnect(name provider.Name) protocol.Command {
 	created := time.Date(2026, 8, 5, 1, 2, 3, 0, time.UTC)
 	expires := created.Add(time.Hour)
-	return agentprotocol.Command{
-		APIVersion: agentprotocol.APIVersion,
+	return protocol.Command{
+		APIVersion: protocol.APIVersion,
 		CommandID:  strings.Repeat("a", 32),
 		ClientID:   strings.Repeat("b", 32),
-		Type:       agentprotocol.CommandConnect,
-		Payload: agentprotocol.ConnectPayload{
-			Provider:      agentprotocol.ProviderName(name),
-			Resource:      agentprotocol.Resource{Kind: agentprotocol.ResourceMarkdown, ID: strings.Repeat("c", 32), CreatedAt: created, UpdatedAt: created, ExpiresAt: &expires},
+		Type:       protocol.CommandConnect,
+		Payload: protocol.ConnectPayload{
+			Provider:      protocol.ProviderName(name),
+			Resource:      protocol.Resource{Kind: protocol.ResourceMarkdown, ID: strings.Repeat("c", 32), CreatedAt: created, UpdatedAt: created, ExpiresAt: &expires},
 			ContextDigest: strings.Repeat("0", 64),
 		},
 	}
@@ -269,7 +268,7 @@ func TestNewAgentServiceFailureReleasesState(t *testing.T) {
 	require.Nil(t, service)
 	require.Error(t, err)
 
-	reopened, err := agentstate.Open(home)
+	reopened, err := statepkg.Open(home)
 	require.NoError(t, err)
 	require.NoError(t, reopened.Close())
 }
@@ -295,7 +294,7 @@ func TestAgentServiceEphemeralLifecycleAndIdempotentClose(t *testing.T) {
 	require.NoError(t, <-done)
 	require.NoError(t, service.Close())
 
-	reopened, err := agentstate.Open(home)
+	reopened, err := statepkg.Open(home)
 	require.NoError(t, err)
 	require.NoError(t, reopened.Close())
 }

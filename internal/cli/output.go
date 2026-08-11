@@ -11,8 +11,7 @@ import (
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/http"
-	"github.com/edocsss/agent-whiteboard/internal/launchagent"
+	"github.com/edocsss/agent-whiteboard/internal/webapi"
 )
 
 type jsonResource struct {
@@ -66,7 +65,7 @@ type jsonErrorOutput struct {
 	Error         jsonErrorBody `json:"error"`
 }
 
-func resolveJSONResources(client Client, resources []http.Resource) ([]jsonResource, error) {
+func resolveJSONResources(client Client, resources []webapi.Resource) ([]jsonResource, error) {
 	resolved := make([]jsonResource, 0, len(resources))
 	for _, resource := range resources {
 		publicURL, err := client.PublicURL(resource.Path)
@@ -80,8 +79,8 @@ func resolveJSONResources(client Client, resources []http.Resource) ([]jsonResou
 	return resolved, nil
 }
 
-func writeResource(writer io.Writer, jsonMode bool, client Client, resource http.Resource) error {
-	resolved, err := resolveJSONResources(client, []http.Resource{resource})
+func writeResource(writer io.Writer, jsonMode bool, client Client, resource webapi.Resource) error {
+	resolved, err := resolveJSONResources(client, []webapi.Resource{resource})
 	if err != nil {
 		return err
 	}
@@ -98,8 +97,8 @@ func writeResource(writer io.Writer, jsonMode bool, client Client, resource http
 	return err
 }
 
-func writeMarkdown(writer io.Writer, client Client, response http.MarkdownResponse) error {
-	resolved, err := resolveJSONResources(client, []http.Resource{response.Resource})
+func writeMarkdown(writer io.Writer, client Client, response webapi.MarkdownResponse) error {
+	resolved, err := resolveJSONResources(client, []webapi.Resource{response.Resource})
 	if err != nil {
 		return err
 	}
@@ -117,7 +116,7 @@ func writeMarkdown(writer io.Writer, client Client, response http.MarkdownRespon
 	return err
 }
 
-func writeResourceList(writer io.Writer, jsonMode bool, client Client, resources []http.Resource) error {
+func writeResourceList(writer io.Writer, jsonMode bool, client Client, resources []webapi.Resource) error {
 	resolved, err := resolveJSONResources(client, resources)
 	if err != nil {
 		return err
@@ -144,7 +143,7 @@ func writeDeleteSuccess(writer io.Writer, jsonMode bool) error {
 	return json.NewEncoder(writer).Encode(deleteOutput{SchemaVersion: 1})
 }
 
-func writeDaemonStatus(writer io.Writer, jsonMode bool, status launchagent.Status) error {
+func writeDaemonStatus(writer io.Writer, jsonMode bool, status common.LaunchAgentStatus) error {
 	if (status.Running && (!status.Loaded || status.PID <= 0)) || (!status.Running && status.PID != 0) {
 		return errors.New("launch agent manager returned invalid status")
 	}
@@ -217,8 +216,8 @@ func commandErrorCode(err error) string {
 }
 
 func commandErrorMessage(err error) string {
-	if errors.Is(err, launchagent.ErrUnsupported) {
-		return launchagent.ErrUnsupported.Error()
+	if errors.Is(err, common.ErrLaunchAgentUnsupported) {
+		return common.ErrLaunchAgentUnsupported.Error()
 	}
 	if contextErr, contextOnly := contextOnlyError(err); contextOnly {
 		if contextErr == context.DeadlineExceeded {
