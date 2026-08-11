@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Markdown selection UI</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #e8ebee;
+      --paper: #fcfcfb;
+      --surface: #fff;
+      --ink: #1d252c;
+      --muted: #68737d;
+      --border: #d8dde1;
+      --border-strong: #c7cdd2;
+      --accent: #1769e0;
+      --accent-soft: #eaf2ff;
+      --shadow: 0 20px 60px rgb(25 34 42 / 13%);
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--canvas); color: var(--ink); font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-width: 320px; }
+    button { color: inherit; font: inherit; }
+
+    .prototype { margin: 0 auto; max-width: 1320px; padding: 22px; }
+    .prototype-head { align-items: end; display: flex; gap: 24px; justify-content: space-between; margin: 0 auto 14px; max-width: 1160px; }
+    .kicker { color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .13em; margin: 0 0 6px; text-transform: uppercase; }
+    h1 { font-size: clamp(24px, 3vw, 34px); letter-spacing: -.035em; line-height: 1.05; margin: 0; }
+    .summary { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 7px 0 0; max-width: 650px; }
+    .state-nav { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
+    .state-nav button { background: rgb(255 255 255 / 68%); border: 1px solid var(--border); border-radius: 999px; cursor: pointer; font-size: 10px; font-weight: 750; padding: 7px 10px; }
+    .state-nav button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+
+    .principle { align-items: center; background: #fff7e8; border: 1px solid #e8d2a8; border-radius: 10px; display: flex; font-size: 10px; gap: 8px; margin: 0 auto 10px; max-width: 1160px; padding: 8px 11px; }
+    .principle span:first-child { color: #a26300; font-size: 14px; }
+
+    .page-shell { background: var(--paper); border: 1px solid var(--border-strong); border-radius: 15px; box-shadow: var(--shadow); height: min(820px, calc(100vh - 180px)); margin: 0 auto; max-width: 1160px; min-height: 660px; overflow: auto; position: relative; }
+    .page-toolbar { align-items: center; backdrop-filter: blur(14px); background: rgb(252 252 251 / 91%); border-bottom: 1px solid var(--border); display: flex; height: 48px; justify-content: space-between; padding: 0 19px; position: sticky; top: 0; z-index: 8; }
+    .page-toolbar strong { font-size: 11px; }
+    .page-tools { align-items: center; display: flex; gap: 5px; }
+    .page-tools button { background: transparent; border: 0; border-radius: 7px; color: var(--muted); height: 28px; width: 28px; }
+    .reference-status { background: var(--accent-soft); border-radius: 999px; color: #1559ba; font-size: 9px; font-weight: 750; opacity: 0; padding: 5px 8px; transform: translateY(2px); transition: 140ms ease; }
+    .reference-status.is-visible { opacity: 1; transform: none; }
+
+    .markdown { margin: 0 auto; max-width: 790px; padding: 62px 66px 120px; }
+    .doc-label { color: var(--accent); font-size: 9px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
+    .markdown > h2 { font-family: Georgia, "Times New Roman", serif; font-size: clamp(42px, 5vw, 64px); font-weight: 500; letter-spacing: -.045em; line-height: .98; margin: 15px 0 22px; }
+    .lede { color: #44505a; font-family: Georgia, serif; font-size: 20px; line-height: 1.55; margin: 0 0 34px; }
+    .meta { border-bottom: 1px solid var(--border); border-top: 1px solid var(--border); color: var(--muted); display: flex; font-size: 9px; gap: 19px; margin-bottom: 42px; padding: 10px 0; text-transform: uppercase; }
+
+    .selectable-section { border-radius: 11px; margin: 0 -18px 38px; padding: 10px 18px 15px; position: relative; transition: background 120ms ease, box-shadow 120ms ease; }
+    .selectable-section:hover, .selectable-section.is-demo { background: #f4f7fa; }
+    .selectable-section.just-added, .figure-visual.just-added { animation: source-confirm 950ms ease; }
+    @keyframes source-confirm { 0%, 45% { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); } 100% { background: transparent; box-shadow: inset 3px 0 transparent; } }
+    .selectable-section h3 { font-family: Georgia, serif; font-size: 27px; font-weight: 500; letter-spacing: -.02em; margin: 0 0 13px; }
+    .selectable-section p { color: #37434c; font-family: Georgia, serif; font-size: 16px; line-height: 1.72; margin: 0 0 13px; }
+    .selectable-section p:last-of-type { margin-bottom: 0; }
+
+    .section-action { align-items: center; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 6px 17px rgb(30 40 49 / 9%); color: var(--muted); cursor: pointer; display: flex; font-size: 9px; font-weight: 800; gap: 4px; opacity: 0; padding: 6px 8px; position: absolute; right: 10px; top: 8px; transform: translateY(3px); transition: 110ms ease; }
+    .selectable-section:hover .section-action, .selectable-section.is-demo .section-action, .section-action:focus-visible { opacity: 1; transform: none; }
+    .section-action:hover { border-color: #8eb7ee; color: #1559ba; }
+
+    .metric-grid { display: grid; gap: 10px; grid-template-columns: repeat(3, 1fr); margin: 23px 0 3px; }
+    .metric { background: #fff; border: 1px solid var(--border); border-radius: 9px; padding: 13px; }
+    .metric span { color: var(--muted); display: block; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .metric strong { display: block; font-family: Georgia, serif; font-size: 28px; font-weight: 500; margin-top: 5px; }
+    .metric em { color: #16815a; font-size: 9px; font-style: normal; }
+
+    figure { margin: 0 0 44px; }
+    .figure-visual { background: #1d2733; border-radius: 12px; color: #fff; overflow: hidden; position: relative; }
+    .figure-head { align-items: center; display: flex; justify-content: space-between; padding: 15px 17px 4px; }
+    .figure-head strong { font-size: 10px; }
+    .figure-head span { color: #a8b7c6; font-size: 8px; }
+    .chart { height: 205px; position: relative; }
+    .chart-grid { background-image: linear-gradient(rgb(255 255 255 / 7%) 1px, transparent 1px), linear-gradient(90deg, rgb(255 255 255 / 7%) 1px, transparent 1px); background-size: 100% 46px, 70px 100%; inset: 17px 28px 30px; position: absolute; }
+    .chart-line { border-top: 4px solid #72dfbd; border-radius: 50%; height: 98px; left: 50px; position: absolute; top: 57px; transform: rotate(-9deg); width: 78%; }
+    .chart-line::after { border-top: 3px solid #f4b860; border-radius: 50%; content: ""; height: 59px; left: 0; position: absolute; top: 28px; transform: rotate(7deg); width: 100%; }
+    .figure-action { background: rgb(255 255 255 / 95%); border: 0; border-radius: 8px; bottom: 12px; box-shadow: 0 5px 16px rgb(0 0 0 / 22%); color: var(--ink); cursor: pointer; font-size: 9px; font-weight: 800; opacity: 0; padding: 7px 9px; position: absolute; right: 12px; transform: translateY(3px); transition: 110ms ease; }
+    .figure-visual:hover .figure-action, .figure-visual.is-demo .figure-action, .figure-action:focus-visible { opacity: 1; transform: none; }
+    figcaption { color: var(--muted); font-size: 9px; line-height: 1.5; padding: 8px 3px 0; }
+
+    ::selection, .demo-highlight { background: #cfe2ff; color: inherit; }
+    .demo-highlight { border-radius: 2px; box-shadow: 0 0 0 2px #cfe2ff; }
+
+    .selection-toolbar { align-items: center; display: flex; padding: 0; position: fixed; transform: translate(-50%, -100%); z-index: 20; }
+    .selection-toolbar[data-placement="bottom"] { transform: translate(-50%, 0); }
+    .selection-toolbar[hidden] { display: none; }
+    .selection-toolbar button { align-items: center; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 7px 20px rgb(25 35 45 / 16%); color: var(--ink); cursor: pointer; display: flex; font-size: 10px; font-weight: 750; gap: 5px; padding: 7px 10px; white-space: nowrap; }
+    .selection-toolbar button:hover { background: var(--accent-soft); border-color: #a9c8ef; color: #1559ba; }
+    .selection-toolbar button.is-added { background: #eff9f4; border-color: #aedbc8; color: #126743; }
+    .selection-icon { color: var(--accent); font-size: 12px; font-weight: 850; line-height: .8; }
+    .selection-toolbar button.is-added .selection-icon { color: #16815a; }
+
+    .toast { align-items: center; background: #202a34; border: 1px solid rgb(255 255 255 / 10%); border-radius: 9px; bottom: 20px; box-shadow: 0 8px 24px rgb(15 22 29 / 22%); color: #fff; display: flex; font-size: 10px; gap: 8px; left: 50%; opacity: 0; padding: 9px 12px; pointer-events: none; position: fixed; transform: translate(-50%, 10px); transition: 150ms ease; z-index: 30; }
+    .toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
+    .toast-check { align-items: center; background: #2daf73; border-radius: 50%; display: flex; font-size: 8px; height: 17px; justify-content: center; width: 17px; }
+
+    .prototype-foot { color: var(--muted); display: flex; font-size: 10px; gap: 18px; justify-content: space-between; margin: 11px auto 0; max-width: 1160px; }
+    .prototype-foot p { margin: 0; }
+    .prototype-foot strong { color: var(--ink); }
+    .recommendation { color: #1559ba; }
+    :focus-visible { outline: 3px solid rgb(23 105 224 / 38%); outline-offset: 2px; }
+
+    @media (max-width: 760px) {
+      .prototype { padding: 12px; }
+      .prototype-head { align-items: stretch; flex-direction: column; gap: 11px; }
+      .state-nav { justify-content: flex-start; }
+      .markdown { padding: 44px 28px 90px; }
+      .metric-grid { grid-template-columns: 1fr; }
+      .prototype-foot { flex-direction: column; gap: 4px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; scroll-behavior: auto !important; transition-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <main class="prototype">
+    <header class="prototype-head">
+      <div><p class="kicker">Document-side interaction prototype</p><h1>Select from rendered Markdown</h1><p class="summary">The reading surface stays clean until intent is clear. Drag text for a page-native context button; hover whole sections or figures for semantic selection.</p></div>
+      <nav class="state-nav" aria-label="Prototype state">
+        <button type="button" data-state="idle">Idle</button>
+        <button type="button" data-state="text" aria-pressed="true">Text drag</button>
+        <button type="button" data-state="section">Section hover</button>
+        <button type="button" data-state="figure">Figure hover</button>
+        <button type="button" data-state="added">Added feedback</button>
+      </nav>
+    </header>
+
+    <div class="principle"><span>◈</span><span><strong>Recommended:</strong> use the browser’s normal highlight and place one page-styled context button immediately above the selected range.</span></div>
+
+    <article class="page-shell" id="pageShell">
+      <header class="page-toolbar"><strong>Northstar product review</strong><div class="page-tools"><span class="reference-status" id="referenceStatus">1 in message</span><button type="button" aria-label="Change theme">◐</button><button type="button" aria-label="More options">•••</button></div></header>
+      <div class="markdown" id="markdown">
+        <span class="doc-label">Quarterly review · Q3 2026</span>
+        <h2>Activation is growing.<br>Confidence is not.</h2>
+        <p class="lede">The new onboarding path gets more teams to their first published board, but the handoff from creation to collaboration remains unclear.</p>
+        <div class="meta"><span>Product strategy</span><span>6 min read</span><span>Updated today</span></div>
+
+        <section class="selectable-section" id="findingSection" data-title="Finding · Activation gap">
+          <button class="section-action" type="button" data-add="section">＋ Add section</button>
+          <h3>Finding: the activation gap moved downstream</h3>
+          <p>First-board creation improved from 41% to 58% after the template launch. The sharper issue now appears after publishing: <span id="targetText">only 23% of new workspaces invite a collaborator in their first week.</span></p>
+          <p>Interviews suggest the page feels complete once it is published. The collaboration action reads like administration, not the next meaningful step.</p>
+          <div class="metric-grid">
+            <div class="metric"><span>First board</span><strong>58%</strong><em>+17 points</em></div>
+            <div class="metric"><span>First invite</span><strong>23%</strong><em>+2 points</em></div>
+            <div class="metric"><span>Week-2 return</span><strong>31%</strong><em>+4 points</em></div>
+          </div>
+        </section>
+
+        <figure>
+          <div class="figure-visual" id="figureVisual">
+            <div class="figure-head"><strong>Activation by cohort</strong><span>APR — JUL 2026</span></div>
+            <div class="chart"><div class="chart-grid"></div><div class="chart-line"></div></div>
+            <button class="figure-action" type="button" data-add="figure">＋ Add figure</button>
+          </div>
+          <figcaption>Figure 1. Board creation increased after templates launched; collaboration remained comparatively flat.</figcaption>
+        </figure>
+
+        <section class="selectable-section" id="recommendationSection" data-title="Recommendation · Make sharing consequential">
+          <button class="section-action" type="button" data-add="section">＋ Add section</button>
+          <h3>Recommendation: make sharing consequential</h3>
+          <p>Place collaboration inside the completion moment. After a board is published, ask who needs to react to it and preview the message they will receive.</p>
+          <p>Success means improving first-week collaborator invites without reducing publishing completion or adding a mandatory setup step.</p>
+        </section>
+      </div>
+    </article>
+
+    <footer class="prototype-foot"><p><strong>Try it:</strong> actually drag across any text; the button follows the first selected line.</p><p class="recommendation" id="stateDescription">Text drag · native highlight plus one page-native context button.</p></footer>
+  </main>
+
+  <div class="selection-toolbar" id="selectionToolbar" hidden>
+    <button type="button" id="addSelection"><span class="selection-icon" id="selectionActionIcon" aria-hidden="true">＋</span><span id="selectionActionLabel">Add to message</span></button>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"><span class="toast-check">✓</span><span id="toastCopy">Added to message · Finding ¶1</span></div>
+
+  <script>
+    (() => {
+      const markdown = document.querySelector('#markdown');
+      const targetText = document.querySelector('#targetText');
+      const findingSection = document.querySelector('#findingSection');
+      const figureVisual = document.querySelector('#figureVisual');
+      const toolbar = document.querySelector('#selectionToolbar');
+      const addSelection = document.querySelector('#addSelection');
+      const selectionActionIcon = document.querySelector('#selectionActionIcon');
+      const selectionActionLabel = document.querySelector('#selectionActionLabel');
+      const toast = document.querySelector('#toast');
+      const toastCopy = document.querySelector('#toastCopy');
+      const referenceStatus = document.querySelector('#referenceStatus');
+      const description = document.querySelector('#stateDescription');
+      const stateButtons = [...document.querySelectorAll('[data-state]')];
+      let pending = null;
+      let count = 0;
+      let toastTimer;
+
+      const stateCopy = {
+        idle: 'Idle · the Markdown remains visually untouched while reading.',
+        text: 'Text drag · native highlight plus one page-native context button.',
+        section: 'Section hover · a semantic whole-section action appears only on intent.',
+        figure: 'Figure hover · the action sits on the visual without changing its content.',
+        added: 'Added · a short source pulse and confirmation; no permanent marker on the page.'
+      };
+
+      function clearDemo() {
+        targetText.classList.remove('demo-highlight');
+        findingSection.classList.remove('is-demo', 'just-added');
+        figureVisual.classList.remove('is-demo', 'just-added');
+        toolbar.hidden = true;
+        toast.classList.remove('is-visible');
+        referenceStatus.classList.remove('is-visible');
+        addSelection.classList.remove('is-added');
+        selectionActionIcon.textContent = '＋';
+        selectionActionLabel.textContent = 'Add to message';
+      }
+
+      function showToolbar(rect, source) {
+        const placeAbove = rect.top > 86;
+        toolbar.dataset.placement = placeAbove ? 'top' : 'bottom';
+        addSelection.title = `Add selected text from ${source}`;
+        addSelection.setAttribute('aria-label', `Add selected text from ${source} to message`);
+        toolbar.style.left = `${Math.max(145, Math.min(window.innerWidth - 145, rect.left + rect.width / 2))}px`;
+        toolbar.style.top = `${placeAbove ? rect.top - 8 : rect.bottom + 8}px`;
+        toolbar.hidden = false;
+      }
+
+      function confirmAdded(label, source = findingSection) {
+        count += 1;
+        source.classList?.add('just-added');
+        toastCopy.textContent = `Added to message · ${label}`;
+        toast.classList.add('is-visible');
+        referenceStatus.textContent = `${count} in message`;
+        referenceStatus.classList.add('is-visible');
+        window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(() => { toast.classList.remove('is-visible'); source.classList?.remove('just-added'); }, 1700);
+      }
+
+      markdown.addEventListener('mouseup', () => {
+        window.setTimeout(() => {
+          const selection = window.getSelection();
+          const text = selection?.toString().trim().replace(/\s+/g, ' ') || '';
+          if (!selection || !text || selection.rangeCount === 0 || !markdown.contains(selection.anchorNode)) { toolbar.hidden = true; return; }
+          const range = selection.getRangeAt(0).cloneRange();
+          const container = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
+          const section = container.closest('.selectable-section');
+          const paragraph = container.closest('p');
+          const index = section && paragraph ? [...section.querySelectorAll('p')].indexOf(paragraph) + 1 : 1;
+          pending = { text, range, section: section || findingSection, label: `${section?.dataset.title || 'Page'} ¶${index}` };
+          const anchorRect = [...range.getClientRects()][0] || range.getBoundingClientRect();
+          showToolbar(anchorRect, `${section?.dataset.title || 'Page'} · paragraph ${index}`);
+        }, 0);
+      });
+
+      addSelection.addEventListener('mousedown', event => event.preventDefault());
+      addSelection.addEventListener('click', () => {
+        if (!pending) return;
+        selectionActionIcon.textContent = '✓';
+        selectionActionLabel.textContent = 'Added';
+        addSelection.classList.add('is-added');
+        confirmAdded(pending.label, pending.section);
+        window.getSelection()?.removeAllRanges();
+        window.setTimeout(() => {
+          toolbar.hidden = true;
+          addSelection.classList.remove('is-added');
+          selectionActionIcon.textContent = '＋';
+          selectionActionLabel.textContent = 'Add to message';
+        }, 650);
+      });
+
+      document.querySelectorAll('[data-add="section"]').forEach(button => button.addEventListener('click', () => {
+        confirmAdded(button.closest('.selectable-section').dataset.title, button.closest('.selectable-section'));
+      }));
+      document.querySelector('[data-add="figure"]').addEventListener('click', () => confirmAdded('Figure 1', figureVisual));
+
+      function setState(state) {
+        clearDemo();
+        stateButtons.forEach(button => button.setAttribute('aria-pressed', String(button.dataset.state === state)));
+        description.textContent = stateCopy[state];
+        if (state === 'text') {
+          targetText.classList.add('demo-highlight');
+          pending = { text: targetText.textContent, section: findingSection, label: 'Finding · Activation gap ¶1' };
+          showToolbar(targetText.getClientRects()[0] || targetText.getBoundingClientRect(), 'Finding · paragraph 1');
+        } else if (state === 'section') {
+          findingSection.classList.add('is-demo');
+          findingSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else if (state === 'figure') {
+          figureVisual.classList.add('is-demo');
+          figureVisual.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        else if (state === 'added') {
+          findingSection.classList.add('just-added');
+          referenceStatus.textContent = `${Math.max(1, count)} in message`;
+          referenceStatus.classList.add('is-visible');
+          toastCopy.textContent = 'Added to message · Finding ¶1';
+          toast.classList.add('is-visible');
+        }
+      }
+
+      stateButtons.forEach(button => button.addEventListener('click', () => setState(button.dataset.state)));
+      document.addEventListener('mousedown', event => { if (!event.target.closest('#selectionToolbar') && !markdown.contains(event.target)) toolbar.hidden = true; });
+      window.addEventListener('resize', () => { toolbar.hidden = true; });
+      document.querySelector('#pageShell').addEventListener('scroll', () => { toolbar.hidden = true; });
+      setState('text');
+    })();
+  </script>
+</body>
+</html>

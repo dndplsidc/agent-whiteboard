@@ -70,7 +70,7 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 			turn.userEmitted = true
 			s.mu.Unlock()
 			if first {
-				message := provider.NewUserMessageEvent(turn.request.TurnID, turn.request.MessageID, envelope.ReaderMessage, eventTime(msg.Timestamp, s.driver.config.Clock.Now()))
+				message := provider.NewUserMessageEvent(turn.request.TurnID, turn.request.MessageID, envelope.ReaderContent, eventTime(msg.Timestamp, s.driver.config.Clock.Now()))
 				if message.Validate() != nil {
 					s.failMalformed(turn)
 					return

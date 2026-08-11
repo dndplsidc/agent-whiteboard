@@ -147,7 +147,7 @@ func deriveBrokerItems(entries []nativeEntry) ([]brokerNativeItem, bool) {
 				return nil, false
 			}
 			seenMessages[envelope.MessageID] = struct{}{}
-			item := provider.HistoryItem{TurnID: envelope.TurnID, MessageID: envelope.MessageID, Role: provider.HistoryUser, Text: envelope.ReaderMessage, CreatedAt: at}
+			item := provider.HistoryItem{TurnID: envelope.TurnID, MessageID: envelope.MessageID, Role: provider.HistoryUser, Content: envelope.ReaderContent.Clone(), CreatedAt: at}
 			items = append(items, brokerNativeItem{item: item})
 			current = &items[len(items)-1].item
 			assistantSeen = false
@@ -195,7 +195,7 @@ func (s *Session) History(ctx context.Context, request provider.HistoryRequest) 
 	}
 	eligible := make([]provider.HistoryItem, 0, len(derived))
 	for _, value := range derived {
-		if value.item.Text != "" {
+		if value.item.Role == provider.HistoryUser && !value.item.Content.Empty() || value.item.Role == provider.HistoryAssistant && value.item.Text != "" {
 			eligible = append(eligible, value.item)
 		}
 	}
@@ -225,13 +225,17 @@ func (s *Session) History(ctx context.Context, request provider.HistoryRequest) 
 	actualStart := end
 	for index := end - 1; index >= start; index-- {
 		item := eligible[index]
-		if len(item.Text) > provider.MaxHistoryItemBytes {
+		bytes := len(item.Text)
+		if item.Role == provider.HistoryUser {
+			bytes = item.Content.SemanticBytes()
+		}
+		if bytes > provider.MaxHistoryItemBytes {
 			return provider.HistoryPage{}, provider.NewProviderError(provider.ErrorMalformedStream)
 		}
-		if total+len(item.Text) > provider.MaxHistoryBytes {
+		if total+bytes > provider.MaxHistoryBytes {
 			break
 		}
-		total += len(item.Text)
+		total += bytes
 		actualStart = index
 	}
 	page := provider.HistoryPage{Items: make([]provider.HistoryItem, 0, end-actualStart)}

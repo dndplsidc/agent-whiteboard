@@ -11,6 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func messageContentPointer(content agentprotocol.MessageContent) *agentprotocol.MessageContent {
+	return &content
+}
+
 func TestCurrentHistoryPagesProviderMessagesWithStableBrowserIdentity(t *testing.T) {
 	broker, _, session, connection, clientID, _, _, _ := turnFixture(t, 9000)
 	defer broker.Close(context.Background())
@@ -20,7 +24,7 @@ func TestCurrentHistoryPagesProviderMessagesWithStableBrowserIdentity(t *testing
 	session.mu.Lock()
 	session.historyPage = provider.HistoryPage{
 		Items: []provider.HistoryItem{
-			{TurnID: turnID, MessageID: userMessageID, Role: provider.HistoryUser, Text: "question", CreatedAt: testTime()},
+			{TurnID: turnID, MessageID: userMessageID, Role: provider.HistoryUser, Content: provider.TextMessage("question"), CreatedAt: testTime()},
 			{TurnID: turnID, MessageID: assistantMessageID, Role: provider.HistoryAssistant, Text: "answer", CreatedAt: testTime().Add(lifecycleTestTimeout)},
 		},
 		NextCursor: assistantMessageID,
@@ -37,7 +41,7 @@ func TestCurrentHistoryPagesProviderMessagesWithStableBrowserIdentity(t *testing
 	payload := timeline.Payload.(agentprotocol.TimelinePayload)
 	require.Equal(t, command.CommandID, payload.CommandID)
 	require.Equal(t, []agentprotocol.TimelineItem{
-		{ItemID: userMessageID, Kind: agentprotocol.TimelineUser, TurnID: turnID, MessageID: userMessageID, Text: "question", CreatedAt: testTime()},
+		{ItemID: userMessageID, Kind: agentprotocol.TimelineUser, TurnID: turnID, MessageID: userMessageID, Content: messageContentPointer(agentprotocol.TextContent("question")), CreatedAt: testTime()},
 		{ItemID: assistantMessageID, Kind: agentprotocol.TimelineAssistant, TurnID: turnID, MessageID: assistantMessageID, Text: "answer", CreatedAt: testTime().Add(lifecycleTestTimeout)},
 	}, payload.Items)
 	require.NotNil(t, payload.NextCursor)
@@ -62,7 +66,7 @@ func TestCurrentHistoryTimelineIsIsolatedFromOtherClientsLiveAndInReplay(t *test
 	turnID := sequenceID(9007)
 	messageID := sequenceID(9008)
 	session.mu.Lock()
-	session.historyPage = provider.HistoryPage{Items: []provider.HistoryItem{{TurnID: turnID, MessageID: messageID, Role: provider.HistoryUser, Text: "private timeline", CreatedAt: testTime()}}}
+	session.historyPage = provider.HistoryPage{Items: []provider.HistoryItem{{TurnID: turnID, MessageID: messageID, Role: provider.HistoryUser, Content: provider.TextMessage("private timeline"), CreatedAt: testTime()}}}
 	session.mu.Unlock()
 	conversationID := first.ConversationID()
 	command := historyCommand(sequenceID(9009), firstClientID, conversationID, agentprotocol.PageRequestPayload{})
@@ -116,7 +120,7 @@ func TestCurrentHistoryRejectsProviderPagesBeyondRequestedOrBrowserBoundsIdempot
 			name:  "requested limit",
 			limit: 1,
 			items: []provider.HistoryItem{
-				{TurnID: sequenceID(9015), MessageID: sequenceID(9016), Role: provider.HistoryUser, Text: "one", CreatedAt: testTime()},
+				{TurnID: sequenceID(9015), MessageID: sequenceID(9016), Role: provider.HistoryUser, Content: provider.TextMessage("one"), CreatedAt: testTime()},
 				{TurnID: sequenceID(9015), MessageID: sequenceID(9017), Role: provider.HistoryAssistant, Text: "two", CreatedAt: testTime()},
 			},
 		},
@@ -124,7 +128,7 @@ func TestCurrentHistoryRejectsProviderPagesBeyondRequestedOrBrowserBoundsIdempot
 			name:  "browser byte bound",
 			limit: 2,
 			items: []provider.HistoryItem{
-				{TurnID: sequenceID(9018), MessageID: sequenceID(9019), Role: provider.HistoryUser, Text: strings.Repeat("x", agentprotocol.MaxMessageBytes), CreatedAt: testTime()},
+				{TurnID: sequenceID(9018), MessageID: sequenceID(9019), Role: provider.HistoryUser, Content: provider.TextMessage(strings.Repeat("x", agentprotocol.MaxMessageBytes)), CreatedAt: testTime()},
 				{TurnID: sequenceID(9018), MessageID: sequenceID(9020), Role: provider.HistoryAssistant, Text: strings.Repeat("y", agentprotocol.MaxMessageBytes), CreatedAt: testTime()},
 			},
 		},

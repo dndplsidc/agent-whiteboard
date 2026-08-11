@@ -117,7 +117,7 @@ func TestSessionSubmitNormalizesRealPiEventSequence(t *testing.T) {
 
 	events := receiveProviderEvents(t, session.Events(), 4)
 	require.Equal(t, []provider.EventKind{provider.EventUserMessage, provider.EventAssistantDelta, provider.EventAssistantDelta, provider.EventAssistantMessage}, []provider.EventKind{events[0].Kind, events[1].Kind, events[2].Kind, events[3].Kind})
-	require.Equal(t, request.Message, events[0].Text)
+	require.Equal(t, request.Content, events[0].Content)
 	require.Equal(t, "visible ", events[1].Text)
 	require.Equal(t, "answer", events[2].Text)
 	require.Equal(t, "visible answer", events[3].Text)
@@ -385,7 +385,7 @@ func installBehaviorTurn(session *Session, seed byte) *activeTurn {
 }
 
 func behaviorTurn(seed byte, message string) provider.TurnRequest {
-	return provider.TurnRequest{TurnID: behaviorID(seed), MessageID: behaviorID(seed + 40), Message: message}
+	return provider.TurnRequest{TurnID: behaviorID(seed), MessageID: behaviorID(seed + 40), Content: provider.TextMessage(message)}
 }
 func behaviorID(seed byte) string {
 	raw := make([]byte, 24)

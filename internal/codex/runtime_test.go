@@ -61,7 +61,7 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 				require.NoError(t, err)
 				require.Equal(t, contentturn.PolicyConfigured, envelope.Policy)
 				require.Equal(t, "# Whiteboard", string(envelope.Markdown))
-				require.Equal(t, "What changed?", envelope.ReaderMessage)
+				require.Equal(t, provider.TextMessage("What changed?"), envelope.ReaderContent)
 				// Exercise notifications that arrive before turn/start is acknowledged.
 				child.send(t, notification("item/agentMessage/delta", map[string]any{"threadId": "native-thread", "turnId": "native-turn", "delta": "Working"}))
 				child.send(t, map[string]any{"id": 700, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": "native-thread", "turnId": "native-turn", "itemId": "native-item", "startedAtMs": 1, "command": "go test ./...", "cwd": "/workspace", "reason": "Run the tests"}})
@@ -94,7 +94,7 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Shutdown(context.Background()) })
 	request := provider.TurnRequest{
-		TurnID: testID(91), MessageID: testID(92), Message: "What changed?",
+		TurnID: testID(91), MessageID: testID(92), Content: provider.TextMessage("What changed?"),
 		Context: &provider.PageContext{Revision: provider.ContextInitial, Markdown: markdown, CreatorContext: creator, Title: "Board", URL: "https://example.com/board", Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: resourceID, CreatedAt: now, UpdatedAt: now}, Digest: contextdigest.Calculate(markdown, creator)},
 	}
 	accepted, err := session.Submit(context.Background(), request)
@@ -165,7 +165,7 @@ func TestTurnAcceptanceBarrierOrdersPreAckEventBeforeImmediatePostAckInteraction
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 	runtime.sessions[session.threadID] = session
-	request := provider.TurnRequest{TurnID: testID(93), MessageID: testID(94), Message: "Order this stream"}
+	request := provider.TurnRequest{TurnID: testID(93), MessageID: testID(94), Content: provider.TextMessage("Order this stream")}
 	submitted := make(chan error, 1)
 	go func() { _, err := session.Submit(context.Background(), request); submitted <- err }()
 	<-input.wrote
@@ -209,7 +209,7 @@ func TestTurnCompletionBeforeAcceptanceResponseIsBuffered(t *testing.T) {
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 	runtime.sessions[session.threadID] = session
-	request := provider.TurnRequest{TurnID: testID(95), MessageID: testID(96), Message: "Complete immediately"}
+	request := provider.TurnRequest{TurnID: testID(95), MessageID: testID(96), Content: provider.TextMessage("Complete immediately")}
 	submitted := make(chan error, 1)
 	go func() { _, err := session.Submit(context.Background(), request); submitted <- err }()
 	<-input.wrote
@@ -416,7 +416,7 @@ func TestDriverResumeReadDeleteInterruptCompactionAndContextOverflow(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, provider.TurnNotAccepted, state)
 
-	request := provider.TurnRequest{TurnID: testID(701), MessageID: testID(702), Message: "Continue"}
+	request := provider.TurnRequest{TurnID: testID(701), MessageID: testID(702), Content: provider.TextMessage("Continue")}
 	accepted, err := session.Submit(context.Background(), request)
 	require.NoError(t, err)
 	require.NoError(t, session.Interrupt(context.Background(), accepted))
@@ -971,7 +971,7 @@ func TestConcurrentSubmitAndShutdownSynchronizeNativeTurnIdentity(t *testing.T) 
 			activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 		}
 		runtime.sessions[session.threadID] = session
-		request := provider.TurnRequest{TurnID: testID(uint64(800 + iteration*2)), MessageID: testID(uint64(801 + iteration*2)), Message: "race"}
+		request := provider.TurnRequest{TurnID: testID(uint64(800 + iteration*2)), MessageID: testID(uint64(801 + iteration*2)), Content: provider.TextMessage("race")}
 		submitDone := make(chan error, 1)
 		go func() { _, err := session.Submit(context.Background(), request); submitDone <- err }()
 		<-input.wrote
@@ -1119,7 +1119,7 @@ func TestHistoryProjectionBoundsNativeTextAndAggregateSize(t *testing.T) {
 	for index := range turns {
 		turnID := testID(uint64(index + 100))
 		envelope, err := contentturn.Build(provider.TurnRequest{
-			TurnID: turnID, MessageID: testID(uint64(index + 200)), Message: "question",
+			TurnID: turnID, MessageID: testID(uint64(index + 200)), Content: provider.TextMessage("question"),
 		}, contentturn.PolicyConfigured)
 		require.NoError(t, err)
 		turns[index] = map[string]any{
@@ -1142,7 +1142,7 @@ func TestHistoryReturnsNewestFirstAndPagesTowardOlderMessages(t *testing.T) {
 		turnID := testID(uint64(index + 300))
 		messageID := testID(uint64(index + 400))
 		envelope, err := contentturn.Build(provider.TurnRequest{
-			TurnID: turnID, MessageID: messageID, Message: "question " + strconv.Itoa(index),
+			TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("question " + strconv.Itoa(index)),
 		}, contentturn.PolicyConfigured)
 		require.NoError(t, err)
 		turns[index] = map[string]any{
@@ -1157,11 +1157,11 @@ func TestHistoryReturnsNewestFirstAndPagesTowardOlderMessages(t *testing.T) {
 	require.NoError(t, err)
 	page, err := historyPage(items, provider.HistoryRequest{Limit: 2})
 	require.NoError(t, err)
-	require.Equal(t, []string{"answer 2", "question 2"}, []string{page.Items[0].Text, page.Items[1].Text})
+	require.Equal(t, []string{"answer 2", "question 2"}, []string{page.Items[0].Text, page.Items[1].Content.PlainText()})
 	require.Equal(t, testID(402), page.NextCursor)
 	older, err := historyPage(items, provider.HistoryRequest{Limit: 2, BeforeMessageID: page.NextCursor})
 	require.NoError(t, err)
-	require.Equal(t, []string{"answer 1", "question 1"}, []string{older.Items[0].Text, older.Items[1].Text})
+	require.Equal(t, []string{"answer 1", "question 1"}, []string{older.Items[0].Text, older.Items[1].Content.PlainText()})
 	require.Equal(t, testID(401), older.NextCursor)
 }
 

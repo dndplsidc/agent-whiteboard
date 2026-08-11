@@ -149,7 +149,7 @@ func TestTrustSourceFailureFailsClosedButStatusRemainsMinimal(t *testing.T) {
 	running.trust.mu.Unlock()
 	response := running.request(t, http.MethodGet, agentprotocol.StatusPath, trustedOrigin, nil)
 	assert.Equal(t, http.StatusOK, response.StatusCode)
-	assert.Equal(t, map[string]any{"available": true, "api_version": "2", "origin_trusted": false}, readJSON(t, response))
+	assert.Equal(t, map[string]any{"available": true, "api_version": "3", "origin_trusted": false}, readJSON(t, response))
 	response = running.request(t, http.MethodPost, agentprotocol.ConnectPath, trustedOrigin, encodeCommand(t, connectCommand()))
 	assert.Equal(t, http.StatusForbidden, response.StatusCode)
 	response.Body.Close()
@@ -157,7 +157,7 @@ func TestTrustSourceFailureFailsClosedButStatusRemainsMinimal(t *testing.T) {
 	loopbackOrigin := "http://127.0.0.1:4321"
 	response = running.request(t, http.MethodGet, agentprotocol.StatusPath, loopbackOrigin, nil)
 	assert.Equal(t, http.StatusOK, response.StatusCode)
-	assert.Equal(t, map[string]any{"available": true, "api_version": "2", "origin_trusted": true}, readJSON(t, response))
+	assert.Equal(t, map[string]any{"available": true, "api_version": "3", "origin_trusted": true}, readJSON(t, response))
 	stream := running.request(t, http.MethodPost, agentprotocol.ConnectPath, loopbackOrigin, encodeCommand(t, connectCommand()))
 	assert.Equal(t, http.StatusOK, stream.StatusCode)
 	stream.Body.Close()

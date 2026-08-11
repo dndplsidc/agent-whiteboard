@@ -69,7 +69,19 @@ type StageRequest struct {
 	Provider       provider.Name
 	ConversationID string
 	ClientID       string
+	Purpose        ImagePurpose
 	Content        io.Reader
+}
+
+type ImagePurpose string
+
+const (
+	PurposeAttachment      ImagePurpose = "attachment"
+	PurposeInlineReference ImagePurpose = "inline_reference"
+)
+
+func (purpose ImagePurpose) valid() bool {
+	return purpose == "" || purpose == PurposeAttachment || purpose == PurposeInlineReference
 }
 
 type Staged struct {
@@ -100,6 +112,7 @@ type ClaimRequest struct {
 	TurnID         string
 	MessageID      string
 	Images         []agentprotocol.ImageReference
+	InlineImages   int
 }
 
 type Claimed struct {
@@ -123,6 +136,7 @@ type record struct {
 	Provider       provider.Name `json:"provider"`
 	ConversationID string        `json:"conversation_id"`
 	ClientID       string        `json:"client_id"`
+	Purpose        ImagePurpose  `json:"purpose,omitempty"`
 	State          lifecycle     `json:"state"`
 	Name           string        `json:"name,omitempty"`
 	TurnID         string        `json:"turn_id,omitempty"`
@@ -137,7 +151,7 @@ type manifest struct {
 }
 
 func (service *Service) Stage(ctx context.Context, request StageRequest) (Staged, error) {
-	if service == nil || !validOrigin(request.Origin) || !request.Provider.Valid() || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.IsNil(request.Content) {
+	if service == nil || !validOrigin(request.Origin) || !request.Provider.Valid() || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || !request.Purpose.valid() || common.IsNil(request.Content) {
 		return Staged{}, ErrInvalid
 	}
 	service.mu.Lock()
@@ -218,7 +232,7 @@ func (service *Service) Stage(ctx context.Context, request StageRequest) (Staged
 	state.Records = append(state.Records, record{
 		ImageID: id, Filename: filename, MediaType: format.MediaType, Bytes: written,
 		Origin: request.Origin, Provider: request.Provider, ConversationID: request.ConversationID,
-		ClientID: request.ClientID, State: stagedLifecycle, CreatedAt: now, ExpiresAt: now.Add(stagedLifetime),
+		ClientID: request.ClientID, Purpose: request.Purpose, State: stagedLifecycle, CreatedAt: now, ExpiresAt: now.Add(stagedLifetime),
 	})
 	if err := saveManifest(root, state, service.ids); err != nil {
 		// Publication may have reached the manifest rename before a directory
@@ -296,7 +310,7 @@ func (service *Service) DeleteStaged(ctx context.Context, request DeleteRequest)
 }
 
 func (service *Service) Claim(ctx context.Context, request ClaimRequest) (Claimed, error) {
-	if service == nil || !validOrigin(request.Origin) || !request.Provider.Valid() || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.ValidateID(request.TurnID) != nil || common.ValidateID(request.MessageID) != nil || len(request.Images) == 0 || len(request.Images) > agentlimits.MaxImagesPerTurn {
+	if service == nil || !validOrigin(request.Origin) || !request.Provider.Valid() || common.ValidateID(request.ConversationID) != nil || common.ValidateID(request.ClientID) != nil || common.ValidateID(request.TurnID) != nil || common.ValidateID(request.MessageID) != nil || len(request.Images) == 0 || len(request.Images) > agentlimits.MaxImagesPerTurn || request.InlineImages < 0 || request.InlineImages > len(request.Images) {
 		return Claimed{}, ErrInvalid
 	}
 	service.mu.Lock()
@@ -330,6 +344,17 @@ func (service *Service) Claim(ctx context.Context, request ClaimRequest) (Claime
 		record := state.Records[index]
 		if record.State != stagedLifecycle || record.Origin != request.Origin || record.Provider != request.Provider || record.ClientID != request.ClientID || !record.ExpiresAt.After(now) {
 			return Claimed{}, ErrMissing
+		}
+		expectedPurpose := PurposeAttachment
+		if position < request.InlineImages {
+			expectedPurpose = PurposeInlineReference
+		}
+		actualPurpose := record.Purpose
+		if actualPurpose == "" {
+			actualPurpose = PurposeAttachment
+		}
+		if actualPurpose != expectedPurpose {
+			return Claimed{}, ErrInvalid
 		}
 		input := provider.ImageInput{ID: record.ImageID, Name: reference.Name, MediaType: record.MediaType, Bytes: record.Bytes, Path: filepath.Join(directory, record.Filename)}
 		if input.Validate() != nil {
@@ -408,6 +433,57 @@ func (service *Service) ReleaseMessage(ctx context.Context, conversationID, mess
 		} else {
 			kept = append(kept, record)
 		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	state.Records = kept
+	if err := saveManifest(root, state, service.ids); err != nil {
+		return ErrStorage
+	}
+	for _, record := range removed {
+		if err := root.Remove(record.Filename); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return ErrStorage
+		}
+	}
+	return syncRoot(root)
+}
+
+func (service *Service) ReleaseImages(ctx context.Context, conversationID, messageID string, imageIDs []string) error {
+	if service == nil || common.ValidateID(conversationID) != nil || common.ValidateID(messageID) != nil || len(imageIDs) == 0 {
+		return ErrInvalid
+	}
+	wanted := make(map[string]struct{}, len(imageIDs))
+	for _, imageID := range imageIDs {
+		if common.ValidateID(imageID) != nil {
+			return ErrInvalid
+		}
+		wanted[imageID] = struct{}{}
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	root, _, err := service.open(conversationID)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	state, err := loadManifest(root, conversationID)
+	if err != nil {
+		return ErrStorage
+	}
+	kept := make([]record, 0, len(state.Records))
+	removed := make([]record, 0, len(imageIDs))
+	for _, record := range state.Records {
+		if record.MessageID == messageID {
+			if _, exists := wanted[record.ImageID]; exists {
+				removed = append(removed, record)
+				continue
+			}
+		}
+		kept = append(kept, record)
 	}
 	if len(removed) == 0 {
 		return nil
@@ -657,7 +733,7 @@ func removeFiles(root *os.Root, names []string) error {
 }
 
 func validRecord(record record, conversationID string) bool {
-	if common.ValidateID(record.ImageID) != nil || record.ConversationID != conversationID || common.ValidateID(record.ClientID) != nil || !record.Provider.Valid() || !validOrigin(record.Origin) || !raster.SupportedMediaType(record.MediaType) || record.Bytes <= 0 || record.Bytes > int64(agentlimits.MaxImageBytes) || record.CreatedAt.IsZero() || record.Filename != record.ImageID+extensionFor(record.MediaType) {
+	if common.ValidateID(record.ImageID) != nil || record.ConversationID != conversationID || common.ValidateID(record.ClientID) != nil || !record.Provider.Valid() || !record.Purpose.valid() || !validOrigin(record.Origin) || !raster.SupportedMediaType(record.MediaType) || record.Bytes <= 0 || record.Bytes > int64(agentlimits.MaxImageBytes) || record.CreatedAt.IsZero() || record.Filename != record.ImageID+extensionFor(record.MediaType) {
 		return false
 	}
 	switch record.State {

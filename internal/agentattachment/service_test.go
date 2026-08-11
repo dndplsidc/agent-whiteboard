@@ -68,6 +68,34 @@ func TestStageClaimReadAndReleaseLifecycle(t *testing.T) {
 	require.NoFileExists(t, claimed.Inputs[0].Path)
 }
 
+func TestMixedInlineAndAttachmentPurposeIsAtomicAndSupportsPartialRelease(t *testing.T) {
+	service, _ := newService(t)
+	stage := func(purpose agentattachment.ImagePurpose) agentattachment.Staged {
+		staged, err := service.Stage(t.Context(), agentattachment.StageRequest{Origin: origin, Provider: provider.NamePi, ConversationID: conversationID, ClientID: clientID, Purpose: purpose, Content: bytes.NewReader(encodedPNG(t))})
+		require.NoError(t, err)
+		return staged
+	}
+	inline := stage(agentattachment.PurposeInlineReference)
+	attachment := stage(agentattachment.PurposeAttachment)
+
+	_, err := service.Claim(t.Context(), agentattachment.ClaimRequest{
+		Origin: origin, Provider: provider.NamePi, ConversationID: conversationID, ClientID: clientID, TurnID: turnID, MessageID: messageID,
+		Images: []agentprotocol.ImageReference{{ImageID: attachment.ImageID, Name: "attachment.png"}, {ImageID: inline.ImageID, Name: "inline.png"}}, InlineImages: 1,
+	})
+	require.ErrorIs(t, err, agentattachment.ErrInvalid)
+
+	claimed, err := service.Claim(t.Context(), agentattachment.ClaimRequest{
+		Origin: origin, Provider: provider.NamePi, ConversationID: conversationID, ClientID: clientID, TurnID: turnID, MessageID: messageID,
+		Images: []agentprotocol.ImageReference{{ImageID: inline.ImageID, Name: "inline.png"}, {ImageID: attachment.ImageID, Name: "attachment.png"}}, InlineImages: 1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{inline.ImageID, attachment.ImageID}, []string{claimed.Inputs[0].ID, claimed.Inputs[1].ID})
+	require.NoError(t, service.ReleaseImages(t.Context(), conversationID, messageID, []string{inline.ImageID}))
+	descriptors, err := service.ImagesForMessage(t.Context(), conversationID, messageID)
+	require.NoError(t, err)
+	require.Equal(t, []agentprotocol.ImageDescriptor{{ImageID: attachment.ImageID, Name: "attachment.png", MediaType: "image/png"}}, descriptors)
+}
+
 func TestStageAndReadEnforceOwnershipAndValidation(t *testing.T) {
 	service, _ := newService(t)
 	_, err := service.Stage(t.Context(), agentattachment.StageRequest{

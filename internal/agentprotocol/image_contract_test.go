@@ -10,8 +10,8 @@ import (
 )
 
 func TestImageAttachmentLimitsAreFrozen(t *testing.T) {
-	require.Equal(t, "2", agentprotocol.APIVersion)
-	require.Equal(t, "agent-whiteboard.v2", agentprotocol.WebSocketSubprotocol)
+	require.Equal(t, "3", agentprotocol.APIVersion)
+	require.Equal(t, "agent-whiteboard.v3", agentprotocol.WebSocketSubprotocol)
 	require.Equal(t, "/api/v1/agent/images", agentprotocol.ImagesPath)
 	require.Equal(t, 8, agentprotocol.MaxImagesPerTurn)
 	require.Equal(t, 10<<20, agentprotocol.MaxImageBytes)
@@ -27,6 +27,7 @@ func TestSubmitImagesRoundTripAndPermitImageOnlyTurns(t *testing.T) {
 		ConversationID: &conversationID, Type: agentprotocol.CommandSubmit,
 		Payload: agentprotocol.SubmitPayload{
 			TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32),
+			Content: agentprotocol.TextContent(""),
 			Images: []agentprotocol.ImageReference{
 				{ImageID: strings.Repeat("F", 32), Name: "first.png"},
 				{ImageID: strings.Repeat("G", 32), Name: "second.webp"},
@@ -65,7 +66,7 @@ func TestSubmitImageReferencesRejectInvalidBoundaries(t *testing.T) {
 			_, err := agentprotocol.EncodeCommand(agentprotocol.Command{
 				APIVersion: agentprotocol.APIVersion, CommandID: idA, ClientID: idB,
 				ConversationID: &conversationID, Type: agentprotocol.CommandSubmit,
-				Payload: agentprotocol.SubmitPayload{TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32), Message: tt.message, Images: tt.images},
+				Payload: agentprotocol.SubmitPayload{TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32), Content: agentprotocol.TextContent(tt.message), Images: tt.images},
 			})
 			require.Error(t, err)
 		})
@@ -74,10 +75,11 @@ func TestSubmitImageReferencesRejectInvalidBoundaries(t *testing.T) {
 
 func TestImageDescriptorsSupportImageOnlyUserEvents(t *testing.T) {
 	descriptors := []agentprotocol.ImageDescriptor{{ImageID: strings.Repeat("F", 32), Name: "screen.png", MediaType: "image/png"}}
+	empty := agentprotocol.TextContent("")
 	payloads := []agentprotocol.EventPayload{
-		agentprotocol.UserMessagePayload{TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32), Images: descriptors, CreatedAt: time.Now().UTC()},
-		agentprotocol.QueuePayload{Items: []agentprotocol.QueueItem{{TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32), Images: descriptors}}},
-		agentprotocol.TimelinePayload{CommandID: idA, Items: []agentprotocol.TimelineItem{{ItemID: idB, Kind: agentprotocol.TimelineUser, TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32), Images: descriptors, CreatedAt: time.Now().UTC()}}},
+		agentprotocol.UserMessagePayload{TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32), Content: empty, Images: descriptors, CreatedAt: time.Now().UTC()},
+		agentprotocol.QueuePayload{Items: []agentprotocol.QueueItem{{TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32), Content: empty, Images: descriptors}}},
+		agentprotocol.TimelinePayload{CommandID: idA, Items: []agentprotocol.TimelineItem{{ItemID: idB, Kind: agentprotocol.TimelineUser, TurnID: strings.Repeat("D", 32), MessageID: strings.Repeat("E", 32), Content: &empty, Images: descriptors, CreatedAt: time.Now().UTC()}}},
 	}
 	for _, payload := range payloads {
 		event := agentprotocol.Event{APIVersion: agentprotocol.APIVersion, EventID: idA, ConversationID: idC, Type: payload.EventType(), Timestamp: time.Now().UTC(), Payload: payload}

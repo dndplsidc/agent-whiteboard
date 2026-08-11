@@ -49,34 +49,39 @@ func (attempt *actorShutdown) run(ctx context.Context, timeout time.Duration) er
 	if gracePeriod <= 0 {
 		gracePeriod = timeout
 	}
-	graceCtx, graceCancel := context.WithTimeout(runCtx, gracePeriod)
-	defer graceCancel()
-	attempt.startOnce.Do(func() {
-		go func() {
-			attempt.shutdownDone <- attempt.session.Shutdown(graceCtx)
-		}()
-	})
+	// A retry resumes the persisted escalation phase. Shutdown starts only once,
+	// so waiting through another grace window would spend the retry budget on a
+	// provider call that cannot be restarted.
+	if !attempt.terminateStarted {
+		graceCtx, graceCancel := context.WithTimeout(runCtx, gracePeriod)
+		attempt.startOnce.Do(func() {
+			go func() {
+				attempt.shutdownDone <- attempt.session.Shutdown(graceCtx)
+			}()
+		})
 
-	for !attempt.workerDone || !attempt.shutdownEnded {
-		if attempt.shutdownEnded && attempt.shutdownErr != nil {
-			break
+		graceExpired := false
+		for (!attempt.workerDone || !attempt.shutdownEnded) && !graceExpired {
+			if attempt.shutdownEnded && attempt.shutdownErr != nil {
+				break
+			}
+			select {
+			case <-attempt.workerSettled:
+				attempt.workerDone = true
+				attempt.workerSettled = nil
+			case attempt.shutdownErr = <-attempt.shutdownDone:
+				attempt.shutdownEnded = true
+				attempt.shutdownDone = nil
+			case <-graceCtx.Done():
+				graceExpired = true
+			}
 		}
-		select {
-		case <-attempt.workerSettled:
-			attempt.workerDone = true
-			attempt.workerSettled = nil
-		case attempt.shutdownErr = <-attempt.shutdownDone:
-			attempt.shutdownEnded = true
-			attempt.shutdownDone = nil
-		case <-graceCtx.Done():
-			goto escalate
+		graceCancel()
+		if attempt.workerDone && attempt.shutdownEnded && attempt.shutdownErr == nil {
+			return nil
 		}
 	}
-	if attempt.workerDone && attempt.shutdownEnded && attempt.shutdownErr == nil {
-		return nil
-	}
 
-escalate:
 	child := attempt.child
 	if common.IsNil(child) {
 		return errors.New("provider shutdown failed without a managed child")

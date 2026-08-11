@@ -209,7 +209,7 @@ func TestRecoveryNeverReplaysActiveTurnAndPreservesQueuedFollowUpOnFailure(t *te
 	snapshot := receiveLifecycle(t, reconnected.Events()).Payload.(agentprotocol.SnapshotPayload)
 	require.Equal(t, agentprotocol.LifecycleUnavailable, snapshot.Lifecycle)
 	require.Nil(t, snapshot.ActiveTurnID)
-	require.Equal(t, []agentprotocol.QueueItem{{TurnID: queuedTurnID, MessageID: queuedMessageID, Message: "queued"}}, snapshot.Queue)
+	require.Equal(t, []agentprotocol.QueueItem{{TurnID: queuedTurnID, MessageID: queuedMessageID, Content: agentprotocol.TextContent("queued")}}, snapshot.Queue)
 	require.NoError(t, broker.Close(context.Background()))
 	driver.mu.Lock()
 	require.Len(t, driver.requests, 2)
@@ -509,7 +509,7 @@ func TestNewerRevisionAttachedDuringRecoveryErasesStaleQueuedContext(t *testing.
 	require.NoError(t, err)
 	defer fourth.Close(context.Background())
 	resynced := receiveLifecycle(t, fourth.Events()).Payload.(agentprotocol.SnapshotPayload)
-	require.Equal(t, []agentprotocol.QueueItem{{TurnID: queuedTurnID, MessageID: queuedMessageID, Message: "queued"}}, resynced.Queue)
+	require.Equal(t, []agentprotocol.QueueItem{{TurnID: queuedTurnID, MessageID: queuedMessageID, Content: agentprotocol.TextContent("queued")}}, resynced.Queue)
 	require.Equal(t, agentprotocol.ContextPending, resynced.ContextState)
 }
 

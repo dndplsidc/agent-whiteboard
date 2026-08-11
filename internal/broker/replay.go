@@ -266,6 +266,7 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 		}
 		return &copyOfValue
 	case agentprotocol.UserMessagePayload:
+		value.Content = value.Content.Clone()
 		value.Images = append([]agentprotocol.ImageDescriptor(nil), value.Images...)
 		return value
 	case *agentprotocol.UserMessagePayload:
@@ -273,6 +274,7 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 			return (*agentprotocol.UserMessagePayload)(nil)
 		}
 		copyOfValue := *value
+		copyOfValue.Content = value.Content.Clone()
 		copyOfValue.Images = append([]agentprotocol.ImageDescriptor(nil), value.Images...)
 		return &copyOfValue
 	case agentprotocol.HistoryPayload:
@@ -325,6 +327,7 @@ func clonePayload(payload agentprotocol.EventPayload) agentprotocol.EventPayload
 func cloneQueueItems(items []agentprotocol.QueueItem) []agentprotocol.QueueItem {
 	result := append([]agentprotocol.QueueItem{}, items...)
 	for index := range result {
+		result[index].Content = items[index].Content.Clone()
 		result[index].Images = append([]agentprotocol.ImageDescriptor(nil), items[index].Images...)
 	}
 	return result
@@ -333,6 +336,10 @@ func cloneQueueItems(items []agentprotocol.QueueItem) []agentprotocol.QueueItem 
 func cloneTimelineItems(items []agentprotocol.TimelineItem) []agentprotocol.TimelineItem {
 	result := append([]agentprotocol.TimelineItem{}, items...)
 	for index := range result {
+		if items[index].Content != nil {
+			content := items[index].Content.Clone()
+			result[index].Content = &content
+		}
 		result[index].Images = append([]agentprotocol.ImageDescriptor(nil), items[index].Images...)
 	}
 	return result

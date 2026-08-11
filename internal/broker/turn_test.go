@@ -701,7 +701,7 @@ func TestSubmitCommitsContextOnceAndDeduplicatesTheCommandResult(t *testing.T) {
 
 	changed := command
 	payload := changed.Payload.(agentprotocol.SubmitPayload)
-	payload.Message = "different"
+	payload.Content = agentprotocol.TextContent("different")
 	changed.Payload = payload
 	rejected, err := connection.Command(context.Background(), changed)
 	require.NoError(t, err)
@@ -728,7 +728,7 @@ func TestFollowUpQueueEditRemoveFIFOAndInterruptPreserveQueue(t *testing.T) {
 	require.NoError(t, err)
 	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
 	queueEvent := receiveLifecycle(t, connection.Events())
-	require.Equal(t, []agentprotocol.QueueItem{{TurnID: sequenceID(7111), MessageID: sequenceID(7112), Message: "first"}}, queueEvent.Payload.(agentprotocol.QueuePayload).Items)
+	require.Equal(t, []agentprotocol.QueueItem{{TurnID: sequenceID(7111), MessageID: sequenceID(7112), Content: agentprotocol.TextContent("first")}}, queueEvent.Payload.(agentprotocol.QueuePayload).Items)
 	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
 
 	second := submitCommand(sequenceID(7113), clientID, conversationID, sequenceID(7114), sequenceID(7115), "second", nil)
@@ -737,12 +737,12 @@ func TestFollowUpQueueEditRemoveFIFOAndInterruptPreserveQueue(t *testing.T) {
 	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
 	drainEvents(t, connection.Events(), 2)
 
-	edit := agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: sequenceID(7116), ClientID: clientID, ConversationID: &conversationID, Type: agentprotocol.CommandQueueEdit, Payload: agentprotocol.QueueEditPayload{MessageID: sequenceID(7112), Message: "edited"}}
+	edit := agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: sequenceID(7116), ClientID: clientID, ConversationID: &conversationID, Type: agentprotocol.CommandQueueEdit, Payload: agentprotocol.QueueEditPayload{MessageID: sequenceID(7112), Content: agentprotocol.TextContent("edited")}}
 	result, err = connection.Command(context.Background(), edit)
 	require.NoError(t, err)
 	requireCommandResult(t, result, agentprotocol.CommandSucceeded, "")
 	queueEvent = receiveLifecycle(t, connection.Events())
-	require.Equal(t, "edited", queueEvent.Payload.(agentprotocol.QueuePayload).Items[0].Message)
+	require.Equal(t, "edited", queueEvent.Payload.(agentprotocol.QueuePayload).Items[0].Content.Parts[0].Text)
 	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
 
 	remove := agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: sequenceID(7117), ClientID: clientID, ConversationID: &conversationID, Type: agentprotocol.CommandQueueRemove, Payload: agentprotocol.MessageReferencePayload{MessageID: sequenceID(7115)}}
@@ -768,7 +768,7 @@ func TestFollowUpQueueEditRemoveFIFOAndInterruptPreserveQueue(t *testing.T) {
 	require.Equal(t, agentprotocol.LifecycleConnecting, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
 	dispatched := receiveLifecycle(t, session.submitted)
 	require.Equal(t, sequenceID(7111), dispatched.TurnID)
-	require.Equal(t, "edited", dispatched.Message)
+	require.Equal(t, "edited", dispatched.Content.PlainText())
 	require.Equal(t, agentprotocol.LifecycleResponding, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
 }
 
@@ -911,15 +911,15 @@ func TestProviderEventsRequireTheActiveTurnAndUseProviderUserMessageAuthority(t 
 	require.Equal(t, turnID, receiveLifecycle(t, session.submitted).TurnID)
 	drainEvents(t, connection.Events(), 3)
 
-	session.events <- provider.NewUserMessageEvent(sequenceID(7125), messageID, "wrong turn", testTime())
+	session.events <- provider.NewUserMessageEvent(sequenceID(7125), messageID, provider.TextMessage("wrong turn"), testTime())
 	malformed := receiveLifecycle(t, connection.Events())
 	require.Equal(t, agentprotocol.EventError, malformed.Type)
 	require.Equal(t, agentprotocol.ErrorProviderMalformedStream, malformed.Payload.(agentprotocol.ErrorPayload).Error.Code())
 
-	session.events <- provider.NewUserMessageEvent(turnID, messageID, "question", testTime())
+	session.events <- provider.NewUserMessageEvent(turnID, messageID, provider.TextMessage("question"), testTime())
 	user := receiveLifecycle(t, connection.Events())
 	require.Equal(t, agentprotocol.EventUserMessage, user.Type)
-	require.Equal(t, "question", user.Payload.(agentprotocol.UserMessagePayload).Text)
+	require.Equal(t, "question", user.Payload.(agentprotocol.UserMessagePayload).Content.Parts[0].Text)
 	session.events <- provider.NewCompletionEvent(turnID)
 	require.Equal(t, agentprotocol.EventCompletion, receiveLifecycle(t, connection.Events()).Type)
 	require.Equal(t, agentprotocol.LifecycleReady, receiveLifecycle(t, connection.Events()).Payload.(agentprotocol.LifecyclePayload).State)
@@ -1201,7 +1201,7 @@ func TestNewRevisionAttachesToTheNextExistingQueuedMessage(t *testing.T) {
 	drainEvents(t, connection.Events(), 2)
 	dispatched := receiveLifecycle(t, session.submitted)
 	require.Equal(t, firstTurnID, dispatched.TurnID)
-	require.Equal(t, "already queued", dispatched.Message)
+	require.Equal(t, "already queued", dispatched.Content.PlainText())
 	require.NotNil(t, dispatched.Context)
 	require.Equal(t, newPage.Digest, dispatched.Context.Digest)
 	require.Equal(t, []byte(newPage.Markdown), dispatched.Context.Markdown)
@@ -1483,7 +1483,7 @@ func turnFixture(t *testing.T, base uint64) (*Broker, *repairState, *turnSession
 }
 
 func submitCommand(commandID, clientID, conversationID, turnID, messageID, message string, page *agentprotocol.PageContext) agentprotocol.Command {
-	return agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: commandID, ClientID: clientID, ConversationID: &conversationID, Type: agentprotocol.CommandSubmit, Payload: agentprotocol.SubmitPayload{TurnID: turnID, MessageID: messageID, Message: message, Context: page}}
+	return agentprotocol.Command{APIVersion: agentprotocol.APIVersion, CommandID: commandID, ClientID: clientID, ConversationID: &conversationID, Type: agentprotocol.CommandSubmit, Payload: agentprotocol.SubmitPayload{TurnID: turnID, MessageID: messageID, Content: agentprotocol.TextContent(message), Context: page}}
 }
 
 func requireCommandResult(t *testing.T, event agentprotocol.Event, status agentprotocol.CommandStatus, code agentprotocol.BrowserErrorCode) {

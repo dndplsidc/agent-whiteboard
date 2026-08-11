@@ -11,7 +11,9 @@ import (
 )
 
 func (actor *conversation) claimTurnImages(command agentprotocol.Command, payload agentprotocol.SubmitPayload) ([]provider.ImageInput, []agentprotocol.ImageDescriptor, agentprotocol.BrowserErrorCode) {
-	if len(payload.Images) == 0 {
+	inline := payload.Content.InlineImages()
+	images := append(append([]agentprotocol.ImageReference(nil), inline...), payload.Images...)
+	if len(images) == 0 {
 		return nil, nil, ""
 	}
 	if !actor.session.capabilities.Images {
@@ -27,7 +29,8 @@ func (actor *conversation) claimTurnImages(command agentprotocol.Command, payloa
 		ClientID:       command.ClientID,
 		TurnID:         payload.TurnID,
 		MessageID:      payload.MessageID,
-		Images:         payload.Images,
+		Images:         images,
+		InlineImages:   len(inline),
 	})
 	if err != nil {
 		return nil, nil, mapAttachmentError(err)
@@ -47,6 +50,19 @@ func (actor *conversation) releaseMessageImages(messageID string) error {
 		return nil
 	}
 	return actor.attachments.ReleaseMessage(context.WithoutCancel(actor.lifecycleCtx), actor.mapping.Current.ConversationID, messageID)
+}
+
+func (actor *conversation) releaseMessageImageSubset(messageID string, imageIDs []string) error {
+	if common.IsNil(actor.attachments) || actor.mapping.Current == nil || len(imageIDs) == 0 {
+		return nil
+	}
+	releaser, ok := actor.attachments.(interface {
+		ReleaseImages(context.Context, string, string, []string) error
+	})
+	if !ok {
+		return errors.New("attachment store cannot release individual images")
+	}
+	return releaser.ReleaseImages(context.WithoutCancel(actor.lifecycleCtx), actor.mapping.Current.ConversationID, messageID, imageIDs)
 }
 
 func removeImageWorkspace(ctx context.Context, attachments AttachmentStore, state StateStore, conversationID string) error {

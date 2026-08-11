@@ -156,7 +156,7 @@ func (session *Session) Submit(ctx context.Context, request provider.TurnRequest
 	turn.buffered = nil
 	turn.bytes = 0
 	session.mu.Unlock()
-	session.emit(provider.NewUserMessageEvent(request.TurnID, request.MessageID, request.Message, acceptedAt))
+	session.emit(provider.NewUserMessageEvent(request.TurnID, request.MessageID, request.Content, acceptedAt))
 	for _, event := range buffered {
 		if len(event.rpcID) != 0 {
 			if err := session.handleServerRequest(event.rpcID, event.method, event.params); err != nil {
@@ -515,7 +515,7 @@ func projectHistory(raw json.RawMessage, expectedThreadID string) ([]provider.Hi
 				if parseErr != nil || envelope.Policy != contentturn.PolicyConfigured {
 					continue
 				}
-				items = append(items, provider.HistoryItem{TurnID: envelope.TurnID, MessageID: envelope.MessageID, Role: provider.HistoryUser, Text: envelope.ReaderMessage, CreatedAt: at})
+				items = append(items, provider.HistoryItem{TurnID: envelope.TurnID, MessageID: envelope.MessageID, Role: provider.HistoryUser, Content: envelope.ReaderContent.Clone(), CreatedAt: at})
 			case "agentMessage":
 				if len(items) == 0 || items[len(items)-1].Role != provider.HistoryUser || item.Text == "" {
 					continue

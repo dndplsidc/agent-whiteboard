@@ -22,7 +22,7 @@ func TestConservativeTokenBoundUsesOneTokenPerByte(t *testing.T) {
 }
 
 func TestDeriveBrokerItemsUsesEnvelopeIdentityAndDropsNativeIDs(t *testing.T) {
-	request := provider.TurnRequest{TurnID: "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4", MessageID: "eHl6YWJjZGVmZ2hpamtsbW5vcHFyc3R1", Message: "reader text"}
+	request := provider.TurnRequest{TurnID: "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4", MessageID: "eHl6YWJjZGVmZ2hpamtsbW5vcHFyc3R1", Content: provider.TextMessage("reader text")}
 	envelope, err := BuildEnvelope(request)
 	require.NoError(t, err)
 	message := func(role, text string) json.RawMessage {
@@ -37,7 +37,7 @@ func TestDeriveBrokerItemsUsesEnvelopeIdentityAndDropsNativeIDs(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, items, 2)
 	require.Equal(t, request.MessageID, items[0].item.MessageID)
-	require.Equal(t, "reader text", items[0].item.Text)
+	require.Equal(t, provider.TextMessage("reader text"), items[0].item.Content)
 	require.Equal(t, assistantMessageID(request.TurnID), items[1].item.MessageID)
 	require.Equal(t, "visible answer", items[1].item.Text)
 }

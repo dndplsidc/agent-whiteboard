@@ -77,7 +77,11 @@ func (factory *EventFactory) FromProvider(event provider.Event) (agentprotocol.E
 	var payload agentprotocol.EventPayload
 	switch event.Kind {
 	case provider.EventUserMessage:
-		payload = agentprotocol.UserMessagePayload{TurnID: event.TurnID, MessageID: event.MessageID, Text: event.Text, CreatedAt: event.Timestamp}
+		content, err := messageContentFromProvider(event.Content, nil)
+		if err != nil {
+			return agentprotocol.Event{}, NewBrokerError(agentprotocol.ErrorProviderMalformedStream)
+		}
+		payload = agentprotocol.UserMessagePayload{TurnID: event.TurnID, MessageID: event.MessageID, Content: content, CreatedAt: event.Timestamp}
 	case provider.EventAssistantDelta:
 		payload = agentprotocol.AssistantDeltaPayload{TurnID: event.TurnID, MessageID: event.MessageID, Text: event.Text}
 	case provider.EventAssistantMessage:

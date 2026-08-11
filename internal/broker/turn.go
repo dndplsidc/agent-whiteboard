@@ -98,7 +98,7 @@ func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, t
 	if contextForHead != nil {
 		request.Context = nil
 	}
-	turn := QueuedTurn{TurnID: request.TurnID, MessageID: request.MessageID, Message: request.Message, Images: request.Images, Descriptors: descriptors, Context: request.Context}
+	turn := QueuedTurn{TurnID: request.TurnID, MessageID: request.MessageID, Content: request.Content, Images: request.Images, Descriptors: descriptors, Context: request.Context}
 	if err := actor.queue.Enqueue(turn); err != nil {
 		zeroProviderContext(request.Context)
 		zeroProviderContext(contextForHead)
@@ -129,12 +129,19 @@ func (actor *conversation) commandSubmit(attachments map[*attachment]struct{}, t
 }
 
 func (actor *conversation) convertSubmittedTurn(payload agentprotocol.SubmitPayload, images []provider.ImageInput) (provider.TurnRequest, agentprotocol.BrowserErrorCode) {
+	content, err := messageContentToProvider(payload.Content)
+	if err != nil {
+		return provider.TurnRequest{}, agentprotocol.ErrorInvalidCommand
+	}
+	if !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) {
+		return provider.TurnRequest{}, agentprotocol.ErrorBoardRevisionUnavailable
+	}
 	contextOwned := (actor.active != nil && actor.active.request.Context != nil) || actor.queue.hasContext
 	if actor.contextState != agentprotocol.ContextPending {
 		if payload.Context != nil {
 			return provider.TurnRequest{}, agentprotocol.ErrorInvalidState
 		}
-		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message, Images: images}
+		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images}
 		if request.Validate() != nil {
 			return provider.TurnRequest{}, agentprotocol.ErrorInvalidCommand
 		}
@@ -144,7 +151,7 @@ func (actor *conversation) convertSubmittedTurn(payload agentprotocol.SubmitPayl
 		if payload.Context != nil {
 			return provider.TurnRequest{}, agentprotocol.ErrorInvalidState
 		}
-		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message, Images: images}
+		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images}
 		if request.Validate() != nil {
 			return provider.TurnRequest{}, agentprotocol.ErrorInvalidCommand
 		}
@@ -163,7 +170,7 @@ func (actor *conversation) convertSubmittedTurn(payload agentprotocol.SubmitPayl
 		zeroProviderContext(&converted)
 		return provider.TurnRequest{}, agentprotocol.ErrorInvalidState
 	}
-	request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Message: payload.Message, Images: images, Context: &converted}
+	request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images, Context: &converted}
 	if request.Validate() != nil {
 		zeroProviderContext(&converted)
 		return provider.TurnRequest{}, agentprotocol.ErrorInvalidCommand

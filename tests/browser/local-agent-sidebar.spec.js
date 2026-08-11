@@ -75,6 +75,78 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   expect(localAgentSidebar.brokerRequests.some((request) => request.status === 200 && request.method === "POST" && request.url === "/api/v1/agent/connect")).toBe(true);
 });
 
+test("adds multiple document selections inline with surrounding message text", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: "# Selection board\n\nThe first selected sentence explains the premise.\n\n## Evidence\n\nA complete section supports it.\n",
+    creatorContext: "Selection context.\n",
+  });
+  const paragraph = page.locator("#agent-whiteboard-content p").first();
+  await paragraph.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, 4);
+    range.setEnd(element.firstChild, 27);
+    const selection = getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  const popup = page.getByRole("button", { name: "Add selected text to message" });
+  await expect(popup).toBeVisible();
+  await popup.click();
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  await expect(composer.locator(".agent-message-reference")).toHaveCount(1);
+  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
+  await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
+  await composer.press("End");
+  await composer.pressSequentially(" and ");
+  await expect(composer).toContainText("and");
+
+  const evidence = page.getByRole("heading", { name: /Evidence/u });
+  await evidence.hover();
+  await evidence.getByRole("button", { name: "Add section: Evidence" }).click();
+  await expect(composer.locator(".agent-message-reference")).toHaveCount(2);
+  await expect(composer).toContainText("and");
+  await composer.press("End");
+  await composer.pressSequentially(" explain the relationship.");
+
+  await composer.press("Enter");
+  const sent = page.locator(".agent-message-user").last();
+  await expect(sent.locator(".agent-message-reference")).toHaveCount(2);
+  await expect(sent).toContainText("and");
+  await expect(sent).toContainText("explain the relationship");
+
+  const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
+  expect(submit.payload.content.parts.map((part) => part.type)).toEqual(["reference", "text", "reference", "text"]);
+  expect(submit.payload.content.parts[0].reference).toMatchObject({ kind: "text", quote: "first selected sentence" });
+  expect(submit.payload.content.parts[2].reference).toMatchObject({ kind: "section", label: "Evidence" });
+});
+
+test("adds a rendered raster as a private inline image reference", async ({ context, page, localAgentSidebar }) => {
+  const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+V3x7WQAAAABJRU5ErkJggg==";
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: `# Visual board\n\n![Architecture](data:image/png;base64,${onePixelPNG})\n`, creatorContext: "Visual context.\n" });
+  await connectSidebar(page);
+  const image = page.getByRole("img", { name: "Architecture" });
+  await image.locator("..").hover();
+  await page.getByRole("button", { name: "Add image: Architecture" }).click();
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  await expect(composer.locator('[data-reference-kind="image"]')).toHaveText("Architecture");
+  await composer.press("End");
+  await composer.pressSequentially(" explain this visual.");
+  await composer.press("Enter");
+
+  const sent = page.locator(".agent-message-user").last();
+  await expect(sent.locator('[data-reference-kind="image"]')).toHaveText("Architecture");
+  await expect(sent.locator(".agent-message-images")).toHaveCount(0);
+  const upload = localAgentSidebar.brokerRequests.find((request) => request.method === "POST" && request.url === "/api/v1/agent/images");
+  expect(upload.headers["x-agent-whiteboard-image-purpose"]).toBe("inline_reference");
+  const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
+  expect(submit.payload.images).toBeUndefined();
+  expect(submit.payload.content.parts[0].reference).toMatchObject({ kind: "image", visual: { name: "image-1.png", alt: "Architecture" } });
+});
+
 test("uses the versioned WebSocket for connect and subsequent commands", async ({
   context,
   page,
@@ -292,17 +364,17 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   const composer = page.getByLabel("Message Pi about this whiteboard");
   await composer.fill("Line one");
   await composer.press("Shift+Enter");
-  await expect(composer).toHaveValue("Line one\n");
+  await expect(composer).toHaveText("Line one\n");
   await composer.fill("Keep this turn active.");
   await composer.press("Enter");
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
   await composer.fill("Queued follow-up.");
   await composer.press("Enter");
   const queued = page.getByLabel("Edit queued message");
-  await expect(queued).toHaveValue("Queued follow-up.");
+  await expect(queued).toHaveText("Queued follow-up.");
   await queued.fill("Edited follow-up.");
   await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByLabel("Edit queued message")).toHaveValue("Edited follow-up.");
+  await expect(page.getByLabel("Edit queued message")).toHaveText("Edited follow-up.");
   await page.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(page.getByLabel("Edit queued message")).toHaveCount(0);
   await page.getByRole("button", { name: "Stop", exact: true }).click();
@@ -343,10 +415,10 @@ test("picks and pastes multiple images with previews, retry, queue, and styled f
     clipboard.items.add(new File([new Uint8Array([82, 73, 70, 70])], "paste.webp", { type: "image/webp" }));
     element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
   });
-  await expect(composer).toHaveValue("Queued with a pasted image.");
+  await expect(composer).toHaveText("Queued with a pasted image.");
   await expect(page.locator('.agent-attachment-preview[data-state="ready"]')).toHaveCount(1);
   await composer.press("Enter");
-  await expect(page.getByLabel("Edit queued message")).toHaveValue("Queued with a pasted image.");
+  await expect(page.getByLabel("Edit queued message")).toHaveText("Queued with a pasted image.");
   await expect(page.locator(".agent-queue .agent-message-images img")).toHaveCount(1);
 
   localAgentSidebar.failNextImageUpload();
@@ -360,8 +432,8 @@ test("picks and pastes multiple images with previews, retry, queue, and styled f
   await expect.poll(() => localAgentSidebar.brokerRequests.some((request) => request.method === "DELETE" && request.url.startsWith("/api/v1/agent/images/"))).toBe(true);
 
   const submits = parsedCommands(localAgentSidebar.brokerRequests).filter((command) => command.type === "submit");
-  expect(submits[0].payload).toMatchObject({ message: "", images: [{ name: "diagram.png" }, { name: "photo.jpg" }] });
-  expect(submits[1].payload).toMatchObject({ message: "Queued with a pasted image.", images: [{ name: "paste.webp" }] });
+  expect(submits[0].payload).toMatchObject({ content: { parts: [] }, images: [{ name: "diagram.png" }, { name: "photo.jpg" }] });
+  expect(submits[1].payload).toMatchObject({ content: { parts: [{ type: "text", text: "Queued with a pasted image." }] }, images: [{ name: "paste.webp" }] });
 });
 
 test("explains when the selected model cannot accept images", async ({ context, page, localAgentSidebar }) => {
@@ -472,7 +544,7 @@ test("sends exact initial context once and resumes without replaying it", async 
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
 
   const firstSubmit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
-  expect(firstSubmit.payload.message).toBe("What does this page say?");
+  expect(firstSubmit.payload.content).toEqual({ parts: [{ type: "text", text: "What does this page say?" }] });
   expect(firstSubmit.payload.context).toMatchObject({
     revision: "initial",
     markdown,
@@ -492,7 +564,7 @@ test("sends exact initial context once and resumes without replaying it", async 
   await expect(page.locator(".agent-message-assistant")).toHaveCount(2);
 
   const resumedSubmit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
-  expect(resumedSubmit.payload.message).toBe("Continue without repeating context.");
+  expect(resumedSubmit.payload.content).toEqual({ parts: [{ type: "text", text: "Continue without repeating context." }] });
   expect(resumedSubmit.payload).not.toHaveProperty("context");
   const stored = await page.evaluate(() => Object.fromEntries(Object.entries(localStorage)));
   expect(stored[portKey]).toBe(String(localAgentSidebar.brokerPort));
@@ -546,8 +618,9 @@ test("switches providers silently and isolates active Pi and Codex conversations
   const commands = parsedCommands(localAgentSidebar.brokerRequests);
   const connects = commands.filter((command) => command.type === "connect");
   expect(connects.map((command) => command.payload.provider)).toEqual(["codex", "pi"]);
-  const codexSubmit = commands.find((command) => command.type === "submit" && command.payload.message.includes("Codex"));
-  const piSubmit = commands.find((command) => command.type === "submit" && command.payload.message.includes("Pi"));
+  const commandText = (command) => command.payload.content.parts.filter((part) => part.type === "text").map((part) => part.text).join("");
+  const codexSubmit = commands.find((command) => command.type === "submit" && commandText(command).includes("Codex"));
+  const piSubmit = commands.find((command) => command.type === "submit" && commandText(command).includes("Pi"));
   expect(codexSubmit.conversation_id).not.toBe(piSubmit.conversation_id);
 });
 

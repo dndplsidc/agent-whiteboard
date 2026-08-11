@@ -35,7 +35,7 @@ func TestProviderContractCarriesExactBoundedContentOnlyTurnInMemory(t *testing.T
 	_, err := json.Marshal(request.Context)
 	require.Error(t, err)
 
-	request.Message = strings.Repeat("x", provider.MaxTurnMessageBytes+1)
+	request.Content = provider.TextMessage(strings.Repeat("x", provider.MaxTurnMessageBytes+1))
 	require.Error(t, request.Validate())
 	request = validTurnRequest()
 	request.Context.Markdown = []byte(strings.Repeat("x", provider.MaxMarkdownBytes+1))
@@ -46,7 +46,7 @@ func TestProviderContractCarriesExactBoundedContentOnlyTurnInMemory(t *testing.T
 }
 
 func TestTurnRequestRejectsPartialContextInvalidRevisionAndUTF8(t *testing.T) {
-	base := provider.TurnRequest{TurnID: idA, MessageID: idB, Message: "question"}
+	base := provider.TurnRequest{TurnID: idA, MessageID: idB, Content: provider.TextMessage("question")}
 	require.NoError(t, base.Validate())
 
 	base.Context = &provider.PageContext{Revision: provider.ContextInitial, Markdown: []byte("markdown")}
@@ -55,7 +55,7 @@ func TestTurnRequestRejectsPartialContextInvalidRevisionAndUTF8(t *testing.T) {
 	base.Context.Revision = "partial"
 	require.Error(t, base.Validate())
 	base = validTurnRequest()
-	base.Message = string([]byte{0xff})
+	base.Content = provider.TextMessage(string([]byte{0xff}))
 	require.Error(t, base.Validate())
 }
 
@@ -63,7 +63,7 @@ func TestNormalizedProviderEventsCarryTurnIdentityAndTypedTerminalFailure(t *tes
 	now := time.Now().UTC()
 	failure := provider.NewProviderError(provider.ErrorMalformedStream)
 	events := []provider.Event{
-		provider.NewUserMessageEvent(idA, idB, "question", now),
+		provider.NewUserMessageEvent(idA, idB, provider.TextMessage("question"), now),
 		provider.NewAssistantDeltaEvent(idA, idB, "answer part"),
 		provider.NewAssistantMessageEvent(idA, idB, "answer", now),
 		provider.NewActivityEvent(idA, provider.ActivityCompaction, "Conversation compacted."),
@@ -191,7 +191,7 @@ func TestProviderEventsRejectEveryFieldNotPermittedByKind(t *testing.T) {
 		event   provider.Event
 		allowed map[string]bool
 	}{
-		{"user message", provider.NewUserMessageEvent(idA, idB, "question", now), map[string]bool{"MessageID": true, "TurnID": true, "Text": true, "Timestamp": true}},
+		{"user message", provider.NewUserMessageEvent(idA, idB, provider.TextMessage("question"), now), map[string]bool{"MessageID": true, "TurnID": true, "Content": true, "Timestamp": true}},
 		{"assistant delta", provider.NewAssistantDeltaEvent(idA, idB, "part"), map[string]bool{"MessageID": true, "TurnID": true, "Text": true}},
 		{"assistant message", provider.NewAssistantMessageEvent(idA, idB, "answer", now), map[string]bool{"MessageID": true, "TurnID": true, "Text": true, "Timestamp": true}},
 		{"activity", provider.NewActivityEvent(idA, provider.ActivityStatus, "working"), map[string]bool{"TurnID": true, "Text": true, "Activity": true}},
@@ -204,6 +204,7 @@ func TestProviderEventsRejectEveryFieldNotPermittedByKind(t *testing.T) {
 		"MessageID":    func(event *provider.Event) { event.MessageID = idB },
 		"TurnID":       func(event *provider.Event) { event.TurnID = idA },
 		"Text":         func(event *provider.Event) { event.Text = "contradictory text" },
+		"Content":      func(event *provider.Event) { event.Content = provider.TextMessage("contradictory content") },
 		"Timestamp":    func(event *provider.Event) { event.Timestamp = now },
 		"Activity":     func(event *provider.Event) { event.Activity = provider.ActivityStatus },
 		"Blocked":      func(event *provider.Event) { event.Blocked = provider.BlockedTool },
@@ -264,7 +265,7 @@ func TestProviderPageContextDigestAndAuthorizedHostnameAreValidated(t *testing.T
 
 func TestHistoryPageNextCursorMatchesLastReturnedMessage(t *testing.T) {
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
-	item := provider.HistoryItem{TurnID: idA, MessageID: idB, Role: provider.HistoryUser, Text: "question", CreatedAt: now}
+	item := provider.HistoryItem{TurnID: idA, MessageID: idB, Role: provider.HistoryUser, Content: provider.TextMessage("question"), CreatedAt: now}
 	require.NoError(t, (provider.HistoryPage{Items: []provider.HistoryItem{item}, NextCursor: idB}).Validate())
 	require.NoError(t, (provider.HistoryPage{Items: []provider.HistoryItem{item}}).Validate())
 	require.Error(t, (provider.HistoryPage{Items: []provider.HistoryItem{item}, NextCursor: idA}).Validate())
@@ -286,9 +287,9 @@ func TestNormalizedProviderEventAndHistoryBounds(t *testing.T) {
 	require.Error(t, provider.NewActivityEvent(idA, provider.ActivityStatus, strings.Repeat("s", provider.MaxSummaryBytes+1)).Validate())
 	require.Error(t, provider.NewAssistantMessageEvent(idA, idB, strings.Repeat("m", provider.MaxEventTextBytes+1), now).Validate())
 
-	page := provider.HistoryPage{Items: []provider.HistoryItem{{TurnID: idB, MessageID: idA, Role: provider.HistoryUser, Text: strings.Repeat("h", provider.MaxHistoryItemBytes), CreatedAt: now}}}
+	page := provider.HistoryPage{Items: []provider.HistoryItem{{TurnID: idB, MessageID: idA, Role: provider.HistoryUser, Content: provider.TextMessage(strings.Repeat("h", provider.MaxHistoryItemBytes)), CreatedAt: now}}}
 	require.NoError(t, page.Validate())
-	page.Items[0].Text += "x"
+	page.Items[0].Content = provider.TextMessage(strings.Repeat("h", provider.MaxHistoryItemBytes+1))
 	require.Error(t, page.Validate())
 
 	page.Items = make([]provider.HistoryItem, provider.MaxHistoryItems+1)
@@ -590,7 +591,7 @@ func TestCompileTimeFakesHaveBehaviorallyUsableSignatures(t *testing.T) {
 func validTurnRequest() provider.TurnRequest {
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
 	return provider.TurnRequest{
-		TurnID: idA, MessageID: idB, Message: "reader question",
+		TurnID: idA, MessageID: idB, Content: provider.TextMessage("reader question"),
 		Context: &provider.PageContext{
 			Revision: provider.ContextInitial, Markdown: []byte("# exact\nmarkdown\n"), CreatorContext: []byte("exact creator context\n"), Title: "Board",
 			URL:      "https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",

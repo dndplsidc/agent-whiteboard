@@ -44,7 +44,7 @@ func TestCommandLedgerRejectsReusedIDWithDifferentCanonicalContent(t *testing.T)
 
 	changed := original
 	payload := changed.Payload.(agentprotocol.SubmitPayload)
-	payload.Message = "second"
+	payload.Content = agentprotocol.TextContent("second")
 	changed.Payload = payload
 	disposition, _, err = ledger.begin(changed)
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func ledgerSubmitCommand(commandID, conversationID, message string) agentprotoco
 		ClientID:       sequenceID(6404),
 		ConversationID: &conversationID,
 		Type:           agentprotocol.CommandSubmit,
-		Payload:        agentprotocol.SubmitPayload{TurnID: sequenceID(6405), MessageID: sequenceID(6406), Message: message, Context: &context},
+		Payload:        agentprotocol.SubmitPayload{TurnID: sequenceID(6405), MessageID: sequenceID(6406), Content: agentprotocol.TextContent(message), Context: &context},
 	}
 }
 

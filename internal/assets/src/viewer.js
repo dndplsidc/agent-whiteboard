@@ -2,6 +2,8 @@ import createDOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import MarkdownIt from "markdown-it";
 import mermaid from "mermaid";
+import { createMarkdownContextController, imageReference, indexMarkdownTokens } from "./markdown-context.js";
+import { createMessageEditor, cloneMessageContent, messageContentBytes, normalizeMessageContent, renderMessageContent } from "./message-editor.js";
 
 export const DEFAULT_TITLE = "Untitled whiteboard";
 export const THEME_STORAGE_KEY = "agent-whiteboard-theme";
@@ -81,12 +83,15 @@ function purifierFor(doc) {
   return createDOMPurify(doc.defaultView ?? window);
 }
 
-function renderMarkdown(source, doc) {
+function renderMarkdown(source, doc, { contextEnabled = false } = {}) {
   const diagramSources = [];
   const markdown = createMarkdownRenderer(diagramSources);
-  const rendered = markdown.render(source);
+  const environment = {};
+  const tokens = markdown.parse(source, environment);
+  const semanticIndex = contextEnabled ? indexMarkdownTokens(tokens, source) : null;
+  const rendered = markdown.renderer.render(tokens, markdown.options, environment);
   const sanitized = purifierFor(doc).sanitize(rendered);
-  return { diagramSources, html: sanitized };
+  return { diagramSources, html: sanitized, semanticIndex };
 }
 
 function highlightCode(container) {
@@ -347,6 +352,7 @@ export async function renderWhiteboard(
     doc = document,
     storage = browserStorage(doc),
     mediaQuery = browserMediaQuery(doc),
+    contextEnabled = false,
   } = {},
 ) {
   if (typeof source !== "string") throw new TypeError("whiteboard source must be a string");
@@ -354,7 +360,7 @@ export async function renderWhiteboard(
 
   container[THEME_CONTROL_CLEANUP]?.();
   container[THEME_CONTROL_CLEANUP] = undefined;
-  const { diagramSources, html } = renderMarkdown(source, doc);
+  const { diagramSources, html, semanticIndex } = renderMarkdown(source, doc, { contextEnabled });
   container.innerHTML = html;
   highlightCode(container);
   setDocumentTitle(container, doc);
@@ -399,6 +405,7 @@ export async function renderWhiteboard(
 
   const controller = {
     diagramSources: [...diagramSources],
+    semanticIndex,
     get theme() {
       return theme;
     },
@@ -446,8 +453,8 @@ export const DEFAULT_AGENT_DRAWER_WIDTH = 420;
 export const MIN_AGENT_DRAWER_WIDTH = 360;
 export const MAX_AGENT_DRAWER_WIDTH = 720;
 export const AGENT_DRAWER_DOCK_BREAKPOINT = 64 * 16;
-export const AGENT_API_VERSION = "2";
-export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v2";
+export const AGENT_API_VERSION = "3";
+export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v3";
 export const MAX_AGENT_MESSAGE_BYTES = 64 * 1024;
 export const MAX_AGENT_EVENT_BYTES = 256 * 1024;
 export const MAX_AGENT_IMAGES_PER_TURN = 8;
@@ -572,6 +579,66 @@ function validImages(value, validator) {
 
 function validTurnTextAndImages(text, images, validator = validImageDescriptor) {
   return validText(text, MAX_AGENT_MESSAGE_BYTES, true) && validImages(images, validator) && (text.length > 0 || images.length > 0);
+}
+
+function validAnchor(value) {
+  return exactObject(value, ["block", "line", "offset"]) && Number.isInteger(value.block) && value.block >= 0 && Number.isInteger(value.line) && value.line >= 1 && Number.isInteger(value.offset) && value.offset >= 0;
+}
+
+function validHeading(value) {
+  return exactObject(value, ["level", "title", "ordinal"]) && Number.isInteger(value.level) && value.level >= 1 && value.level <= 6 && validText(value.title, 256) && Number.isInteger(value.ordinal) && value.ordinal >= 1;
+}
+
+function validReferenceSource(value) {
+  return exactObject(value, ["resource_kind", "resource_id", "resource_updated_at", "context_digest", "heading_path", "start", "end"])
+    && value.resource_kind === "markdown" && validID(value.resource_id) && validDate(value.resource_updated_at) && DIGEST_PATTERN.test(value.context_digest)
+    && Array.isArray(value.heading_path) && value.heading_path.length <= 12 && value.heading_path.every(validHeading)
+    && validAnchor(value.start) && validAnchor(value.end)
+    && (value.start.block < value.end.block || value.start.block === value.end.block && value.start.offset <= value.end.offset);
+}
+
+function validContextReference(value, event = false) {
+  if (!exactObject(value, ["id", "kind", "label", "source"], ["quote", "markdown", "section_lines", "visual"]) || !validID(value.id) || !["text", "section", "image"].includes(value.kind) || !validText(value.label, 256) || !validReferenceSource(value.source)) return false;
+  if (value.kind === "text") return exactObject(value, ["id", "kind", "label", "source", "quote"]) && validText(value.quote, 16 * 1024);
+  if (value.kind === "section") return exactObject(value, ["id", "kind", "label", "source", "markdown", "section_lines"]) && validText(value.markdown, 48 * 1024) && exactObject(value.section_lines, ["start", "end"]) && Number.isInteger(value.section_lines.start) && value.section_lines.start >= 1 && Number.isInteger(value.section_lines.end) && value.section_lines.end > value.section_lines.start;
+  if (!exactObject(value, ["id", "kind", "label", "source", "visual"]) || !isRecord(value.visual)) return false;
+  const required = event ? ["image_id", "name", "alt", "media_type"] : ["image_id", "name", "alt"];
+  return exactObject(value.visual, required) && validID(value.visual.image_id) && validImageName(value.visual.name) && validText(value.visual.alt, 512, true) && (!event || IMAGE_MEDIA_TYPES.has(value.visual.media_type));
+}
+
+export function validMessageContent(value, event = false) {
+  if (!exactObject(value, ["parts"]) || !Array.isArray(value.parts) || value.parts.length > 64) return false;
+  const ids = [];
+  let previousText = false;
+  for (const part of value.parts) {
+    if (part?.type === "text") {
+      if (!exactObject(part, ["type", "text"]) || !validText(part.text, MAX_AGENT_MESSAGE_BYTES) || previousText) return false;
+      previousText = true;
+    } else if (part?.type === "reference") {
+      if (!exactObject(part, ["type", "reference"]) || !validContextReference(part.reference, event)) return false;
+      ids.push(part.reference.id);
+      previousText = false;
+    } else return false;
+  }
+  return ids.length <= 16 && new Set(ids).size === ids.length && messageContentBytes(value) <= MAX_AGENT_MESSAGE_BYTES;
+}
+
+function inlineImages(content) {
+  return content.parts.filter((part) => part.type === "reference" && part.reference.kind === "image").map((part) => ({ image_id: part.reference.visual.image_id, name: part.reference.visual.name }));
+}
+
+function messageContentForCommand(content) {
+  const result = cloneMessageContent(content);
+  for (const part of result.parts) {
+    if (part.type === "reference" && part.reference.kind === "image") delete part.reference.visual.media_type;
+  }
+  return result;
+}
+
+function validContentAndImages(content, images, event = true) {
+  if (!validMessageContent(content, event) || !validImages(images, event ? validImageDescriptor : validImageReference) || content.parts.length === 0 && images.length === 0) return false;
+  const ids = [...inlineImages(content).map(({ image_id }) => image_id), ...images.map(({ image_id }) => image_id)];
+  return ids.length <= MAX_AGENT_IMAGES_PER_TURN && new Set(ids).size === ids.length;
 }
 
 function validResource(value) {
@@ -727,13 +794,16 @@ export function createPageContext(payload, { title, url, revision }) {
   };
 }
 
-export function createSubmitCommand({ message, images = [], payload, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
-  if (!validTurnTextAndImages(message, images, validImageReference) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
+export function createSubmitCommand({ content, message, images = [], payload, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
+  let orderedContent;
+  try { orderedContent = content ?? normalizeMessageContent({ parts: message ? [{ type: "text", text: message }] : [] }); }
+  catch { throw new TypeError("invalid agent message"); }
+  if (!validContentAndImages(orderedContent, images, false) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const turnID = idFactory();
   const messageID = idFactory();
   if (!validID(turnID) || !validID(messageID)) throw new TypeError("invalid agent command identity");
-  const submitPayload = { turn_id: turnID, message_id: messageID, message };
+  const submitPayload = { turn_id: turnID, message_id: messageID, content: cloneMessageContent(orderedContent) };
   if (images.length > 0) submitPayload.images = images.map((image) => ({ ...image }));
   if (revision === "initial" || revision === "replacement") {
     submitPayload.context = createPageContext(payload, { title, url, revision });
@@ -744,7 +814,7 @@ export function createSubmitCommand({ message, images = [], payload, clientID, c
 export function createAgentCommand({ type, payload, clientID, conversationID, idFactory = generateAgentID }) {
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const validators = {
-    queue_edit: () => exactObject(payload, ["message_id", "message"]) && validID(payload.message_id) && validText(payload.message, MAX_AGENT_MESSAGE_BYTES, true),
+    queue_edit: () => exactObject(payload, ["message_id", "content"]) && validID(payload.message_id) && validMessageContent(payload.content),
     queue_remove: () => exactObject(payload, ["message_id"]) && validID(payload.message_id),
     interrupt: () => exactObject(payload, ["turn_id"]) && validID(payload.turn_id),
     new: () => exactObject(payload, []),
@@ -766,15 +836,15 @@ function validBrowserError(value) {
 }
 
 function validQueueItem(item) {
-  return exactObject(item, ["turn_id", "message_id", "message"], ["images"]) && validID(item.turn_id) && validID(item.message_id) && validTurnTextAndImages(item.message, item.images ?? []);
+  return exactObject(item, ["turn_id", "message_id", "content"], ["images"]) && validID(item.turn_id) && validID(item.message_id) && validContentAndImages(item.content, item.images ?? []);
 }
 
 function validTimelineItem(item) {
-  if (!exactObject(item, ["item_id", "kind", "text", "created_at"], ["turn_id", "message_id", "images"]) || !validID(item.item_id) || !["user", "assistant", "activity"].includes(item.kind) || !validDate(item.created_at)) return false;
+  if (!isRecord(item) || !validID(item.item_id) || !["user", "assistant", "activity"].includes(item.kind) || !validDate(item.created_at)) return false;
   const images = item.images ?? [];
-  if (item.kind === "activity") return validText(item.text, MAX_AGENT_MESSAGE_BYTES) && images.length === 0 && !Object.hasOwn(item, "message_id") && (!Object.hasOwn(item, "turn_id") || validID(item.turn_id));
-  if (item.kind === "assistant") return validText(item.text, MAX_AGENT_MESSAGE_BYTES) && images.length === 0 && validID(item.turn_id) && validID(item.message_id);
-  return validTurnTextAndImages(item.text, images) && validID(item.turn_id) && validID(item.message_id);
+  if (item.kind === "activity") return exactObject(item, ["item_id", "kind", "text", "created_at"], ["turn_id"]) && validText(item.text, MAX_AGENT_MESSAGE_BYTES) && (!Object.hasOwn(item, "turn_id") || validID(item.turn_id));
+  if (item.kind === "assistant") return exactObject(item, ["item_id", "kind", "turn_id", "message_id", "text", "created_at"]) && validText(item.text, MAX_AGENT_MESSAGE_BYTES) && validID(item.turn_id) && validID(item.message_id);
+  return exactObject(item, ["item_id", "kind", "turn_id", "message_id", "content", "created_at"], ["images"]) && validID(item.turn_id) && validID(item.message_id) && validContentAndImages(item.content, images);
 }
 
 function validArchiveItem(item) {
@@ -847,7 +917,7 @@ function validateEventPayload(type, payload) {
     case "history":
       return exactObject(payload, ["command_id", "items", "next_cursor"]) && validID(payload.command_id) && Array.isArray(payload.items) && payload.items.length <= 100 && payload.items.every(validArchiveItem) && (payload.next_cursor === null || validID(payload.next_cursor));
     case "user_message":
-      return exactObject(payload, ["turn_id", "message_id", "text", "created_at"], ["images"]) && validID(payload.turn_id) && validID(payload.message_id) && validTurnTextAndImages(payload.text, payload.images ?? []) && validDate(payload.created_at);
+      return exactObject(payload, ["turn_id", "message_id", "content", "created_at"], ["images"]) && validID(payload.turn_id) && validID(payload.message_id) && validContentAndImages(payload.content, payload.images ?? []) && validDate(payload.created_at);
     case "assistant_message":
       return exactObject(payload, ["turn_id", "message_id", "text", "created_at"]) && validID(payload.turn_id) && validID(payload.message_id) && validText(payload.text, MAX_AGENT_MESSAGE_BYTES) && validDate(payload.created_at);
     case "assistant_delta":
@@ -888,11 +958,11 @@ export function validateAgentEvent(value) {
     throw new TypeError("invalid agent event");
   }
   const payload = value.payload;
-  if (value.type === "timeline" && (new Set(payload.items.map((item) => item.item_id)).size !== payload.items.length || encoder.encode(payload.items.map((item) => item.text).join("")).length > MAX_TIMELINE_TEXT_BYTES || (payload.next_cursor !== null && (payload.items.length === 0 || payload.next_cursor !== payload.items.at(-1).item_id)))) throw new TypeError("invalid agent event");
+  if (value.type === "timeline" && (new Set(payload.items.map((item) => item.item_id)).size !== payload.items.length || payload.items.reduce((total, item) => total + (item.content ? messageContentBytes(item.content) : encoder.encode(item.text).length), 0) > MAX_TIMELINE_TEXT_BYTES || (payload.next_cursor !== null && (payload.items.length === 0 || payload.next_cursor !== payload.items.at(-1).item_id)))) throw new TypeError("invalid agent event");
   if (value.type === "history" && (new Set(payload.items.map((item) => item.archive_id)).size !== payload.items.length || (payload.next_cursor !== null && (payload.items.length === 0 || payload.next_cursor !== payload.items.at(-1).archive_id)))) throw new TypeError("invalid agent event");
   if (["snapshot", "queue"].includes(value.type)) {
     const items = value.type === "snapshot" ? payload.queue : payload.items;
-    if (new Set(items.map((item) => item.message_id)).size !== items.length || new Set(items.map((item) => item.turn_id)).size !== items.length || encoder.encode(items.map((item) => item.message).join("")).length > 96 * 1024) throw new TypeError("invalid agent event");
+    if (new Set(items.map((item) => item.message_id)).size !== items.length || new Set(items.map((item) => item.turn_id)).size !== items.length || items.reduce((total, item) => total + messageContentBytes(item.content), 0) > 96 * 1024) throw new TypeError("invalid agent event");
   }
   return value;
 }
@@ -1026,7 +1096,7 @@ export function createAgentState(provider = "pi") {
 function appendTimeline(state, item) {
   const key = item.item_id ?? item.message_id ?? `${item.kind}-${state.lastEventID}`;
   if (state.timeline.some((current) => (current.item_id ?? current.message_id) === key)) return;
-  state.timeline.push({ ...item, images: item.images?.map((image) => ({ ...image })) });
+  state.timeline.push({ ...item, content: item.content ? cloneMessageContent(item.content) : undefined, images: item.images?.map((image) => ({ ...image })) });
   if (state.timeline.length > MAX_TIMELINE_ITEMS) state.timeline.splice(0, state.timeline.length - MAX_TIMELINE_ITEMS);
 }
 
@@ -1053,8 +1123,8 @@ export function applyAgentEvent(state, untrustedEvent) {
   const draft = {
     ...state,
     provider: { ...state.provider },
-    timeline: state.timeline.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) })),
-    queue: state.queue.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) })),
+    timeline: state.timeline.map((item) => ({ ...item, content: item.content ? cloneMessageContent(item.content) : undefined, images: item.images?.map((image) => ({ ...image })) })),
+    queue: state.queue.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })) })),
     archives: state.archives.map((item) => ({ ...item })),
     errors: state.errors.map((item) => ({ ...item })),
     seenEventIDs: new Set(state.seenEventIDs),
@@ -1084,14 +1154,14 @@ function applyAgentEventMutable(state, untrustedEvent) {
       state.lifecycle = payload.lifecycle;
       state.activeTurnID = payload.active_turn_id;
       state.contextState = payload.context_state;
-      state.queue = payload.queue.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) }));
+      state.queue = payload.queue.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })) }));
       state.supportsImages = payload.supports_images;
       state.provider.supportsImages = payload.supports_images;
       state.connected = true;
       break;
     case "timeline": {
       const known = new Set(state.timeline.map((item) => item.item_id ?? item.message_id));
-      const older = payload.items.filter((item) => !known.has(item.item_id)).map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) })).reverse();
+      const older = payload.items.filter((item) => !known.has(item.item_id)).map((item) => ({ ...item, content: item.content ? cloneMessageContent(item.content) : undefined, images: item.images?.map((image) => ({ ...image })) })).reverse();
       state.timeline = [...older, ...state.timeline].slice(-MAX_TIMELINE_ITEMS);
       state.timelineCursor = payload.next_cursor;
       break;
@@ -1124,7 +1194,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
       else appendTimeline(state, { kind: "assistant", ...payload });
       break;
     }
-    case "queue": state.queue = payload.items.map((item) => ({ ...item, images: item.images?.map((image) => ({ ...image })) })); break;
+    case "queue": state.queue = payload.items.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })) })); break;
     case "lifecycle": state.lifecycle = payload.state; state.activeTurnID = payload.turn_id; break;
     case "provider":
       if (payload.provider !== state.provider.provider) throw new TypeError("agent provider changed unexpectedly");
@@ -1241,7 +1311,7 @@ export function createAgentTransport({
     return { ok: true, code: null };
   }
 
-  function imageHeaders(targetConversationID, mediaType = null) {
+  function imageHeaders(targetConversationID, mediaType = null, purpose = "attachment") {
     if (!validID(targetConversationID)) throw new TypeError("invalid agent conversation");
     const headers = {
       "X-Agent-Whiteboard-API-Version": AGENT_API_VERSION,
@@ -1252,6 +1322,7 @@ export function createAgentTransport({
       if (!IMAGE_MEDIA_TYPES.has(mediaType)) throw new TypeError("unsupported image type");
       headers["Content-Type"] = mediaType;
       headers["X-Agent-Whiteboard-Provider"] = provider;
+      if (purpose === "inline_reference") headers["X-Agent-Whiteboard-Image-Purpose"] = purpose;
     }
     return headers;
   }
@@ -1265,11 +1336,11 @@ export function createAgentTransport({
     throw error;
   }
 
-  async function uploadImage(file, targetConversationID = conversationID, signal) {
+  async function uploadImage(file, targetConversationID = conversationID, signal, purpose = "attachment") {
     if (!file || typeof file.size !== "number" || file.size <= 0 || file.size > MAX_AGENT_IMAGE_BYTES || !IMAGE_MEDIA_TYPES.has(file.type)) throw new TypeError("invalid image");
     const response = await fetchImpl(`${agentOrigin(currentPort)}/api/v1/agent/images`, {
       method: "POST",
-      headers: imageHeaders(targetConversationID, file.type),
+      headers: imageHeaders(targetConversationID, file.type, purpose),
       body: file,
       credentials: "omit",
       referrerPolicy: "no-referrer",
@@ -1521,14 +1592,18 @@ function browserErrorText(code, doc, fallback) {
   return guidance ? `${definition[0]} ${guidance}` : definition[0];
 }
 
-function appendAgentMessage(doc, container, item, providerName = "Pi", appendImages = () => {}) {
+function appendAgentMessage(doc, container, item, providerName = "Pi", appendImages = () => {}, onReference = () => {}) {
   const article = doc.createElement("article");
   article.className = `agent-message agent-message-${item.kind}`;
   const label = doc.createElement("strong");
   label.textContent = item.kind === "assistant" ? providerName : "You";
   const body = doc.createElement("div");
   body.className = "agent-message-body";
-  body.innerHTML = renderAgentMarkdown(item.text, doc);
+  if (item.kind === "user" && item.content) {
+    const textOnly = item.content.parts.length === 1 && item.content.parts[0].type === "text";
+    if (textOnly) body.innerHTML = renderAgentMarkdown(item.content.parts[0].text, doc);
+    else body.append(renderMessageContent(doc, item.content, { onReference }));
+  } else body.innerHTML = renderAgentMarkdown(item.text, doc);
   article.append(label, body);
   appendImages(article, item.images ?? []);
   container.append(article);
@@ -1732,7 +1807,7 @@ function appendInteractionCard(doc, container, request, respond) {
   container.append(card);
 }
 
-export function createAgentDrawer({ payload, doc = document, storage = browserStorage(doc), transportFactory = createAgentTransport, pageTitle = doc.title, pageURL = doc.location.href } = {}) {
+export function createAgentDrawer({ payload, doc = document, storage = browserStorage(doc), transportFactory = createAgentTransport, pageTitle = doc.title, pageURL = doc.location.href, onReference = () => false } = {}) {
   const preferences = readAgentPreferences(storage);
   let selectedProvider = preferences.provider;
   let state;
@@ -1756,6 +1831,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let handoffCommandID = null;
   let attachmentSerial = 0;
   let draftAttachments = [];
+  const draftInlineVisuals = new Map();
+  let queueEditors = [];
   const imageObjectURLs = new Map();
   const imageLoads = new Map();
   let pendingSubmitCommandID = null;
@@ -2031,11 +2108,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   attachmentStatus.className = "agent-attachment-status";
   attachmentStatus.setAttribute("role", "status");
   attachmentStatus.setAttribute("aria-live", "polite");
-  const message = doc.createElement("textarea");
-  message.maxLength = MAX_AGENT_MESSAGE_BYTES;
-  message.rows = 2;
-  message.placeholder = "Ask about this page…";
-  message.setAttribute("aria-label", "Message Pi about this whiteboard");
+  let messageEditor;
+  messageEditor = createMessageEditor({
+    doc,
+    onChange: (content) => { handleDraftContentChange(content); resizeComposer(); updateComposerAvailability(); },
+    onSubmit: () => composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  });
+  const message = messageEditor.element;
   const composerBar = doc.createElement("div");
   composerBar.className = "agent-composer-bar";
   const imagePicker = doc.createElement("input");
@@ -2368,8 +2447,83 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   function updateComposerAvailability() {
     const preparing = draftAttachments.some((item) => item.status === "preparing");
     const hasReadyImage = draftAttachments.some((item) => item.status === "ready");
-    const hasMessage = validText(message.value, MAX_AGENT_MESSAGE_BYTES);
+    const hasMessage = messageEditor.getContent().parts.length > 0;
     sendButton.disabled = submitBlocked() || preparing || (!hasMessage && !hasReadyImage);
+  }
+
+  function handleDraftContentChange(content) {
+    const retained = new Set(inlineImages(content).map(({ image_id }) => image_id));
+    for (const [imageID, visual] of draftInlineVisuals) {
+      if (retained.has(imageID)) continue;
+      draftInlineVisuals.delete(imageID);
+      if (typeof visual.owner.transport.deleteImage === "function") void visual.owner.transport.deleteImage(imageID, visual.conversationID).catch(() => {});
+    }
+  }
+
+  function clearDraftInlineVisuals({ deleteStaged = true } = {}) {
+    if (!deleteStaged) draftInlineVisuals.clear();
+    const content = messageEditor.getContent();
+    const retained = content.parts.filter((part) => part.type !== "reference" || part.reference.kind !== "image");
+    if (!deleteStaged) messageEditor.setContent({ parts: retained });
+    else messageEditor.setContent({ parts: retained });
+  }
+
+  async function readRenderedImage(metadata) {
+    const rawSource = metadata.element?.currentSrc || metadata.element?.src;
+    if (!rawSource) throw new Error("This image has no readable source.");
+    let parsed;
+    try { parsed = new URL(rawSource, pageURL); } catch { throw new Error("This image source is invalid."); }
+    const pageOrigin = new URL(pageURL).origin;
+    if (parsed.protocol !== "data:" && parsed.origin !== pageOrigin) throw new Error("Only same-origin page images can be added.");
+    let blob;
+    if (parsed.protocol === "data:") {
+      const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/iu.exec(rawSource);
+      if (!match || match[2].length > Math.ceil(MAX_AGENT_IMAGE_BYTES * 4 / 3) + 16) throw new Error("Use a base64 PNG, JPEG, GIF, or WebP image up to 10 MiB.");
+      let decoded;
+      try { decoded = doc.defaultView.atob(match[2].replace(/\s/gu, "")); } catch { throw new Error("This embedded image is invalid."); }
+      const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+      blob = new doc.defaultView.Blob([bytes], { type: match[1].toLowerCase() });
+    } else {
+      const fetchImpl = doc.defaultView?.fetch ?? globalThis.fetch;
+      if (typeof fetchImpl !== "function") throw new Error("Image reading is unavailable.");
+      const response = await fetchImpl(parsed.href, { method: "GET", credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", redirect: "error" });
+      if (!response.ok) throw new Error("The selected image could not be read.");
+      if (response.url && new URL(response.url).origin !== pageOrigin) throw new Error("The selected image redirected away from this page.");
+      blob = await response.blob();
+    }
+    const mediaType = blob.type.split(";", 1)[0].trim();
+    if (!IMAGE_MEDIA_TYPES.has(mediaType) || blob.size <= 0 || blob.size > MAX_AGENT_IMAGE_BYTES) throw new Error("Use a PNG, JPEG, GIF, or WebP image up to 10 MiB.");
+    const fallbackExtension = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" }[mediaType];
+    const candidate = parsed.protocol === "data:" ? "" : decodeURIComponent(parsed.pathname.split("/").at(-1) || "");
+    const name = validImageName(candidate) ? candidate : `image-${metadata.ordinal}.${fallbackExtension}`;
+    const FileType = doc.defaultView?.File;
+    return { file: FileType ? new FileType([blob], name, { type: mediaType }) : Object.assign(blob, { name }), name };
+  }
+
+  async function addInlineImage(metadata) {
+    setOpen(true, { focus: false });
+    showView("conversation", { focus: false });
+    if (!state.connected || !state.supportsImages || !transport.conversationID) {
+      showTransientStatus("Image reference unavailable", "Connect an image-capable model", "Connect Page Agent with image input enabled, then add this image again.");
+      throw new Error("Connect an image-capable Page Agent before adding this image.");
+    }
+    if (draftAttachments.length + draftInlineVisuals.size >= MAX_AGENT_IMAGES_PER_TURN) throw new Error(`A message can contain at most ${MAX_AGENT_IMAGES_PER_TURN} images.`);
+    const owner = controller;
+    const conversationID = transport.conversationID;
+    const { file, name } = await readRenderedImage(metadata);
+    const aggregate = draftAttachments.reduce((total, item) => total + item.file.size, 0) + [...draftInlineVisuals.values()].reduce((total, item) => total + item.bytes, 0) + file.size;
+    if (aggregate > MAX_AGENT_TURN_IMAGE_BYTES) throw new Error("A message can contain at most 20 MiB of image data.");
+    if (owner !== controller || conversationID !== transport.conversationID) throw new Error("The Page Agent conversation changed while preparing this image.");
+    const staged = await owner.transport.uploadImage(file, conversationID, undefined, "inline_reference");
+    if (owner !== controller || conversationID !== transport.conversationID) {
+      await owner.transport.deleteImage?.(staged.image_id, conversationID).catch(() => {});
+      throw new Error("The Page Agent conversation changed while preparing this image.");
+    }
+    draftInlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size });
+    const reference = imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name);
+    messageEditor.insertReference(reference);
+    attachmentStatus.textContent = `Added ${reference.label} to the message.`;
+    return reference;
   }
 
   function renderDraftAttachments() {
@@ -2652,7 +2806,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       timeline.append(older);
     }
     for (const item of state.timeline) {
-      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages);
+      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages, onReference);
       else if (item.kind === "tool") appendToolActivity(doc, timeline, item);
       else {
         const details = doc.createElement("details");
@@ -2713,23 +2867,26 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       timeline.scrollTop = followTimeline ? timeline.scrollHeight : timelineScrollTop;
       timelineScrollTop = timeline.scrollTop;
     }
+    for (const editor of queueEditors) editor.destroy();
+    queueEditors = [];
     queue.replaceChildren();
     if (state.queue.length) {
       const title = doc.createElement("h3"); title.textContent = "Queued follow-ups"; queue.append(title);
     }
     for (const item of state.queue) {
       const row = doc.createElement("div"); row.className = "agent-queue-item";
-      const input = doc.createElement("textarea"); input.value = item.message; input.maxLength = MAX_AGENT_MESSAGE_BYTES; input.setAttribute("aria-label", "Edit queued message");
+      const editor = createMessageEditor({ doc, content: item.content, placeholder: "Edit queued message", ariaLabel: "Edit queued message" });
+      queueEditors.push(editor);
+      const input = editor.element;
       const save = doc.createElement("button"); save.type = "button"; save.textContent = "Save";
       const remove = doc.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
       save.addEventListener("click", () => {
-        if (!validText(input.value, MAX_AGENT_MESSAGE_BYTES, true) || input.value.length === 0 && !item.images?.length) {
-          input.setCustomValidity("Enter a queued message or keep at least one image attached.");
-          input.reportValidity();
+        const content = messageContentForCommand(editor.getContent());
+        if (!validMessageContent(content, false) || content.parts.length === 0 && !(item.images?.length > 0)) {
+          showTransientStatus("Queued message required", "Keep content", "Enter text, retain a page reference, or keep at least one image attached.");
           return;
         }
-        input.setCustomValidity("");
-        void sendCommand("queue_edit", { message_id: item.message_id, message: input.value });
+        void sendCommand("queue_edit", { message_id: item.message_id, content });
       });
       remove.addEventListener("click", () => void sendCommand("queue_remove", { message_id: item.message_id }));
       if (item.images?.length) appendDescriptorImages(row, item.images);
@@ -2887,18 +3044,19 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     render();
     if (!focus) return;
     if (activeView !== "conversation") backButton.focus();
-    else if (state.connected) message.focus();
+    else if (state.connected) messageEditor.focus();
     else overflowButton.focus();
   };
   backButton.addEventListener("click", () => showView("conversation"));
   contextChip.addEventListener("click", () => showView("context"));
   contextDisclosure.addEventListener("click", () => showView("context"));
   directSettingsButton.addEventListener("click", () => showView("settings"));
-  queueChip.addEventListener("click", () => queue.querySelector("textarea")?.focus());
+  queueChip.addEventListener("click", () => queue.querySelector(".agent-message-editor")?.focus());
   providerSelect.addEventListener("change", () => {
     const nextProvider = providerSelect.value;
     if (!PROVIDERS.has(nextProvider) || nextProvider === selectedProvider) return;
     clearDraftAttachments();
+    clearDraftInlineVisuals();
     saveController();
     selectedProvider = nextProvider;
     persistAgentPreference(storage, AGENT_PROVIDER_STORAGE_KEY, selectedProvider);
@@ -2965,7 +3123,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     message.style.height = `${height}px`;
     message.style.overflowY = message.scrollHeight > maximum ? "auto" : "hidden";
   }
-  let composing = false;
   imageButton.addEventListener("click", () => imagePicker.click());
   imagePicker.addEventListener("change", () => {
     addImageFiles([...imagePicker.files]);
@@ -2978,25 +3135,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       .filter(Boolean);
     if (files.length > 0) addImageFiles(files);
   });
-  message.addEventListener("compositionstart", () => { composing = true; });
-  message.addEventListener("compositionend", () => { composing = false; });
-  message.addEventListener("input", () => { resizeComposer(); updateComposerAvailability(); });
-  message.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || event.shiftKey || composing || event.isComposing || event.keyCode === 229) return;
-    event.preventDefault();
-    composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-  });
   resizeComposer();
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const text = message.value;
+    const content = messageEditor.getContent();
     const sentAttachments = draftAttachments.filter((item) => item.status === "ready");
     const imageReferences = sentAttachments.map((item) => ({ image_id: item.imageID, name: item.name }));
     if (draftAttachments.some((item) => item.status === "preparing")) {
       showTransientStatus("Preparing images", "Please wait", "Images must finish preparing before this message can be sent.");
       return;
     }
-    if (!validTurnTextAndImages(text, imageReferences, validImageReference)) { message.setCustomValidity("Enter a message or add at least one ready image."); message.reportValidity(); return; }
+    if (!validContentAndImages(content, imageReferences, false)) { showTransientStatus("Message required", "Add text or an image", "Enter a message, add a page reference, or add at least one ready image."); return; }
     saveController();
     const target = controller;
     if (target.state.contextState === "pending" && target.contextRevision === undefined) {
@@ -3007,9 +3156,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       showTransientStatus("Context pending", "Reconnect", "Wait for the complete context handoff to be confirmed before sending another message.");
       return;
     }
-    message.setCustomValidity("");
     const revision = target.state.contextState === "pending" ? target.contextRevision : undefined;
-    const command = createSubmitCommand({ message: text, images: imageReferences, payload, clientID: target.transport.clientID, conversationID: target.transport.conversationID, title: pageTitle, url: pageURL, revision });
+    const command = createSubmitCommand({ content, images: imageReferences, payload, clientID: target.transport.clientID, conversationID: target.transport.conversationID, title: pageTitle, url: pageURL, revision });
     registerAgentCommand(target.state, command);
     target.pendingSubmitCommandID = command.command_id;
     if (revision !== undefined) target.contextCommandID = command.command_id;
@@ -3017,8 +3165,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     render();
     try {
       await target.transport.send(command);
-      if (target === controller && message.value === text) {
-        message.value = "";
+      if (target === controller && JSON.stringify(messageEditor.getContent()) === JSON.stringify(content)) {
+        for (const { image_id: imageID } of inlineImages(content)) draftInlineVisuals.delete(imageID);
+        messageEditor.clear();
         resizeComposer();
       }
       for (const item of sentAttachments) removeAttachment(item, { deleteStaged: false });
@@ -3046,7 +3195,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     scheduleReconnect();
   });
   newButton.addEventListener("click", () => {
-    if (doc.defaultView?.confirm("Archive this conversation and start a new one?")) { clearDraftAttachments(); showView("conversation"); void forcedConversationCommand("new", {}); }
+    if (doc.defaultView?.confirm("Archive this conversation and start a new one?")) { clearDraftAttachments(); clearDraftInlineVisuals(); showView("conversation"); void forcedConversationCommand("new", {}); }
   });
   historyButton.addEventListener("click", () => { showView("archives"); });
   function onOverflowOutsidePointerDown(event) {
@@ -3082,7 +3231,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
     if (event.key === "Escape" && open) { setOpen(false); return; }
     if (event.key !== "Tab" || !open || isDockedViewport()) return;
-    const available = [...drawer.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary")].filter((element) => element.closest("[hidden]") === null);
+    const available = [...drawer.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable=\"true\"], summary")].filter((element) => element.closest("[hidden]") === null);
     const focusable = [close, ...available.filter((element) => element !== close)];
     if (focusable.length === 0) return;
     const first = focusable[0];
@@ -3106,9 +3255,24 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     setOpen,
     probe,
     sendCommand,
+    addReference(reference) {
+      setOpen(true, { focus: false });
+      showView("conversation");
+      const content = messageEditor.insertReference(reference);
+      updateComposerAvailability();
+      return content;
+    },
+    addImageReference: addInlineImage,
+    announce(messageText) {
+      attachmentStatus.textContent = messageText;
+    },
     destroy() {
       destroyed = true;
+      clearDraftInlineVisuals();
+      for (const editor of queueEditors) editor.destroy();
+      queueEditors = [];
       clearDraftAttachments();
+      messageEditor.destroy();
       for (const url of imageObjectURLs.values()) revokeObjectURL(url);
       imageObjectURLs.clear();
       for (const owned of controllers.values()) clearTimeout(owned.reconnectTimer);
@@ -3137,11 +3301,24 @@ export async function bootViewer(doc = document) {
   try { parsed = JSON.parse(sourceElement.textContent || "null"); }
   catch { throw new TypeError("invalid whiteboard source payload"); }
   const payload = validateViewerPayload(parsed);
-  const viewer = await renderWhiteboard(payload.markdown, { container: viewerContainer(doc), doc });
+  const container = viewerContainer(doc);
+  const viewer = await renderWhiteboard(payload.markdown, { container, doc, contextEnabled: payload.local_agent.enabled });
   if (payload.local_agent.enabled) {
-    viewer.agent = createAgentDrawer({ payload, doc });
+    let contextController;
+    viewer.agent = createAgentDrawer({ payload, doc, onReference: (reference) => contextController?.navigate(reference) ?? false });
+    contextController = createMarkdownContextController({
+      doc,
+      container,
+      index: viewer.semanticIndex,
+      identity: { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest },
+      idFactory: generateAgentID,
+      onAdd: (reference) => viewer.agent.addReference(reference),
+      onImageAdd: (metadata) => viewer.agent.addImageReference(metadata),
+      announce: (messageText) => viewer.agent.announce(messageText),
+    });
+    viewer.context = contextController;
     const destroyViewer = viewer.destroy.bind(viewer);
-    viewer.destroy = () => { viewer.agent.destroy(); destroyViewer(); };
+    viewer.destroy = () => { contextController.destroy(); viewer.agent.destroy(); destroyViewer(); };
   }
   return viewer;
 }
