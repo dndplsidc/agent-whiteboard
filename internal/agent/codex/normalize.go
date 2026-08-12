@@ -21,9 +21,10 @@ func (session *Session) handleNotification(method string, params json.RawMessage
 		return
 	}
 	nativeTurnID := notificationTurnID(method, params)
+	settingsNotification := method == "thread/settings/updated" || method == "model/rerouted"
 	session.mu.Lock()
 	turn := session.active
-	if turn != nil && nativeTurnID != "" && turn.nativeID == "" {
+	if turn != nil && turn.nativeID == "" && (nativeTurnID != "" || settingsNotification) {
 		size := len(method) + len(params)
 		if len(turn.buffered) >= provider.MaxLaunchItems || turn.bytes+size > maxJSONLMessageBytes {
 			session.mu.Unlock()
@@ -70,6 +71,10 @@ func (session *Session) handleNotification(method string, params json.RawMessage
 		session.handleToolUpdate(params, brokerTurnID, "message")
 	case "thread/compacted":
 		session.emit(provider.NewActivityEvent(brokerTurnID, provider.ActivityCompaction, "Codex compacted the conversation context."))
+	case "thread/settings/updated":
+		session.handleSettingsUpdated(params)
+	case "model/rerouted":
+		session.handleModelRerouted(params)
 	case "turn/completed":
 		session.handleTurnCompleted(params, brokerTurnID)
 	}
@@ -323,10 +328,18 @@ func (session *Session) handleTurnCompleted(params json.RawMessage, brokerTurnID
 			malformed = true
 		}
 	}
+	unresolvedSettings := session.settingsUnverified
+	if unresolvedSettings {
+		session.closed = true
+	}
 	session.active = nil
 	session.activities = make(map[string]string)
 	session.toolStates = make(map[string]provider.ToolActivity)
 	session.mu.Unlock()
+	if unresolvedSettings {
+		session.emit(provider.NewTerminalFailureEvent(brokerTurnID, provider.NewProviderError(provider.ErrorProtocolIncompatible)))
+		return
+	}
 	if malformed {
 		session.emit(provider.NewTerminalFailureEvent(brokerTurnID, provider.NewProviderError(provider.ErrorMalformedStream)))
 		return

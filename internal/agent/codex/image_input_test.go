@@ -47,23 +47,26 @@ func TestBuildTurnInputRejectsPathsOutsideWorkspaceAndSymlinks(t *testing.T) {
 	}
 }
 
-func TestParseModelPageDefaultsMissingModalitiesAndHonorsTextOnly(t *testing.T) {
-	models, cursor, err := parseModelPage([]byte(`{"data":[{"id":"default-id","model":"default-model"},{"id":"text-id","model":"text-model","inputModalities":["text"]},{"id":"vision-id","model":"vision-model","inputModalities":["text","image"]}],"nextCursor":null}`))
+func TestModelCatalogDefaultsMissingModalitiesAndHonorsTextOnly(t *testing.T) {
+	models, cursor, err := parseModelCatalogPage([]byte(`{"data":[
+		{"id":"default-id","model":"default-model","displayName":"Default","description":"default","hidden":false,"isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"}]},
+		{"id":"text-id","model":"text-model","displayName":"Text","description":"text","hidden":false,"isDefault":false,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"}],"inputModalities":["text"]},
+		{"id":"vision-id","model":"vision-model","displayName":"Vision","description":"vision","hidden":false,"isDefault":false,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"}],"inputModalities":["text","image"]}
+	],"nextCursor":null}`))
 	require.NoError(t, err)
 	require.Empty(t, cursor)
-	require.True(t, models["default-id"].Images)
-	require.True(t, models["default-model"].Images)
-	require.False(t, models["text-id"].Images)
-	require.True(t, models["vision-model"].Images)
+	require.True(t, models[0].Capabilities.Images)
+	require.False(t, models[1].Capabilities.Images)
+	require.True(t, models[2].Capabilities.Images)
 }
 
-func TestParseModelPageRejectsMalformedModalities(t *testing.T) {
+func TestModelCatalogRejectsMalformedModalities(t *testing.T) {
 	for _, raw := range []string{
 		`{"data":null}`,
-		`{"data":[{"id":"model","model":"model","inputModalities":null}]}`,
-		`{"data":[{"id":"model","model":"model","inputModalities":["bogus"]}]}`,
+		`{"data":[{"id":"model","model":"model","displayName":"Model","description":"desc","hidden":false,"isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"}],"inputModalities":null}]}`,
+		`{"data":[{"id":"model","model":"model","displayName":"Model","description":"desc","hidden":false,"isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"}],"inputModalities":["bogus"]}]}`,
 	} {
-		_, _, err := parseModelPage([]byte(raw))
+		_, _, err := parseModelCatalogPage([]byte(raw))
 		require.Error(t, err)
 	}
 }
@@ -75,16 +78,19 @@ func TestSessionSubmitSendsStableLocalImageInputs(t *testing.T) {
 	path := filepath.Join(imagesDirectory, "image.png")
 	require.NoError(t, os.WriteFile(path, []byte("image"), 0o600))
 	runtime, requests, child := pipeRuntime(t)
+	catalog := testNativeCatalog(t)
+	runtime.catalog = catalog
 	go runtime.readLoop(child.Output())
 	driver := &Driver{config: Config{Clock: fixedClock{time.Unix(10, 0).UTC()}, IDs: &sequenceIDs{}, IdleTimeout: time.Hour}, runtime: runtime}
 	session := &Session{
 		driver: driver, runtime: runtime, threadID: "native-thread", workspace: workspace,
-		capabilities: provider.Capabilities{Images: true}, events: make(chan provider.Event, 8), view: newSessionChild(),
+		capabilities: provider.Capabilities{Images: true}, catalog: catalog, events: make(chan provider.Event, 8), view: newSessionChild(),
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 	runtime.sessions[session.threadID] = session
+	settings := provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: provider.SpeedFast}
 	request := provider.TurnRequest{
-		TurnID: testID(900), MessageID: testID(901), Content: provider.TextMessage("compare"),
+		TurnID: testID(900), MessageID: testID(901), Content: provider.TextMessage("compare"), Settings: &settings,
 		Images: []provider.ImageInput{{ID: strings.Repeat("A", 32), Name: "image.png", MediaType: "image/png", Bytes: 5, Path: path}},
 	}
 	result := make(chan error, 1)

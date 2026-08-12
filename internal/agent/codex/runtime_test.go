@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,7 +45,7 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 				var params map[string]json.RawMessage
 				require.NoError(t, json.Unmarshal(request["params"], &params))
 				require.Equal(t, []string{"cwd"}, sortedKeys(params))
-				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": "native-thread"}, "model": "gpt-fixture"}})
+				child.send(t, map[string]any{"id": request["id"], "result": completeThreadResponse("native-thread", "gpt-fixture", "medium", nil)})
 			case "turn/start":
 				var params struct {
 					ThreadID string `json:"threadId"`
@@ -92,8 +93,9 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 	session, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: "/workspace"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = session.Shutdown(context.Background()) })
+	settings := defaultTestSettings()
 	request := provider.TurnRequest{
-		TurnID: testID(91), MessageID: testID(92), Content: provider.TextMessage("What changed?"),
+		TurnID: testID(91), MessageID: testID(92), Content: provider.TextMessage("What changed?"), Settings: &settings,
 		Context: &provider.PageContext{Revision: provider.ContextInitial, Markdown: markdown, CreatorContext: creator, Title: "Board", URL: "https://example.com/board", Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: resourceID, CreatedAt: now, UpdatedAt: now}, Digest: agent.CalculateContextDigest(markdown, creator)},
 	}
 	accepted, err := session.Submit(context.Background(), request)
@@ -158,19 +160,22 @@ func TestTurnAcceptanceBarrierOrdersPreAckEventBeforeImmediatePostAckInteraction
 	clock := &blockingClock{entered: make(chan struct{}), release: make(chan struct{}), now: time.Unix(100, 0).UTC()}
 	input := newSignalingWriteCloser()
 	runtime := &runtime{input: input, pending: make(map[int64]chan rpcResult), barriers: make(map[int64]*responseBarrier), inbound: make(map[string]struct{}), sessions: make(map[string]*Session), done: make(chan struct{})}
+	runtime.catalog = testNativeCatalog(t)
 	driver := &Driver{config: Config{Clock: clock, IDs: &sequenceIDs{}, IdleTimeout: time.Hour}, runtime: runtime}
 	session := &Session{
 		driver: driver, runtime: runtime, threadID: "native-thread", events: make(chan provider.Event, 8), view: newSessionChild(),
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 	runtime.sessions[session.threadID] = session
-	request := provider.TurnRequest{TurnID: testID(93), MessageID: testID(94), Content: provider.TextMessage("Order this stream")}
+	settings := defaultTestSettings()
+	request := provider.TurnRequest{TurnID: testID(93), MessageID: testID(94), Content: provider.TextMessage("Order this stream"), Settings: &settings}
 	submitted := make(chan error, 1)
 	go func() { _, err := session.Submit(context.Background(), request); submitted <- err }()
 	<-input.wrote
 
 	lines := []string{
 		string(mustJSON(t, notification("item/agentMessage/delta", map[string]any{"threadId": "native-thread", "turnId": "native-turn", "delta": "pre-ack"}))),
+		string(mustJSON(t, notification("thread/settings/updated", map[string]any{"threadId": "native-thread", "threadSettings": map[string]any{"model": "gpt-fixture", "effort": "medium", "serviceTier": nil}}))),
 		string(mustJSON(t, map[string]any{"id": 1, "result": map[string]any{"turn": map[string]any{"id": "native-turn"}}})),
 		string(mustJSON(t, map[string]any{"id": 700, "method": "item/commandExecution/requestApproval", "params": map[string]any{
 			"threadId": "native-thread", "turnId": "native-turn", "itemId": "native-item", "startedAtMs": 1, "command": "go test", "cwd": "/workspace",
@@ -187,13 +192,14 @@ func TestTurnAcceptanceBarrierOrdersPreAckEventBeforeImmediatePostAckInteraction
 	close(clock.release)
 	require.NoError(t, <-submitted)
 
-	kinds := make([]provider.EventKind, 0, 4)
-	for len(kinds) < 4 {
+	kinds := make([]provider.EventKind, 0, 5)
+	for len(kinds) < 5 {
 		kinds = append(kinds, awaitEvent(t, session.events).Kind)
 	}
 	require.Equal(t, []provider.EventKind{
 		provider.EventUserMessage,
 		provider.EventAssistantDelta,
+		provider.EventSettings,
 		provider.EventInteractionRequest,
 		provider.EventCompletion,
 	}, kinds)
@@ -202,13 +208,15 @@ func TestTurnAcceptanceBarrierOrdersPreAckEventBeforeImmediatePostAckInteraction
 func TestTurnCompletionBeforeAcceptanceResponseIsBuffered(t *testing.T) {
 	input := newSignalingWriteCloser()
 	runtime := &runtime{input: input, pending: make(map[int64]chan rpcResult), barriers: make(map[int64]*responseBarrier), inbound: make(map[string]struct{}), sessions: make(map[string]*Session), done: make(chan struct{})}
+	runtime.catalog = testNativeCatalog(t)
 	driver := &Driver{config: Config{Clock: fixedClock{time.Unix(100, 0).UTC()}, IDs: &sequenceIDs{}, IdleTimeout: time.Hour}, runtime: runtime}
 	session := &Session{
 		driver: driver, runtime: runtime, threadID: "native-thread", events: make(chan provider.Event, 4), view: newSessionChild(),
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 	runtime.sessions[session.threadID] = session
-	request := provider.TurnRequest{TurnID: testID(95), MessageID: testID(96), Content: provider.TextMessage("Complete immediately")}
+	settings := defaultTestSettings()
+	request := provider.TurnRequest{TurnID: testID(95), MessageID: testID(96), Content: provider.TextMessage("Complete immediately"), Settings: &settings}
 	submitted := make(chan error, 1)
 	go func() { _, err := session.Submit(context.Background(), request); submitted <- err }()
 	<-input.wrote
@@ -250,7 +258,7 @@ func TestIdleTimerCannotStopRuntimeDuringSessionActivation(t *testing.T) {
 	clock := &blockingClock{entered: make(chan struct{}), release: make(chan struct{}), now: time.Unix(100, 0).UTC()}
 	launcher := readyLauncher(t, func(child *scriptedChild, request map[string]json.RawMessage, method string) {
 		if method == "thread/start" {
-			child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": "native-thread"}, "model": "gpt-fixture"}})
+			child.send(t, map[string]any{"id": request["id"], "result": completeThreadResponse("native-thread", "gpt-fixture", "medium", nil)})
 		}
 	})
 	driver, err := NewDriver(Config{
@@ -331,7 +339,7 @@ func TestDriverSharesOneRuntimeAcrossConcurrentThreadsAndStopsAfterLastDetach(t 
 				threadCount++
 				threadID := "native-thread-" + strconv.Itoa(threadCount)
 				threadMu.Unlock()
-				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": threadID}, "model": "gpt-fixture"}})
+				child.send(t, map[string]any{"id": request["id"], "result": completeThreadResponse(threadID, "gpt-fixture", "medium", nil)})
 			}
 		}
 	}}
@@ -378,7 +386,7 @@ func TestDriverResumeReadDeleteInterruptCompactionAndContextOverflow(t *testing.
 	launcher := readyLauncher(t, func(child *scriptedChild, request map[string]json.RawMessage, method string) {
 		switch method {
 		case "thread/resume":
-			child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": "native-thread"}, "model": "gpt-fixture"}})
+			child.send(t, map[string]any{"id": request["id"], "result": completeThreadResponse("native-thread", "gpt-fixture", "medium", nil)})
 		case "thread/read":
 			child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": "native-thread", "turns": []any{}}, "model": "gpt-fixture"}})
 		case "thread/delete":
@@ -415,7 +423,8 @@ func TestDriverResumeReadDeleteInterruptCompactionAndContextOverflow(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, provider.TurnNotAccepted, state)
 
-	request := provider.TurnRequest{TurnID: testID(701), MessageID: testID(702), Content: provider.TextMessage("Continue")}
+	settings := defaultTestSettings()
+	request := provider.TurnRequest{TurnID: testID(701), MessageID: testID(702), Content: provider.TextMessage("Continue"), Settings: &settings}
 	accepted, err := session.Submit(context.Background(), request)
 	require.NoError(t, err)
 	require.NoError(t, session.Interrupt(context.Background(), accepted))
@@ -433,6 +442,39 @@ func TestDriverResumeReadDeleteInterruptCompactionAndContextOverflow(t *testing.
 	require.True(t, foundCompaction)
 	require.NoError(t, session.Shutdown(context.Background()))
 	require.NoError(t, driver.Delete(context.Background(), provider.DeleteRequest{Provider: provider.NameCodex, NativeSession: ref}))
+}
+
+func TestFreshThreadHistoryBeforeFirstUserMessageIsEmpty(t *testing.T) {
+	launcher := readyLauncher(t, func(child *scriptedChild, request map[string]json.RawMessage, method string) {
+		switch method {
+		case "thread/start":
+			child.send(t, map[string]any{"id": request["id"], "result": completeThreadResponse("fresh-thread", "gpt-fixture", "medium", nil)})
+		case "thread/read":
+			child.send(t, map[string]any{"id": request["id"], "error": map[string]any{
+				"code": -32600, "message": "thread fresh-thread is not materialized yet; includeTurns is unavailable before first user message",
+			}})
+		}
+	})
+	driver, err := NewDriver(Config{
+		Executable: "/fixture/bin/codex", Environment: []string{"PATH=/fixture/bin"}, ProviderRoot: t.TempDir(),
+		Launcher: launcher, IDs: &sequenceIDs{}, Clock: fixedClock{time.Unix(100, 0).UTC()}, IdleTimeout: time.Hour,
+	})
+	require.NoError(t, err)
+
+	created, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: "/workspace"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, created.Shutdown(context.Background())) })
+
+	page, err := created.History(context.Background(), provider.HistoryRequest{Limit: 50})
+	require.NoError(t, err)
+	require.Empty(t, page.Items)
+	require.Empty(t, page.NextCursor)
+
+	_, err = created.History(context.Background(), provider.HistoryRequest{BeforeMessageID: testID(800), Limit: 50})
+	assertProviderError(t, err, provider.ErrorProtocolFailure)
+	state, err := created.Reconcile(context.Background(), provider.TurnReference{TurnID: testID(801)})
+	require.NoError(t, err)
+	require.Equal(t, provider.TurnNotAccepted, state)
 }
 
 func TestMissingResumeMapsToNativeSessionMissingAndDeleteIsIdempotent(t *testing.T) {
@@ -964,13 +1006,15 @@ func TestConcurrentSubmitAndShutdownSynchronizeNativeTurnIdentity(t *testing.T) 
 	for iteration := 0; iteration < 100; iteration++ {
 		input := newSignalingWriteCloser()
 		runtime := &runtime{input: input, pending: make(map[int64]chan rpcResult), barriers: make(map[int64]*responseBarrier), inbound: make(map[string]struct{}), sessions: make(map[string]*Session), done: make(chan struct{})}
+		runtime.catalog = testNativeCatalog(t)
 		driver := &Driver{config: Config{Clock: fixedClock{time.Unix(100, 0).UTC()}, IDs: &sequenceIDs{}, IdleTimeout: time.Hour}, runtime: runtime}
 		session := &Session{
 			driver: driver, runtime: runtime, threadID: "native-thread", events: make(chan provider.Event, 4), view: newSessionChild(),
 			activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 		}
 		runtime.sessions[session.threadID] = session
-		request := provider.TurnRequest{TurnID: testID(uint64(800 + iteration*2)), MessageID: testID(uint64(801 + iteration*2)), Content: provider.TextMessage("race")}
+		settings := defaultTestSettings()
+		request := provider.TurnRequest{TurnID: testID(uint64(800 + iteration*2)), MessageID: testID(uint64(801 + iteration*2)), Content: provider.TextMessage("race"), Settings: &settings}
 		submitDone := make(chan error, 1)
 		go func() { _, err := session.Submit(context.Background(), request); submitDone <- err }()
 		<-input.wrote
@@ -1241,10 +1285,13 @@ func readyLauncher(t *testing.T, handle func(*scriptedChild, map[string]json.Raw
 
 func sendModelList(t *testing.T, child *scriptedChild, request map[string]json.RawMessage) {
 	t.Helper()
-	child.send(t, map[string]any{"id": request["id"], "result": map[string]any{
-		"data":       []map[string]any{{"id": "gpt-fixture", "model": "gpt-fixture", "inputModalities": []string{"text", "image"}}},
-		"nextCursor": nil,
-	}})
+	var result any
+	require.NoError(t, json.Unmarshal([]byte(testModelListJSON()), &result))
+	child.send(t, map[string]any{"id": request["id"], "result": result})
+}
+
+func defaultTestSettings() provider.ExecutionSettings {
+	return provider.ExecutionSettings{Model: "gpt-fixture", Effort: "medium", Speed: provider.SpeedStandard}
 }
 
 func pipeRuntime(t *testing.T) (*runtime, <-chan map[string]json.RawMessage, *scriptedChild) {
@@ -1282,9 +1329,7 @@ func sortedKeys(values map[string]json.RawMessage) []string {
 	for key := range values {
 		keys = append(keys, key)
 	}
-	if len(keys) == 2 && keys[0] > keys[1] {
-		keys[0], keys[1] = keys[1], keys[0]
-	}
+	sort.Strings(keys)
 	return keys
 }
 
