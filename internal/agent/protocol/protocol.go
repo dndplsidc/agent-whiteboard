@@ -14,12 +14,12 @@ import (
 )
 
 const (
-	APIVersion           = "3"
+	APIVersion           = "4"
 	Namespace            = "/api/v1/agent"
 	StatusPath           = Namespace + "/status"
 	ConnectPath          = Namespace + "/connect"
 	ImagesPath           = Namespace + "/images"
-	WebSocketSubprotocol = "agent-whiteboard.v3"
+	WebSocketSubprotocol = "agent-whiteboard.v4"
 	APIVersionHeader     = "X-Agent-Whiteboard-API-Version"
 	ClientIDHeader       = "X-Agent-Whiteboard-Client-ID"
 	ConversationIDHeader = "X-Agent-Whiteboard-Conversation-ID"
@@ -42,7 +42,7 @@ const (
 	MaxQueueItems             = 64
 	MaxQueueBytes             = 96 << 10
 	MaxTimelineBytes          = 96 << 10
-	MaxEventBytes             = 256 << 10
+	MaxEventBytes             = 1 << 20
 	MaxDeltaBytes             = 32 << 10
 	MaxReplayEvents           = 2048
 	MaxReplayBytes            = 8 << 20
@@ -135,20 +135,22 @@ type PageContext struct {
 }
 
 type ConnectPayload struct {
-	Provider      ProviderName `json:"provider"`
-	Resource      Resource     `json:"resource"`
-	ContextDigest string       `json:"context_digest"`
-	ReplayAfter   string       `json:"replay_after,omitempty"`
+	Provider      ProviderName       `json:"provider"`
+	Resource      Resource           `json:"resource"`
+	ContextDigest string             `json:"context_digest"`
+	ReplayAfter   string             `json:"replay_after,omitempty"`
+	Settings      *ExecutionSettings `json:"settings"`
 }
 
 func (ConnectPayload) commandPayload() {}
 
 type SubmitPayload struct {
-	TurnID    string           `json:"turn_id"`
-	MessageID string           `json:"message_id"`
-	Content   MessageContent   `json:"content"`
-	Images    []ImageReference `json:"images,omitempty"`
-	Context   *PageContext     `json:"context,omitempty"`
+	TurnID    string             `json:"turn_id"`
+	MessageID string             `json:"message_id"`
+	Content   MessageContent     `json:"content"`
+	Images    []ImageReference   `json:"images,omitempty"`
+	Context   *PageContext       `json:"context,omitempty"`
+	Settings  *ExecutionSettings `json:"settings"`
 }
 
 func (SubmitPayload) commandPayload() {}
@@ -186,9 +188,13 @@ type TurnReferencePayload struct {
 
 func (TurnReferencePayload) commandPayload() {}
 
-type EmptyPayload struct{}
+type NewPayload struct {
+	Settings *ExecutionSettings `json:"settings"`
+}
 
-func (EmptyPayload) commandPayload() {}
+func (NewPayload) commandPayload() {}
+
+type EmptyPayload = NewPayload
 
 type PageRequestPayload struct {
 	Before string `json:"before,omitempty"`
@@ -268,6 +274,7 @@ func DecodeCommand(data []byte) (Command, error) {
 		"conversation_id":                     true,
 		"payload.resource.expires_at":         true,
 		"payload.context.resource.expires_at": true,
+		"payload.settings":                    true,
 		"payload.answers":                     true,
 	}
 	if err := inspectJSON(data, nullable); err != nil {
@@ -302,9 +309,9 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 	var required []string
 	switch kind {
 	case CommandConnect:
-		target, required = &ConnectPayload{}, []string{"provider", "resource", "context_digest"}
+		target, required = &ConnectPayload{}, []string{"provider", "resource", "context_digest", "settings"}
 	case CommandSubmit:
-		target, required = &SubmitPayload{}, []string{"turn_id", "message_id", "content"}
+		target, required = &SubmitPayload{}, []string{"turn_id", "message_id", "content", "settings"}
 	case CommandQueueEdit:
 		target, required = &QueueEditPayload{}, []string{"message_id", "content"}
 	case CommandQueueRemove:
@@ -312,7 +319,7 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 	case CommandInterrupt, CommandRetry:
 		target, required = &TurnReferencePayload{}, []string{"turn_id"}
 	case CommandNew:
-		target = &EmptyPayload{}
+		target, required = &NewPayload{}, []string{"settings"}
 	case CommandArchiveList, CommandHistoryPage:
 		target = &PageRequestPayload{}
 	case CommandArchiveRestore, CommandArchiveDelete:
@@ -341,7 +348,7 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 		return *value, nil
 	case *TurnReferencePayload:
 		return *value, nil
-	case *EmptyPayload:
+	case *NewPayload:
 		return *value, nil
 	case *PageRequestPayload:
 		return *value, nil
@@ -369,11 +376,12 @@ func validateCommand(command Command) error {
 	}
 	switch payload := command.Payload.(type) {
 	case ConnectPayload:
-		if command.Type != CommandConnect || !payload.Provider.Valid() || validateResource(payload.Resource) != nil || !validDigest(payload.ContextDigest) || (payload.ReplayAfter != "" && !validID(payload.ReplayAfter)) {
+		if command.Type != CommandConnect || !payload.Provider.Valid() || validateResource(payload.Resource) != nil || !validDigest(payload.ContextDigest) || (payload.ReplayAfter != "" && !validID(payload.ReplayAfter)) ||
+			(payload.Provider == ProviderPi && payload.Settings != nil) || (payload.Settings != nil && payload.Settings.Validate() != nil) {
 			return invalid(nil)
 		}
 	case SubmitPayload:
-		if command.Type != CommandSubmit || !validID(payload.TurnID) || !validID(payload.MessageID) || payload.Content.ValidateCommand() != nil || payload.Content.Empty() && len(payload.Images) == 0 || validateImageReferences(payload.Images) != nil {
+		if command.Type != CommandSubmit || !validID(payload.TurnID) || !validID(payload.MessageID) || payload.Content.ValidateCommand() != nil || payload.Content.Empty() && len(payload.Images) == 0 || validateImageReferences(payload.Images) != nil || (payload.Settings != nil && payload.Settings.Validate() != nil) {
 			return invalid(nil)
 		}
 		if payload.Context != nil && validatePageContext(*payload.Context) != nil {
@@ -391,8 +399,8 @@ func validateCommand(command Command) error {
 		if (command.Type != CommandInterrupt && command.Type != CommandRetry) || !validID(payload.TurnID) {
 			return invalid(nil)
 		}
-	case EmptyPayload:
-		if command.Type != CommandNew {
+	case NewPayload:
+		if command.Type != CommandNew || (payload.Settings != nil && payload.Settings.Validate() != nil) {
 			return invalid(nil)
 		}
 	case PageRequestPayload:

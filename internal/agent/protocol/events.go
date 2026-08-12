@@ -30,6 +30,7 @@ const (
 	EventToolActivity        EventType = "tool_activity"
 	EventInteractionRequest  EventType = "interaction_request"
 	EventInteractionResolved EventType = "interaction_resolved"
+	EventSettings            EventType = "settings"
 )
 
 type LifecycleState string
@@ -108,11 +109,29 @@ const (
 )
 
 type QueueItem struct {
-	TurnID    string            `json:"turn_id"`
-	MessageID string            `json:"message_id"`
-	Content   MessageContent    `json:"content"`
-	Images    []ImageDescriptor `json:"images,omitempty"`
+	TurnID    string                      `json:"turn_id"`
+	MessageID string                      `json:"message_id"`
+	Content   MessageContent              `json:"content"`
+	Images    []ImageDescriptor           `json:"images,omitempty"`
+	Settings  *PresentedExecutionSettings `json:"settings"`
 }
+
+func (item *QueueItem) UnmarshalJSON(data []byte) error {
+	if err := inspectJSON(data, map[string]bool{"settings": true}); err != nil {
+		return err
+	}
+	if err := requireFields(data, "turn_id", "message_id", "content", "settings"); err != nil {
+		return err
+	}
+	type wire QueueItem
+	var decoded wire
+	if err := strictDecode(data, &decoded); err != nil {
+		return err
+	}
+	*item = QueueItem(decoded)
+	return nil
+}
+
 type TimelineItem struct {
 	ItemID    string            `json:"item_id"`
 	Kind      TimelineItemKind  `json:"kind"`
@@ -138,17 +157,25 @@ type EventPayload interface {
 }
 
 type SnapshotPayload struct {
-	Lifecycle      LifecycleState `json:"lifecycle"`
-	Queue          []QueueItem    `json:"queue"`
-	ContextState   ContextState   `json:"context_state"`
-	ActiveTurnID   *string        `json:"active_turn_id"`
-	SupportsImages bool           `json:"supports_images"`
+	Lifecycle         LifecycleState              `json:"lifecycle"`
+	Queue             []QueueItem                 `json:"queue"`
+	ContextState      ContextState                `json:"context_state"`
+	ActiveTurnID      *string                     `json:"active_turn_id"`
+	SupportsImages    bool                        `json:"supports_images"`
+	SettingsState     *SettingsState              `json:"settings_state"`
+	EffectiveSettings *PresentedExecutionSettings `json:"effective_settings"`
+	Catalog           []CatalogModel              `json:"catalog"`
 }
 
 func (SnapshotPayload) EventType() EventType { return EventSnapshot }
 func (p SnapshotPayload) validate() error {
-	if p.Queue == nil || !validLifecycle(p.Lifecycle) || !validContextState(p.ContextState) || !validActiveTurn(p.Lifecycle, p.ActiveTurnID) {
+	if p.Queue == nil || !validLifecycle(p.Lifecycle) || !validContextState(p.ContextState) || !validActiveTurn(p.Lifecycle, p.ActiveTurnID) || validateSettingsSnapshot(p.SettingsState, p.EffectiveSettings, p.Catalog) != nil {
 		return invalid(nil)
+	}
+	if p.EffectiveSettings != nil {
+		if supportsImages, known := selectableModelCapabilities(*p.EffectiveSettings, p.Catalog); known && supportsImages != p.SupportsImages {
+			return invalid(nil)
+		}
 	}
 	return ValidateQueue(p.Queue)
 }
@@ -310,6 +337,30 @@ type ProviderPayload struct {
 func (ProviderPayload) EventType() EventType { return EventProvider }
 func (p ProviderPayload) validate() error {
 	if !p.Provider.Valid() || !validProviderState(p.State) || !validBoundedText(p.Model, MaxTitleBytes, false) || (p.State == ProviderReady && p.Model == "") {
+		return invalid(nil)
+	}
+	return nil
+}
+
+type SettingsPayload struct {
+	SettingsState     SettingsState               `json:"settings_state"`
+	EffectiveSettings *PresentedExecutionSettings `json:"effective_settings"`
+	Catalog           []CatalogModel              `json:"catalog"`
+	AcceptedTurnID    *string                     `json:"accepted_turn_id"`
+}
+
+func (SettingsPayload) EventType() EventType { return EventSettings }
+func (p SettingsPayload) validate() error {
+	if !p.SettingsState.Valid() || validateCatalog(p.Catalog) != nil || (p.AcceptedTurnID != nil && !validID(*p.AcceptedTurnID)) {
+		return invalid(nil)
+	}
+	if p.SettingsState == SettingsVerified {
+		if p.EffectiveSettings == nil || p.EffectiveSettings.Validate() != nil || validateSelectableSettings(*p.EffectiveSettings, p.Catalog) != nil {
+			return invalid(nil)
+		}
+		return nil
+	}
+	if p.EffectiveSettings != nil || p.AcceptedTurnID != nil {
 		return invalid(nil)
 	}
 	return nil
@@ -493,6 +544,11 @@ func DecodeEvent(data []byte) (Event, error) {
 	}
 	nullable := map[string]bool{
 		"payload.active_turn_id":      true,
+		"payload.settings_state":      true,
+		"payload.effective_settings":  true,
+		"payload.accepted_turn_id":    true,
+		"payload.queue[].settings":    true,
+		"payload.items[].settings":    true,
 		"payload.next_cursor":         true,
 		"payload.turn_id":             true,
 		"payload.options":             true,
@@ -527,7 +583,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	var required []string
 	switch kind {
 	case EventSnapshot:
-		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_turn_id", "supports_images"}
+		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_turn_id", "supports_images", "settings_state", "effective_settings", "catalog"}
 	case EventCommandResult:
 		target, required = &CommandResultPayload{}, []string{"command_id", "status"}
 	case EventTimeline:
@@ -546,6 +602,8 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 		target, required = &LifecyclePayload{}, []string{"state", "turn_id"}
 	case EventProvider:
 		target, required = &ProviderPayload{}, []string{"provider", "state", "supports_images"}
+	case EventSettings:
+		target, required = &SettingsPayload{}, []string{"settings_state", "effective_settings", "catalog", "accepted_turn_id"}
 	case EventContext:
 		target, required = &ContextPayload{}, []string{"digest", "state"}
 	case EventActivity:
@@ -596,6 +654,8 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 		return *value, nil
 	case *ProviderPayload:
 		return *value, nil
+	case *SettingsPayload:
+		return *value, nil
 	case *ContextPayload:
 		return *value, nil
 	case *ActivityPayload:
@@ -645,7 +705,7 @@ func ValidateQueue(items []QueueItem) error {
 	}
 	total := 0
 	for _, item := range items {
-		total += item.Content.SemanticBytes()
+		total += item.Content.SemanticBytes() + presentedSettingsBytes(item.Settings)
 		if total > MaxQueueBytes {
 			return ErrMessageTooLarge
 		}
@@ -653,7 +713,7 @@ func ValidateQueue(items []QueueItem) error {
 	seenMessages := make(map[string]struct{}, len(items))
 	seenTurns := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if !validID(item.TurnID) || !validID(item.MessageID) || !validContentWithDescriptors(item.Content, item.Images) {
+		if !validID(item.TurnID) || !validID(item.MessageID) || !validContentWithDescriptors(item.Content, item.Images) || (item.Settings != nil && item.Settings.Validate() != nil) {
 			return invalid(nil)
 		}
 		if _, exists := seenMessages[item.MessageID]; exists {

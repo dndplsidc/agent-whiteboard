@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestV3SubmitRoundTripsOrderedContentStrictly(t *testing.T) {
+func TestV4SubmitRoundTripsOrderedContentStrictly(t *testing.T) {
 	conversationID := protocolID("C")
 	reference := protocolTextReference()
 	command := protocol.Command{
@@ -23,7 +23,7 @@ func TestV3SubmitRoundTripsOrderedContentStrictly(t *testing.T) {
 	}
 	encoded, err := command.MarshalJSON()
 	require.NoError(t, err)
-	require.Contains(t, string(encoded), `"api_version":"3"`)
+	require.Contains(t, string(encoded), `"api_version":"4"`)
 	require.NotContains(t, string(encoded), `"message"`)
 
 	decoded, err := protocol.DecodeCommand(encoded)
@@ -31,7 +31,7 @@ func TestV3SubmitRoundTripsOrderedContentStrictly(t *testing.T) {
 	require.Equal(t, command, decoded)
 }
 
-func TestV3ContentRejectsNoncanonicalDuplicateAndPhaseInvalidVisuals(t *testing.T) {
+func TestV4ContentRejectsNoncanonicalDuplicateAndPhaseInvalidVisuals(t *testing.T) {
 	text := protocolTextReference()
 	content := protocol.MessageContent{Parts: []protocol.MessagePart{
 		{Type: protocol.MessagePartText, Text: "a"},
@@ -48,7 +48,7 @@ func TestV3ContentRejectsNoncanonicalDuplicateAndPhaseInvalidVisuals(t *testing.
 	image.Visual.MediaType = "image/png"
 	require.NoError(t, (protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &image}}}).ValidateEvent())
 
-	duplicate := `{"api_version":"3","command_id":"` + protocolID("D") + `","client_id":"` + protocolID("E") + `","conversation_id":"` + protocolID("C") + `","type":"submit","payload":{"turn_id":"` + protocolID("T") + `","message_id":"` + protocolID("M") + `","content":{"parts":[{"type":"text","text":"a","text":"b"}]}}}`
+	duplicate := `{"api_version":"4","command_id":"` + protocolID("D") + `","client_id":"` + protocolID("E") + `","conversation_id":"` + protocolID("C") + `","type":"submit","payload":{"turn_id":"` + protocolID("T") + `","message_id":"` + protocolID("M") + `","content":{"parts":[{"type":"text","text":"a","text":"b"}]},"settings":null}}`
 	_, err := protocol.DecodeCommand([]byte(duplicate))
 	require.Error(t, err)
 
@@ -56,7 +56,7 @@ func TestV3ContentRejectsNoncanonicalDuplicateAndPhaseInvalidVisuals(t *testing.
 	require.Error(t, (protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &text}}}).ValidateCommand())
 }
 
-func TestV3ContentBoundsQuotesSectionsAndReferences(t *testing.T) {
+func TestV4ContentBoundsQuotesSectionsAndReferences(t *testing.T) {
 	text := protocolTextReference()
 	text.Quote = strings.Repeat("x", protocol.MaxReferenceQuoteBytes+1)
 	require.Error(t, (protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &text}}}).ValidateCommand())

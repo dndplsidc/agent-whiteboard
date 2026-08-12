@@ -38,6 +38,7 @@ const (
 	ErrorProviderProtocolFailure      BrowserErrorCode = "provider_protocol_failure"
 	ErrorProviderMalformedStream      BrowserErrorCode = "provider_malformed_stream"
 	ErrorAcceptanceOutcomeUnknown     BrowserErrorCode = "acceptance_outcome_unknown"
+	ErrorInvalidModelConfiguration    BrowserErrorCode = "invalid_model_configuration"
 	ErrorImageInputUnsupported        BrowserErrorCode = "image_input_unsupported"
 	ErrorImageUnsupported             BrowserErrorCode = "image_unsupported"
 	ErrorImageTooLarge                BrowserErrorCode = "image_too_large"
@@ -112,6 +113,7 @@ var browserErrorDefinitions = map[BrowserErrorCode]browserErrorDefinition{
 	ErrorProviderProtocolFailure:      {"The provider protocol operation failed.", ActionRestartProvider},
 	ErrorProviderMalformedStream:      {"The provider returned a malformed event stream.", ActionRestartProvider},
 	ErrorAcceptanceOutcomeUnknown:     {"The provider turn acceptance outcome is unknown.", ActionRefreshState},
+	ErrorInvalidModelConfiguration:    {"The selected model settings are no longer available.", ActionConfigureModel},
 	ErrorImageInputUnsupported:        {"The selected model does not support image input.", ActionConfigureModel},
 	ErrorImageUnsupported:             {"The selected file is not a supported image.", ActionNone},
 	ErrorImageTooLarge:                {"The selected image is too large.", ActionNone},
@@ -143,7 +145,7 @@ func AllBrowserErrorCodes() []BrowserErrorCode {
 		ErrorBoardRevisionMalformed, ErrorInvalidCommand, ErrorInvalidState, ErrorQueueFull, ErrorActiveTurnConflict,
 		ErrorStaleReference, ErrorReplayWindowUnavailable, ErrorStateRepairFailed, ErrorArchiveDeleteRetained,
 		ErrorBrokerShuttingDown, ErrorProviderProtocolFailure, ErrorProviderMalformedStream, ErrorAcceptanceOutcomeUnknown,
-		ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
+		ErrorInvalidModelConfiguration, ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
 		ErrorImageWorkspaceLimit, ErrorImageMissing, ErrorImageStorageFailure,
 	}
 }
