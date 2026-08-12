@@ -86,7 +86,7 @@ func TestCreateLoadAndStrictDurableSchema(t *testing.T) {
 	require.NoError(t, json.Unmarshal(durable, &document))
 	require.Equal(t, []string{"archives", "created_at", "current", "identity", "schema_version", "updated_at"}, sortedKeys(document))
 	require.Equal(t, []string{"capability_id", "kind", "origin", "provider"}, sortedKeys(document["identity"].(map[string]any)))
-	require.Equal(t, []string{"committed", "conversation_id", "created_at", "model_label", "native_session_ref", "observed", "prepared_commit", "provider_label", "updated_at"}, sortedKeys(document["current"].(map[string]any)))
+	require.Equal(t, []string{"committed", "conversation_id", "created_at", "model_label", "model_presentation", "native_session_ref", "observed", "prepared_commit", "provider_label", "settings", "updated_at"}, sortedKeys(document["current"].(map[string]any)))
 }
 
 func TestRevisionPreparePromoteAndReconcile(t *testing.T) {
@@ -430,7 +430,7 @@ func TestLoadRejectsCorruptionAndEmbeddedIdentityMismatch(t *testing.T) {
 
 func TestStrictDecoderRejectsDuplicateJSONFields(t *testing.T) {
 	identity := testIdentity()
-	_, err := decodeMapping([]byte(`{"schema_version":1,"schema_version":1}`), identity)
+	_, err := decodeMapping([]byte(`{"schema_version":2,"schema_version":2}`), identity)
 	require.Error(t, err)
 }
 

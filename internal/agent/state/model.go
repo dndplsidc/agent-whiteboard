@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	SchemaVersion           = 1
+	SchemaVersion           = 2
 	MaxNativeReferenceBytes = 1024
 	maxDisplayLabelBytes    = 512
 )
@@ -88,6 +88,8 @@ type Session struct {
 	UpdatedAt      time.Time
 	ProviderLabel  string
 	ModelLabel     string
+	Settings       *provider.ExecutionSettings
+	Presentation   *provider.ModelPresentation
 	Committed      *Revision
 	Observed       *Revision
 	PreparedCommit *PreparedCommit
@@ -105,6 +107,12 @@ func (session Session) validate() error {
 	if _, err := validateNativeSessionRef(session.NativeSession.Value()); err != nil || !session.NativeSession.Valid() {
 		return errors.New("invalid session bookkeeping")
 	}
+	if (session.Settings == nil) != (session.Presentation == nil) {
+		return errors.New("incomplete durable execution settings")
+	}
+	if session.Settings != nil && (session.Settings.Validate() != nil || session.Presentation.Validate() != nil || session.ModelLabel != session.Presentation.ModelDisplayName) {
+		return errors.New("invalid durable execution settings")
+	}
 	if session.Committed != nil && session.Committed.validate() != nil {
 		return errors.New("invalid committed revision")
 	}
@@ -116,6 +124,25 @@ func (session Session) validate() error {
 	}
 	if session.PreparedCommit != nil && (session.Observed == nil || session.PreparedCommit.Revision != *session.Observed) {
 		return errors.New("prepared commit does not match observed revision")
+	}
+	return nil
+}
+
+func (session Session) validateForProvider(name provider.Name) error {
+	if session.validate() != nil {
+		return errors.New("invalid provider session bookkeeping")
+	}
+	switch name {
+	case provider.NamePi:
+		if session.Settings != nil || session.Presentation != nil {
+			return errors.New("Pi session contains execution settings")
+		}
+	case provider.NameCodex:
+		if session.Settings == nil || session.Presentation == nil {
+			return errors.New("Codex session lacks execution settings")
+		}
+	default:
+		return errors.New("invalid session provider")
 	}
 	return nil
 }
@@ -144,7 +171,7 @@ func (mapping Mapping) validate(expected *Identity) error {
 	seenIDs := make(map[string]struct{}, len(mapping.Archives)+1)
 	seenNative := make(map[string]struct{}, len(mapping.Archives)+1)
 	validateUnique := func(session Session) error {
-		if err := session.validate(); err != nil {
+		if err := session.validateForProvider(mapping.Identity.Provider); err != nil {
 			return err
 		}
 		if _, duplicate := seenIDs[session.ConversationID]; duplicate {
