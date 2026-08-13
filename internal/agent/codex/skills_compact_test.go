@@ -16,6 +16,7 @@ func TestParseSkillCatalogPublishesOnlyEnabledSafeMetadataAndPreservesIDs(t *tes
 	workspace := "/workspace"
 	raw := json.RawMessage(`{"data":[{"cwd":"/workspace","skills":[
 		{"name":"review-helper","description":"Long description","shortDescription":"Legacy short","path":"/private/review/SKILL.md","scope":"repo","enabled":true,"interface":{"displayName":"Review helper","shortDescription":"Review this page","iconSmall":"https://example.invalid/icon.png","defaultPrompt":"secret"}},
+		{"name":"personal-helper","description":"Personal description","path":"/Users/example/.agents/skills/personal-helper/SKILL.md","scope":"user","enabled":true,"interface":{"displayName":"Personal helper","shortDescription":"Use a personal skill"}},
 		{"name":"disabled","description":"Hidden","path":"/private/disabled/SKILL.md","scope":"user","enabled":false,"interface":null}
 	],"errors":[{"path":"/private/broken/SKILL.md","message":"private failure"}]}]}`)
 	var generated atomic.Int32
@@ -27,15 +28,16 @@ func TestParseSkillCatalogPublishesOnlyEnabledSafeMetadataAndPreservesIDs(t *tes
 	require.NoError(t, err)
 	safe := catalog.safeCatalog()
 	require.Equal(t, provider.SkillsReady, safe.State)
-	require.Len(t, safe.Skills, 1)
+	require.Len(t, safe.Skills, 2)
 	require.Equal(t, provider.SkillDescriptor{ID: testID(901), Name: "review-helper", DisplayName: "Review helper", Description: "Review this page", Scope: provider.SkillScopeRepo}, safe.Skills[0])
+	require.Equal(t, provider.SkillDescriptor{ID: testID(902), Name: "personal-helper", DisplayName: "Personal helper", Description: "Use a personal skill", Scope: provider.SkillScopeUser}, safe.Skills[1])
 	require.NotContains(t, string(mustJSON(t, safe)), "/private")
 	require.NotContains(t, string(mustJSON(t, safe)), "secret")
 
 	next, err := parseSkillCatalog(raw, workspace, catalog, ids)
 	require.NoError(t, err)
 	require.Equal(t, safe, next.safeCatalog())
-	require.Equal(t, int32(1), generated.Load(), "unchanged scope/name/path identity keeps its opaque id")
+	require.Equal(t, int32(2), generated.Load(), "unchanged scope/name/path identity keeps its opaque id")
 
 	wrongWorkspace := strings.Replace(string(raw), `"cwd":"/workspace"`, `"cwd":"/other"`, 1)
 	_, err = parseSkillCatalog(json.RawMessage(wrongWorkspace), workspace, catalog, ids)

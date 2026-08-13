@@ -1172,7 +1172,10 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.value = "$rev";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
     expect(drawer.elements.completionMenu.hidden).toBe(false);
+    expect(drawer.elements.composer.previousElementSibling).toBe(drawer.elements.completionMenu);
     expect(drawer.elements.completionMenu.textContent).toContain("Review helper");
+    expect(drawer.elements.completionMenu.textContent).not.toContain("Test helper");
+    expect(drawer.elements.completionMenu.querySelector(".agent-completion-option-scope")?.textContent).toBe("Repo");
     drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(drawer.elements.message.querySelector(".agent-message-skill")?.textContent).toBe("$review-helper");
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -1188,6 +1191,12 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(drawer.elements.message.querySelectorAll(".agent-message-skill")).toHaveLength(2);
 
+    drawer.elements.message.value = "/co";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(drawer.elements.completionMenu.textContent).toContain("/compact");
+    drawer.elements.message.value = "/nope";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(drawer.elements.completionMenu.hidden).toBe(true);
     drawer.elements.message.value = "/compact";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(sent.some(({ type }) => type === "compact")).toBe(true));
@@ -1729,6 +1738,20 @@ describe("local agent rendering and controls", () => {
     expect(drawer.elements.setup.hidden).toBe(true);
     expect(drawer.elements.settings.hidden).toBe(false);
     expect(document.activeElement).toBe(drawer.elements.backButton);
+    const checkButton = drawer.elements.settings.querySelector("button");
+    expect(checkButton).toBeTruthy();
+    transport.probe.mockReset();
+    transport.probe.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ ok: true, code: null }), 10)));
+    checkButton.click();
+    expect(checkButton.textContent).toBe("Checking…");
+    expect(checkButton.disabled).toBe(true);
+    await vi.waitFor(() => expect(checkButton.textContent).toBe("Broker available ✓"));
+    expect(checkButton.disabled).toBe(false);
+    transport.probe.mockImplementation(async () => ({ ok: false, code: "wrong_port" }));
+    checkButton.click();
+    await vi.waitFor(() => expect(checkButton.textContent).toBe("No broker on port 8568 ✕"));
+    expect(checkButton.dataset.state).toBe("offline");
+    expect(drawer.elements.settings.querySelector(".agent-guidance")?.textContent).toContain("No compatible broker was found on this port");
     drawer.elements.backButton.click();
     expect(document.activeElement).toBe(drawer.elements.overflowButton);
     chooseMenu("Inspect page context");

@@ -2296,11 +2296,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   sendButton.setAttribute("aria-label", "Send");
   sendButton.textContent = "↑";
   composerBar.append(imageButton, contextChip, queueChip, modelControl.element, stopButton, sendButton);
-  composer.append(imagePicker, attachmentList, attachmentStatus, message, completionMenu, composerBar);
+  composer.append(imagePicker, attachmentList, attachmentStatus, message, composerBar);
   const composerFineprint = doc.createElement("p");
   composerFineprint.className = "agent-composer-fineprint";
   composerFineprint.textContent = "Pi can make mistakes. Review important details.";
-  composerWrap.append(composer, composerFineprint);
+  composerWrap.append(completionMenu, composer, composerFineprint);
 
   const separator = doc.createElement("div");
   separator.className = "agent-drawer-separator";
@@ -2687,7 +2687,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (!match) { closeCompletionMenu(); return; }
     completionMode = match.mode;
     completionItems = match.mode === "slash"
-      ? [{ id: "compact", name: "/compact", display_name: "/compact", description: "Summarize the conversation to prevent hitting the context limit." }]
+      ? [{ id: "compact", name: "/compact", display_name: "/compact", description: "Summarize the conversation to prevent hitting the context limit." }].filter((command) => command.name.slice(1).startsWith(match.query))
       : state.skills.filter((skill) => skill.name.toLocaleLowerCase().includes(match.query) || (skill.display_name ?? "").toLocaleLowerCase().includes(match.query)).filter((skill) => !messageEditor.getContent().parts.some((part) => part.type === "skill" && part.skill.id === skill.id)).slice(0, 12);
     if (completionItems.length === 0) { closeCompletionMenu(); return; }
     completionIndex = Math.min(completionIndex, completionItems.length - 1);
@@ -2699,11 +2699,21 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       option.id = `agent-completion-${index}`;
       option.setAttribute("role", "option");
       option.setAttribute("aria-selected", String(index === completionIndex));
+      const icon = doc.createElement("span");
+      icon.className = "agent-completion-option-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = completionMode === "skill" ? "◇" : "/";
+      const copy = doc.createElement("span");
+      copy.className = "agent-completion-option-copy";
       const label = doc.createElement("strong");
-      label.textContent = completionMode === "skill" ? `$${item.display_name || item.name}` : item.display_name;
+      label.textContent = completionMode === "skill" ? item.display_name || item.name : item.display_name;
       const description = doc.createElement("span");
       description.textContent = item.description || item.scope;
-      option.append(label, description);
+      copy.append(label, description);
+      const scope = doc.createElement("span");
+      scope.className = "agent-completion-option-scope";
+      scope.textContent = completionMode === "skill" ? `${item.scope[0].toUpperCase()}${item.scope.slice(1)}` : "Command";
+      option.append(icon, copy, scope);
       option.addEventListener("pointerdown", (event) => { event.preventDefault(); chooseCompletion(index); });
       completionMenu.append(option);
     });
@@ -3051,6 +3061,15 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       connectButton.disabled = connectionState === "connecting";
     }
     settings.hidden = activeView !== "settings";
+    checkButton.textContent = connectionState === "checking"
+      ? "Checking…"
+      : connectionState === "ready"
+        ? "Broker available ✓"
+        : brokerCode === "local_network_permission_denied"
+          ? "Local access blocked ✕"
+          : `No broker on port ${port} ✕`;
+    checkButton.disabled = connectionState === "checking";
+    checkButton.dataset.state = connectionState;
     newMenuButton.disabled = !state.connected || selectedProvider === "codex" && currentCodexSettings() === null;
     archivesMenuButton.disabled = !state.connected;
     reconnectMenuButton.disabled = transport.consented !== true;
@@ -3380,7 +3399,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       brokerState = "offline";
       brokerGuidance = permissionDenied
         ? "Allow Local Network Access for this site in Chrome, then check again. No page content has been shared."
-        : "Start the local broker on this device, then check again. No page content has been shared.";
+        : `No compatible broker responded on port ${port}. Check the port or start the local broker, then try again. No page content has been shared.`;
       guidance.textContent = brokerGuidance;
       render();
       return { ok: false, code: brokerCode };
@@ -3606,6 +3625,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       overflowButton.setAttribute("aria-expanded", "false");
     }
   }
+  function onDrawerPointerDown() { drawer.dataset.focusModality = "pointer"; }
+  function onDrawerKeyDown() { drawer.dataset.focusModality = "keyboard"; }
+  drawer.addEventListener("pointerdown", onDrawerPointerDown);
+  drawer.addEventListener("keydown", onDrawerKeyDown);
   doc.addEventListener("pointerdown", onOverflowOutsidePointerDown);
   doc.addEventListener("keydown", onKeydown);
   function onKeydown(event) {
@@ -3688,6 +3711,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       for (const owned of controllers.values()) owned.transport.close();
       doc.removeEventListener("keydown", onKeydown);
       doc.removeEventListener("pointerdown", onOverflowOutsidePointerDown);
+      drawer.removeEventListener("pointerdown", onDrawerPointerDown);
+      drawer.removeEventListener("keydown", onDrawerKeyDown);
       doc.defaultView?.removeEventListener("resize", onViewportResize);
       separator.removeEventListener("pointerdown", onPointerDown);
       separator.removeEventListener("pointermove", onPointerMove);

@@ -188,14 +188,59 @@ test("adds a rendered raster as a private inline image reference", async ({ cont
   expect(submit.payload.content.parts[0].reference).toMatchObject({ kind: "image", visual: { name: "image-1.png", alt: "Architecture" } });
 });
 
+test("keeps header pointer focus borderless while retaining keyboard focus", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Header focus\n", creatorContext: "Focus context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  const provider = page.getByLabel("Conversation provider");
+  await provider.click();
+  expect(await provider.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+  await page.keyboard.press("Tab");
+  const focused = page.locator(":focus");
+  expect(await focused.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
+});
+
+test("shows connection recheck success and an explicit wrong-port failure in settings", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Connection feedback\n", creatorContext: "Connection context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Connection settings" }).click();
+  const check = page.locator(".agent-settings button");
+  await check.click();
+  await expect(check).toHaveText("Broker available ✓");
+  await expect(page.locator(".agent-guidance")).toContainText("local broker is available");
+  const portInput = page.getByLabel("Local agent broker port");
+  await portInput.click();
+  expect(await portInput.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+  await portInput.fill("1");
+  await portInput.press("Tab");
+  await expect(check).toHaveText("No broker on port 1 ✕");
+  await check.click();
+  expect(await check.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+  await expect(page.locator(".agent-guidance")).toContainText("No compatible broker responded on port 1");
+});
+
 test("invokes Codex skills and compacts without queueing a busy draft", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex skills and compact\n", creatorContext: "Codex feature context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
   await connectSidebar(page, "codex");
   const composer = page.getByLabel("Message Codex about this whiteboard");
 
-  await composer.fill("$rev");
+  await composer.fill("$");
   const suggestions = page.getByRole("listbox", { name: "Composer suggestions" });
   await expect(suggestions).toContainText("Review helper");
+  await expect(suggestions).toContainText("Personal helper with an intentionally long name");
+  await expect(suggestions.getByText("User", { exact: true })).toBeVisible();
+  const longSkill = suggestions.locator(".agent-completion-option").filter({ hasText: "Personal helper" });
+  const longSkillBox = await longSkill.boundingBox();
+  const longSkillScrollWidth = await longSkill.evaluate((element) => element.scrollWidth);
+  expect(longSkillBox).not.toBeNull();
+  expect(longSkillScrollWidth).toBeLessThanOrEqual(Math.ceil(longSkillBox.width));
+  const suggestionsBox = await suggestions.boundingBox();
+  const composerBox = await page.locator(".agent-composer").boundingBox();
+  expect(suggestionsBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(suggestionsBox.y + suggestionsBox.height).toBeLessThanOrEqual(composerBox.y);
+  await composer.fill("$rev");
+  await expect(suggestions).not.toContainText("Personal helper");
   await composer.press("Enter");
   await expect(composer.locator(".agent-message-skill")).toHaveText("$review-helper");
   await composer.press("End");
@@ -207,6 +252,10 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   expect(JSON.stringify(skillSubmit)).not.toMatch(/\/Users\/|SKILL\.md/u);
 
   await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+  await composer.fill("/co");
+  await expect(suggestions).toContainText("/compact");
+  await composer.fill("/nope");
+  await expect(suggestions).toBeHidden();
   await composer.fill("/compact");
   await composer.press("Enter");
   await expect(page.locator(".agent-compaction-row")).toHaveText("Compacting context…");

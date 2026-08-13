@@ -528,7 +528,10 @@ function createSidebarBroker(initialAllowedOrigin) {
       activeTurn: null,
       activeCompact: null,
       skillsState: provider === "codex" ? "ready" : null,
-      skills: provider === "codex" ? [{ id: protocolID(230), name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" }] : [],
+      skills: provider === "codex" ? [
+        { id: protocolID(230), name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" },
+        { id: protocolID(231), name: "personal-helper-with-an-intentionally-long-name-for-narrow-layout", display_name: "Personal helper with an intentionally long name for narrow layout", description: "Use a personally installed skill with a long description that must remain contained in the compact row", scope: "user" },
+      ] : [],
       supportsCompact: provider === "codex",
       pendingResponse: null,
       queue: [],
