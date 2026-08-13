@@ -31,6 +31,8 @@ const (
 	EventInteractionRequest  EventType = "interaction_request"
 	EventInteractionResolved EventType = "interaction_resolved"
 	EventSettings            EventType = "settings"
+	EventSkillCatalog        EventType = "skill_catalog"
+	EventCompaction          EventType = "compaction"
 )
 
 type LifecycleState string
@@ -39,6 +41,7 @@ const (
 	LifecycleConnecting  LifecycleState = "connecting"
 	LifecycleReady       LifecycleState = "ready"
 	LifecycleResponding  LifecycleState = "responding"
+	LifecycleCompacting  LifecycleState = "compacting"
 	LifecycleInterrupted LifecycleState = "interrupted"
 	LifecycleUnavailable LifecycleState = "unavailable"
 )
@@ -160,16 +163,26 @@ type SnapshotPayload struct {
 	Lifecycle         LifecycleState              `json:"lifecycle"`
 	Queue             []QueueItem                 `json:"queue"`
 	ContextState      ContextState                `json:"context_state"`
-	ActiveTurnID      *string                     `json:"active_turn_id"`
+	ActiveWork        *ActiveWork                 `json:"active_work"`
 	SupportsImages    bool                        `json:"supports_images"`
 	SettingsState     *SettingsState              `json:"settings_state"`
 	EffectiveSettings *PresentedExecutionSettings `json:"effective_settings"`
 	Catalog           []CatalogModel              `json:"catalog"`
+	SkillsState       *SkillsState                `json:"skills_state"`
+	Skills            []SkillDescriptor           `json:"skills"`
+	SupportsCompact   bool                        `json:"supports_compact"`
 }
 
 func (SnapshotPayload) EventType() EventType { return EventSnapshot }
 func (p SnapshotPayload) validate() error {
-	if p.Queue == nil || !validLifecycle(p.Lifecycle) || !validContextState(p.ContextState) || !validActiveTurn(p.Lifecycle, p.ActiveTurnID) || validateSettingsSnapshot(p.SettingsState, p.EffectiveSettings, p.Catalog) != nil {
+	if p.Queue == nil || p.Skills == nil || !validLifecycle(p.Lifecycle) || !validContextState(p.ContextState) || !validActiveWork(p.Lifecycle, p.ActiveWork) || validateSettingsSnapshot(p.SettingsState, p.EffectiveSettings, p.Catalog) != nil {
+		return invalid(nil)
+	}
+	if p.SkillsState == nil {
+		if len(p.Skills) != 0 {
+			return invalid(nil)
+		}
+	} else if validateSkillCatalog(*p.SkillsState, p.Skills) != nil {
 		return invalid(nil)
 	}
 	if p.EffectiveSettings != nil {
@@ -178,6 +191,22 @@ func (p SnapshotPayload) validate() error {
 		}
 	}
 	return ValidateQueue(p.Queue)
+}
+
+func (p SnapshotPayload) ValidateForProvider(provider ProviderName) error {
+	if !provider.Valid() || p.validate() != nil {
+		return invalid(nil)
+	}
+	if provider == ProviderPi {
+		if p.SkillsState != nil || len(p.Skills) != 0 || p.SupportsCompact || p.ActiveWork != nil && p.ActiveWork.Kind == ActiveWorkCompact || p.Lifecycle == LifecycleCompacting {
+			return invalid(nil)
+		}
+		return nil
+	}
+	if p.SkillsState == nil {
+		return invalid(nil)
+	}
+	return nil
 }
 
 type CommandResultPayload struct {
@@ -315,13 +344,13 @@ func (p QueuePayload) validate() error {
 }
 
 type LifecyclePayload struct {
-	State  LifecycleState `json:"state"`
-	TurnID *string        `json:"turn_id"`
+	State      LifecycleState `json:"state"`
+	ActiveWork *ActiveWork    `json:"active_work"`
 }
 
 func (LifecyclePayload) EventType() EventType { return EventLifecycle }
 func (p LifecyclePayload) validate() error {
-	if !validLifecycle(p.State) || !validActiveTurn(p.State, p.TurnID) {
+	if !validLifecycle(p.State) || !validActiveWork(p.State, p.ActiveWork) {
 		return invalid(nil)
 	}
 	return nil
@@ -361,6 +390,29 @@ func (p SettingsPayload) validate() error {
 		return nil
 	}
 	if p.EffectiveSettings != nil || p.AcceptedTurnID != nil {
+		return invalid(nil)
+	}
+	return nil
+}
+
+type SkillCatalogPayload struct {
+	State  SkillsState       `json:"state"`
+	Skills []SkillDescriptor `json:"skills"`
+}
+
+func (SkillCatalogPayload) EventType() EventType { return EventSkillCatalog }
+func (p SkillCatalogPayload) validate() error {
+	return validateSkillCatalog(p.State, p.Skills)
+}
+
+type CompactionPayload struct {
+	WorkID string           `json:"work_id"`
+	Status CompactionStatus `json:"status"`
+}
+
+func (CompactionPayload) EventType() EventType { return EventCompaction }
+func (p CompactionPayload) validate() error {
+	if !validID(p.WorkID) || !p.Status.valid() {
 		return invalid(nil)
 	}
 	return nil
@@ -543,7 +595,8 @@ func DecodeEvent(data []byte) (Event, error) {
 		return Event{}, ErrMessageTooLarge
 	}
 	nullable := map[string]bool{
-		"payload.active_turn_id":      true,
+		"payload.active_work":         true,
+		"payload.skills_state":        true,
 		"payload.settings_state":      true,
 		"payload.effective_settings":  true,
 		"payload.accepted_turn_id":    true,
@@ -583,7 +636,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	var required []string
 	switch kind {
 	case EventSnapshot:
-		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_turn_id", "supports_images", "settings_state", "effective_settings", "catalog"}
+		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_work", "supports_images", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "supports_compact"}
 	case EventCommandResult:
 		target, required = &CommandResultPayload{}, []string{"command_id", "status"}
 	case EventTimeline:
@@ -599,11 +652,15 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	case EventQueue:
 		target, required = &QueuePayload{}, []string{"items"}
 	case EventLifecycle:
-		target, required = &LifecyclePayload{}, []string{"state", "turn_id"}
+		target, required = &LifecyclePayload{}, []string{"state", "active_work"}
 	case EventProvider:
 		target, required = &ProviderPayload{}, []string{"provider", "state", "supports_images"}
 	case EventSettings:
 		target, required = &SettingsPayload{}, []string{"settings_state", "effective_settings", "catalog", "accepted_turn_id"}
+	case EventSkillCatalog:
+		target, required = &SkillCatalogPayload{}, []string{"state", "skills"}
+	case EventCompaction:
+		target, required = &CompactionPayload{}, []string{"work_id", "status"}
 	case EventContext:
 		target, required = &ContextPayload{}, []string{"digest", "state"}
 	case EventActivity:
@@ -655,6 +712,10 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	case *ProviderPayload:
 		return *value, nil
 	case *SettingsPayload:
+		return *value, nil
+	case *SkillCatalogPayload:
+		return *value, nil
+	case *CompactionPayload:
 		return *value, nil
 	case *ContextPayload:
 		return *value, nil
@@ -752,7 +813,7 @@ func ValidateReplay(events []Event) error {
 }
 
 func validLifecycle(value LifecycleState) bool {
-	return value == LifecycleConnecting || value == LifecycleReady || value == LifecycleResponding || value == LifecycleInterrupted || value == LifecycleUnavailable
+	return value == LifecycleConnecting || value == LifecycleReady || value == LifecycleResponding || value == LifecycleCompacting || value == LifecycleInterrupted || value == LifecycleUnavailable
 }
 func validContextState(value ContextState) bool {
 	return value == ContextPending || value == ContextAccepted || value == ContextUnchanged || value == ContextUnavailable
@@ -795,10 +856,4 @@ func validArchiveItem(item ArchiveItem) bool {
 }
 func validCursor(cursor *string) bool {
 	return cursor == nil || validID(*cursor)
-}
-func validActiveTurn(lifecycle LifecycleState, turnID *string) bool {
-	if lifecycle == LifecycleResponding {
-		return turnID != nil && validID(*turnID)
-	}
-	return turnID == nil
 }

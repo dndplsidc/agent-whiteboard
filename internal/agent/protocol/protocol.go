@@ -80,6 +80,7 @@ type CommandType string
 const (
 	CommandConnect            CommandType = "connect"
 	CommandSubmit             CommandType = "submit"
+	CommandCompact            CommandType = "compact"
 	CommandQueueEdit          CommandType = "queue_edit"
 	CommandQueueRemove        CommandType = "queue_remove"
 	CommandInterrupt          CommandType = "interrupt"
@@ -187,6 +188,18 @@ type TurnReferencePayload struct {
 }
 
 func (TurnReferencePayload) commandPayload() {}
+
+type WorkReferencePayload struct {
+	WorkID string `json:"work_id"`
+}
+
+func (WorkReferencePayload) commandPayload() {}
+
+type CompactPayload struct {
+	WorkID string `json:"work_id"`
+}
+
+func (CompactPayload) commandPayload() {}
 
 type NewPayload struct {
 	Settings *ExecutionSettings `json:"settings"`
@@ -312,11 +325,15 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 		target, required = &ConnectPayload{}, []string{"provider", "resource", "context_digest", "settings"}
 	case CommandSubmit:
 		target, required = &SubmitPayload{}, []string{"turn_id", "message_id", "content", "settings"}
+	case CommandCompact:
+		target, required = &CompactPayload{}, []string{"work_id"}
 	case CommandQueueEdit:
 		target, required = &QueueEditPayload{}, []string{"message_id", "content"}
 	case CommandQueueRemove:
 		target, required = &MessageReferencePayload{}, []string{"message_id"}
-	case CommandInterrupt, CommandRetry:
+	case CommandInterrupt:
+		target, required = &WorkReferencePayload{}, []string{"work_id"}
+	case CommandRetry:
 		target, required = &TurnReferencePayload{}, []string{"turn_id"}
 	case CommandNew:
 		target, required = &NewPayload{}, []string{"settings"}
@@ -342,11 +359,15 @@ func decodeCommandPayload(kind CommandType, raw json.RawMessage) (CommandPayload
 		return *value, nil
 	case *SubmitPayload:
 		return *value, nil
+	case *CompactPayload:
+		return *value, nil
 	case *QueueEditPayload:
 		return *value, nil
 	case *MessageReferencePayload:
 		return *value, nil
 	case *TurnReferencePayload:
+		return *value, nil
+	case *WorkReferencePayload:
 		return *value, nil
 	case *NewPayload:
 		return *value, nil
@@ -387,6 +408,10 @@ func validateCommand(command Command) error {
 		if payload.Context != nil && validatePageContext(*payload.Context) != nil {
 			return invalid(nil)
 		}
+	case CompactPayload:
+		if command.Type != CommandCompact || !validID(payload.WorkID) {
+			return invalid(nil)
+		}
 	case QueueEditPayload:
 		if command.Type != CommandQueueEdit || !validID(payload.MessageID) || payload.Content.ValidateCommand() != nil {
 			return invalid(nil)
@@ -396,7 +421,11 @@ func validateCommand(command Command) error {
 			return invalid(nil)
 		}
 	case TurnReferencePayload:
-		if (command.Type != CommandInterrupt && command.Type != CommandRetry) || !validID(payload.TurnID) {
+		if command.Type != CommandRetry || !validID(payload.TurnID) {
+			return invalid(nil)
+		}
+	case WorkReferencePayload:
+		if command.Type != CommandInterrupt || !validID(payload.WorkID) {
 			return invalid(nil)
 		}
 	case NewPayload:

@@ -76,6 +76,8 @@ const (
 	ErrorImageTurnLimit            ProviderErrorCode = "image_turn_limit"
 	ErrorImageMissing              ProviderErrorCode = "image_missing"
 	ErrorImageStorageFailure       ProviderErrorCode = "image_storage_failure"
+	ErrorSkillUnavailable          ProviderErrorCode = "skill_unavailable"
+	ErrorCompactUnsupported        ProviderErrorCode = "compact_unsupported"
 )
 
 var providerErrorMessages = map[ProviderErrorCode]string{
@@ -100,6 +102,8 @@ var providerErrorMessages = map[ProviderErrorCode]string{
 	ErrorImageTurnLimit:            "The turn exceeds the image input limit.",
 	ErrorImageMissing:              "The image input is no longer available.",
 	ErrorImageStorageFailure:       "The image input could not be read safely.",
+	ErrorSkillUnavailable:          "The selected skill is no longer available. Refresh the skill catalog and try again.",
+	ErrorCompactUnsupported:        "Manual context compaction is unavailable for this provider runtime.",
 }
 
 // ProviderError is a closed, provider-neutral failure. It intentionally carries
@@ -129,7 +133,7 @@ func AllProviderErrorCodes() []ProviderErrorCode {
 		ErrorNoUsableModel, ErrorContentOnlyUnavailable, ErrorProtocolIncompatible, ErrorProtocolFailure, ErrorMalformedStream,
 		ErrorChildExited, ErrorNativeSessionMissing, ErrorContextTooLarge, ErrorAcceptanceUnknown,
 		ErrorInvalidModelConfiguration, ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
-		ErrorImageMissing, ErrorImageStorageFailure,
+		ErrorImageMissing, ErrorImageStorageFailure, ErrorSkillUnavailable, ErrorCompactUnsupported,
 	}
 }
 
@@ -599,6 +603,8 @@ const (
 	EventInteractionRequest  EventKind = "interaction_request"
 	EventInteractionResolved EventKind = "interaction_resolved"
 	EventSettings            EventKind = "settings"
+	EventSkillCatalog        EventKind = "skill_catalog"
+	EventCompact             EventKind = "compact"
 	EventBlocked             EventKind = "blocked"
 	EventCompletion          EventKind = "completion"
 	EventInterruption        EventKind = "interruption"
@@ -657,6 +663,8 @@ type Event struct {
 	SettingsState SettingsState
 	Settings      *ExecutionSettings
 	Presentation  *ModelPresentation
+	SkillCatalog  *SkillCatalog
+	Compact       *CompactResult
 }
 
 func NewUserMessageEvent(turnID, messageID string, content MessageContent, at time.Time) Event {
@@ -691,6 +699,14 @@ func NewVerifiedSettingsEvent(turnID string, settings ExecutionSettings, present
 func NewUnverifiedSettingsEvent(turnID string) Event {
 	return Event{Kind: EventSettings, TurnID: turnID, SettingsState: SettingsUnverified}
 }
+func NewSkillCatalogEvent(catalog SkillCatalog) Event {
+	cloned := catalog.Clone()
+	return Event{Kind: EventSkillCatalog, SkillCatalog: &cloned}
+}
+func NewCompactEvent(workID string, status CompactStatus) Event {
+	result := CompactResult{WorkID: workID, Status: status}
+	return Event{Kind: EventCompact, Compact: &result}
+}
 func NewBlockedEvent(turnID string, kind BlockedKind) Event {
 	return Event{Kind: EventBlocked, TurnID: turnID, Blocked: kind, Text: blockedMessage(kind)}
 }
@@ -706,7 +722,13 @@ func (e Event) Validate() error {
 	if e.Kind != EventSettings && settingsStructured {
 		return errors.New("provider settings fields on non-settings event")
 	}
-	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil || settingsStructured || e.Kind != EventUserMessage && !e.Content.Empty()
+	if e.Kind != EventSkillCatalog && e.SkillCatalog != nil {
+		return errors.New("provider skill catalog on unrelated event")
+	}
+	if e.Kind != EventCompact && e.Compact != nil {
+		return errors.New("provider compact result on unrelated event")
+	}
+	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil || settingsStructured || e.SkillCatalog != nil || e.Compact != nil || e.Kind != EventUserMessage && !e.Content.Empty()
 	switch e.Kind {
 	case EventUserMessage:
 		if structured || !validID(e.TurnID) || !validID(e.MessageID) || e.Text != "" || e.Content.Validate() != nil || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
@@ -753,6 +775,14 @@ func (e Event) Validate() error {
 			}
 		} else if e.Settings != nil || e.Presentation != nil {
 			return errors.New("invalid unverified provider settings event")
+		}
+	case EventSkillCatalog:
+		if e.SkillCatalog == nil || e.SkillCatalog.Validate() != nil || e.Compact != nil || e.Tool != nil || e.Interaction != nil || e.Resolution != nil || e.TurnID != "" || e.MessageID != "" || e.Text != "" || !e.Content.Empty() || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+			return errors.New("invalid provider skill catalog event")
+		}
+	case EventCompact:
+		if e.Compact == nil || e.Compact.Validate() != nil || e.SkillCatalog != nil || e.Tool != nil || e.Interaction != nil || e.Resolution != nil || e.TurnID != "" || e.MessageID != "" || e.Text != "" || !e.Content.Empty() || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+			return errors.New("invalid provider compact event")
 		}
 	case EventCompletion:
 		if structured || !validID(e.TurnID) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
