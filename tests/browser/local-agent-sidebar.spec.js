@@ -3,6 +3,7 @@ import { expect, test } from "./fixture.js";
 const drawerKey = "agent-whiteboard-agent-drawer-open";
 const portKey = "agent-whiteboard-agent-port";
 const widthKey = "agent-whiteboard-agent-drawer-width";
+const codexSettingsKey = "agent-whiteboard-codex-settings-v1";
 
 test.use({ browserRequestInterception: false, ignoreHTTPSErrors: true });
 
@@ -23,9 +24,9 @@ async function openSidebarPage({ context, page, fixture, markdown, creatorContex
   return resource;
 }
 
-async function connectSidebar(page, provider = "pi") {
+async function connectSidebar(page, provider = "pi", expectedModel = null) {
   const providerName = provider === "codex" ? "Codex" : "Pi";
-  const model = provider === "codex" ? "fixture-codex-model" : "fixture-model";
+  const model = expectedModel ?? (provider === "codex" ? "5.6 Sol" : "fixture-model");
   const launcher = page.getByRole("button", { name: "Open Page agent", exact: true });
   if (await launcher.isVisible()) await launcher.click();
   await page.getByRole("button", { name: `Connect to ${providerName}`, exact: true }).click();
@@ -97,7 +98,12 @@ test("adds multiple document selections inline with surrounding message text", a
   await expect(popup).toBeVisible();
   await popup.click();
   const composer = page.getByLabel("Message Pi about this whiteboard");
+  const toast = page.locator(".agent-toast");
   await expect(composer.locator(".agent-message-reference")).toHaveCount(1);
+  await expect(page.locator(".agent-attachment-status")).toBeEmpty();
+  await expect(toast).toContainText(/Added .* to the message/u);
+  await expect(toast).toBeVisible();
+  await expect(toast).toBeHidden({ timeout: 4_000 });
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
   await composer.press("End");
@@ -122,6 +128,40 @@ test("adds multiple document selections inline with surrounding message text", a
   expect(submit.payload.content.parts.map((part) => part.type)).toEqual(["reference", "text", "reference", "text"]);
   expect(submit.payload.content.parts[0].reference).toMatchObject({ kind: "text", quote: "first selected sentence" });
   expect(submit.payload.content.parts[2].reference).toMatchObject({ kind: "section", label: "Evidence" });
+});
+
+test("ellipsizes a long page reference inside the composer", async ({ context, page, localAgentSidebar }) => {
+  const title = "A deliberately long whiteboard heading that must stay inside the compact message composer";
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: `# ${title}\n\nReference token overflow regression.\n`,
+    creatorContext: "Long page-reference context.\n",
+  });
+  await connectSidebar(page);
+  const heading = page.locator("#agent-whiteboard-content h1");
+  await heading.hover();
+  await heading.getByRole("button", { name: `Add page: ${title}` }).click();
+
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  const token = composer.locator(".agent-message-reference");
+  const label = token.locator(".agent-message-reference-label");
+  await expect(token).toHaveCount(1);
+  await expect(label).toHaveText(title);
+  const metrics = await label.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    overflow: getComputedStyle(element).overflow,
+    textOverflow: getComputedStyle(element).textOverflow,
+    whiteSpace: getComputedStyle(element).whiteSpace,
+  }));
+  expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
+  expect(metrics).toMatchObject({ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+  const [composerBox, tokenBox] = await Promise.all([composer.boundingBox(), token.boundingBox()]);
+  expect(tokenBox.x + tokenBox.width).toBeLessThanOrEqual(composerBox.x + composerBox.width);
+  expect(tokenBox.width).toBeLessThanOrEqual(196);
+  expect(tokenBox.height).toBeLessThanOrEqual(20);
 });
 
 test("adds a rendered raster as a private inline image reference", async ({ context, page, localAgentSidebar }) => {
@@ -436,11 +476,40 @@ test("picks and pastes multiple images with previews, retry, queue, and styled f
   expect(submits[1].payload).toMatchObject({ content: { parts: [{ type: "text", text: "Queued with a pasted image." }] }, images: [{ name: "paste.webp" }] });
 });
 
+test("keeps assistant Markdown emphasis inline and separate from the author label", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: "# Inline assistant Markdown\n",
+    creatorContext: "Assistant Markdown structure context.\n",
+  });
+  localAgentSidebar.setResponseText("This uses **Page agent**, **Pi**, and **Codex** inline.\n\n```go\nfunc ready() bool { return true }\n```");
+  await connectSidebar(page);
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  await composer.fill("Render inline emphasis.");
+  await composer.press("Enter");
+
+  const assistant = page.locator(".agent-message-assistant").last();
+  const author = assistant.locator(":scope > .agent-message-author");
+  const emphasis = assistant.locator(".agent-message-body strong");
+  await expect(author).toHaveText("Pi");
+  await expect(emphasis).toHaveText(["Page agent", "Pi", "Codex"]);
+  await expect(author).toHaveCSS("display", "block");
+  for (const element of await emphasis.all()) await expect(element).toHaveCSS("display", "inline");
+  await expect(assistant.locator(".agent-message-body")).toContainText("This uses Page agent, Pi, and Codex inline.");
+  const code = assistant.locator("pre code.language-go");
+  await expect(code).toHaveClass(/hljs/u);
+  await expect(code.locator(".hljs-keyword").first()).toContainText("func");
+});
+
 test("explains when the selected model cannot accept images", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Text model\n", creatorContext: "Text only.\n" });
   localAgentSidebar.setSupportsImages("pi", false);
   await connectSidebar(page);
   const imageButton = page.getByRole("button", { name: "Add images" });
+  await expect(imageButton.locator("svg")).toHaveCount(1);
+  await expect(imageButton.locator("svg")).toHaveAttribute("aria-hidden", "true");
   await expect(imageButton).toBeDisabled();
   await expect(imageButton).toHaveAttribute("title", /does not support image input/u);
 });
@@ -461,8 +530,25 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
   await composer.fill("Stream this response.");
   await composer.press("Enter");
   await expect(page.locator(".agent-response-loading")).toHaveAccessibleName("Pi is responding");
-  await expect(page.locator(".agent-response-dot")).toHaveCount(3);
-  await expect(page.locator(".agent-response-dot").first()).not.toHaveCSS("animation-name", "none");
+  const responseDots = page.locator(".agent-response-dot");
+  await expect(responseDots).toHaveCount(3);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(responseDots.first()).toHaveCSS("animation-name", "agent-response-dance");
+  const dotMotion = await responseDots.first().evaluate((element) => element.getAnimations()[0].effect.getKeyframes().map(({ transform }) => new DOMMatrixReadOnly(transform).m42));
+  expect(Math.min(...dotMotion)).toBeLessThan(-1);
+  expect(Math.max(...dotMotion)).toBeGreaterThan(1);
+  await expect(responseDots.nth(1)).toHaveCSS("animation-delay", "-0.16s");
+  await expect(responseDots.nth(2)).toHaveCSS("animation-delay", "-0.32s");
+  const sampledMotion = await responseDots.evaluateAll(async (elements) => {
+    const samples = elements.map(() => []);
+    for (let frame = 0; frame < 18; frame += 1) {
+      elements.forEach((element, index) => samples[index].push(element.getBoundingClientRect().y));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    return samples.map((values) => Math.max(...values) - Math.min(...values));
+  });
+  expect(sampledMotion.every((distance) => distance > 3)).toBe(true);
+  await expect(page.locator(".agent-response-text")).toHaveCSS("margin-right", "8px");
   await expect(page.locator(".agent-live-status")).toHaveText("Responding");
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
 
@@ -610,7 +696,7 @@ test("switches providers silently and isolates active Pi and Codex conversations
   await expect(page.locator(".agent-timeline")).not.toContainText("Keep the Codex turn active.");
 
   await page.getByLabel("Conversation provider").selectOption("codex");
-  await expect(page.locator(".agent-provider-label")).toContainText("fixture-codex-model");
+  await expect(page.locator(".agent-provider-label")).toContainText("5.6 Sol");
   await expect(page.locator(".agent-message-user")).toContainText("Keep the Codex turn active.");
   await expect(page.locator(".agent-timeline")).not.toContainText("Answer only in the Pi conversation.");
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
@@ -622,6 +708,236 @@ test("switches providers silently and isolates active Pi and Codex conversations
   const codexSubmit = commands.find((command) => command.type === "submit" && commandText(command).includes("Codex"));
   const piSubmit = commands.find((command) => command.type === "submit" && commandText(command).includes("Pi"));
   expect(codexSubmit.conversation_id).not.toBe(piSubmit.conversation_id);
+});
+
+test("uses accessible Codex model controls and captures accepted exact settings", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex controls\n", creatorContext: "Model controls context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+
+  const pill = page.locator(".agent-model-pill");
+  await expect(pill).toHaveAccessibleName("Model 5.6 Sol, effort High, speed Fast");
+  await expect(pill.locator(".agent-model-pill-fast")).toHaveText("⚡");
+  await pill.focus();
+  await pill.press("Enter");
+  const menu = page.locator(".agent-model-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu.locator('[data-settings-section="model"]')).toBeFocused();
+  await menu.locator('[data-settings-section="model"]').press("ArrowRight");
+  const luna = menu.locator('[data-settings-value="gpt-5.6-luna"]');
+  await expect(luna).toHaveAttribute("aria-disabled", "true");
+  await expect(luna).toContainText("Choose a supported effort and Standard speed first.");
+  await menu.press("Escape");
+  await expect(pill).toBeFocused();
+
+  await pill.click();
+  await menu.locator('[data-settings-section="effort"]').click();
+  await menu.locator('[data-settings-value="xhigh"]').click();
+  await menu.locator('[data-settings-section="speed"]').click();
+  await menu.locator('[data-settings-value="standard"]').click();
+  await expect(pill).toHaveAccessibleName("Model 5.6 Sol, effort Extra high, speed Standard");
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+  await composer.fill("Accept this tuple.");
+  await composer.press("Enter");
+
+  await expect.poll(() => localAgentSidebar.acceptedSettings()).toEqual([{
+    turn_id: expect.any(String),
+    settings: { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" },
+  }]);
+  expect(parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit")?.payload.settings).toEqual({ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" });
+  await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key)), codexSettingsKey)).toEqual({ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" });
+});
+
+test("keeps queued Codex settings immutable and preserves a rejected draft", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex queue\n", creatorContext: "Queue settings context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  localAgentSidebar.setHoldResponses(true, "codex");
+  await connectSidebar(page, "codex");
+  const pill = page.locator(".agent-model-pill");
+  const menu = page.locator(".agent-model-menu");
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+
+  await composer.fill("Active fast turn.");
+  await composer.press("Enter");
+  await pill.click();
+  await menu.locator('[data-settings-section="speed"]').click();
+  await menu.locator('[data-settings-value="standard"]').click();
+  await composer.fill("Queued standard turn.");
+  await composer.press("Enter");
+  if (await menu.isVisible()) await menu.press("Escape");
+  await pill.click();
+  await menu.locator('[data-settings-section="effort"]').click();
+  await menu.locator('[data-settings-value="xhigh"]').click();
+  await composer.fill("Queued xhigh turn.");
+  await composer.press("Enter");
+
+  await expect(page.locator(".agent-queue-settings")).toHaveText([
+    "5.6 Sol · High · Standard",
+    "5.6 Sol · Extra high · Standard",
+  ]);
+  const submits = parsedCommands(localAgentSidebar.brokerRequests).filter((command) => command.type === "submit");
+  expect(submits.map(({ payload }) => payload.settings)).toEqual([
+    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
+    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
+    { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" },
+  ]);
+
+  localAgentSidebar.preparePendingResponse("codex");
+  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
+  localAgentSidebar.releaseResponsePhase("later_delta", "codex");
+  localAgentSidebar.releaseResponsePhase("completion", "codex");
+  await expect.poll(() => localAgentSidebar.acceptedSettings().map(({ settings }) => settings)).toEqual([
+    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
+    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
+  ]);
+  await expect(page.locator(".agent-queue-settings")).toHaveText(["5.6 Sol · Extra high · Standard"]);
+  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
+  localAgentSidebar.releaseResponsePhase("later_delta", "codex");
+  localAgentSidebar.releaseResponsePhase("completion", "codex");
+  await expect.poll(() => localAgentSidebar.acceptedSettings().map(({ settings }) => settings)).toEqual([
+    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
+    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
+    { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" },
+  ]);
+
+  localAgentSidebar.rejectNextSettings();
+  await composer.fill("Keep this rejected draft.");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-activity-error")).toContainText("The selected model settings are no longer available.");
+  await expect(composer).toHaveText("Keep this rejected draft.");
+  await expect(pill).toBeEnabled();
+  await expect(pill).toHaveAccessibleName("Model 5.6 Sol, effort Extra high, speed Standard");
+  if (await menu.isVisible()) await menu.press("Escape");
+  await pill.click();
+  await menu.locator('[data-settings-section="model"]').click();
+  await expect(menu.locator('[data-settings-value="gpt-5.6-nova"]')).toBeVisible();
+  await expect(menu.locator('[data-settings-value="gpt-5.6-nova"]')).toContainText("Choose a supported effort first.");
+});
+
+test("uses the visible Codex pill for New without updating accepted preference", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex New\n", creatorContext: "New conversation context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+  const pill = page.locator(".agent-model-pill");
+  const menu = page.locator(".agent-model-menu");
+  await pill.click();
+  await menu.locator('[data-settings-section="effort"]').click();
+  await menu.locator('[data-settings-value="xhigh"]').click();
+  await menu.locator('[data-settings-section="speed"]').click();
+  await menu.locator('[data-settings-value="standard"]').click();
+  await menu.press("Escape");
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("menuitem", { name: "New conversation" }).click();
+  await expect.poll(() => localAgentSidebar.createdSettings()).toEqual([{ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" }]);
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected", { timeout: 5_000 });
+  await expect(page.locator(".agent-provider-label")).toContainText("5.6 Sol");
+  await expect(page.locator(".agent-model-pill")).toHaveAccessibleName("Model 5.6 Sol, effort Extra high, speed Standard");
+  const connects = parsedCommands(localAgentSidebar.brokerRequests).filter((command) => command.type === "connect" && command.payload.provider === "codex");
+  expect(connects.at(-1).conversation_id).toBeNull();
+  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), codexSettingsKey)).toBeNull();
+});
+
+test("discards an unsent Codex draft on reload", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex reload\n", creatorContext: "Reload context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+  const pill = page.locator(".agent-model-pill");
+  const menu = page.locator(".agent-model-menu");
+  await pill.click();
+  await menu.locator('[data-settings-section="speed"]').click();
+  await menu.locator('[data-settings-value="standard"]').click();
+  await expect(pill).toHaveAccessibleName("Model 5.6 Sol, effort High, speed Standard");
+  await page.reload();
+  await expect(page.locator(".agent-live-status")).toHaveText("Codex ready");
+  await connectSidebar(page, "codex");
+  await expect(page.locator(".agent-model-pill")).toHaveAccessibleName("Model 5.6 Sol, effort High, speed Fast");
+  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), codexSettingsKey)).toBeNull();
+});
+
+test("synchronizes accepted Codex settings across tabs without overwriting a later draft", async ({ context, page, localAgentSidebar }) => {
+  const resource = await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex tabs\n", creatorContext: "Cross-tab settings context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+  const otherPage = await context.newPage();
+  await otherPage.goto(resource.url);
+  await expect(otherPage.locator(".agent-live-status")).toHaveText("Codex ready");
+  await connectSidebar(otherPage, "codex");
+
+  const otherPill = otherPage.locator(".agent-model-pill");
+  const otherMenu = otherPage.locator(".agent-model-menu");
+  await otherPill.click();
+  await otherMenu.locator('[data-settings-section="speed"]').click();
+  await otherMenu.locator('[data-settings-value="standard"]').click();
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+  await composer.fill("Accept fast in both tabs.");
+  await composer.press("Enter");
+  await expect(otherPill).toHaveAccessibleName("Model 5.6 Sol, effort High, speed Standard");
+  await expect.poll(() => otherPage.evaluate((key) => JSON.parse(localStorage.getItem(key)), codexSettingsKey)).toEqual({ model: "gpt-5.6-sol", effort: "high", speed: "fast" });
+  await otherPage.close();
+});
+
+test("applies accepted browser preference only to a new Codex mapping", async ({ context, page, localAgentSidebar }) => {
+  const preference = JSON.stringify({ model: "gpt-5.6-luna", effort: "medium", speed: "standard" });
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: "# Codex preference\n",
+    creatorContext: "Preference context.\n",
+    preferences: { [codexSettingsKey]: preference },
+  });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+  await expect(page.locator(".agent-model-pill")).toHaveAccessibleName("Model 5.6 Sol, effort High, speed Fast");
+  expect(parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "connect")?.payload.settings).toEqual({ model: "gpt-5.6-luna", effort: "medium", speed: "standard" });
+
+  localAgentSidebar.restoreSettings({ model: "gpt-5.6-luna", effort: "medium", speed: "standard" });
+  await expect(page.locator(".agent-model-pill")).toHaveAccessibleName("Model 5.6 Luna, effort Medium, speed Standard");
+  await expect(page.getByRole("button", { name: "Add images" })).toBeDisabled();
+  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), codexSettingsKey)).toBe(preference);
+
+  const newResource = await localAgentSidebar.publish("# New Codex mapping\n", "New mapping context.\n");
+  localAgentSidebar.resetBrokerRequests();
+  localAgentSidebar.resetBrokerState();
+  localAgentSidebar.setNewMapping();
+  const otherPage = await context.newPage();
+  await otherPage.goto(newResource.url);
+  await expect(otherPage.locator(".agent-live-status")).toHaveText("Codex ready");
+  await connectSidebar(otherPage, "codex", "5.6 Luna");
+  await expect(otherPage.locator(".agent-model-pill")).toHaveAccessibleName("Model 5.6 Luna, effort Medium, speed Standard");
+  await otherPage.close();
+});
+
+test("contains the Codex menu in mobile dark mode and leaves Pi unchanged", async ({ context, page, localAgentSidebar }) => {
+  await page.setViewportSize({ width: 390, height: 720 });
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: "# Mobile model controls\n",
+    creatorContext: "Mobile context.\n",
+    preferences: { "agent-whiteboard-theme": "dark" },
+  });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+  await page.locator(".agent-model-pill").click();
+  const menu = page.locator(".agent-model-menu");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  const box = await menu.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y + box.height).toBeLessThanOrEqual(720);
+  await page.getByLabel("Conversation provider").selectOption("pi");
+  await expect(page.locator(".agent-model-control")).toBeHidden();
 });
 
 test("renders Codex tool lifecycle and stable approval and interaction families", async ({

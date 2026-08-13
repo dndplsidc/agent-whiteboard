@@ -1881,9 +1881,7 @@ body.agent-drawer-modal-open .agent-toast {
   }
 
   .agent-response-dot {
-    animation: none;
     opacity: 0.65;
-    transform: none;
   }
 }
 

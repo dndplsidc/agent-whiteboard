@@ -93,6 +93,13 @@ function referenceLabel(reference) {
   return `${kind}: ${reference.label}`;
 }
 
+function referenceLabelElement(doc, label) {
+  const element = doc.createElement("span");
+  element.className = "agent-message-reference-label";
+  element.textContent = label;
+  return element;
+}
+
 export function renderMessageContent(doc, content, { interactive = true, onReference } = {}) {
   const fragment = doc.createDocumentFragment();
   for (const part of normalizeMessageContent(content).parts) {
@@ -109,7 +116,7 @@ export function renderMessageContent(doc, content, { interactive = true, onRefer
     token.dataset.referenceId = part.reference.id;
     token.dataset.referenceKind = part.reference.kind;
     token.setAttribute("aria-label", referenceLabel(part.reference));
-    token.textContent = part.reference.label;
+    token.append(referenceLabelElement(doc, part.reference.label));
     if (interactive && onReference) token.addEventListener("click", () => onReference(part.reference));
     fragment.append(token);
   }
@@ -145,7 +152,7 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
         token.dataset.referenceKind = part.reference.kind;
         token.setAttribute("role", "button");
         token.setAttribute("aria-label", `${referenceLabel(part.reference)}. Press Backspace or Delete to remove.`);
-        token.textContent = part.reference.label;
+        token.append(referenceLabelElement(doc, part.reference.label));
         root.append(token);
       }
     }

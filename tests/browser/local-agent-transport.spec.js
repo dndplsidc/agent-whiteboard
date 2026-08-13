@@ -22,7 +22,7 @@ async function readWebSocketStream(page, brokerOrigin) {
     ({ origin }) =>
       new Promise((resolve, reject) => {
         const messages = [];
-        const socket = new WebSocket(`${origin.replace("http:", "ws:")}/api/v1/agent/connect`);
+        const socket = new WebSocket(`${origin.replace("http:", "ws:")}/api/v1/agent/connect`, "agent-whiteboard.v4");
         const timer = setTimeout(() => {
           socket.close();
           reject(new Error("WebSocket stream timed out"));
@@ -49,7 +49,7 @@ async function connectWithFallback(page, brokerOrigin) {
     const webSocketURL = `${origin.replace("http:", "ws:")}/api/v1/agent/connect`;
     try {
       await new Promise((resolve, reject) => {
-        const socket = new WebSocket(webSocketURL);
+        const socket = new WebSocket(webSocketURL, "agent-whiteboard.v4");
         const timer = setTimeout(() => {
           socket.close();
           reject(new Error("WebSocket attempt timed out"));
@@ -70,7 +70,7 @@ async function connectWithFallback(page, brokerOrigin) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Agent-Whiteboard-API-Version": "3",
+          "X-Agent-Whiteboard-API-Version": "4",
         },
         body: "{}",
       });
@@ -122,7 +122,7 @@ test("requires exact-origin Local Network Access permission before loopback stat
   expect(permission).toBe("granted");
 
   const status = await fetchStatus(page, broker.origin);
-  expect(status).toEqual({ ok: true, status: 200, body: { available: true, api_version: "3" } });
+  expect(status).toEqual({ ok: true, status: 200, body: { available: true, api_version: "4" } });
   expect(broker.requests).toHaveLength(1);
   expect(broker.requests[0]).toMatchObject({
     method: "GET",
@@ -169,7 +169,7 @@ test("streams over a real WebSocket and falls back to HTTP streaming after hands
         request.method === "POST" &&
         request.url === "/api/v1/agent/connect" &&
         request.headers.origin === source.origin &&
-        request.headers["x-agent-whiteboard-api-version"] === "3" &&
+        request.headers["x-agent-whiteboard-api-version"] === "4" &&
         request.status === 200,
     ),
   ).toBe(true);
@@ -190,7 +190,7 @@ test("enforces exact-origin ordinary CORS and legacy PNA preflight contracts", a
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Agent-Whiteboard-API-Version": "3",
+        "X-Agent-Whiteboard-API-Version": "4",
       },
       body: "{}",
     });
