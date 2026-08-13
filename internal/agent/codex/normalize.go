@@ -20,6 +20,9 @@ func (session *Session) handleNotification(method string, params json.RawMessage
 		session.handleServerRequestResolved(params)
 		return
 	}
+	if session.captureCompactNotification(method, params) {
+		return
+	}
 	nativeTurnID := notificationTurnID(method, params)
 	settingsNotification := method == "thread/settings/updated" || method == "model/rerouted"
 	session.mu.Lock()

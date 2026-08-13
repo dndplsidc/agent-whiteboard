@@ -17,7 +17,10 @@ import (
 const maxJSONLMessageBytes = 4 << 20
 const maxPendingRPCRequests = 1024
 
-var errHistoryUnavailableBeforeFirstMessage = errors.New("Codex history is unavailable before the first user message")
+var (
+	errHistoryUnavailableBeforeFirstMessage = errors.New("Codex history is unavailable before the first user message")
+	errMethodNotFound                       = errors.New("Codex App Server method unavailable")
+)
 
 type rpcError struct {
 	Code    int             `json:"code"`
@@ -63,9 +66,13 @@ type runtime struct {
 
 	catalogMu sync.RWMutex
 	catalog   nativeCatalog
-	done      chan struct{}
-	stopOnce  sync.Once
-	err       error
+
+	skillsMu         sync.Mutex
+	skillsGeneration uint64
+	skillsRefreshing bool
+	done             chan struct{}
+	stopOnce         sync.Once
+	err              error
 }
 
 func startRuntime(ctx context.Context, driver *Driver) (*runtime, error) {
@@ -202,10 +209,14 @@ func (runtime *runtime) callWithOrder(ctx context.Context, method string, params
 	}
 	select {
 	case result := <-response:
-		if barrier == nil {
-			return result.result, noop, result.err
+		resultErr := result.err
+		if errors.Is(resultErr, errMethodNotFound) && method != "thread/compact/start" {
+			resultErr = provider.NewProviderError(provider.ErrorProtocolFailure)
 		}
-		return result.result, barrier.release, result.err
+		if barrier == nil {
+			return result.result, noop, resultErr
+		}
+		return result.result, barrier.release, resultErr
 	case <-ctx.Done():
 		runtime.mu.Lock()
 		delete(runtime.pending, id)
@@ -457,6 +468,14 @@ func (runtime *runtime) handleResponse(envelope rpcEnvelope) {
 }
 
 func (runtime *runtime) handleNotification(method string, params json.RawMessage) {
+	if method == "skills/changed" {
+		if validateJSONStructure(params) != nil {
+			runtime.stop(provider.NewProviderError(provider.ErrorMalformedStream))
+			return
+		}
+		runtime.scheduleSkillRefresh()
+		return
+	}
 	threadID := extractString(params, "threadId")
 	if threadID == "" {
 		if method == "turn/completed" || method == "thread/settings/updated" || method == "model/rerouted" {
@@ -586,6 +605,9 @@ func providerRuntimeCause(cause error) provider.ProviderError {
 func classifyRPCError(failure *rpcError) error {
 	if failure == nil {
 		return provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	if failure.Code == -32601 {
+		return errMethodNotFound
 	}
 	text := failure.Message + " " + string(failure.Data)
 	lower := strings.ToLower(text)

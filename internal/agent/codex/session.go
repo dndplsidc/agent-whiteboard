@@ -21,6 +21,16 @@ type nativeTurn struct {
 	bytes    int
 }
 
+type nativeCompact struct {
+	request          provider.CompactRequest
+	accepted         bool
+	nativeID         string
+	pendingInterrupt bool
+	interruptSent    bool
+	buffered         []bufferedNativeEvent
+	bytes            int
+}
+
 type bufferedNativeEvent struct {
 	rpcID  json.RawMessage
 	method string
@@ -55,11 +65,18 @@ type Session struct {
 	capabilities provider.Capabilities
 	catalog      nativeCatalog
 
-	mu                 sync.Mutex
+	skillsMu sync.RWMutex
+	mu       sync.Mutex
+
 	settingsUnverified bool
 	rerouteTarget      string
 	settingsGeneration uint64
 	active             *nativeTurn
+	compact            *nativeCompact
+	skills             nativeSkillCatalog
+	skillsLoaded       bool
+	skillsGeneration   uint64
+	supportsCompact    bool
 	activities         map[string]string
 	toolStates         map[string]provider.ToolActivity
 	interactions       map[string]nativeInteraction
@@ -73,6 +90,7 @@ func newSession(driver *Driver, runtime *runtime, native provider.NativeSession,
 	view := newSessionChild()
 	return &Session{
 		driver: driver, runtime: runtime, native: native, threadID: native.Ref.Value(), events: make(chan provider.Event, 512), view: view, workspace: workspace, capabilities: capabilities, catalog: catalog.clone(),
+		skills: unavailableSkillCatalog(), supportsCompact: true,
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 }
@@ -120,10 +138,16 @@ func (session *Session) Preflight(_ context.Context, request provider.PreflightR
 	if request.Validate() != nil || request.Turn.Settings == nil {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
+	session.skillsMu.RLock()
 	session.mu.Lock()
+	_, skillErr := session.skills.resolve(request.Turn.Content)
 	unverified := session.settingsUnverified
 	closed := session.closed
 	session.mu.Unlock()
+	session.skillsMu.RUnlock()
+	if skillErr != nil {
+		return provider.PreflightResult{}, skillErr
+	}
 	if unverified || closed {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
@@ -142,6 +166,14 @@ func (session *Session) Preflight(_ context.Context, request provider.PreflightR
 func (session *Session) Submit(ctx context.Context, request provider.TurnRequest) (provider.AcceptedTurn, error) {
 	if request.Validate() != nil || request.Settings == nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	session.skillsMu.RLock()
+	defer session.skillsMu.RUnlock()
+	session.mu.Lock()
+	nativeSkills, skillErr := session.skills.resolve(request.Content)
+	session.mu.Unlock()
+	if skillErr != nil {
+		return provider.AcceptedTurn{}, skillErr
 	}
 	catalog := session.currentCatalog()
 	settings, nativeModel, presentation, capabilities, err := catalog.resolveSubmitted(*request.Settings)
@@ -164,13 +196,13 @@ func (session *Session) Submit(ctx context.Context, request provider.TurnRequest
 		session.mu.Unlock()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
-	if session.closed || session.active != nil {
+	if session.closed || session.active != nil || session.compact != nil {
 		session.mu.Unlock()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	session.active = turn
 	session.mu.Unlock()
-	input, err := buildTurnInput(session.workspace, envelope, request.Images)
+	input, err := buildTurnInput(session.workspace, envelope, nativeSkills, request.Images)
 	if err != nil {
 		session.mu.Lock()
 		if session.active == turn {
@@ -392,10 +424,12 @@ func (session *Session) Shutdown(ctx context.Context) error {
 	session.closeOnce.Do(func() {
 		session.mu.Lock()
 		session.closed = true
-		active := session.active != nil
+		active := session.active != nil || session.compact != nil
 		nativeID := ""
-		if active {
+		if session.active != nil {
 			nativeID = session.active.nativeID
+		} else if session.compact != nil {
+			nativeID = session.compact.nativeID
 		}
 		pending := make([]nativeInteraction, 0, len(session.interactions))
 		for requestID, interaction := range session.interactions {
@@ -497,12 +531,18 @@ func (session *Session) runtimeStopped(cause error) {
 	session.closeOnce.Do(func() {
 		session.mu.Lock()
 		turnID := ""
+		compactWorkID := ""
 		if session.active != nil {
 			turnID = session.active.request.TurnID
 		}
+		if session.compact != nil {
+			compactWorkID = session.compact.request.WorkID
+		}
 		session.closed = true
 		session.mu.Unlock()
-		if turnID != "" {
+		if compactWorkID != "" {
+			session.emit(provider.NewCompactEvent(compactWorkID, provider.CompactFailed))
+		} else if turnID != "" {
 			session.emit(provider.NewTerminalFailureEvent(turnID, providerRuntimeCause(cause)))
 		} else {
 			session.emit(provider.NewTerminalFailureEvent("", providerRuntimeCause(cause)))
@@ -515,10 +555,19 @@ func (session *Session) runtimeStopped(cause error) {
 func (session *Session) fail(code provider.ProviderErrorCode) {
 	session.mu.Lock()
 	turnID := ""
+	compactWorkID := ""
 	if session.active != nil {
 		turnID = session.active.request.TurnID
 	}
+	if session.compact != nil {
+		compactWorkID = session.compact.request.WorkID
+		session.compact = nil
+	}
 	session.mu.Unlock()
+	if compactWorkID != "" {
+		session.emit(provider.NewCompactEvent(compactWorkID, provider.CompactFailed))
+		return
+	}
 	session.emit(provider.NewTerminalFailureEvent(turnID, provider.NewProviderError(code)))
 }
 
@@ -560,7 +609,7 @@ func (session *Session) closeEvents() {
 
 func importantEvent(kind provider.EventKind) bool {
 	switch kind {
-	case provider.EventInteractionRequest, provider.EventInteractionResolved, provider.EventSettings, provider.EventCompletion, provider.EventInterruption, provider.EventTerminalFailure:
+	case provider.EventInteractionRequest, provider.EventInteractionResolved, provider.EventSettings, provider.EventSkillCatalog, provider.EventCompact, provider.EventCompletion, provider.EventInterruption, provider.EventTerminalFailure:
 		return true
 	default:
 		return false
@@ -617,7 +666,11 @@ func projectHistory(raw json.RawMessage, expectedThreadID string) ([]provider.Hi
 	}
 	total := 0
 	for _, item := range items {
-		total += len(item.Text)
+		if item.Role == provider.HistoryUser {
+			total += item.Content.SemanticBytes()
+		} else {
+			total += len(item.Text)
+		}
 	}
 	for total > provider.MaxHistoryBytes && len(items) != 0 {
 		remove := 1
@@ -625,7 +678,11 @@ func projectHistory(raw json.RawMessage, expectedThreadID string) ([]provider.Hi
 			remove = 2
 		}
 		for _, item := range items[:remove] {
-			total -= len(item.Text)
+			if item.Role == provider.HistoryUser {
+				total -= item.Content.SemanticBytes()
+			} else {
+				total -= len(item.Text)
+			}
 		}
 		items = items[remove:]
 	}
@@ -779,3 +836,5 @@ func wipe(value []byte) {
 
 var _ provider.Session = (*Session)(nil)
 var _ provider.InteractiveSession = (*Session)(nil)
+var _ provider.SkillCatalogSession = (*Session)(nil)
+var _ provider.ManualCompactSession = (*Session)(nil)

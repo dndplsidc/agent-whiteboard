@@ -128,6 +128,7 @@ func (*catalogSessionContract) Skills(context.Context) provider.SkillCatalog {
 
 type compactSessionContract struct{}
 
+func (*compactSessionContract) SupportsCompact() bool { return true }
 func (*compactSessionContract) Compact(context.Context, provider.CompactRequest) (provider.AcceptedCompact, error) {
 	return provider.AcceptedCompact{}, nil
 }

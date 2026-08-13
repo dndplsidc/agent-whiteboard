@@ -127,6 +127,7 @@ func (accepted AcceptedCompact) Validate() error {
 // manual compaction. Compact and its interruption are correlated solely by the
 // broker-safe work identity at this boundary.
 type ManualCompactSession interface {
+	SupportsCompact() bool
 	Compact(context.Context, CompactRequest) (AcceptedCompact, error)
 	InterruptCompact(context.Context, AcceptedCompact) error
 }

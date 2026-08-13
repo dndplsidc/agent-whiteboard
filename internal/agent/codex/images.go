@@ -12,12 +12,19 @@ import (
 type turnInput struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+	Name string `json:"name,omitempty"`
 	Path string `json:"path,omitempty"`
 }
 
-func buildTurnInput(workspace string, envelope []byte, images []provider.ImageInput) ([]turnInput, error) {
-	input := make([]turnInput, 1, len(images)+1)
-	input[0] = turnInput{Type: "text", Text: string(envelope)}
+func buildTurnInput(workspace string, envelope []byte, skills []nativeSkill, images []provider.ImageInput) ([]turnInput, error) {
+	input := make([]turnInput, 0, len(skills)+len(images)+1)
+	for _, skill := range skills {
+		if !validAbsolutePath(skill.path) || !validCatalogText(skill.name, provider.MaxSkillNameBytes, true) {
+			return nil, errors.New("invalid Codex skill input")
+		}
+		input = append(input, turnInput{Type: "skill", Name: skill.name, Path: skill.path})
+	}
+	input = append(input, turnInput{Type: "text", Text: string(envelope)})
 	if len(images) == 0 {
 		return input, nil
 	}
