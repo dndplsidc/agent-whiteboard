@@ -2666,7 +2666,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     const skill = /(?:^|\s)\$([\p{L}\p{N}_.-]*)$/u.exec(text);
     if (skill) return { mode: "skill", query: skill[1].toLocaleLowerCase() };
     const slash = /^\/([a-z]*)$/u.exec(text);
-    if (slash && state.supportsCompact) return { mode: "slash", query: slash[1] };
+    if (slash && text !== "/compact" && state.supportsCompact) return { mode: "slash", query: slash[1] };
     return null;
   }
 
@@ -3006,6 +3006,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       providerLabel.hidden = false;
       liveStatus.textContent = state.lifecycle === "responding"
         ? "Responding"
+        : state.lifecycle === "compacting"
+          ? "Compacting"
         : pendingSubmitCommandID !== null
           ? "Sending"
           : "Connected";
@@ -3083,7 +3085,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     stopButton.disabled = state.activeWork === null || state.activeWork.state === "stopping";
     stopButton.hidden = state.activeWork === null;
     stopButton.textContent = state.activeWork?.state === "stopping" ? "Stopping…" : "Stop";
-    stopButton.setAttribute("aria-label", state.activeWork?.state === "stopping" ? "Stopping active work" : "Stop active work");
+    stopButton.setAttribute("aria-label", state.activeWork?.state === "stopping" ? "Stopping…" : "Stop");
     sendButton.hidden = state.activeWork !== null;
     contextChip.textContent = `Context · ${contextAttached ? "current" : "available"}`;
     queueChip.textContent = `Queue · ${state.queue.length}`;

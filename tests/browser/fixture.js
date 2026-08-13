@@ -526,6 +526,10 @@ function createSidebarBroker(initialAllowedOrigin) {
       phaseResponses: false,
       responseText: null,
       activeTurn: null,
+      activeCompact: null,
+      skillsState: provider === "codex" ? "ready" : null,
+      skills: provider === "codex" ? [{ id: protocolID(230), name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" }] : [],
+      supportsCompact: provider === "codex",
       pendingResponse: null,
       queue: [],
       history: [],
@@ -566,14 +570,17 @@ function createSidebarBroker(initialAllowedOrigin) {
     payload,
   });
   const snapshotPayload = (state) => ({
-    lifecycle: state.activeTurn === null ? "ready" : "responding",
+    lifecycle: state.activeCompact !== null ? "compacting" : state.activeTurn === null ? "ready" : "responding",
     queue: state.queue.map((item) => structuredClone(item)),
     context_state: state.contextState,
-    active_turn_id: state.activeTurn,
+    active_work: state.activeCompact !== null ? { work_id: state.activeCompact, kind: "compact", state: "running" } : state.activeTurn === null ? null : { work_id: state.activeTurn, kind: "turn", state: "running" },
     supports_images: state.supportsImages,
     settings_state: state.settingsState,
     effective_settings: state.effectiveSettings === null ? null : { ...state.effectiveSettings },
     catalog: structuredClone(state.catalog),
+    skills_state: state.skillsState,
+    skills: structuredClone(state.skills),
+    supports_compact: state.supportsCompact,
   });
   const archivePayload = (state) => ({
     archive_id: state.archiveID,
@@ -668,7 +675,7 @@ function createSidebarBroker(initialAllowedOrigin) {
           ...(next.images?.length ? { images: next.images } : {}),
           created_at: response.createdAt,
         });
-        emit(state, "lifecycle", { state: "responding", turn_id: next.turn_id });
+        emit(state, "lifecycle", { state: "responding", active_work: { work_id: next.turn_id, kind: "turn", state: "running" } });
         state.pendingResponse = { turnID: next.turn_id, assistantID: protocolID(state.identitySequence++), createdAt: response.createdAt, phase: "responding" };
       }
       return;
@@ -737,7 +744,7 @@ function createSidebarBroker(initialAllowedOrigin) {
         state.history.push(user);
         state.activeTurn = command.payload.turn_id;
         emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, content: user.content, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt });
-        emit(state, "lifecycle", { state: "responding", turn_id: command.payload.turn_id });
+        emit(state, "lifecycle", { state: "responding", active_work: { work_id: command.payload.turn_id, kind: "turn", state: "running" } });
         const assistantID = protocolID(150 + state.history.length + (state.provider === "codex" ? 25 : 0));
         if (state.phaseResponses) {
           state.pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
@@ -786,10 +793,21 @@ function createSidebarBroker(initialAllowedOrigin) {
         state.queue.splice(index, 1);
       }
       emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
-    } else if (command.type === "interrupt" && state.activeTurn === command.payload.turn_id) {
+    } else if (command.type === "compact" && state.provider === "codex" && state.activeTurn === null && state.activeCompact === null) {
+      state.activeCompact = command.payload.work_id;
+      emit(state, "lifecycle", { state: "compacting", active_work: { work_id: state.activeCompact, kind: "compact", state: "running" } });
+      emit(state, "compaction", { work_id: state.activeCompact, status: "running" });
+    } else if (command.type === "interrupt" && state.activeTurn === command.payload.work_id) {
+      emit(state, "lifecycle", { state: "responding", active_work: { work_id: state.activeTurn, kind: "turn", state: "stopping" } });
       emit(state, "interruption", { turn_id: state.activeTurn, reason: "requested" });
       state.activeTurn = null;
       state.pendingResponse = null;
+    } else if (command.type === "interrupt" && state.activeCompact === command.payload.work_id) {
+      emit(state, "lifecycle", { state: "compacting", active_work: { work_id: state.activeCompact, kind: "compact", state: "stopping" } });
+      emit(state, "compaction", { work_id: state.activeCompact, status: "stopping" });
+      emit(state, "compaction", { work_id: state.activeCompact, status: "interrupted" });
+      state.activeCompact = null;
+      emit(state, "lifecycle", { state: "interrupted", active_work: null });
     } else if (command.type === "archive_list") {
       targetedEvent(state, "history", { command_id: command.command_id, items: [archivePayload(state)], next_cursor: null }, command.client_id);
     } else if (command.type === "archive_restore" || command.type === "archive_delete") {
@@ -983,6 +1001,19 @@ function createSidebarBroker(initialAllowedOrigin) {
     releaseResponsePhase: emitResponsePhase,
     setProviderAvailable(provider, value) { providerState(provider).available = value; },
     setSupportsImages(provider, value) { providerState(provider).supportsImages = value; },
+    refreshSkills(skills, provider = "codex") {
+      const state = providerState(provider);
+      state.skills = structuredClone(skills);
+      state.skillsState = "ready";
+      emit(state, "skill_catalog", { state: state.skillsState, skills: structuredClone(state.skills) });
+    },
+    completeCompact(status = "completed", provider = "codex") {
+      const state = providerState(provider);
+      if (state.activeCompact === null) throw new Error(`no active ${provider} compact work`);
+      emit(state, "compaction", { work_id: state.activeCompact, status });
+      state.activeCompact = null;
+      emit(state, "lifecycle", { state: status === "interrupted" ? "interrupted" : "ready", active_work: null });
+    },
     rejectNextSettings(provider = "codex") {
       const state = providerState(provider);
       state.rejectNextSettings = true;
@@ -1376,6 +1407,8 @@ export const test = base.extend({
           releaseResponsePhase: broker.releaseResponsePhase,
           setProviderAvailable: broker.setProviderAvailable,
           setSupportsImages: broker.setSupportsImages,
+          refreshSkills: broker.refreshSkills,
+          completeCompact: broker.completeCompact,
           rejectNextSettings: broker.rejectNextSettings,
           setNewMapping: broker.setNewMapping,
           refreshCatalog: broker.refreshCatalog,

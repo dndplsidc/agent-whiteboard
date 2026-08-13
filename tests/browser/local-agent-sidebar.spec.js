@@ -20,7 +20,8 @@ async function openSidebarPage({ context, page, fixture, markdown, creatorContex
   fixture.resetBrokerRequests();
   fixture.resetBrokerState();
   await page.goto(resource.url);
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
+  const expectedProvider = preferences["agent-whiteboard-agent-provider"] === "codex" ? "Codex" : "Pi";
+  await expect(page.locator(".agent-live-status")).toHaveText(`${expectedProvider} ready`);
   return resource;
 }
 
@@ -185,6 +186,38 @@ test("adds a rendered raster as a private inline image reference", async ({ cont
   const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
   expect(submit.payload.images).toBeUndefined();
   expect(submit.payload.content.parts[0].reference).toMatchObject({ kind: "image", visual: { name: "image-1.png", alt: "Architecture" } });
+});
+
+test("invokes Codex skills and compacts without queueing a busy draft", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex skills and compact\n", creatorContext: "Codex feature context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  await connectSidebar(page, "codex");
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+
+  await composer.fill("$rev");
+  const suggestions = page.getByRole("listbox", { name: "Composer suggestions" });
+  await expect(suggestions).toContainText("Review helper");
+  await composer.press("Enter");
+  await expect(composer.locator(".agent-message-skill")).toHaveText("$review-helper");
+  await composer.press("End");
+  await composer.pressSequentially(" check this page");
+  await composer.press("Enter");
+  await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "submit")).toBe(true);
+  const skillSubmit = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit");
+  expect(skillSubmit.payload.content.parts.some((part) => part.type === "skill" && part.skill.name === "review-helper")).toBe(true);
+  expect(JSON.stringify(skillSubmit)).not.toMatch(/\/Users\/|SKILL\.md/u);
+
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+  await composer.fill("/compact");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-compaction-row")).toHaveText("Compacting context…");
+  expect(parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "compact")).toBe(true);
+  await composer.fill("preserved next draft");
+  await composer.press("Enter");
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "submit")).toHaveLength(1);
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(page.locator(".agent-compaction-row")).toHaveText("Compaction stopped");
+  await expect(composer).toHaveText("preserved next draft");
+  expect(parsedCommands(localAgentSidebar.brokerRequests).at(-1)).toMatchObject({ type: "interrupt" });
 });
 
 test("uses the versioned WebSocket for connect and subsequent commands", async ({
@@ -749,7 +782,7 @@ test("uses accessible Codex model controls and captures accepted exact settings"
   await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key)), codexSettingsKey)).toEqual({ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" });
 });
 
-test("keeps queued Codex settings immutable and preserves a rejected draft", async ({ context, page, localAgentSidebar }) => {
+test("preserves a busy Codex draft without queue admission", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex queue\n", creatorContext: "Queue settings context.\n" });
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
   await page.getByLabel("Conversation provider").selectOption("codex");
@@ -773,47 +806,15 @@ test("keeps queued Codex settings immutable and preserves a rejected draft", asy
   await composer.fill("Queued xhigh turn.");
   await composer.press("Enter");
 
-  await expect(page.locator(".agent-queue-settings")).toHaveText([
-    "5.6 Sol · High · Standard",
-    "5.6 Sol · Extra high · Standard",
-  ]);
+  await expect(page.locator(".agent-queue-settings")).toHaveCount(0);
   const submits = parsedCommands(localAgentSidebar.brokerRequests).filter((command) => command.type === "submit");
-  expect(submits.map(({ payload }) => payload.settings)).toEqual([
-    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
-    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
-    { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" },
-  ]);
-
-  localAgentSidebar.preparePendingResponse("codex");
-  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
-  localAgentSidebar.releaseResponsePhase("later_delta", "codex");
-  localAgentSidebar.releaseResponsePhase("completion", "codex");
-  await expect.poll(() => localAgentSidebar.acceptedSettings().map(({ settings }) => settings)).toEqual([
-    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
-    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
-  ]);
-  await expect(page.locator(".agent-queue-settings")).toHaveText(["5.6 Sol · Extra high · Standard"]);
-  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
-  localAgentSidebar.releaseResponsePhase("later_delta", "codex");
-  localAgentSidebar.releaseResponsePhase("completion", "codex");
-  await expect.poll(() => localAgentSidebar.acceptedSettings().map(({ settings }) => settings)).toEqual([
-    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
-    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
-    { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" },
-  ]);
-
-  localAgentSidebar.rejectNextSettings();
-  await composer.fill("Keep this rejected draft.");
-  await composer.press("Enter");
-  await expect(page.locator(".agent-activity-error")).toContainText("The selected model settings are no longer available.");
-  await expect(composer).toHaveText("Keep this rejected draft.");
+  expect(submits).toHaveLength(1);
+  await expect(composer).toHaveText("Queued xhigh turn.");
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(composer).toHaveText("Queued xhigh turn.");
   await expect(pill).toBeEnabled();
   await expect(pill).toHaveAccessibleName("Model 5.6 Sol, effort Extra high, speed Standard");
   if (await menu.isVisible()) await menu.press("Escape");
-  await pill.click();
-  await menu.locator('[data-settings-section="model"]').click();
-  await expect(menu.locator('[data-settings-value="gpt-5.6-nova"]')).toBeVisible();
-  await expect(menu.locator('[data-settings-value="gpt-5.6-nova"]')).toContainText("Choose a supported effort first.");
 });
 
 test("uses the visible Codex pill for New without updating accepted preference", async ({ context, page, localAgentSidebar }) => {
