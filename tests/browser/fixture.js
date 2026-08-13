@@ -537,6 +537,9 @@ function createSidebarBroker(initialAllowedOrigin) {
       queue: [],
       history: [],
       interactions: new Map(),
+      archiveMode: "populated",
+      archiveDelay: null,
+      pendingArchiveResponse: null,
       holdInteractionResolution: false,
       eventLog: [],
       eventPositions: new Map(),
@@ -585,13 +588,13 @@ function createSidebarBroker(initialAllowedOrigin) {
     skills: structuredClone(state.skills),
     supports_compact: state.supportsCompact,
   });
-  const archivePayload = (state) => ({
-    archive_id: state.archiveID,
-    created_at: "2026-07-26T01:02:03Z",
-    updated_at: "2026-07-26T02:03:04Z",
+  const archivePayload = (state, { id = state.archiveID, createdAt = "2026-07-26T01:02:03Z", updatedAt = "2026-07-26T02:03:04Z", preview = "" } = {}) => ({
+    archive_id: id,
+    created_at: createdAt,
+    updated_at: updatedAt,
     provider: state.provider,
     model: state.model,
-    preview: "",
+    preview,
   });
   const corsHeaders = () => ({ "Access-Control-Allow-Origin": allowedOrigin, Vary: "Origin" });
   const sendJSON = (response, record, status, value) => {
@@ -812,7 +815,17 @@ function createSidebarBroker(initialAllowedOrigin) {
       state.activeCompact = null;
       emit(state, "lifecycle", { state: "interrupted", active_work: null });
     } else if (command.type === "archive_list") {
-      targetedEvent(state, "history", { command_id: command.command_id, items: [archivePayload(state)], next_cursor: null }, command.client_id);
+      const firstPage = !command.payload.before;
+      const paginated = state.archiveMode === "paginated";
+      const secondID = protocolID(state.provider === "codex" ? 223 : 222);
+      const items = state.archiveMode === "empty"
+        ? []
+        : firstPage
+          ? [archivePayload(state, { preview: "Earlier conversation" })]
+          : [archivePayload(state, { id: secondID, createdAt: "2026-07-25T01:02:03Z", updatedAt: "2026-07-25T02:03:04Z", preview: "Older conversation" })];
+      const respond = () => targetedEvent(state, "history", { command_id: command.command_id, items, next_cursor: paginated && firstPage ? state.archiveID : null }, command.client_id);
+      if (state.archiveDelay) state.pendingArchiveResponse = respond;
+      else respond();
     } else if (command.type === "archive_restore" || command.type === "archive_delete") {
       emit(state, "archive", { action: command.type === "archive_restore" ? "restored" : "deleted", archive_id: command.payload.archive_id });
     } else if (command.type === "interaction_respond") {
@@ -1004,6 +1017,15 @@ function createSidebarBroker(initialAllowedOrigin) {
     releaseResponsePhase: emitResponsePhase,
     setProviderAvailable(provider, value) { providerState(provider).available = value; },
     setSupportsImages(provider, value) { providerState(provider).supportsImages = value; },
+    setArchiveMode(value, provider = "pi") { providerState(provider).archiveMode = value; },
+    setArchiveDelay(value, provider = "pi") { providerState(provider).archiveDelay = value; },
+    releaseArchiveList(provider = "pi") {
+      const state = providerState(provider);
+      if (!state.pendingArchiveResponse) throw new Error(`no delayed ${provider} archive response`);
+      const pending = state.pendingArchiveResponse;
+      state.pendingArchiveResponse = null;
+      pending();
+    },
     refreshSkills(skills, provider = "codex") {
       const state = providerState(provider);
       state.skills = structuredClone(skills);
@@ -1410,6 +1432,9 @@ export const test = base.extend({
           releaseResponsePhase: broker.releaseResponsePhase,
           setProviderAvailable: broker.setProviderAvailable,
           setSupportsImages: broker.setSupportsImages,
+          setArchiveMode: broker.setArchiveMode,
+          setArchiveDelay: broker.setArchiveDelay,
+          releaseArchiveList: broker.releaseArchiveList,
           refreshSkills: broker.refreshSkills,
           completeCompact: broker.completeCompact,
           rejectNextSettings: broker.rejectNextSettings,

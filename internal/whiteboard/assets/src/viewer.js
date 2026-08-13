@@ -1162,6 +1162,7 @@ export function createAgentState(provider = "pi") {
     timeline: [],
     queue: [],
     archives: [],
+    archiveStatus: "idle",
     timelineCursor: null,
     archiveCursor: null,
     errors: [],
@@ -1213,6 +1214,7 @@ export function applyAgentEvent(state, untrustedEvent) {
     timeline: state.timeline.map((item) => ({ ...item, content: item.content ? cloneMessageContent(item.content) : undefined, images: item.images?.map((image) => ({ ...image })) })),
     queue: state.queue.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })), settings: item.settings ? { ...item.settings } : null })),
     archives: state.archives.map((item) => ({ ...item })),
+    archiveStatus: state.archiveStatus,
     errors: state.errors.map((item) => ({ ...item })),
     seenEventIDs: new Set(state.seenEventIDs),
     pendingCommandIDs: new Set(state.pendingCommandIDs),
@@ -1267,6 +1269,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
         state.archives = [...state.archives, ...payload.items.filter((item) => !known.has(item.archive_id)).map((item) => ({ ...item }))].slice(0, MAX_ARCHIVES);
       }
       state.archiveCursor = payload.next_cursor;
+      state.archiveStatus = "loaded";
       break;
     }
     case "user_message":
@@ -1966,6 +1969,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let completionIndex = 0;
   let pendingCompactCommandID = null;
   let pendingCompactDraft = null;
+  let confirmationState = null;
+  let focusModality = "programmatic";
 
   const toggle = doc.createElement("button");
   toggle.type = "button";
@@ -1999,6 +2004,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   drawer.setAttribute("role", "complementary");
   drawer.setAttribute("aria-label", "Local agent conversation");
   drawer.setAttribute("aria-modal", "false");
+  drawer.dataset.focusModality = focusModality;
 
   const header = doc.createElement("header");
   header.className = "agent-drawer-header";
@@ -2099,15 +2105,18 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const connectionStatusDot = doc.createElement("span");
   connectionStatusDot.className = "agent-connection-status-dot";
   connectionStatusDot.setAttribute("aria-hidden", "true");
+  const connectionStatusCopy = doc.createElement("div");
+  connectionStatusCopy.className = "agent-connection-status-copy";
   const connectionStatusText = doc.createElement("span");
   connectionStatusText.className = "agent-connection-status-text";
   connectionStatusText.setAttribute("role", "status");
   connectionStatusText.setAttribute("aria-live", "polite");
+  connectionStatusCopy.append(connectionStatusText, guidance);
   const checkButton = doc.createElement("button");
   checkButton.type = "button";
   checkButton.className = "agent-connection-retry";
   checkButton.textContent = "Check again";
-  connectionStatus.append(connectionStatusDot, connectionStatusText, checkButton);
+  connectionStatus.append(connectionStatusDot, connectionStatusCopy, checkButton);
   const setupCheckButton = doc.createElement("button");
   setupCheckButton.type = "button";
   setupCheckButton.textContent = "Check again";
@@ -2142,7 +2151,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   contextDisclosureChevron.textContent = "›";
   contextDisclosure.append(contextDisclosureIcon, contextDisclosureCopy, contextDisclosureChevron);
   setup.append(setupBody, contextDisclosure);
-  settings.append(settingsHeading, portLabel, guidance, connectionStatus);
+  settings.append(settingsHeading, portLabel, connectionStatus);
 
   const actions = doc.createElement("div");
   actions.className = "agent-actions";
@@ -2237,6 +2246,37 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   archives.setAttribute("aria-label", "Conversation archives");
   archives.hidden = true;
 
+  const confirmationBackdrop = doc.createElement("div");
+  confirmationBackdrop.className = "agent-confirmation-backdrop";
+  confirmationBackdrop.hidden = true;
+  const confirmationDialog = doc.createElement("section");
+  confirmationDialog.className = "agent-confirmation-dialog";
+  confirmationDialog.setAttribute("role", "dialog");
+  confirmationDialog.setAttribute("aria-modal", "true");
+  confirmationDialog.setAttribute("aria-labelledby", "agent-confirmation-title");
+  confirmationDialog.setAttribute("aria-describedby", "agent-confirmation-description");
+  const confirmationIcon = doc.createElement("span");
+  confirmationIcon.className = "agent-confirmation-icon";
+  confirmationIcon.setAttribute("aria-hidden", "true");
+  const confirmationCopy = doc.createElement("div");
+  confirmationCopy.className = "agent-confirmation-copy";
+  const confirmationTitle = doc.createElement("h3");
+  confirmationTitle.id = "agent-confirmation-title";
+  const confirmationDescription = doc.createElement("p");
+  confirmationDescription.id = "agent-confirmation-description";
+  confirmationCopy.append(confirmationTitle, confirmationDescription);
+  const confirmationActions = doc.createElement("div");
+  confirmationActions.className = "agent-confirmation-actions";
+  const confirmationCancel = doc.createElement("button");
+  confirmationCancel.type = "button";
+  confirmationCancel.textContent = "Cancel";
+  const confirmationConfirm = doc.createElement("button");
+  confirmationConfirm.type = "button";
+  confirmationConfirm.className = "agent-confirmation-primary";
+  confirmationActions.append(confirmationCancel, confirmationConfirm);
+  confirmationDialog.append(confirmationIcon, confirmationCopy, confirmationActions);
+  confirmationBackdrop.append(confirmationDialog);
+
   const composerWrap = doc.createElement("div");
   composerWrap.className = "agent-composer-wrap";
   const composer = doc.createElement("form");
@@ -2327,7 +2367,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   separator.setAttribute("aria-valuenow", String(effectiveWidth));
   separator.setAttribute("aria-label", "Resize Page agent pane");
 
-  drawer.append(header, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
+  drawer.append(header, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap, confirmationBackdrop);
   doc.body.append(overlay, drawer, toggle, toast);
 
   function buildController(provider) {
@@ -2399,6 +2439,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           owned.state.queue = [];
           owned.state.interactions = [];
           owned.state.timelineCursor = null;
+          owned.state.archiveStatus = "idle";
           owned.state.pendingCommandIDs.clear();
           owned.state.knownCommandIDs.clear();
           owned.state.freshArchiveCommandIDs.clear();
@@ -2460,6 +2501,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     target.state.skills = [];
     target.state.supportsCompact = false;
     target.state.timelineCursor = null;
+    target.state.archiveStatus = "idle";
     target.state.pendingCommandIDs.clear();
     target.state.knownCommandIDs.clear();
     target.state.freshArchiveCommandIDs.clear();
@@ -2588,6 +2630,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function onViewportResize() {
+    if (confirmationState) closeConfirmation();
     syncDrawerLayout();
   }
 
@@ -2608,6 +2651,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (!next && resizing) finishResize({ persist: false });
     open = next;
     if (wasOpen && !open) {
+      closeConfirmation({ restore: false });
       modelControl.close();
       closeCompletionMenu();
       clearDraftAttachments();
@@ -2622,11 +2666,73 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     persistAgentPreference(storage, AGENT_DRAWER_STORAGE_KEY, open);
     syncDrawerLayout();
     if (open && focus) {
+      setFocusModality(focusModality === "keyboard" ? "keyboard" : "programmatic");
       close.focus();
     } else if (!open && focus) {
       restoreFocus?.focus?.();
     }
   }
+
+  function setFocusModality(value) {
+    focusModality = value;
+    drawer.dataset.focusModality = value;
+  }
+
+  function confirmationFallback(state = confirmationState) {
+    if (!state) return close;
+    if (state.invoker?.isConnected && !state.invoker.disabled && !state.invoker.closest("[hidden]")) return state.invoker;
+    if (state.archiveID) {
+      const matching = archives.querySelector(`[data-archive-id="${state.archiveID}"] [data-archive-action="${state.action}"]`);
+      if (matching) return matching;
+    }
+    return activeView === "archives" ? backButton : close;
+  }
+
+  function closeConfirmation({ restore = true } = {}) {
+    if (!confirmationState) return;
+    const previous = confirmationState;
+    confirmationState = null;
+    confirmationBackdrop.hidden = true;
+    confirmationBackdrop.dataset.tone = "";
+    for (const child of drawer.children) {
+      if (child !== confirmationBackdrop) child.removeAttribute("inert");
+    }
+    if (restore) confirmationFallback(previous).focus?.();
+  }
+
+  function openConfirmation({ title, description, confirmLabel, tone = "default", action, archiveID = null, invoker = doc.activeElement, onConfirm }) {
+    closeConfirmation({ restore: false });
+    confirmationState = { action, archiveID, invoker, onConfirm, submitting: false };
+    confirmationTitle.textContent = title;
+    confirmationDescription.textContent = description;
+    confirmationConfirm.textContent = confirmLabel;
+    confirmationBackdrop.dataset.tone = tone;
+    confirmationIcon.textContent = tone === "danger" ? "!" : action === "new" ? "+" : "↺";
+    confirmationBackdrop.hidden = false;
+    for (const child of drawer.children) {
+      if (child !== confirmationBackdrop) child.setAttribute("inert", "");
+    }
+    setFocusModality("programmatic");
+    confirmationCancel.focus();
+  }
+
+  confirmationCancel.addEventListener("click", () => closeConfirmation());
+  confirmationBackdrop.addEventListener("pointerdown", (event) => {
+    if (event.target === confirmationBackdrop) closeConfirmation();
+  });
+  confirmationConfirm.addEventListener("click", async () => {
+    if (!confirmationState || confirmationState.submitting) return;
+    confirmationState.submitting = true;
+    confirmationCancel.disabled = true;
+    confirmationConfirm.disabled = true;
+    const action = confirmationState.onConfirm;
+    try { await action(); }
+    finally {
+      confirmationCancel.disabled = false;
+      confirmationConfirm.disabled = false;
+      closeConfirmation({ restore: false });
+    }
+  });
 
   function currentCodexSettings() {
     if (selectedProvider !== "codex" || state.settingsState !== "verified") return null;
@@ -3162,20 +3268,23 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages, onReference);
       else if (item.kind === "tool") appendToolActivity(doc, timeline, item);
       else if (item.activity === "interruption") {
-        const notice = doc.createElement("div");
-        notice.className = "agent-activity-notice agent-activity-interruption";
-        const icon = doc.createElement("span");
-        icon.className = "agent-activity-notice-icon";
-        icon.setAttribute("aria-hidden", "true");
-        icon.textContent = "■";
-        const copy = doc.createElement("div");
-        const title = doc.createElement("strong");
-        title.textContent = "Response stopped";
-        const content = doc.createElement("p");
-        content.textContent = item.text;
-        copy.append(title, content);
-        notice.append(icon, copy);
-        timeline.append(notice);
+        appendStatusNotice(timeline, { tone: "stopped", icon: "■", title: "Response stopped", text: item.text, className: "agent-activity-interruption" });
+      } else if (["status", "retry", "compaction", "blocked", "error"].includes(item.activity)) {
+        const labels = {
+          status: "Status update",
+          retry: "Retrying",
+          compaction: "Compaction",
+          blocked_tool: "Tool request blocked",
+          blocked_permission: "Permission request blocked",
+          blocked: "Request blocked",
+          error: "Something went wrong",
+        };
+        const title = item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
+        const guidanceText = actionGuidance(item.action, doc);
+        const text = guidanceText ? `${item.text} ${guidanceText}` : item.text;
+        const tone = item.activity === "error" ? "error" : item.activity === "blocked" ? "warning" : "neutral";
+        const icon = item.activity === "error" ? "!" : item.activity === "blocked" ? "×" : item.activity === "retry" ? "↻" : "•";
+        appendStatusNotice(timeline, { tone, icon, title, text, className: `agent-activity-${item.activity}` });
       } else {
         const details = doc.createElement("details");
         details.className = `agent-activity agent-activity-${item.activity}`;
@@ -3203,14 +3312,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       appendInteractionCard(doc, timeline, request, (optionID, answers) => respondToInteraction(request, optionID, answers));
     }
     for (const compact of state.compactions) {
-      const row = doc.createElement("div");
-      row.className = "agent-compaction-row";
+      const presentations = {
+        running: { tone: "info", icon: "•", title: "Compacting context…", animated: true },
+        stopping: { tone: "info", icon: "■", title: "Stopping compaction…", animated: true },
+        completed: { tone: "success", icon: "✓", title: "Context compacted" },
+        interrupted: { tone: "stopped", icon: "■", title: "Compaction stopped" },
+        failed: { tone: "error", icon: "!", title: "Compaction failed" },
+      };
+      const row = appendStatusNotice(timeline, { ...presentations[compact.status], className: "agent-compaction-row" });
       row.dataset.status = compact.status;
       row.setAttribute("role", "status");
       row.setAttribute("aria-label", `Compaction ${compact.status}`);
-      const labels = { running: "Compacting context…", stopping: "Stopping compaction…", completed: "Context compacted", interrupted: "Compaction stopped", failed: "Compaction failed" };
-      row.textContent = labels[compact.status];
-      timeline.append(row);
     }
     const activeTurnID = state.activeWork?.kind === "turn" ? state.activeWork.work_id : null;
     const hasActiveAssistant = activeTurnID !== null && state.timeline.some((item) => item.kind === "assistant" && item.turn_id === activeTurnID);
@@ -3281,30 +3393,66 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       row.append(queuedContent, save, remove); queue.append(row);
     }
     archives.replaceChildren();
-    const archivesHeading = doc.createElement("h3");
-    archivesHeading.textContent = "Archives";
-    archives.append(archivesHeading);
-    for (const item of state.archives) {
-      const row = doc.createElement("article");
-      const preview = doc.createElement("p"); preview.textContent = `Updated ${item.updated_at}${item.model ? ` · ${item.model}` : ""}`;
-      const restore = doc.createElement("button"); restore.type = "button"; restore.textContent = "Restore";
-      const remove = doc.createElement("button"); remove.type = "button"; remove.textContent = "Delete";
-      restore.addEventListener("click", () => {
-        if (doc.defaultView?.confirm("Archive the current conversation and restore this one?")) void forcedConversationCommand("archive_restore", { archive_id: item.archive_id });
-      });
-      remove.addEventListener("click", () => {
-        if (doc.defaultView?.confirm("Delete this archived conversation permanently?")) void sendCommand("archive_delete", { archive_id: item.archive_id });
-      });
-      row.append(preview, restore, remove); archives.append(row);
+    if (state.archiveStatus === "loading") {
+      const loading = doc.createElement("div");
+      loading.className = "agent-archives-state agent-archives-loading";
+      loading.setAttribute("role", "status");
+      loading.textContent = "Loading archived conversations…";
+      archives.append(loading);
+    } else if (state.archiveStatus === "loaded" && state.archives.length === 0) {
+      const empty = doc.createElement("div");
+      empty.className = "agent-archives-state agent-archives-empty";
+      const icon = doc.createElement("span"); icon.setAttribute("aria-hidden", "true"); icon.textContent = "▣";
+      const title = doc.createElement("strong"); title.textContent = "No archived conversations";
+      const detail = doc.createElement("p"); detail.textContent = "Conversations you replace or restore will appear here.";
+      empty.append(icon, title, detail); archives.append(empty);
+    } else {
+      for (const item of state.archives) {
+        const row = doc.createElement("article");
+        row.className = "agent-archive-card";
+        row.dataset.archiveId = item.archive_id;
+        const glyph = doc.createElement("span"); glyph.className = "agent-archive-glyph"; glyph.setAttribute("aria-hidden", "true"); glyph.textContent = item.provider === "codex" ? "C" : "P";
+        const copy = doc.createElement("div"); copy.className = "agent-archive-copy";
+        const title = doc.createElement("strong"); title.textContent = `${item.provider === "codex" ? "Codex" : "Pi"}${item.model ? ` · ${item.model}` : ""}`;
+        const time = doc.createElement("time"); time.dateTime = item.updated_at; time.title = item.updated_at; time.textContent = `Updated ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.updated_at))}`;
+        copy.append(title, time);
+        if (item.preview) { const preview = doc.createElement("p"); preview.textContent = item.preview; copy.append(preview); }
+        const rowActions = doc.createElement("div"); rowActions.className = "agent-archive-actions";
+        const restore = doc.createElement("button"); restore.type = "button"; restore.textContent = "Restore"; restore.dataset.archiveAction = "restore";
+        const remove = doc.createElement("button"); remove.type = "button"; remove.textContent = "Delete"; remove.dataset.archiveAction = "delete";
+        restore.addEventListener("click", () => openConfirmation({ title: "Restore this conversation?", description: "The current conversation will be archived first.", confirmLabel: "Restore", action: "restore", archiveID: item.archive_id, invoker: restore, onConfirm: () => forcedConversationCommand("archive_restore", { archive_id: item.archive_id }) }));
+        remove.addEventListener("click", () => openConfirmation({ title: "Delete this archive permanently?", description: "This conversation cannot be recovered.", confirmLabel: "Delete", tone: "danger", action: "delete", archiveID: item.archive_id, invoker: remove, onConfirm: () => sendCommand("archive_delete", { archive_id: item.archive_id }) }));
+        rowActions.append(restore, remove); row.append(glyph, copy, rowActions); archives.append(row);
+      }
+      if (state.archiveCursor) {
+        const more = doc.createElement("button");
+        more.type = "button";
+        more.className = "agent-page-button";
+        more.textContent = state.archiveStatus === "loading-more" ? "Loading…" : "Load more archives";
+        more.disabled = state.archiveStatus === "loading-more";
+        more.addEventListener("click", () => { state.archiveStatus = "loading-more"; render(); void sendCommand("archive_list", { before: state.archiveCursor, limit: 50 }); });
+        archives.append(more);
+      }
     }
-    if (state.archiveCursor) {
-      const more = doc.createElement("button");
-      more.type = "button";
-      more.className = "agent-page-button";
-      more.textContent = "Load more archives";
-      more.addEventListener("click", () => void sendCommand("archive_list", { before: state.archiveCursor, limit: 50 }));
-      archives.append(more);
-    }
+  }
+
+  function appendStatusNotice(parent, { tone = "neutral", icon = "•", title, text, animated = false, className = "" }) {
+    const notice = doc.createElement("div");
+    notice.className = `agent-status-notice${className ? ` ${className}` : ""}`;
+    notice.dataset.tone = tone;
+    if (animated) notice.dataset.animated = "true";
+    const glyph = doc.createElement("span");
+    glyph.className = "agent-status-notice-icon";
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.textContent = icon;
+    const copy = doc.createElement("div");
+    const heading = doc.createElement("strong");
+    heading.textContent = title;
+    copy.append(heading);
+    if (text) { const detail = doc.createElement("span"); detail.textContent = text; copy.append(detail); }
+    notice.append(glyph, copy);
+    parent.append(notice);
+    return notice;
   }
 
   function announce(messageText) {
@@ -3337,6 +3485,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (freshArchivePage) target.state.freshArchiveCommandIDs.add(command.command_id);
     try { await target.transport.send(command); }
     catch (error) {
+      if (freshArchivePage && target.state.archiveStatus === "loading") target.state.archiveStatus = target.state.archives.length > 0 ? "loaded" : "idle";
+      else if (type === "archive_list" && target.state.archiveStatus === "loading-more") target.state.archiveStatus = "loaded";
       if (error?.code) {
         target.state.pendingCommandIDs.delete(command.command_id);
         target.state.freshArchiveCommandIDs.delete(command.command_id);
@@ -3439,10 +3589,14 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   showView = (view, { focus = true } = {}) => {
+    closeConfirmation({ restore: false });
     const previousView = activeView;
     activeView = ["conversation", "settings", "context", "archives"].includes(view) ? view : "conversation";
     if (activeView === "context") markdownCard.open = true;
-    if (activeView === "archives" && previousView !== "archives" && state.connected) void sendCommand("archive_list", { limit: 50 }, { freshArchivePage: true });
+    if (activeView === "archives" && previousView !== "archives" && state.connected) {
+      state.archiveStatus = "loading";
+      void sendCommand("archive_list", { limit: 50 }, { freshArchivePage: true });
+    }
     render();
     if (!focus) return;
     if (activeView !== "conversation") backButton.focus();
@@ -3455,6 +3609,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   directSettingsButton.addEventListener("click", () => showView("settings"));
   queueChip.addEventListener("click", () => queue.querySelector(".agent-message-editor")?.focus());
   providerSelect.addEventListener("change", () => {
+    closeConfirmation({ restore: false });
     const nextProvider = providerSelect.value;
     if (!PROVIDERS.has(nextProvider) || nextProvider === selectedProvider) return;
     clearDraftAttachments();
@@ -3480,6 +3635,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (opening) enabledOverflowItems()[0]?.focus();
     else overflowButton.focus();
   });
+  toggle.addEventListener("pointerdown", () => { focusModality = "pointer"; });
+  toggle.addEventListener("keydown", () => { focusModality = "keyboard"; });
   toggle.addEventListener("click", () => setOpen(!open));
   close.addEventListener("click", () => setOpen(false));
   overlay.addEventListener("click", () => setOpen(false));
@@ -3639,16 +3796,25 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     scheduleReconnect();
   });
   newButton.addEventListener("click", () => {
-    if (!doc.defaultView?.confirm("Archive this conversation and start a new one?")) return;
+    const invoker = doc.activeElement;
     const executionSettings = selectedProvider === "codex" ? currentCodexSettings() : null;
     if (selectedProvider === "codex" && executionSettings === null) {
       showTransientStatus("Model options unavailable", "New conversation not started", "Choose settings supported by the live Codex catalog.");
       return;
     }
-    clearDraftAttachments();
-    clearDraftInlineVisuals();
-    showView("conversation");
-    void forcedConversationCommand("new", { settings: executionSettings });
+    openConfirmation({
+      title: "Start a new conversation?",
+      description: "The current conversation will remain available in Archives.",
+      confirmLabel: "Start new",
+      action: "new",
+      invoker,
+      onConfirm: async () => {
+        clearDraftAttachments();
+        clearDraftInlineVisuals();
+        activeView = "conversation";
+        await forcedConversationCommand("new", { settings: executionSettings });
+      },
+    });
   });
   historyButton.addEventListener("click", () => { showView("archives"); });
   function onOverflowOutsidePointerDown(event) {
@@ -3657,14 +3823,31 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       overflowButton.setAttribute("aria-expanded", "false");
     }
   }
-  function onDrawerPointerDown() { drawer.dataset.focusModality = "pointer"; }
-  function onDrawerKeyDown() { drawer.dataset.focusModality = "keyboard"; }
+  function onDrawerPointerDown() { setFocusModality("pointer"); }
+  function onDrawerKeyDown() { setFocusModality("keyboard"); }
   drawer.addEventListener("pointerdown", onDrawerPointerDown);
   drawer.addEventListener("keydown", onDrawerKeyDown);
   doc.addEventListener("pointerdown", onOverflowOutsidePointerDown);
   doc.addEventListener("keydown", onKeydown);
   function onKeydown(event) {
     if (event.defaultPrevented) return;
+    if (confirmationState) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closeConfirmation();
+        return;
+      }
+      if (event.key === "Tab") {
+        const available = [confirmationCancel, confirmationConfirm].filter((element) => !element.disabled && !element.hidden);
+        const index = available.indexOf(doc.activeElement);
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        available[event.shiftKey ? (index <= 0 ? available.length - 1 : index - 1) : (index + 1) % available.length]?.focus();
+        return;
+      }
+      return;
+    }
     if (!overflowMenu.hidden && event.target?.getAttribute?.("role") === "menuitem" && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       const items = enabledOverflowItems();
       const current = items.indexOf(event.target);
@@ -3734,6 +3917,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       for (const editor of queueEditors) editor.destroy();
       queueEditors = [];
       clearDraftAttachments();
+      closeConfirmation({ restore: false });
       modelControl.destroy();
       messageEditor.destroy();
       for (const url of imageObjectURLs.values()) revokeObjectURL(url);

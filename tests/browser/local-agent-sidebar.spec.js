@@ -260,13 +260,13 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   await expect(suggestions).toBeHidden();
   await composer.fill("/compact");
   await composer.press("Enter");
-  await expect(page.locator(".agent-compaction-row")).toHaveText("Compacting context…");
+  await expect(page.locator(".agent-compaction-row")).toContainText("Compacting context…");
   expect(parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "compact")).toBe(true);
   await composer.fill("preserved next draft");
   await composer.press("Enter");
   expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "submit")).toHaveLength(1);
   await page.getByRole("button", { name: "Stop", exact: true }).click();
-  await expect(page.locator(".agent-compaction-row")).toHaveText("Compaction stopped");
+  await expect(page.locator(".agent-compaction-row")).toContainText("Compaction stopped");
   await expect(composer).toHaveText("preserved next draft");
   expect(parsedCommands(localAgentSidebar.brokerRequests).at(-1)).toMatchObject({ type: "interrupt" });
 });
@@ -656,8 +656,9 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
   localAgentSidebar.emitBlocked("permission");
   await expect(page.locator(".agent-activity-visible_summary summary")).toHaveText("Work summary");
   await expect(page.locator(".agent-activity-visible_summary")).not.toHaveAttribute("open", "");
-  await expect(page.locator(".agent-activity-blocked summary")).toHaveText(["Tool request blocked", "Permission request blocked"]);
+  await expect(page.locator(".agent-activity-blocked strong")).toHaveText(["Tool request blocked", "Permission request blocked"]);
   await expect(page.locator(".agent-activity-blocked").first()).toContainText("content-only policy");
+  await expect(page.locator(".agent-activity-blocked").first()).toHaveAttribute("data-tone", "warning");
   await expect(page.locator(".agent-timeline")).not.toContainText("thinking_delta");
 
   localAgentSidebar.releaseResponsePhase("completion");
@@ -874,6 +875,93 @@ test("preserves a busy Codex draft without queue admission", async ({ context, p
   if (await menu.isVisible()) await menu.press("Escape");
 });
 
+test("renders archive loading, populated, and empty states without false emptiness", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Archive states\n", creatorContext: "Archive context.\n" });
+  await connectSidebar(page);
+  localAgentSidebar.setArchiveDelay(true);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await expect(page.getByRole("status")).toContainText("Loading archived conversations");
+  await expect(page.getByText("No archived conversations")).toHaveCount(0);
+  localAgentSidebar.releaseArchiveList();
+  const archive = page.locator(".agent-archive-card");
+  await expect(archive).toContainText("Pi · fixture-model");
+  await expect(archive).toContainText("Updated Jul 26, 2026");
+
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  localAgentSidebar.setArchiveMode("empty");
+  localAgentSidebar.setArchiveDelay(false);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await expect(page.getByText("No archived conversations")).toBeVisible();
+  await expect(page.locator(".agent-archives")).toContainText("Conversations you replace or restore will appear here.");
+
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  localAgentSidebar.setArchiveMode("paginated");
+  localAgentSidebar.setArchiveDelay(false);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await expect(page.locator(".agent-archive-card")).toHaveCount(1);
+  localAgentSidebar.setArchiveDelay(true);
+  await page.getByRole("button", { name: "Load more archives" }).click();
+  await expect(page.locator(".agent-archive-card")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Loading…" })).toBeDisabled();
+  localAgentSidebar.releaseArchiveList();
+  await expect(page.locator(".agent-archive-card")).toHaveCount(2);
+});
+
+test("uses styled confirmations for New, Restore, and Delete with exact commands", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Confirmations\n", creatorContext: "Confirmation context.\n" });
+  await connectSidebar(page);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "New conversation" }).click();
+  let dialog = page.getByRole("dialog", { name: "Start a new conversation?" });
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await dialog.press("Escape");
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
+
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  const archive = page.locator(".agent-archive-card");
+  await archive.getByRole("button", { name: "Restore" }).click();
+  dialog = page.getByRole("dialog", { name: "Restore this conversation?" });
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "archive_restore")).toHaveLength(0);
+  await archive.getByRole("button", { name: "Restore" }).click();
+  await page.getByRole("dialog", { name: "Restore this conversation?" }).getByRole("button", { name: "Restore" }).click();
+  await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "archive_restore")).toHaveLength(1);
+
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await page.locator(".agent-archive-card").getByRole("button", { name: "Delete" }).click();
+  dialog = page.getByRole("dialog", { name: "Delete this archive permanently?" });
+  await expect(dialog).toContainText("cannot be recovered");
+  await dialog.getByRole("button", { name: "Delete" }).click();
+  await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "archive_delete")).toHaveLength(1);
+});
+
+test("keeps confirmation focus exclusive in the narrow modal drawer", async ({ context, page, localAgentSidebar }) => {
+  await page.setViewportSize({ width: 390, height: 720 });
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Narrow confirmation\n", creatorContext: "Focus context.\n" });
+  await connectSidebar(page);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "New conversation" }).click();
+  const dialog = page.getByRole("dialog", { name: "Start a new conversation?" });
+  const cancel = dialog.getByRole("button", { name: "Cancel" });
+  const confirm = dialog.getByRole("button", { name: "Start new" });
+  await expect(cancel).toBeFocused();
+  await cancel.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await confirm.press("Tab");
+  await expect(cancel).toBeFocused();
+  await expect(page.locator(".agent-drawer > [inert]")).not.toHaveCount(0);
+  await cancel.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".agent-drawer")).toHaveClass(/is-open/u);
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
+});
+
 test("uses the visible Codex pill for New without updating accepted preference", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex New\n", creatorContext: "New conversation context.\n" });
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
@@ -888,8 +976,10 @@ test("uses the visible Codex pill for New without updating accepted preference",
   await menu.locator('[data-settings-value="standard"]').click();
   await menu.press("Escape");
   await page.getByRole("button", { name: "Open Page agent menu" }).click();
-  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("menuitem", { name: "New conversation" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Start a new conversation?" });
+  await expect(confirmation).toContainText("remain available in Archives");
+  await confirmation.getByRole("button", { name: "Start new" }).click();
   await expect.poll(() => localAgentSidebar.createdSettings()).toEqual([{ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" }]);
   await expect(page.locator(".agent-live-status")).toHaveText("Connected", { timeout: 5_000 });
   await expect(page.locator(".agent-provider-label")).toContainText("5.6 Sol");

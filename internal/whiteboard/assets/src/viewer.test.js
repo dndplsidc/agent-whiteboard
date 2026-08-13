@@ -1257,6 +1257,8 @@ describe("local agent rendering and controls", () => {
 
     drawer.elements.drawer.querySelector(".agent-overflow-button").click();
     [...drawer.elements.overflowMenu.querySelectorAll("button")].find((item) => item.textContent === "New conversation").click();
+    expect(drawer.elements.drawer.querySelector(".agent-confirmation-dialog h3")?.textContent).toBe("Start a new conversation?");
+    drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
     await vi.waitFor(() => expect(sent).toHaveLength(3));
     expect(sent[2]).toMatchObject({ type: "new", payload: { settings: { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" } } });
 
@@ -1598,14 +1600,52 @@ describe("local agent rendering and controls", () => {
       items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider: "pi", preview: "" }],
       next_cursor: null,
     }, { event_id: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR" }));
-    drawer.elements.archives.querySelector("button").click();
-    drawer.elements.archives.querySelectorAll("button")[1].click();
+    drawer.elements.archives.querySelector('[data-archive-action="restore"]').click();
+    drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-confirmation-backdrop").hidden).toBe(true));
+    drawer.elements.archives.querySelector('[data-archive-action="delete"]').click();
+    drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
     await vi.waitFor(() => expect(calls).toHaveLength(4));
     expect(calls.map((command) => command.type)).toEqual(["queue_edit", "queue_remove", "archive_restore", "archive_delete"]);
     expect(calls[0].payload).toEqual({ message_id: agentIDs.message, content: { parts: [] } });
-    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(confirm).not.toHaveBeenCalled();
     drawer.destroy();
     confirm.mockRestore();
+  });
+
+  test("owns confirmation focus, sends nothing on cancel, and falls back when an archive row disappears", async () => {
+    let options;
+    const calls = [];
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(async (command) => calls.push(command)), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(snapshotEvent());
+    drawer.elements.overflowButton.click();
+    [...drawer.elements.overflowMenu.querySelectorAll("button")].find((button) => button.textContent === "Archives").click();
+    await vi.waitFor(() => expect(calls.at(-1)?.type).toBe("archive_list"));
+    options.onEvent(agentEvent("history", { command_id: calls.at(-1).command_id, items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider: "pi", model: "fixture", preview: "Saved conversation" }], next_cursor: null }, { event_id: "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT" }));
+    await vi.waitFor(() => expect(drawer.elements.archives.querySelector(".agent-archive-card")).not.toBeNull());
+    const restore = drawer.elements.archives.querySelector('[data-archive-action="restore"]');
+    restore.click();
+    const dialog = drawer.elements.drawer.querySelector(".agent-confirmation-dialog");
+    const cancel = dialog.querySelector("button");
+    const confirmButton = dialog.querySelector(".agent-confirmation-primary");
+    expect(document.activeElement).toBe(cancel);
+    cancel.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", bubbles: true }));
+    cancel.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(confirmButton);
+    confirmButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(cancel);
+    cancel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect(calls.filter(({ type }) => ["new", "archive_restore", "archive_delete"].includes(type))).toHaveLength(0);
+    expect(document.activeElement).toBe(restore);
+
+    restore.click();
+    options.onEvent(agentEvent("archive", { action: "deleted", archive_id: agentIDs.archive }, { event_id: "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU" }));
+    dialog.querySelector("button").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect(calls.filter(({ type }) => ["new", "archive_restore", "archive_delete"].includes(type))).toHaveLength(0);
+    expect(document.activeElement).toBe(drawer.elements.backButton);
+    drawer.destroy();
   });
 
   test("traps focus and exposes modal semantics at the mobile breakpoint", () => {
@@ -1917,10 +1957,13 @@ describe("local agent rendering and controls", () => {
     ];
     for (const event of events) options.onEvent(event);
     const activities = [...drawer.elements.timeline.querySelectorAll(".agent-activity")];
-    expect(activities.map((activity) => activity.querySelector("summary")?.textContent)).toEqual([
-      "Work summary", "Status", "Retrying", "Compaction", "Tool request blocked", "Permission request blocked", "Error",
+    expect(activities.map((activity) => activity.querySelector("summary")?.textContent)).toEqual(["Work summary"]);
+    const notices = [...drawer.elements.timeline.querySelectorAll(".agent-status-notice")];
+    expect(notices.map((notice) => notice.querySelector("strong")?.textContent)).toEqual([
+      "Status update", "Retrying", "Compaction", "Tool request blocked", "Permission request blocked", "Something went wrong",
     ]);
-    expect(activities.map((activity) => activity.open)).toEqual([false, false, false, false, true, true, true]);
+    expect(notices.map((notice) => notice.dataset.tone)).toEqual(["neutral", "neutral", "neutral", "warning", "warning", "error"]);
+    expect(activities.map((activity) => activity.open)).toEqual([false]);
     expect(drawer.elements.timeline.textContent).not.toContain("thinking_delta");
     expect(drawer.elements.timeline.textContent).not.toContain("tool_name");
     drawer.destroy();
