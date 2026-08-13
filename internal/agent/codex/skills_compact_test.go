@@ -174,6 +174,24 @@ func TestManualCompactTerminalStatesAndUnsupportedRuntime(t *testing.T) {
 	runtime.handleResponse(rpcEnvelope{ID: json.RawMessage(`1`), Error: &rpcError{Code: -32601, Message: "method not found"}})
 	assertProviderError(t, <-result, provider.ErrorCompactUnsupported)
 	require.False(t, session.SupportsCompact())
+	second := &Session{runtime: runtime, supportsCompact: true}
+	require.False(t, second.SupportsCompact(), "unsupported compact capability is shared across runtime sessions")
+}
+
+func TestManualCompactDoesNotConsumeUnrelatedSettingsNotifications(t *testing.T) {
+	settings := provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "5.6 Sol", Selectable: true}
+	session := &Session{
+		native: provider.NativeSession{Provider: provider.NameCodex, Model: settings.Model, Settings: &settings, Presentation: &presentation},
+		events: make(chan provider.Event, 2), compact: &nativeCompact{request: provider.CompactRequest{WorkID: testID(932)}, accepted: true, nativeID: "native-compact"},
+		catalog:  nativeCatalog{models: map[string]nativeModelRecord{"gpt-5.6-luna": {Model: "gpt-5.6-luna", DisplayName: "5.6 Luna", DefaultEffort: "medium", Efforts: []provider.ReasoningEffort{{Value: "medium", Description: "Balanced"}}, ServiceTiers: []nativeServiceTier{{ID: "default", Name: "Default"}}}}, aliases: map[string]string{}},
+		threadID: "native-thread", driver: &Driver{config: Config{Clock: fixedClock{time.Unix(100, 0).UTC()}}},
+	}
+	session.handleNotification("thread/settings/updated", mustJSON(t, map[string]any{"threadId": "native-thread", "threadSettings": map[string]any{"model": "gpt-5.6-luna", "effort": "medium", "serviceTier": nil}}))
+	event := awaitEvent(t, session.events)
+	require.Equal(t, provider.EventSettings, event.Kind)
+	require.Equal(t, "gpt-5.6-luna", event.Settings.Model)
+	require.NotNil(t, session.compact)
 }
 
 func skillListResult(name string) json.RawMessage {

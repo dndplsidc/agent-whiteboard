@@ -67,12 +67,32 @@ type runtime struct {
 	catalogMu sync.RWMutex
 	catalog   nativeCatalog
 
-	skillsMu         sync.Mutex
-	skillsGeneration uint64
-	skillsRefreshing bool
-	done             chan struct{}
-	stopOnce         sync.Once
-	err              error
+	skillsMu           sync.Mutex
+	skillsGeneration   uint64
+	skillsRefreshing   bool
+	compactMu          sync.RWMutex
+	compactUnsupported bool
+	done               chan struct{}
+	stopOnce           sync.Once
+	err                error
+}
+
+func (runtime *runtime) supportsManualCompact() bool {
+	if runtime == nil {
+		return false
+	}
+	runtime.compactMu.RLock()
+	defer runtime.compactMu.RUnlock()
+	return !runtime.compactUnsupported
+}
+
+func (runtime *runtime) disableManualCompact() {
+	if runtime == nil {
+		return
+	}
+	runtime.compactMu.Lock()
+	runtime.compactUnsupported = true
+	runtime.compactMu.Unlock()
 }
 
 func startRuntime(ctx context.Context, driver *Driver) (*runtime, error) {

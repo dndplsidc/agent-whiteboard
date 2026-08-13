@@ -1166,7 +1166,8 @@ describe("local agent rendering and controls", () => {
     };
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
     const skill = { id: agentIDs.archive, name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" };
-    options.onEvent(codexSnapshotEvent({ payload: { skills: [skill] } }));
+    const secondSkill = { id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", name: "test-helper", display_name: "Test helper", description: "Run the checks", scope: "repo" };
+    options.onEvent(codexSnapshotEvent({ payload: { skills: [skill, secondSkill] } }));
 
     drawer.elements.message.value = "$rev";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
@@ -1177,6 +1178,15 @@ describe("local agent rendering and controls", () => {
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(sent.some(({ type }) => type === "submit")).toBe(true));
     expect(sent.find(({ type }) => type === "submit").payload.content.parts.some(({ type }) => type === "skill")).toBe(true);
+
+    drawer.elements.message.value = "$rev";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    drawer.elements.message.lastChild.textContent = " $test";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(drawer.elements.completionMenu.textContent).toContain("Test helper");
+    drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(drawer.elements.message.querySelectorAll(".agent-message-skill")).toHaveLength(2);
 
     drawer.elements.message.value = "/compact";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));

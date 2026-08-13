@@ -90,7 +90,7 @@ func newSession(driver *Driver, runtime *runtime, native provider.NativeSession,
 	view := newSessionChild()
 	return &Session{
 		driver: driver, runtime: runtime, native: native, threadID: native.Ref.Value(), events: make(chan provider.Event, 512), view: view, workspace: workspace, capabilities: capabilities, catalog: catalog.clone(),
-		skills: unavailableSkillCatalog(), supportsCompact: true,
+		skills: unavailableSkillCatalog(), supportsCompact: runtime.supportsManualCompact(),
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 }

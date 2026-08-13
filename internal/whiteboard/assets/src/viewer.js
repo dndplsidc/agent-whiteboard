@@ -2661,11 +2661,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function completionQuery(content = messageEditor.getContent()) {
-    if (selectedProvider !== "codex" || codexBusy() || draftAttachments.length > 0 || draftInlineVisuals.size > 0 || content.parts.length !== 1 || content.parts[0].type !== "text") return null;
-    const text = content.parts[0].text;
+    if (selectedProvider !== "codex" || codexBusy() || draftAttachments.length > 0 || draftInlineVisuals.size > 0) return null;
+    const tail = content.parts.at(-1);
+    if (!tail || tail.type !== "text") return null;
+    const text = tail.text;
     const skill = /(?:^|\s)\$([\p{L}\p{N}_.-]*)$/u.exec(text);
     if (skill) return { mode: "skill", query: skill[1].toLocaleLowerCase() };
-    const slash = /^\/([a-z]*)$/u.exec(text);
+    const slash = content.parts.length === 1 ? /^\/([a-z]*)$/u.exec(text) : null;
     if (slash && text !== "/compact" && state.supportsCompact) return { mode: "slash", query: slash[1] };
     return null;
   }

@@ -12,7 +12,7 @@ import (
 func (session *Session) SupportsCompact() bool {
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	return !session.closed && session.supportsCompact
+	return !session.closed && session.supportsCompact && (session.runtime == nil || session.runtime.supportsManualCompact())
 }
 
 func (session *Session) Compact(ctx context.Context, request provider.CompactRequest) (provider.AcceptedCompact, error) {
@@ -21,7 +21,7 @@ func (session *Session) Compact(ctx context.Context, request provider.CompactReq
 	}
 	compact := &nativeCompact{request: request}
 	session.mu.Lock()
-	if session.closed || !session.supportsCompact {
+	if session.closed || !session.supportsCompact || session.runtime == nil || !session.runtime.supportsManualCompact() {
 		session.mu.Unlock()
 		return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorCompactUnsupported)
 	}
@@ -40,6 +40,7 @@ func (session *Session) Compact(ctx context.Context, request provider.CompactReq
 		}
 		if errors.Is(err, errMethodNotFound) {
 			session.supportsCompact = false
+			session.runtime.disableManualCompact()
 		}
 		session.mu.Unlock()
 		if errors.Is(err, errMethodNotFound) {
@@ -112,7 +113,7 @@ func (session *Session) captureCompactNotification(method string, params json.Ra
 	}
 	if nativeID == "" {
 		session.mu.Unlock()
-		return true
+		return false
 	}
 	if compact.nativeID == "" {
 		compact.nativeID = nativeID
