@@ -216,7 +216,7 @@ func (actor *conversation) publishSettingsEvent(attachments map[*clientAttachmen
 		actor.dispatchBlocked = true
 		actor.lifecycle = protocol.LifecycleUnavailable
 		actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 		return
 	}
 	actor.applyEffectiveSettings(*source.Settings, *source.Presentation)

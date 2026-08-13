@@ -54,6 +54,10 @@ func (skill SkillDescriptor) validate() error {
 	return nil
 }
 
+func ValidateSkillCatalog(state SkillsState, skills []SkillDescriptor) error {
+	return validateSkillCatalog(state, skills)
+}
+
 func validateSkillCatalog(state SkillsState, skills []SkillDescriptor) error {
 	if !state.Valid() || skills == nil || len(skills) > MaxSkills || state == SkillsUnavailable && len(skills) != 0 {
 		return invalid(nil)

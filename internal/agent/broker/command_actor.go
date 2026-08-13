@@ -63,6 +63,12 @@ func (actor *conversation) handleCommand(attachments map[*clientAttachment]struc
 			return
 		}
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
+	case protocol.CompactPayload:
+		pending, code := actor.commandCompact(attachments, turnResults, request.command, payload)
+		if pending {
+			return
+		}
+		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
 	case protocol.QueueEditPayload:
 		content, err := messageContentToProvider(payload.Content)
 		if err != nil || !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) {
@@ -99,12 +105,12 @@ func (actor *conversation) handleCommand(attachments map[*clientAttachment]struc
 			return
 		}
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, "")
-	case protocol.TurnReferencePayload:
+	case protocol.WorkReferencePayload:
 		if request.command.Type != protocol.CommandInterrupt {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)
 			return
 		}
-		pending, code := actor.commandInterrupt(turnResults, request.command, payload)
+		pending, code := actor.commandInterrupt(attachments, turnResults, request.command, payload)
 		if pending {
 			return
 		}
@@ -114,7 +120,7 @@ func (actor *conversation) handleCommand(attachments map[*clientAttachment]struc
 			actor.commandArchiveList(attachments, request.command, payload)
 			return
 		}
-		if request.command.Type != protocol.CommandHistoryPage || actor.workerSettled != nil || actor.dispatchBlocked || actor.stopping {
+		if request.command.Type != protocol.CommandHistoryPage || actor.compact != nil || actor.workerSettled != nil || actor.dispatchBlocked || actor.stopping {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)
 			return
 		}

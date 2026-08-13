@@ -46,6 +46,8 @@ const (
 	ErrorImageWorkspaceLimit          BrowserErrorCode = "image_workspace_limit"
 	ErrorImageMissing                 BrowserErrorCode = "image_missing"
 	ErrorImageStorageFailure          BrowserErrorCode = "image_storage_failure"
+	ErrorSkillUnavailable             BrowserErrorCode = "skill_unavailable"
+	ErrorCompactUnsupported           BrowserErrorCode = "compact_unsupported"
 
 	// Compatibility names describe the same frozen wire outcomes.
 	ErrorActiveTurnBusy      = ErrorActiveTurnConflict
@@ -121,6 +123,8 @@ var browserErrorDefinitions = map[BrowserErrorCode]browserErrorDefinition{
 	ErrorImageWorkspaceLimit:          {"This conversation has reached its image storage limit.", ActionNone},
 	ErrorImageMissing:                 {"The selected image is no longer available.", ActionNone},
 	ErrorImageStorageFailure:          {"The selected image could not be stored safely.", ActionTryAgain},
+	ErrorSkillUnavailable:             {"A selected skill is no longer available. Refresh the skill list and try again.", ActionRefreshState},
+	ErrorCompactUnsupported:           {"Manual context compaction is unavailable for this provider runtime.", ActionRefreshState},
 }
 
 type BrowserError struct{ code BrowserErrorCode }
@@ -146,7 +150,7 @@ func AllBrowserErrorCodes() []BrowserErrorCode {
 		ErrorStaleReference, ErrorReplayWindowUnavailable, ErrorStateRepairFailed, ErrorArchiveDeleteRetained,
 		ErrorBrokerShuttingDown, ErrorProviderProtocolFailure, ErrorProviderMalformedStream, ErrorAcceptanceOutcomeUnknown,
 		ErrorInvalidModelConfiguration, ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
-		ErrorImageWorkspaceLimit, ErrorImageMissing, ErrorImageStorageFailure,
+		ErrorImageWorkspaceLimit, ErrorImageMissing, ErrorImageStorageFailure, ErrorSkillUnavailable, ErrorCompactUnsupported,
 	}
 }
 

@@ -106,6 +106,15 @@ func (factory *EventFactory) FromProvider(event provider.Event) (protocol.Event,
 			Kind:      protocol.InteractionKind(event.Resolution.Kind),
 			OptionID:  event.Resolution.OptionID,
 		}
+	case provider.EventSkillCatalog:
+		catalog := event.SkillCatalog
+		skills := make([]protocol.SkillDescriptor, len(catalog.Skills))
+		for index, skill := range catalog.Skills {
+			skills[index] = protocol.SkillDescriptor{ID: skill.ID, Name: skill.Name, DisplayName: skill.DisplayName, Description: skill.Description, Scope: protocol.SkillScope(skill.Scope)}
+		}
+		payload = protocol.SkillCatalogPayload{State: protocol.SkillsState(catalog.State), Skills: skills}
+	case provider.EventCompact:
+		payload = protocol.CompactionPayload{WorkID: event.Compact.WorkID, Status: protocol.CompactionStatus(event.Compact.Status)}
 	case provider.EventBlocked:
 		payload = protocol.NewBlockedPayload(protocol.BlockedKind(event.Blocked))
 	case provider.EventCompletion:

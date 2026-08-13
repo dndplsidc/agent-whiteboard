@@ -83,6 +83,8 @@ func TestProviderAndReadinessErrorsAreExhaustivelyMappedWithoutCauses(t *testing
 		provider.ErrorImageTurnLimit:            protocol.ErrorImageTurnLimit,
 		provider.ErrorImageMissing:              protocol.ErrorImageMissing,
 		provider.ErrorImageStorageFailure:       protocol.ErrorImageStorageFailure,
+		provider.ErrorSkillUnavailable:          protocol.ErrorSkillUnavailable,
+		provider.ErrorCompactUnsupported:        protocol.ErrorCompactUnsupported,
 	}
 	for _, code := range provider.AllProviderErrorCodes() {
 		failure := provider.NewProviderError(code)
@@ -269,30 +271,30 @@ func TestReplayLogUsesWireBytesEvictsExactlyAndFiltersTargets(t *testing.T) {
 
 func TestReplayLogReturnsStablePayloadCopies(t *testing.T) {
 	log := NewReplayLog()
-	active := testID('D')
-	event := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: protocol.EventSnapshot, Timestamp: testTime(), Payload: protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Content: protocol.TextContent("original"), Settings: nil}}, ContextState: protocol.ContextPending, ActiveTurnID: &active, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}}}
+	active := &protocol.ActiveWork{WorkID: testID('D'), Kind: protocol.ActiveWorkTurn, State: protocol.ActiveWorkRunning}
+	event := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: protocol.EventSnapshot, Timestamp: testTime(), Payload: protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Content: protocol.TextContent("original"), Settings: nil}}, ContextState: protocol.ContextPending, ActiveWork: active, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}}}
 	require.NoError(t, log.Append(event))
 	payload := event.Payload.(protocol.SnapshotPayload)
 	payload.Queue[0].Content.Parts[0].Text = "changed"
-	*payload.ActiveTurnID = testID('E')
+	payload.ActiveWork.WorkID = testID('E')
 
-	lifecycleTurn := testID('H')
-	lifecycle := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(101), ConversationID: testID('A'), Type: protocol.EventLifecycle, Timestamp: testTime(), Payload: protocol.LifecyclePayload{State: protocol.LifecycleResponding, TurnID: &lifecycleTurn}}
+	lifecycleWork := &protocol.ActiveWork{WorkID: testID('H'), Kind: protocol.ActiveWorkTurn, State: protocol.ActiveWorkRunning}
+	lifecycle := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(101), ConversationID: testID('A'), Type: protocol.EventLifecycle, Timestamp: testTime(), Payload: protocol.LifecyclePayload{State: protocol.LifecycleResponding, ActiveWork: lifecycleWork}}
 	require.NoError(t, log.Append(lifecycle))
-	*lifecycle.Payload.(protocol.LifecyclePayload).TurnID = testID('I')
+	lifecycle.Payload.(protocol.LifecyclePayload).ActiveWork.WorkID = testID('I')
 
 	got, err := log.Replay(testID('G'), "")
 	require.NoError(t, err)
 	stored := got[0].Payload.(protocol.SnapshotPayload)
 	require.Equal(t, "original", stored.Queue[0].Content.Parts[0].Text)
-	require.Equal(t, testID('D'), *stored.ActiveTurnID)
-	require.Equal(t, testID('H'), *got[1].Payload.(protocol.LifecyclePayload).TurnID)
-	*stored.ActiveTurnID = testID('F')
-	*got[1].Payload.(protocol.LifecyclePayload).TurnID = testID('J')
+	require.Equal(t, testID('D'), stored.ActiveWork.WorkID)
+	require.Equal(t, testID('H'), got[1].Payload.(protocol.LifecyclePayload).ActiveWork.WorkID)
+	stored.ActiveWork.WorkID = testID('F')
+	got[1].Payload.(protocol.LifecyclePayload).ActiveWork.WorkID = testID('J')
 	again, err := log.Replay(testID('G'), "")
 	require.NoError(t, err)
-	require.Equal(t, testID('D'), *again[0].Payload.(protocol.SnapshotPayload).ActiveTurnID)
-	require.Equal(t, testID('H'), *again[1].Payload.(protocol.LifecyclePayload).TurnID)
+	require.Equal(t, testID('D'), again[0].Payload.(protocol.SnapshotPayload).ActiveWork.WorkID)
+	require.Equal(t, testID('H'), again[1].Payload.(protocol.LifecyclePayload).ActiveWork.WorkID)
 	require.NotContains(t, string(mustEncodeEvent(t, got[0])), "creator_context")
 }
 
@@ -301,7 +303,7 @@ func TestReplayClonesPreserveRequiredEmptySlices(t *testing.T) {
 	conversation := testID('K')
 	client := testID('L')
 	payloads := []protocol.EventPayload{
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}},
 		protocol.QueuePayload{Items: []protocol.QueueItem{}},
 		protocol.TimelinePayload{CommandID: testID('M'), Items: []protocol.TimelineItem{}, NextCursor: nil},
 		protocol.HistoryPayload{CommandID: testID('N'), Items: []protocol.ArchiveItem{}, NextCursor: nil},

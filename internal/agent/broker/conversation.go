@@ -38,11 +38,15 @@ type conversation struct {
 	settingsState           protocol.SettingsState
 	effectiveSettings       *provider.ExecutionSettings
 	effectivePresentation   *provider.ModelPresentation
+	skillsState             *protocol.SkillsState
+	skills                  []protocol.SkillDescriptor
+	supportsCompact         bool
 	queue                   *Queue
 	commands                commandLedger
 	pendingInteractions     map[string]*pendingInteraction
 	pendingInteractionBytes int
 	active                  *activeTurn
+	compact                 *activeCompact
 	workerSettled           chan struct{}
 	workerKind              providerWorkerKind
 	workerCommandID         string
@@ -251,6 +255,7 @@ const (
 	providerWorkerInterrupt
 	providerWorkerHistory
 	providerWorkerArchive
+	providerWorkerCompact
 )
 
 type shutdownWorkerResult struct {
@@ -284,7 +289,7 @@ func newConversation(identity statepkg.Identity, mapping statepkg.Mapping, sessi
 		factory: factory, replay: NewReplayLog(), requests: make(chan any),
 		done: make(chan struct{}), start: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
 		contextState: protocol.ContextPending, catalog: catalog, domainCatalog: domainCatalog,
-		lifecycle: protocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(),
+		lifecycle: protocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(), skills: []protocol.SkillDescriptor{},
 		pendingInteractions: make(map[string]*pendingInteraction),
 		lifecycleCtx:        lifecycleCtx, shutdownTimeout: shutdownTimeout,
 	}
@@ -293,6 +298,7 @@ func newConversation(identity statepkg.Identity, mapping statepkg.Mapping, sessi
 			return nil, errors.New("Codex session lacks effective settings")
 		}
 		actor.applyEffectiveSettings(*session.native.Settings, *session.native.Presentation)
+		actor.loadSessionFeatures(lifecycleCtx)
 	}
 	if actor.mapping.Current.Observed != nil {
 		actor.contextDigest = actor.mapping.Current.Observed.Digest
@@ -350,6 +356,7 @@ func (actor *conversation) run() {
 			zeroProviderContext(actor.active.request.Context)
 			actor.active = nil
 		}
+		actor.compact = nil
 		for item := range attachments {
 			delete(attachments, item)
 			item.finish()
@@ -360,7 +367,7 @@ func (actor *conversation) run() {
 		if len(attachments) == 0 && len(actor.pendingInteractions) != 0 {
 			actor.cancelPendingInteractions(interactionResults)
 		}
-		idle := len(attachments) == 0 && actor.active == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !actor.dispatchBlocked && !actor.recoveryActive && !actor.handoffActive && !shutdownActive && !actor.stopping
+		idle := len(attachments) == 0 && actor.active == nil && actor.compact == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !actor.dispatchBlocked && !actor.recoveryActive && !actor.handoffActive && !shutdownActive && !actor.stopping
 		if idle && idleTimer == nil {
 			idleTimer = actor.timers.NewTimer(actor.idleTimeout)
 		} else if !idle && idleTimer != nil {
@@ -491,6 +498,9 @@ func (actor *conversation) run() {
 				actor.shutdownAttempt = nil
 				providerEvents = result.handle.events
 				actor.refreshContextFromMapping()
+				if actor.identity.Provider == provider.NameCodex {
+					actor.loadSessionFeatures(actor.lifecycleCtx)
+				}
 				if !actor.stopping {
 					deferredObservationErr = actor.applyDeferredObservation(attachments)
 				}
@@ -518,27 +528,27 @@ func (actor *conversation) run() {
 				actor.recoveryUnavailable = true
 				actor.lifecycle = protocol.LifecycleUnavailable
 				actor.publishBrowserError(attachments, protocol.ErrorProviderRecoveryFailed)
-				actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+				actor.publishShared(attachments, actor.lifecyclePayload())
 				continue
 			}
 			if deferredObservationErr != nil {
 				actor.recoveryUnavailable = true
 				actor.lifecycle = protocol.LifecycleUnavailable
 				actor.publishBrowserError(attachments, protocol.ErrorProviderRecoveryFailed)
-				actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+				actor.publishShared(attachments, actor.lifecyclePayload())
 				continue
 			}
 			actor.recoveryUnavailable = false
 			actor.dispatchBlocked = false
 			actor.lifecycle = protocol.LifecycleReady
 			if actor.queue.Empty() {
-				actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+				actor.publishShared(attachments, actor.lifecyclePayload())
 			} else {
 				actor.dispatchNext(attachments, turnResults)
 			}
 		case <-idleChannel:
 			idleTimer = nil
-			if len(attachments) != 0 || actor.active != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.dispatchBlocked || actor.recoveryActive || actor.handoffActive || shutdownActive || actor.stopping {
+			if len(attachments) != 0 || actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.dispatchBlocked || actor.recoveryActive || actor.handoffActive || shutdownActive || actor.stopping {
 				continue
 			}
 			actor.stopping = true
@@ -760,17 +770,23 @@ func (actor *conversation) handleAttach(attachments map[*clientAttachment]struct
 }
 
 func (actor *conversation) snapshot(contextState protocol.ContextState) (protocol.Event, error) {
-	var activeTurnID *string
-	if actor.lifecycle == protocol.LifecycleResponding && actor.active != nil {
-		turnID := actor.active.request.TurnID
-		activeTurnID = &turnID
-	}
 	settingsState, effectiveSettings, catalog := actor.settingsSnapshot()
-	return actor.factory.New(protocol.SnapshotPayload{
+	var skillsState *protocol.SkillsState
+	if actor.skillsState != nil {
+		state := *actor.skillsState
+		skillsState = &state
+	}
+	payload := protocol.SnapshotPayload{
 		Lifecycle: actor.lifecycle, Queue: actor.queue.Items(),
-		ContextState: contextState, ActiveTurnID: activeTurnID, SupportsImages: actor.session.capabilities.Images,
+		ContextState: contextState, ActiveWork: actor.activeWork(), SupportsImages: actor.session.capabilities.Images,
 		SettingsState: settingsState, EffectiveSettings: effectiveSettings, Catalog: catalog,
-	})
+		SkillsState: skillsState, Skills: append([]protocol.SkillDescriptor{}, actor.skills...), SupportsCompact: actor.supportsCompact,
+	}
+	wireProvider, err := providerNameFromDomain(actor.identity.Provider)
+	if err != nil || actor.identity.Provider == provider.NameCodex && !actor.queue.Empty() || payload.ValidateForProvider(wireProvider) != nil {
+		return protocol.Event{}, errors.New("invalid provider snapshot state")
+	}
+	return actor.factory.New(payload)
 }
 
 func (actor *conversation) detach(attachments map[*clientAttachment]struct{}, item *clientAttachment) {
@@ -781,7 +797,26 @@ func (actor *conversation) detach(attachments map[*clientAttachment]struct{}, it
 }
 
 func (actor *conversation) handleProviderEvent(attachments map[*clientAttachment]struct{}, turnResults chan<- turnWorkerResult, source provider.Event) {
-	if source.Validate() != nil || !actor.providerEventMatchesActive(source) {
+	if source.Validate() != nil {
+		actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
+		return
+	}
+	if source.Kind == provider.EventSkillCatalog {
+		actor.publishSkillCatalog(attachments, source)
+		return
+	}
+	if source.Kind == provider.EventCompact {
+		if actor.compact != nil && actor.compact.phase == compactStarting && source.Compact != nil && source.Compact.WorkID == actor.compact.request.WorkID && actor.compact.pendingTerminal == nil {
+			copyOfSource := source
+			copyOfCompact := *source.Compact
+			copyOfSource.Compact = &copyOfCompact
+			actor.compact.pendingTerminal = &copyOfSource
+			return
+		}
+		actor.publishCompactTerminal(attachments, source)
+		return
+	}
+	if !actor.providerEventMatchesActive(source) {
 		actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
 		return
 	}
@@ -916,7 +951,7 @@ func (actor *conversation) flushPendingProviderEvents(attachments map[*clientAtt
 		actor.dispatchBlocked = true
 		actor.lifecycle = protocol.LifecycleUnavailable
 		actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 	}
 	for _, source := range events {
 		if actor.active == nil || !actor.providerEventMatchesActive(source) {

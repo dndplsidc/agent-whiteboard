@@ -260,6 +260,12 @@ func messageContentToProvider(content protocol.MessageContent) (provider.Message
 				reference.Visual.Ordinal = imageOrdinal
 			}
 			converted.Parts[index] = provider.MessagePart{Kind: provider.MessagePartReference, Reference: &reference}
+		case protocol.MessagePartSkill:
+			if part.Skill == nil {
+				return provider.MessageContent{}, errors.New("invalid skill message part")
+			}
+			skill := provider.SkillInvocation{ID: part.Skill.ID, Name: part.Skill.Name}
+			converted.Parts[index] = provider.MessagePart{Kind: provider.MessagePartSkill, Skill: &skill}
 		default:
 			return provider.MessageContent{}, errors.New("invalid protocol message part")
 		}
@@ -289,6 +295,12 @@ func messageContentFromProvider(content provider.MessageContent, descriptors []p
 				return protocol.MessageContent{}, err
 			}
 			converted.Parts[index] = protocol.MessagePart{Type: protocol.MessagePartReference, Reference: &reference}
+		case provider.MessagePartSkill:
+			if part.Skill == nil {
+				return protocol.MessageContent{}, errors.New("invalid provider skill message part")
+			}
+			skill := protocol.SkillInvocation{ID: part.Skill.ID, Name: part.Skill.Name}
+			converted.Parts[index] = protocol.MessagePart{Type: protocol.MessagePartSkill, Skill: &skill}
 		default:
 			return protocol.MessageContent{}, errors.New("invalid provider message part")
 		}

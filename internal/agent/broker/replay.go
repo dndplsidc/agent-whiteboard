@@ -206,14 +206,19 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 	case protocol.SnapshotPayload:
 		value.Queue = cloneQueueItems(value.Queue)
 		value.Catalog = cloneCatalog(value.Catalog)
+		value.Skills = append([]protocol.SkillDescriptor{}, value.Skills...)
 		value.EffectiveSettings = clonePresentedSettings(value.EffectiveSettings)
 		if value.SettingsState != nil {
 			state := *value.SettingsState
 			value.SettingsState = &state
 		}
-		if value.ActiveTurnID != nil {
-			active := *value.ActiveTurnID
-			value.ActiveTurnID = &active
+		if value.SkillsState != nil {
+			state := *value.SkillsState
+			value.SkillsState = &state
+		}
+		if value.ActiveWork != nil {
+			active := *value.ActiveWork
+			value.ActiveWork = &active
 		}
 		return value
 	case *protocol.SnapshotPayload:
@@ -223,20 +228,25 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 		copyOfValue := *value
 		copyOfValue.Queue = cloneQueueItems(value.Queue)
 		copyOfValue.Catalog = cloneCatalog(value.Catalog)
+		copyOfValue.Skills = append([]protocol.SkillDescriptor{}, value.Skills...)
 		copyOfValue.EffectiveSettings = clonePresentedSettings(value.EffectiveSettings)
 		if value.SettingsState != nil {
 			state := *value.SettingsState
 			copyOfValue.SettingsState = &state
 		}
-		if value.ActiveTurnID != nil {
-			active := *value.ActiveTurnID
-			copyOfValue.ActiveTurnID = &active
+		if value.SkillsState != nil {
+			state := *value.SkillsState
+			copyOfValue.SkillsState = &state
+		}
+		if value.ActiveWork != nil {
+			active := *value.ActiveWork
+			copyOfValue.ActiveWork = &active
 		}
 		return &copyOfValue
 	case protocol.LifecyclePayload:
-		if value.TurnID != nil {
-			turnID := *value.TurnID
-			value.TurnID = &turnID
+		if value.ActiveWork != nil {
+			work := *value.ActiveWork
+			value.ActiveWork = &work
 		}
 		return value
 	case *protocol.LifecyclePayload:
@@ -244,9 +254,9 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 			return (*protocol.LifecyclePayload)(nil)
 		}
 		copyOfValue := *value
-		if value.TurnID != nil {
-			turnID := *value.TurnID
-			copyOfValue.TurnID = &turnID
+		if value.ActiveWork != nil {
+			work := *value.ActiveWork
+			copyOfValue.ActiveWork = &work
 		}
 		return &copyOfValue
 	case protocol.SettingsPayload:
@@ -268,6 +278,16 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 			turnID := *value.AcceptedTurnID
 			copyOfValue.AcceptedTurnID = &turnID
 		}
+		return &copyOfValue
+	case protocol.SkillCatalogPayload:
+		value.Skills = append([]protocol.SkillDescriptor{}, value.Skills...)
+		return value
+	case *protocol.SkillCatalogPayload:
+		if value == nil {
+			return (*protocol.SkillCatalogPayload)(nil)
+		}
+		copyOfValue := *value
+		copyOfValue.Skills = append([]protocol.SkillDescriptor{}, value.Skills...)
 		return &copyOfValue
 	case protocol.QueuePayload:
 		value.Items = cloneQueueItems(value.Items)

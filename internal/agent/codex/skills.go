@@ -199,9 +199,6 @@ func skillIdentity(scope provider.SkillScope, name, path string) string {
 }
 
 func (session *Session) Skills(ctx context.Context) provider.SkillCatalog {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	session.skillsMu.Lock()
 	defer session.skillsMu.Unlock()
 	session.mu.Lock()

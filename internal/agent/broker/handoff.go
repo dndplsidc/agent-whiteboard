@@ -57,7 +57,7 @@ type handoffResult struct {
 }
 
 func (actor *conversation) commandHandoff(results chan<- handoffResult, command protocol.Command, archiveID string) protocol.BrowserErrorCode {
-	if results == nil || actor.startHandoff == nil || actor.active != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.recoveryActive || actor.recoveryPending || actor.deferredObserve != nil || actor.dispatchBlocked || actor.stopping || actor.handoffActive || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil {
+	if results == nil || actor.startHandoff == nil || actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.recoveryActive || actor.recoveryPending || actor.deferredObserve != nil || actor.dispatchBlocked || actor.stopping || actor.handoffActive || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil {
 		return protocol.ErrorInvalidState
 	}
 	request := handoffRequest{
@@ -134,7 +134,7 @@ func (actor *conversation) handleHandoffResult(attachments map[*clientAttachment
 		actor.handoffFailed = true
 		actor.dispatchBlocked = true
 		actor.lifecycle = protocol.LifecycleUnavailable
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 	}
 	return false, false
 }

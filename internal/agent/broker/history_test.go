@@ -227,7 +227,7 @@ func TestInterruptWaitsForHistoryWorkerWithoutOverlappingProviderCalls(t *testin
 		historyDone <- commandResponse{event: event, err: err}
 	}()
 	receiveLifecycle(t, entered)
-	interrupt := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(9035), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandInterrupt, Payload: protocol.TurnReferencePayload{TurnID: turnID}}
+	interrupt := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(9035), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandInterrupt, Payload: protocol.WorkReferencePayload{WorkID: turnID}}
 	interruptRequest := commandRequest{ctx: context.Background(), attachment: connection.attachment, command: interrupt, response: make(chan commandResponse, 1)}
 	interruptReceived := make(chan struct{})
 	go func() {
