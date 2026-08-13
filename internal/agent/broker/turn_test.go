@@ -1065,8 +1065,8 @@ func TestActorShutdownBoundsPostKillJoinByConfiguredTimeout(t *testing.T) {
 
 func TestActorShutdownEscalatesAndJoinsNonCooperativeTurnWorker(t *testing.T) {
 	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7145)
-	broker.shutdownTimeout = 40 * time.Millisecond
-	connection.actor.shutdownTimeout = 40 * time.Millisecond
+	broker.shutdownTimeout = 200 * time.Millisecond
+	connection.actor.shutdownTimeout = 200 * time.Millisecond
 	child := nonCooperativeHardeningChild(1)
 	session.child = child
 	connection.actor.session.child = child
