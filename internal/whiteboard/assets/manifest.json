@@ -8,6 +8,6 @@
   },
   "sha256": {
     "dist/viewer.min.js": "c4dce6973195516e0b4863a566f1d05005e8f93d90fae2f785dd021b1b7fe5bb",
-    "dist/viewer.min.css": "559c73bdc353ff646fc67102c73d5d37fe502c3d53dc8f46456c9f8d9ccbabc1"
+    "dist/viewer.min.css": "5185fc7f7969d1be184e05ea5c714a6488f6a120251728902b3ea1b3a6bf3f0b"
   }
 }
