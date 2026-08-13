@@ -214,6 +214,7 @@ func validateProtocolResource(resource protocol.Resource) error {
 			Provider:      protocol.ProviderPi,
 			Resource:      resource,
 			ContextDigest: strings.Repeat("0", 64),
+			Settings:      nil,
 		},
 	})
 	return err
@@ -233,6 +234,7 @@ func validateProtocolPageContext(context protocol.PageContext) error {
 			MessageID: id,
 			Content:   protocol.TextContent("message"),
 			Context:   &context,
+			Settings:  nil,
 		},
 	})
 	return err

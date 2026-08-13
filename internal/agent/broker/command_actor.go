@@ -46,7 +46,7 @@ func (actor *conversation) handleCommand(attachments map[*clientAttachment]struc
 		return
 	}
 	if request.command.Type == protocol.CommandNew {
-		if _, ok := request.command.Payload.(protocol.EmptyPayload); !ok {
+		if _, ok := request.command.Payload.(protocol.NewPayload); !ok {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)
 			return
 		}

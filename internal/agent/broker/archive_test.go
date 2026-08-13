@@ -135,6 +135,10 @@ func (store *archiveTestStore) PromotePreparedIfUnchanged(identity statepkg.Iden
 	return store.repairState.PromotePrepared(identity, turnID, at)
 }
 
+func (store *archiveTestStore) UpdateCurrentSettings(identity statepkg.Identity, conversationID string, nativeSession provider.NativeSessionRef, settings provider.ExecutionSettings, presentation provider.ModelPresentation, at time.Time) (statepkg.CommitOutcome, error) {
+	return store.repairState.UpdateCurrentSettings(identity, conversationID, nativeSession, settings, presentation, at)
+}
+
 func (store *archiveTestStore) ReconcilePreparedIfUnchanged(identity statepkg.Identity, expected statepkg.Mapping, turnID string, accepted bool, at time.Time) (statepkg.CommitOutcome, error) {
 	store.muArchive.Lock()
 	hook := store.beforeReconcile

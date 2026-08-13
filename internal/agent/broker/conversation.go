@@ -33,6 +33,11 @@ type conversation struct {
 	contextDigest           string
 	contextState            protocol.ContextState
 	lifecycle               protocol.LifecycleState
+	catalog                 []protocol.CatalogModel
+	domainCatalog           provider.ModelCatalog
+	settingsState           protocol.SettingsState
+	effectiveSettings       *provider.ExecutionSettings
+	effectivePresentation   *provider.ModelPresentation
 	queue                   *Queue
 	commands                commandLedger
 	pendingInteractions     map[string]*pendingInteraction
@@ -265,15 +270,29 @@ func newConversation(identity statepkg.Identity, mapping statepkg.Mapping, sessi
 	if err != nil {
 		return nil, err
 	}
+	domainCatalog, err := loadModelCatalog(lifecycleCtx, identity.Provider, driver)
+	if err != nil {
+		return nil, err
+	}
+	catalog, err := protocolCatalog(domainCatalog)
+	if err != nil {
+		return nil, err
+	}
 	actor := &conversation{
 		identity: identity, mapping: cloneMapping(mapping), state: state, attachments: attachments, driver: driver, retainSession: retainSession,
 		session: session, generation: 1,
 		factory: factory, replay: NewReplayLog(), requests: make(chan any),
 		done: make(chan struct{}), start: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
-		contextState: protocol.ContextPending,
-		lifecycle:    protocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(),
+		contextState: protocol.ContextPending, catalog: catalog, domainCatalog: domainCatalog,
+		lifecycle: protocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(),
 		pendingInteractions: make(map[string]*pendingInteraction),
 		lifecycleCtx:        lifecycleCtx, shutdownTimeout: shutdownTimeout,
+	}
+	if identity.Provider == provider.NameCodex {
+		if session.native.Settings == nil || session.native.Presentation == nil {
+			return nil, errors.New("Codex session lacks effective settings")
+		}
+		actor.applyEffectiveSettings(*session.native.Settings, *session.native.Presentation)
 	}
 	if actor.mapping.Current.Observed != nil {
 		actor.contextDigest = actor.mapping.Current.Observed.Digest
@@ -746,9 +765,11 @@ func (actor *conversation) snapshot(contextState protocol.ContextState) (protoco
 		turnID := actor.active.request.TurnID
 		activeTurnID = &turnID
 	}
+	settingsState, effectiveSettings, catalog := actor.settingsSnapshot()
 	return actor.factory.New(protocol.SnapshotPayload{
 		Lifecycle: actor.lifecycle, Queue: actor.queue.Items(),
 		ContextState: contextState, ActiveTurnID: activeTurnID, SupportsImages: actor.session.capabilities.Images,
+		SettingsState: settingsState, EffectiveSettings: effectiveSettings, Catalog: catalog,
 	})
 }
 
@@ -777,6 +798,10 @@ func (actor *conversation) handleProviderEvent(attachments map[*clientAttachment
 }
 
 func (actor *conversation) publishProviderEvent(attachments map[*clientAttachment]struct{}, turnResults chan<- turnWorkerResult, source provider.Event) {
+	if source.Kind == provider.EventSettings {
+		actor.publishSettingsEvent(attachments, source)
+		return
+	}
 	if source.Kind == provider.EventInteractionRequest {
 		if actor.rememberInteraction(*source.Interaction) != nil {
 			actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
@@ -903,6 +928,9 @@ func (actor *conversation) flushPendingProviderEvents(attachments map[*clientAtt
 }
 
 func (actor *conversation) providerEventMatchesActive(source provider.Event) bool {
+	if source.Kind == provider.EventSettings {
+		return actor.active != nil && (source.TurnID == "" || source.TurnID == actor.active.request.TurnID)
+	}
 	if source.Kind == provider.EventInteractionResolved {
 		return true
 	}

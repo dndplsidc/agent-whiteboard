@@ -138,6 +138,21 @@ func (state *hardeningState) PromotePrepared(_ statepkg.Identity, turnID string,
 	state.mapping.UpdatedAt = at
 	return statepkg.CommitApplied, nil
 }
+func (state *hardeningState) UpdateCurrentSettings(_ statepkg.Identity, conversationID string, nativeSession provider.NativeSessionRef, settings provider.ExecutionSettings, presentation provider.ModelPresentation, at time.Time) (statepkg.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.mapping == nil || state.mapping.Current == nil || state.mapping.Current.ConversationID != conversationID || state.mapping.Current.NativeSession != nativeSession {
+		return statepkg.CommitNotApplied, errors.New("settings update rejected")
+	}
+	copySettings := settings
+	copyPresentation := presentation
+	state.mapping.Current.Settings = &copySettings
+	state.mapping.Current.Presentation = &copyPresentation
+	state.mapping.Current.ModelLabel = presentation.ModelDisplayName
+	state.mapping.Current.UpdatedAt = at
+	state.mapping.UpdatedAt = at
+	return statepkg.CommitApplied, nil
+}
 func (state *hardeningState) ReconcilePrepared(_ statepkg.Identity, turnID string, accepted bool, at time.Time) (statepkg.CommitOutcome, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
