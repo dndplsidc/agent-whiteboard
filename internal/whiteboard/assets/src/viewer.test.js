@@ -801,6 +801,24 @@ describe("local agent transport and event state", () => {
     expect(state.timeline.map((item) => item.content?.parts[0]?.text ?? item.text)).toEqual(["older", "newer"]);
   });
 
+  test("clears archive loading states when list commands are rejected", () => {
+    const state = createAgentState();
+    applyAgentEvent(state, snapshotEvent());
+    const fresh = createAgentCommand({ type: "archive_list", payload: { limit: 50 }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
+    registerAgentCommand(state, fresh);
+    state.freshArchiveCommandIDs.add(fresh.command_id);
+    state.archiveStatus = "loading";
+    applyAgentEvent(state, agentEvent("command_result", { command_id: fresh.command_id, status: "rejected", error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" } }, { event_id: "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV" }));
+    expect(state.archiveStatus).toBe("idle");
+
+    const more = createAgentCommand({ type: "archive_list", payload: { before: agentIDs.archive, limit: 50 }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: () => "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW" });
+    registerAgentCommand(state, more);
+    state.moreArchiveCommandIDs.add(more.command_id);
+    state.archiveStatus = "loading-more";
+    applyAgentEvent(state, agentEvent("command_result", { command_id: more.command_id, status: "rejected", error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" } }, { event_id: "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" }));
+    expect(state.archiveStatus).toBe("loaded");
+  });
+
   test("accepts empty archive previews and normalizes archive deletion", () => {
     const state = createAgentState();
     applyAgentEvent(state, snapshotEvent());

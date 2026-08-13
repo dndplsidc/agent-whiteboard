@@ -1740,8 +1740,14 @@ body.agent-drawer-modal-open .agent-toast {
   max-width: 16rem;
 }
 
-.agent-archives-loading {
+.agent-archives-loading,
+.agent-archives-refreshing {
   font-size: 0.75rem;
+}
+
+.agent-archives-refreshing {
+  color: var(--awb-muted);
+  margin: 0 0 0.55rem;
 }
 
 .agent-queue-settings {

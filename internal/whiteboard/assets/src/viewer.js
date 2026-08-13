@@ -1171,6 +1171,7 @@ export function createAgentState(provider = "pi") {
     pendingCommandIDs: new Set(),
     knownCommandIDs: new Set(),
     freshArchiveCommandIDs: new Set(),
+    moreArchiveCommandIDs: new Set(),
     connected: false,
     interactions: [],
   };
@@ -1220,6 +1221,7 @@ export function applyAgentEvent(state, untrustedEvent) {
     pendingCommandIDs: new Set(state.pendingCommandIDs),
     knownCommandIDs: new Set(state.knownCommandIDs),
     freshArchiveCommandIDs: new Set(state.freshArchiveCommandIDs),
+    moreArchiveCommandIDs: new Set(state.moreArchiveCommandIDs),
     interactions: state.interactions.map((item) => ({ ...item })),
   };
   const changed = applyAgentEventMutable(draft, untrustedEvent);
@@ -1265,6 +1267,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
       if (state.freshArchiveCommandIDs.delete(payload.command_id)) {
         state.archives = payload.items.map((item) => ({ ...item })).slice(0, MAX_ARCHIVES);
       } else {
+        state.moreArchiveCommandIDs.delete(payload.command_id);
         const known = new Set(state.archives.map((item) => item.archive_id));
         state.archives = [...state.archives, ...payload.items.filter((item) => !known.has(item.archive_id)).map((item) => ({ ...item }))].slice(0, MAX_ARCHIVES);
       }
@@ -1342,8 +1345,12 @@ function applyAgentEventMutable(state, untrustedEvent) {
       trimResolvedInteractions(state);
       break;
     }
-    case "command_result":
+    case "command_result": {
       state.pendingCommandIDs.delete(payload.command_id);
+      const rejectedFreshArchives = payload.status === "rejected" && state.freshArchiveCommandIDs.delete(payload.command_id);
+      const rejectedMoreArchives = payload.status === "rejected" && state.moreArchiveCommandIDs.delete(payload.command_id);
+      if (rejectedFreshArchives) state.archiveStatus = state.archives.length > 0 ? "loaded" : "idle";
+      if (rejectedMoreArchives) state.archiveStatus = "loaded";
       if (payload.status === "rejected") {
         const request = state.interactions.find((item) => item.responseCommandID === payload.command_id);
         if (request) Object.assign(request, { submitting: false, responseCommandID: null });
@@ -1355,6 +1362,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
       }
       state.errors = state.errors.slice(-20);
       break;
+    }
   }
   return true;
 }
@@ -2443,6 +2451,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           owned.state.pendingCommandIDs.clear();
           owned.state.knownCommandIDs.clear();
           owned.state.freshArchiveCommandIDs.clear();
+          owned.state.moreArchiveCommandIDs.clear();
           owned.state.contextState = "pending";
           owned.state.contextDigest = null;
           owned.state.settingsState = null;
@@ -2505,6 +2514,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     target.state.pendingCommandIDs.clear();
     target.state.knownCommandIDs.clear();
     target.state.freshArchiveCommandIDs.clear();
+    target.state.moreArchiveCommandIDs.clear();
     if (!preserveContextDelivery) {
       target.contextRevision = undefined;
       target.contextCommandID = null;
@@ -2688,10 +2698,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     return activeView === "archives" ? backButton : close;
   }
 
-  function closeConfirmation({ restore = true } = {}) {
-    if (!confirmationState) return;
+  function closeConfirmation({ restore = true, expected = null } = {}) {
+    if (!confirmationState || expected && confirmationState !== expected) return;
     const previous = confirmationState;
     confirmationState = null;
+    confirmationCancel.disabled = false;
+    confirmationConfirm.disabled = false;
     confirmationBackdrop.hidden = true;
     confirmationBackdrop.dataset.tone = "";
     for (const child of drawer.children) {
@@ -2722,16 +2734,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   });
   confirmationConfirm.addEventListener("click", async () => {
     if (!confirmationState || confirmationState.submitting) return;
-    confirmationState.submitting = true;
+    const submitted = confirmationState;
+    submitted.submitting = true;
     confirmationCancel.disabled = true;
     confirmationConfirm.disabled = true;
-    const action = confirmationState.onConfirm;
-    try { await action(); }
-    finally {
-      confirmationCancel.disabled = false;
-      confirmationConfirm.disabled = false;
-      closeConfirmation({ restore: false });
-    }
+    try { await submitted.onConfirm(); }
+    finally { closeConfirmation({ restore: true, expected: submitted }); }
   });
 
   function currentCodexSettings() {
@@ -3393,7 +3401,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       row.append(queuedContent, save, remove); queue.append(row);
     }
     archives.replaceChildren();
-    if (state.archiveStatus === "loading") {
+    if (state.archiveStatus === "loading" && state.archives.length === 0) {
       const loading = doc.createElement("div");
       loading.className = "agent-archives-state agent-archives-loading";
       loading.setAttribute("role", "status");
@@ -3407,6 +3415,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       const detail = doc.createElement("p"); detail.textContent = "Conversations you replace or restore will appear here.";
       empty.append(icon, title, detail); archives.append(empty);
     } else {
+      if (state.archiveStatus === "loading") {
+        const refreshing = doc.createElement("p");
+        refreshing.className = "agent-archives-refreshing";
+        refreshing.setAttribute("role", "status");
+        refreshing.textContent = "Refreshing archived conversations…";
+        archives.append(refreshing);
+      }
       for (const item of state.archives) {
         const row = doc.createElement("article");
         row.className = "agent-archive-card";
@@ -3430,7 +3445,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         more.className = "agent-page-button";
         more.textContent = state.archiveStatus === "loading-more" ? "Loading…" : "Load more archives";
         more.disabled = state.archiveStatus === "loading-more";
-        more.addEventListener("click", () => { state.archiveStatus = "loading-more"; render(); void sendCommand("archive_list", { before: state.archiveCursor, limit: 50 }); });
+        more.addEventListener("click", () => {
+          state.archiveStatus = "loading-more";
+          render();
+          void sendCommand("archive_list", { before: state.archiveCursor, limit: 50 }, { moreArchivePage: true });
+        });
         archives.append(more);
       }
     }
@@ -3476,20 +3495,22 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (explanation) headerSubtitle.title = explanation;
   }
 
-  async function sendCommand(type, commandPayload, { handoff = false, freshArchivePage = false } = {}) {
+  async function sendCommand(type, commandPayload, { handoff = false, freshArchivePage = false, moreArchivePage = false } = {}) {
     saveController();
     const target = controller;
     const command = createAgentCommand({ type, payload: commandPayload, clientID: target.transport.clientID, conversationID: target.transport.conversationID });
     registerAgentCommand(target.state, command);
     if (handoff) target.handoffCommandID = command.command_id;
     if (freshArchivePage) target.state.freshArchiveCommandIDs.add(command.command_id);
+    if (moreArchivePage) target.state.moreArchiveCommandIDs.add(command.command_id);
     try { await target.transport.send(command); }
     catch (error) {
       if (freshArchivePage && target.state.archiveStatus === "loading") target.state.archiveStatus = target.state.archives.length > 0 ? "loaded" : "idle";
-      else if (type === "archive_list" && target.state.archiveStatus === "loading-more") target.state.archiveStatus = "loaded";
+      else if (moreArchivePage && target.state.archiveStatus === "loading-more") target.state.archiveStatus = "loaded";
       if (error?.code) {
         target.state.pendingCommandIDs.delete(command.command_id);
         target.state.freshArchiveCommandIDs.delete(command.command_id);
+        target.state.moreArchiveCommandIDs.delete(command.command_id);
       }
       if (target.handoffCommandID === command.command_id) target.handoffCommandID = null;
       if (target === controller) {
