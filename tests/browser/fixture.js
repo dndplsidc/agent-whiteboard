@@ -527,6 +527,8 @@ function createSidebarBroker(initialAllowedOrigin) {
       responseText: null,
       activeTurn: null,
       activeCompact: null,
+      holdInterruptCompletion: false,
+      pendingInterruptCompletion: null,
       skillsState: provider === "codex" ? "ready" : null,
       skills: provider === "codex" ? [
         { id: protocolID(230), name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" },
@@ -805,15 +807,23 @@ function createSidebarBroker(initialAllowedOrigin) {
       emit(state, "compaction", { work_id: state.activeCompact, status: "running" });
     } else if (command.type === "interrupt" && state.activeTurn === command.payload.work_id) {
       emit(state, "lifecycle", { state: "responding", active_work: { work_id: state.activeTurn, kind: "turn", state: "stopping" } });
-      emit(state, "interruption", { turn_id: state.activeTurn, reason: "requested" });
-      state.activeTurn = null;
-      state.pendingResponse = null;
+      const complete = () => {
+        emit(state, "interruption", { turn_id: state.activeTurn, reason: "requested" });
+        state.activeTurn = null;
+        state.pendingResponse = null;
+      };
+      if (state.holdInterruptCompletion) state.pendingInterruptCompletion = complete;
+      else complete();
     } else if (command.type === "interrupt" && state.activeCompact === command.payload.work_id) {
       emit(state, "lifecycle", { state: "compacting", active_work: { work_id: state.activeCompact, kind: "compact", state: "stopping" } });
       emit(state, "compaction", { work_id: state.activeCompact, status: "stopping" });
-      emit(state, "compaction", { work_id: state.activeCompact, status: "interrupted" });
-      state.activeCompact = null;
-      emit(state, "lifecycle", { state: "interrupted", active_work: null });
+      const complete = () => {
+        emit(state, "compaction", { work_id: state.activeCompact, status: "interrupted" });
+        state.activeCompact = null;
+        emit(state, "lifecycle", { state: "interrupted", active_work: null });
+      };
+      if (state.holdInterruptCompletion) state.pendingInterruptCompletion = complete;
+      else complete();
     } else if (command.type === "archive_list") {
       const firstPage = !command.payload.before;
       const paginated = state.archiveMode === "paginated";
@@ -1007,6 +1017,14 @@ function createSidebarBroker(initialAllowedOrigin) {
     setAllowedOrigin(origin) { allowedOrigin = origin; },
     setWebSocketEnabled(value) { webSocketEnabled = value; },
     setHoldResponses(value, provider = "pi") { providerState(provider).holdResponses = value; },
+    setHoldInterruptCompletion(value, provider = "pi") { providerState(provider).holdInterruptCompletion = value; },
+    releaseInterruptCompletion(provider = "pi") {
+      const state = providerState(provider);
+      if (!state.pendingInterruptCompletion) throw new Error(`no pending ${provider} interrupt completion`);
+      const completion = state.pendingInterruptCompletion;
+      state.pendingInterruptCompletion = null;
+      completion();
+    },
     setPhaseResponses(value, provider = "pi") { providerState(provider).phaseResponses = value; },
     preparePendingResponse(provider = "pi") {
       const state = providerState(provider);
@@ -1426,6 +1444,8 @@ export const test = base.extend({
           resetBrokerState: broker.resetState,
           setWebSocketEnabled: broker.setWebSocketEnabled,
           setHoldResponses: broker.setHoldResponses,
+          setHoldInterruptCompletion: broker.setHoldInterruptCompletion,
+          releaseInterruptCompletion: broker.releaseInterruptCompletion,
           setPhaseResponses: broker.setPhaseResponses,
           preparePendingResponse: broker.preparePendingResponse,
           setResponseText: broker.setResponseText,
