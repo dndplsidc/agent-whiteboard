@@ -19,6 +19,12 @@ Place new code in the existing package that owns the behavior. Create a package 
 
 Keep business behavior in its domain package, infrastructure behind domain-owned interfaces, and concrete dependency wiring in `internal/app`. Keep APIs internal unless external Go consumers need a stable contract through `pkg/agentwb`.
 
+## User interface consistency
+
+New and changed browser UI must follow the established visual language of the surrounding viewer and Page Agent surfaces. Reuse existing typography, spacing, colors, radii, controls, status patterns, and interaction behavior before introducing a new presentation. Do not add a component that looks or behaves like a separate design system.
+
+Before completing a user-visible UI change, compare it with adjacent existing components in the real rendered interface at applicable desktop, narrow, light, and dark states. Verify pointer, keyboard, loading, success, error, disabled, and interruption states where relevant. Automated assertions are necessary but do not replace real-browser visual inspection.
+
 ## Testing
 
 Every behavioral change must add or update tests at all applicable levels:

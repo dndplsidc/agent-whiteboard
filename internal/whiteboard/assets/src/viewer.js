@@ -2300,7 +2300,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const stopButton = doc.createElement("button");
   stopButton.type = "button";
   stopButton.className = "agent-stop-button";
-  stopButton.textContent = "Stop";
+  stopButton.setAttribute("aria-label", "Stop");
+  const stopIcon = doc.createElement("span");
+  stopIcon.className = "agent-stop-icon";
+  stopIcon.setAttribute("aria-hidden", "true");
+  stopButton.append(stopIcon);
   const sendButton = doc.createElement("button");
   sendButton.type = "submit";
   sendButton.className = "agent-send-button";
@@ -3118,7 +3122,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     renderDraftAttachments();
     stopButton.disabled = state.activeWork === null || state.activeWork.state === "stopping";
     stopButton.hidden = state.activeWork === null;
-    stopButton.textContent = state.activeWork?.state === "stopping" ? "Stopping…" : "Stop";
+    stopButton.dataset.state = state.activeWork?.state === "stopping" ? "stopping" : "running";
     stopButton.setAttribute("aria-label", state.activeWork?.state === "stopping" ? "Stopping…" : "Stop");
     sendButton.hidden = state.activeWork !== null;
     contextChip.textContent = `Context · ${contextAttached ? "current" : "available"}`;
@@ -3157,7 +3161,22 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     for (const item of state.timeline) {
       if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages, onReference);
       else if (item.kind === "tool") appendToolActivity(doc, timeline, item);
-      else {
+      else if (item.activity === "interruption") {
+        const notice = doc.createElement("div");
+        notice.className = "agent-activity-notice agent-activity-interruption";
+        const icon = doc.createElement("span");
+        icon.className = "agent-activity-notice-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent = "■";
+        const copy = doc.createElement("div");
+        const title = doc.createElement("strong");
+        title.textContent = "Response stopped";
+        const content = doc.createElement("p");
+        content.textContent = item.text;
+        copy.append(title, content);
+        notice.append(icon, copy);
+        timeline.append(notice);
+      } else {
         const details = doc.createElement("details");
         details.className = `agent-activity agent-activity-${item.activity}`;
         details.open = item.expanded === true;

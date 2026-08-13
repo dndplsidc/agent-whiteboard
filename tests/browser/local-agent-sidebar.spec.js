@@ -491,7 +491,10 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   await expect(composer).toHaveText("Line one\n");
   await composer.fill("Keep this turn active.");
   await composer.press("Enter");
-  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  const stop = page.getByRole("button", { name: "Stop", exact: true });
+  await expect(stop).toBeEnabled();
+  await expect(stop.locator(".agent-stop-icon")).toBeVisible();
+  await expect(stop).toHaveText("");
   await composer.fill("Queued follow-up.");
   await composer.press("Enter");
   const queued = page.getByLabel("Edit queued message");
@@ -501,8 +504,11 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   await expect(page.getByLabel("Edit queued message")).toHaveText("Edited follow-up.");
   await page.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(page.getByLabel("Edit queued message")).toHaveCount(0);
-  await page.getByRole("button", { name: "Stop", exact: true }).click();
-  await expect(page.locator(".agent-activity-interruption")).toContainText("not replayed automatically");
+  await stop.click();
+  const interrupted = page.locator(".agent-activity-interruption");
+  await expect(interrupted).toContainText("Response stopped");
+  await expect(interrupted).toContainText("not replayed automatically");
+  expect(await interrupted.evaluate((element) => element.tagName)).toBe("DIV");
 
   const types = parsedCommands(localAgentSidebar.brokerRequests).map((command) => command.type);
   expect(types).toEqual(expect.arrayContaining(["submit", "queue_edit", "queue_remove", "interrupt"]));
