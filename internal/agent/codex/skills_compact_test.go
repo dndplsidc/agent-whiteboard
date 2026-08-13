@@ -192,6 +192,14 @@ func TestManualCompactDoesNotConsumeUnrelatedSettingsNotifications(t *testing.T)
 	require.Equal(t, provider.EventSettings, event.Kind)
 	require.Equal(t, "gpt-5.6-luna", event.Settings.Model)
 	require.NotNil(t, session.compact)
+
+	session.active = &nativeTurn{request: provider.TurnRequest{TurnID: testID(933)}, nativeID: "native-turn"}
+	session.handleNotification("model/rerouted", mustJSON(t, map[string]any{"threadId": "native-thread", "turnId": "native-turn", "fromModel": "gpt-5.6-luna", "toModel": "gpt-5.6-sol", "reason": "highRiskCyberActivity"}))
+	event = awaitEvent(t, session.events)
+	require.Equal(t, provider.EventSettings, event.Kind)
+	require.Equal(t, provider.SettingsUnverified, event.SettingsState)
+	require.NotNil(t, session.compact)
+	require.Equal(t, "native-compact", session.compact.nativeID)
 }
 
 func skillListResult(name string) json.RawMessage {

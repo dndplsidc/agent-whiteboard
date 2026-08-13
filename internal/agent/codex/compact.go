@@ -104,6 +104,9 @@ func (session *Session) InterruptCompact(ctx context.Context, accepted provider.
 }
 
 func (session *Session) captureCompactNotification(method string, params json.RawMessage) bool {
+	if method != "item/started" && method != "item/completed" && method != "turn/completed" {
+		return false
+	}
 	nativeID := notificationTurnID(method, params)
 	session.mu.Lock()
 	compact := session.compact
