@@ -15,7 +15,7 @@ import (
 func TestFrozenTransportLimitsAndOversizedBodyRejection(t *testing.T) {
 	assert.Equal(t, 67<<20, protocol.MaxContextCommandBytes)
 	assert.Equal(t, 192<<10, protocol.MaxOrdinaryCommandBytes)
-	assert.Equal(t, 256<<10, protocol.MaxEventBytes)
+	assert.Equal(t, 1<<20, protocol.MaxEventBytes)
 
 	running := startServer(t)
 	connection, err := net.Dial("tcp4", running.server.Host())

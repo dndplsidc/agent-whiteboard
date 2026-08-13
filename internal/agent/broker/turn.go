@@ -60,8 +60,12 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 	if actor.queue.ContainsTurnID(payload.TurnID) || actor.queue.ContainsMessageID(payload.MessageID) {
 		return false, protocol.ErrorInvalidState
 	}
-	if (actor.workerSettled != nil && actor.active == nil) || actor.lifecycle == protocol.LifecycleUnavailable || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil {
+	if (actor.workerSettled != nil && actor.active == nil) || actor.lifecycle == protocol.LifecycleUnavailable || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil || actor.identity.Provider == provider.NameCodex && actor.settingsState != protocol.SettingsVerified {
 		return false, protocol.ErrorInvalidState
+	}
+	settings, code := validateCommandSettings(actor.identity.Provider, actor.domainCatalog, payload.Settings)
+	if code != "" {
+		return false, code
 	}
 
 	images, descriptors, code := actor.claimTurnImages(command, payload)
@@ -74,7 +78,7 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 		}
 		return code
 	}
-	request, code := actor.convertSubmittedTurn(payload, images)
+	request, code := actor.convertSubmittedTurn(payload, images, settings)
 	if code != "" {
 		return false, releaseOnFailure(code)
 	}
@@ -98,7 +102,15 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 	if contextForHead != nil {
 		request.Context = nil
 	}
-	turn := QueuedTurn{TurnID: request.TurnID, MessageID: request.MessageID, Content: request.Content, Images: request.Images, Descriptors: descriptors, Context: request.Context}
+	turn := QueuedTurn{TurnID: request.TurnID, MessageID: request.MessageID, Content: request.Content, Images: request.Images, Descriptors: descriptors, Context: request.Context, Settings: request.Settings}
+	if request.Settings != nil {
+		model, err := actor.domainCatalog.Resolve(*request.Settings)
+		if err != nil {
+			zeroProviderContext(request.Context)
+			return false, releaseOnFailure(protocol.ErrorInvalidModelConfiguration)
+		}
+		turn.Presentation = &provider.ModelPresentation{ModelDisplayName: model.DisplayName, Selectable: true}
+	}
 	if err := actor.queue.Enqueue(turn); err != nil {
 		zeroProviderContext(request.Context)
 		zeroProviderContext(contextForHead)
@@ -128,7 +140,7 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 	return false, ""
 }
 
-func (actor *conversation) convertSubmittedTurn(payload protocol.SubmitPayload, images []provider.ImageInput) (provider.TurnRequest, protocol.BrowserErrorCode) {
+func (actor *conversation) convertSubmittedTurn(payload protocol.SubmitPayload, images []provider.ImageInput, settings *provider.ExecutionSettings) (provider.TurnRequest, protocol.BrowserErrorCode) {
 	content, err := messageContentToProvider(payload.Content)
 	if err != nil {
 		return provider.TurnRequest{}, protocol.ErrorInvalidCommand
@@ -141,7 +153,7 @@ func (actor *conversation) convertSubmittedTurn(payload protocol.SubmitPayload, 
 		if payload.Context != nil {
 			return provider.TurnRequest{}, protocol.ErrorInvalidState
 		}
-		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images}
+		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images, Settings: settings}
 		if request.Validate() != nil {
 			return provider.TurnRequest{}, protocol.ErrorInvalidCommand
 		}
@@ -151,7 +163,7 @@ func (actor *conversation) convertSubmittedTurn(payload protocol.SubmitPayload, 
 		if payload.Context != nil {
 			return provider.TurnRequest{}, protocol.ErrorInvalidState
 		}
-		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images}
+		request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images, Settings: settings}
 		if request.Validate() != nil {
 			return provider.TurnRequest{}, protocol.ErrorInvalidCommand
 		}
@@ -170,7 +182,7 @@ func (actor *conversation) convertSubmittedTurn(payload protocol.SubmitPayload, 
 		zeroProviderContext(&converted)
 		return provider.TurnRequest{}, protocol.ErrorInvalidState
 	}
-	request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images, Context: &converted}
+	request := provider.TurnRequest{TurnID: payload.TurnID, MessageID: payload.MessageID, Content: content, Images: images, Context: &converted, Settings: settings}
 	if request.Validate() != nil {
 		zeroProviderContext(&converted)
 		return provider.TurnRequest{}, protocol.ErrorInvalidCommand
@@ -299,6 +311,9 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 			actor.contextState = actor.contextStateFromMapping()
 			actor.lifecycle = protocol.LifecycleReady
 		}
+		if code == protocol.ErrorInvalidModelConfiguration {
+			actor.refreshCatalog(attachments)
+		}
 		actor.publishBrowserError(attachments, code)
 		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
 		if active.originCommandID != "" {
@@ -309,6 +324,20 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 	}
 
 	accepted := result.accepted
+	if actor.identity.Provider == provider.NameCodex {
+		if accepted.Settings == nil || accepted.Presentation == nil || !actor.persistEffectiveSettings(*accepted.Settings, *accepted.Presentation) {
+			actor.contextState = protocol.ContextUnavailable
+			actor.lifecycle = protocol.LifecycleUnavailable
+			actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
+			actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+			if active.originCommandID != "" {
+				actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, protocol.ErrorStateRepairFailed)
+			}
+			actor.flushPendingProviderEvents(attachments, results)
+			return
+		}
+		actor.applyEffectiveSettings(*accepted.Settings, *accepted.Presentation)
+	}
 	active.accepted = &accepted
 	active.phase = turnRunning
 	if activeHasPrepared(actor.mapping.Current, active.request.TurnID) {
@@ -330,6 +359,12 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 	actor.lifecycle = protocol.LifecycleResponding
 	turnID := active.request.TurnID
 	actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle, TurnID: &turnID})
+	if actor.identity.Provider == provider.NameCodex {
+		actor.publishShared(attachments, protocol.SettingsPayload{
+			SettingsState: protocol.SettingsVerified, EffectiveSettings: actor.presentedEffectiveSettings(accepted.Settings, accepted.Presentation),
+			Catalog: append([]protocol.CatalogModel{}, actor.catalog...), AcceptedTurnID: &turnID,
+		})
+	}
 	if active.originCommandID != "" {
 		actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, "")
 		active.originCommandID = ""

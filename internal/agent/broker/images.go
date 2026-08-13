@@ -16,7 +16,7 @@ func (actor *conversation) claimTurnImages(command protocol.Command, payload pro
 	if len(images) == 0 {
 		return nil, nil, ""
 	}
-	if !actor.session.capabilities.Images {
+	if !actor.draftSupportsImages(providerSettings(payload.Settings)) {
 		return nil, nil, protocol.ErrorImageInputUnsupported
 	}
 	if common.IsNil(actor.attachments) || actor.mapping.Current == nil {

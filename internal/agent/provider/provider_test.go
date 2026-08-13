@@ -430,7 +430,7 @@ func TestProviderErrorTaxonomyIsClosedStaticAndRedacted(t *testing.T) {
 		provider.ErrorNotReady, provider.ErrorReadinessFailed, provider.ErrorMissingExecutable, provider.ErrorStartupFailed, provider.ErrorAuthenticationRequired,
 		provider.ErrorNoUsableModel, provider.ErrorContentOnlyUnavailable, provider.ErrorProtocolIncompatible,
 		provider.ErrorProtocolFailure, provider.ErrorMalformedStream, provider.ErrorChildExited, provider.ErrorNativeSessionMissing,
-		provider.ErrorContextTooLarge, provider.ErrorAcceptanceUnknown,
+		provider.ErrorContextTooLarge, provider.ErrorAcceptanceUnknown, provider.ErrorInvalidModelConfiguration,
 		provider.ErrorImageInputUnsupported, provider.ErrorImageUnsupported, provider.ErrorImageTooLarge,
 		provider.ErrorImageTurnLimit, provider.ErrorImageMissing, provider.ErrorImageStorageFailure,
 	}

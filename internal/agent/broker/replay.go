@@ -205,6 +205,12 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 	switch value := payload.(type) {
 	case protocol.SnapshotPayload:
 		value.Queue = cloneQueueItems(value.Queue)
+		value.Catalog = cloneCatalog(value.Catalog)
+		value.EffectiveSettings = clonePresentedSettings(value.EffectiveSettings)
+		if value.SettingsState != nil {
+			state := *value.SettingsState
+			value.SettingsState = &state
+		}
 		if value.ActiveTurnID != nil {
 			active := *value.ActiveTurnID
 			value.ActiveTurnID = &active
@@ -216,6 +222,12 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 		}
 		copyOfValue := *value
 		copyOfValue.Queue = cloneQueueItems(value.Queue)
+		copyOfValue.Catalog = cloneCatalog(value.Catalog)
+		copyOfValue.EffectiveSettings = clonePresentedSettings(value.EffectiveSettings)
+		if value.SettingsState != nil {
+			state := *value.SettingsState
+			copyOfValue.SettingsState = &state
+		}
 		if value.ActiveTurnID != nil {
 			active := *value.ActiveTurnID
 			copyOfValue.ActiveTurnID = &active
@@ -235,6 +247,26 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 		if value.TurnID != nil {
 			turnID := *value.TurnID
 			copyOfValue.TurnID = &turnID
+		}
+		return &copyOfValue
+	case protocol.SettingsPayload:
+		value.Catalog = cloneCatalog(value.Catalog)
+		value.EffectiveSettings = clonePresentedSettings(value.EffectiveSettings)
+		if value.AcceptedTurnID != nil {
+			turnID := *value.AcceptedTurnID
+			value.AcceptedTurnID = &turnID
+		}
+		return value
+	case *protocol.SettingsPayload:
+		if value == nil {
+			return (*protocol.SettingsPayload)(nil)
+		}
+		copyOfValue := *value
+		copyOfValue.Catalog = cloneCatalog(value.Catalog)
+		copyOfValue.EffectiveSettings = clonePresentedSettings(value.EffectiveSettings)
+		if value.AcceptedTurnID != nil {
+			turnID := *value.AcceptedTurnID
+			copyOfValue.AcceptedTurnID = &turnID
 		}
 		return &copyOfValue
 	case protocol.QueuePayload:
@@ -329,6 +361,23 @@ func cloneQueueItems(items []protocol.QueueItem) []protocol.QueueItem {
 	for index := range result {
 		result[index].Content = items[index].Content.Clone()
 		result[index].Images = append([]protocol.ImageDescriptor(nil), items[index].Images...)
+		result[index].Settings = clonePresentedSettings(items[index].Settings)
+	}
+	return result
+}
+
+func clonePresentedSettings(settings *protocol.PresentedExecutionSettings) *protocol.PresentedExecutionSettings {
+	if settings == nil {
+		return nil
+	}
+	copyOfSettings := *settings
+	return &copyOfSettings
+}
+
+func cloneCatalog(catalog []protocol.CatalogModel) []protocol.CatalogModel {
+	result := append([]protocol.CatalogModel{}, catalog...)
+	for index := range result {
+		result[index].SupportedReasoningEfforts = append([]protocol.ReasoningEffortOption{}, catalog[index].SupportedReasoningEfforts...)
 	}
 	return result
 }

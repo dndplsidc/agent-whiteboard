@@ -80,6 +80,23 @@ func (s *lifecycleState) PromotePrepared(identity statepkg.Identity, turnID stri
 func (s *lifecycleState) ReconcilePrepared(identity statepkg.Identity, turnID string, accepted bool, at time.Time) (statepkg.CommitOutcome, error) {
 	return statepkg.CommitNotApplied, errors.New("reconciliation not configured")
 }
+func (s *lifecycleState) UpdateCurrentSettings(identity statepkg.Identity, conversationID string, nativeSession provider.NativeSessionRef, settings provider.ExecutionSettings, presentation provider.ModelPresentation, at time.Time) (statepkg.CommitOutcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mapping, ok := s.mappings[identity]
+	if !ok || mapping.Current == nil || mapping.Current.ConversationID != conversationID || mapping.Current.NativeSession != nativeSession {
+		return statepkg.CommitNotApplied, errors.New("settings update rejected")
+	}
+	copySettings := settings
+	copyPresentation := presentation
+	mapping.Current.Settings = &copySettings
+	mapping.Current.Presentation = &copyPresentation
+	mapping.Current.ModelLabel = presentation.ModelDisplayName
+	mapping.Current.UpdatedAt = at
+	mapping.UpdatedAt = at
+	s.mappings[identity] = mapping
+	return statepkg.CommitApplied, nil
+}
 func (s *lifecycleState) EnsureWorkspace(id string) (string, error) {
 	s.mu.Lock()
 	s.ensures = append(s.ensures, id)
@@ -141,6 +158,15 @@ func (d *lifecycleDriver) Resume(_ context.Context, request provider.ResumeReque
 func (d *lifecycleDriver) Inspect(context.Context, provider.InspectRequest) (provider.NativeSession, error) {
 	return provider.NativeSession{}, nil
 }
+func (d *lifecycleDriver) ModelCatalog(context.Context) (provider.ModelCatalog, error) {
+	if d.name != provider.NameCodex {
+		return provider.ModelCatalog{}, errors.New("model catalog unavailable")
+	}
+	return provider.ModelCatalog{Models: []provider.CatalogModel{{
+		Model: "model", DisplayName: "Model", Description: "Test model", DefaultEffort: "high",
+		SupportedReasoningEfforts: []provider.ReasoningEffort{{Value: "high", Description: "High reasoning"}}, Default: true,
+	}}}, nil
+}
 func (d *lifecycleDriver) Delete(_ context.Context, request provider.DeleteRequest) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -162,7 +188,14 @@ func newLifecycleSession(refValue string) *lifecycleSession {
 
 func newLifecycleSessionForProvider(refValue string, name provider.Name) *lifecycleSession {
 	ref, _ := provider.NewNativeSessionRef(refValue)
-	return &lifecycleSession{native: provider.NativeSession{Ref: ref, Provider: name, Model: "model", CreatedAt: testTime(), UpdatedAt: testTime()}, events: make(chan provider.Event, 4096)}
+	native := provider.NativeSession{Ref: ref, Provider: name, Model: "model", CreatedAt: testTime(), UpdatedAt: testTime()}
+	if name == provider.NameCodex {
+		settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+		presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: true}
+		native.Settings = &settings
+		native.Presentation = &presentation
+	}
+	return &lifecycleSession{native: native, events: make(chan provider.Event, 4096)}
 }
 func (s *lifecycleSession) NativeSession() provider.NativeSession { return s.native }
 func (s *lifecycleSession) Model() string                         { return s.native.Model }

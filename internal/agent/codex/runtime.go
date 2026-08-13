@@ -17,6 +17,8 @@ import (
 const maxJSONLMessageBytes = 4 << 20
 const maxPendingRPCRequests = 1024
 
+var errHistoryUnavailableBeforeFirstMessage = errors.New("Codex history is unavailable before the first user message")
+
 type rpcError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
@@ -57,8 +59,10 @@ type runtime struct {
 	barriers  map[int64]*responseBarrier
 	inbound   map[string]struct{}
 	sessions  map[string]*Session
-	models    map[string]provider.Capabilities
 	leases    int
+
+	catalogMu sync.RWMutex
+	catalog   nativeCatalog
 	done      chan struct{}
 	stopOnce  sync.Once
 	err       error
@@ -114,13 +118,30 @@ func startRuntime(ctx context.Context, driver *Driver) (*runtime, error) {
 		runtime.close()
 		return nil, provider.NewProviderError(provider.ErrorAuthenticationRequired)
 	}
-	models, err := loadModelCapabilities(ctx, runtime)
+	catalog, err := loadModelCatalog(ctx, runtime)
 	if err != nil {
 		runtime.close()
 		return nil, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
-	runtime.models = models
+	runtime.catalog = catalog
 	return runtime, nil
+}
+
+func (runtime *runtime) modelCatalog() nativeCatalog {
+	runtime.catalogMu.RLock()
+	defer runtime.catalogMu.RUnlock()
+	return runtime.catalog.clone()
+}
+
+func (runtime *runtime) refreshModelCatalog(ctx context.Context) error {
+	catalog, err := loadModelCatalog(ctx, runtime)
+	if err != nil {
+		return err
+	}
+	runtime.catalogMu.Lock()
+	runtime.catalog = catalog
+	runtime.catalogMu.Unlock()
+	return nil
 }
 
 func (runtime *runtime) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
@@ -438,7 +459,7 @@ func (runtime *runtime) handleResponse(envelope rpcEnvelope) {
 func (runtime *runtime) handleNotification(method string, params json.RawMessage) {
 	threadID := extractString(params, "threadId")
 	if threadID == "" {
-		if method == "turn/completed" {
+		if method == "turn/completed" || method == "thread/settings/updated" || method == "model/rerouted" {
 			runtime.stop(provider.NewProviderError(provider.ErrorMalformedStream))
 		}
 		return
@@ -569,6 +590,10 @@ func classifyRPCError(failure *rpcError) error {
 	text := failure.Message + " " + string(failure.Data)
 	lower := strings.ToLower(text)
 	switch {
+	case strings.Contains(lower, "not materialized yet") && strings.Contains(lower, "includeturns is unavailable before first user message"):
+		return errHistoryUnavailableBeforeFirstMessage
+	case strings.Contains(lower, "unsupported model"), strings.Contains(lower, "model is not supported"), strings.Contains(lower, "unsupported reasoning effort"), strings.Contains(lower, "reasoning effort is not supported"), strings.Contains(lower, "unsupported service tier"), strings.Contains(lower, "service tier is not supported"):
+		return provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
 	case strings.Contains(text, "contextWindowExceeded"):
 		return provider.NewProviderError(provider.ErrorContextTooLarge)
 	case strings.Contains(lower, "unauthorized"):

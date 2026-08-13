@@ -55,49 +55,51 @@ const (
 type ProviderErrorCode string
 
 const (
-	ErrorNotReady               ProviderErrorCode = "not_ready"
-	ErrorReadinessFailed        ProviderErrorCode = "readiness_failed"
-	ErrorMissingExecutable      ProviderErrorCode = "missing_executable"
-	ErrorStartupFailed          ProviderErrorCode = "startup_failed"
-	ErrorAuthenticationRequired ProviderErrorCode = "authentication_required"
-	ErrorNoUsableModel          ProviderErrorCode = "no_usable_model"
-	ErrorContentOnlyUnavailable ProviderErrorCode = "content_only_unavailable"
-	ErrorProtocolIncompatible   ProviderErrorCode = "protocol_incompatible"
-	ErrorProtocolFailure        ProviderErrorCode = "protocol_failure"
-	ErrorMalformedStream        ProviderErrorCode = "malformed_stream"
-	ErrorChildExited            ProviderErrorCode = "child_exited"
-	ErrorNativeSessionMissing   ProviderErrorCode = "native_session_missing"
-	ErrorContextTooLarge        ProviderErrorCode = "context_too_large"
-	ErrorAcceptanceUnknown      ProviderErrorCode = "acceptance_unknown"
-	ErrorImageInputUnsupported  ProviderErrorCode = "image_input_unsupported"
-	ErrorImageUnsupported       ProviderErrorCode = "image_unsupported"
-	ErrorImageTooLarge          ProviderErrorCode = "image_too_large"
-	ErrorImageTurnLimit         ProviderErrorCode = "image_turn_limit"
-	ErrorImageMissing           ProviderErrorCode = "image_missing"
-	ErrorImageStorageFailure    ProviderErrorCode = "image_storage_failure"
+	ErrorNotReady                  ProviderErrorCode = "not_ready"
+	ErrorReadinessFailed           ProviderErrorCode = "readiness_failed"
+	ErrorMissingExecutable         ProviderErrorCode = "missing_executable"
+	ErrorStartupFailed             ProviderErrorCode = "startup_failed"
+	ErrorAuthenticationRequired    ProviderErrorCode = "authentication_required"
+	ErrorNoUsableModel             ProviderErrorCode = "no_usable_model"
+	ErrorContentOnlyUnavailable    ProviderErrorCode = "content_only_unavailable"
+	ErrorProtocolIncompatible      ProviderErrorCode = "protocol_incompatible"
+	ErrorProtocolFailure           ProviderErrorCode = "protocol_failure"
+	ErrorMalformedStream           ProviderErrorCode = "malformed_stream"
+	ErrorChildExited               ProviderErrorCode = "child_exited"
+	ErrorNativeSessionMissing      ProviderErrorCode = "native_session_missing"
+	ErrorContextTooLarge           ProviderErrorCode = "context_too_large"
+	ErrorAcceptanceUnknown         ProviderErrorCode = "acceptance_unknown"
+	ErrorInvalidModelConfiguration ProviderErrorCode = "invalid_model_configuration"
+	ErrorImageInputUnsupported     ProviderErrorCode = "image_input_unsupported"
+	ErrorImageUnsupported          ProviderErrorCode = "image_unsupported"
+	ErrorImageTooLarge             ProviderErrorCode = "image_too_large"
+	ErrorImageTurnLimit            ProviderErrorCode = "image_turn_limit"
+	ErrorImageMissing              ProviderErrorCode = "image_missing"
+	ErrorImageStorageFailure       ProviderErrorCode = "image_storage_failure"
 )
 
 var providerErrorMessages = map[ProviderErrorCode]string{
-	ErrorNotReady:               "The provider is not ready.",
-	ErrorReadinessFailed:        "The provider readiness check failed.",
-	ErrorMissingExecutable:      "The provider executable is unavailable.",
-	ErrorStartupFailed:          "The provider could not be started.",
-	ErrorAuthenticationRequired: "Provider-native authentication is required.",
-	ErrorNoUsableModel:          "The provider has no usable default model.",
-	ErrorContentOnlyUnavailable: "The provider cannot enforce content-only access.",
-	ErrorProtocolIncompatible:   "The provider protocol is incompatible.",
-	ErrorProtocolFailure:        "The provider protocol operation failed.",
-	ErrorMalformedStream:        "The provider returned a malformed event stream.",
-	ErrorChildExited:            "The provider process stopped unexpectedly.",
-	ErrorNativeSessionMissing:   "The native provider session is unavailable.",
-	ErrorContextTooLarge:        "The complete turn does not fit the effective model capacity.",
-	ErrorAcceptanceUnknown:      "The provider turn acceptance outcome is unknown.",
-	ErrorImageInputUnsupported:  "The resolved model does not support image input.",
-	ErrorImageUnsupported:       "The image input is unsupported or malformed.",
-	ErrorImageTooLarge:          "The image input exceeds the per-image limit.",
-	ErrorImageTurnLimit:         "The turn exceeds the image input limit.",
-	ErrorImageMissing:           "The image input is no longer available.",
-	ErrorImageStorageFailure:    "The image input could not be read safely.",
+	ErrorNotReady:                  "The provider is not ready.",
+	ErrorReadinessFailed:           "The provider readiness check failed.",
+	ErrorMissingExecutable:         "The provider executable is unavailable.",
+	ErrorStartupFailed:             "The provider could not be started.",
+	ErrorAuthenticationRequired:    "Provider-native authentication is required.",
+	ErrorNoUsableModel:             "The provider has no usable default model.",
+	ErrorContentOnlyUnavailable:    "The provider cannot enforce content-only access.",
+	ErrorProtocolIncompatible:      "The provider protocol is incompatible.",
+	ErrorProtocolFailure:           "The provider protocol operation failed.",
+	ErrorMalformedStream:           "The provider returned a malformed event stream.",
+	ErrorChildExited:               "The provider process stopped unexpectedly.",
+	ErrorNativeSessionMissing:      "The native provider session is unavailable.",
+	ErrorContextTooLarge:           "The complete turn does not fit the effective model capacity.",
+	ErrorAcceptanceUnknown:         "The provider turn acceptance outcome is unknown.",
+	ErrorInvalidModelConfiguration: "The selected model settings are no longer available.",
+	ErrorImageInputUnsupported:     "The resolved model does not support image input.",
+	ErrorImageUnsupported:          "The image input is unsupported or malformed.",
+	ErrorImageTooLarge:             "The image input exceeds the per-image limit.",
+	ErrorImageTurnLimit:            "The turn exceeds the image input limit.",
+	ErrorImageMissing:              "The image input is no longer available.",
+	ErrorImageStorageFailure:       "The image input could not be read safely.",
 }
 
 // ProviderError is a closed, provider-neutral failure. It intentionally carries
@@ -126,7 +128,7 @@ func AllProviderErrorCodes() []ProviderErrorCode {
 		ErrorNotReady, ErrorReadinessFailed, ErrorMissingExecutable, ErrorStartupFailed, ErrorAuthenticationRequired,
 		ErrorNoUsableModel, ErrorContentOnlyUnavailable, ErrorProtocolIncompatible, ErrorProtocolFailure, ErrorMalformedStream,
 		ErrorChildExited, ErrorNativeSessionMissing, ErrorContextTooLarge, ErrorAcceptanceUnknown,
-		ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
+		ErrorInvalidModelConfiguration, ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
 		ErrorImageMissing, ErrorImageStorageFailure,
 	}
 }
@@ -184,16 +186,27 @@ func (NativeSessionRef) MarshalJSON() ([]byte, error) {
 // NativeSession is validated provider-owned session metadata. Ref remains
 // memory-only and must never be copied to browser protocol values.
 type NativeSession struct {
-	Ref       NativeSessionRef
-	Provider  Name
-	Model     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Ref          NativeSessionRef
+	Provider     Name
+	Model        string
+	Settings     *ExecutionSettings
+	Presentation *ModelPresentation
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 func (s NativeSession) Validate() error {
 	if !s.Ref.Valid() || !s.Provider.Valid() || !validBoundedText(s.Model, MaxTitleBytes, true) || s.CreatedAt.IsZero() || s.UpdatedAt.IsZero() || s.UpdatedAt.Before(s.CreatedAt) {
 		return errors.New("invalid native session metadata")
+	}
+	if s.Provider == NamePi {
+		if s.Settings != nil || s.Presentation != nil {
+			return errors.New("Pi native session contains execution settings")
+		}
+		return nil
+	}
+	if s.Settings == nil || s.Settings.Validate() != nil || s.Presentation == nil || s.Presentation.Validate() != nil || s.Model != s.Settings.Model {
+		return errors.New("Codex native session lacks complete execution settings")
 	}
 	return nil
 }
@@ -205,10 +218,12 @@ type CreateRequest struct {
 	Provider  Name
 	Access    AccessMode
 	Workspace string
+	Settings  *ExecutionSettings
 }
 
 func (r CreateRequest) Validate() error {
-	if validateProviderAccess(r.Provider, r.Access) != nil || !validAbsoluteCleanPath(r.Workspace) {
+	if validateProviderAccess(r.Provider, r.Access) != nil || !validAbsoluteCleanPath(r.Workspace) ||
+		(r.Provider == NamePi && r.Settings != nil) || (r.Settings != nil && r.Settings.Validate() != nil) {
 		return errors.New("invalid provider create request")
 	}
 	return nil
@@ -354,10 +369,11 @@ type TurnRequest struct {
 	Content   MessageContent
 	Images    []ImageInput
 	Context   *PageContext
+	Settings  *ExecutionSettings
 }
 
 func (r TurnRequest) Validate() error {
-	if !validID(r.TurnID) || !validID(r.MessageID) || r.Content.Validate() != nil || (r.Content.Empty() && len(r.Images) == 0) || validateImageInputs(r.Images) != nil || r.Content.ValidateImages(r.Images) != nil {
+	if !validID(r.TurnID) || !validID(r.MessageID) || r.Content.Validate() != nil || (r.Content.Empty() && len(r.Images) == 0) || validateImageInputs(r.Images) != nil || r.Content.ValidateImages(r.Images) != nil || (r.Settings != nil && r.Settings.Validate() != nil) {
 		return errors.New("invalid turn request")
 	}
 	if r.Context != nil {
@@ -452,13 +468,18 @@ func (r PreflightResult) Validate() error {
 }
 
 type AcceptedTurn struct {
-	TurnID     string
-	AcceptedAt time.Time
+	TurnID       string
+	AcceptedAt   time.Time
+	Settings     *ExecutionSettings
+	Presentation *ModelPresentation
 }
 
 func (a AcceptedTurn) Validate() error {
-	if !validID(a.TurnID) || a.AcceptedAt.IsZero() {
+	if !validID(a.TurnID) || a.AcceptedAt.IsZero() || (a.Settings == nil) != (a.Presentation == nil) {
 		return errors.New("invalid accepted turn")
+	}
+	if a.Settings != nil && (a.Settings.Validate() != nil || a.Presentation.Validate() != nil) {
+		return errors.New("invalid accepted turn settings")
 	}
 	return nil
 }
@@ -577,6 +598,7 @@ const (
 	EventToolActivity        EventKind = "tool_activity"
 	EventInteractionRequest  EventKind = "interaction_request"
 	EventInteractionResolved EventKind = "interaction_resolved"
+	EventSettings            EventKind = "settings"
 	EventBlocked             EventKind = "blocked"
 	EventCompletion          EventKind = "completion"
 	EventInterruption        EventKind = "interruption"
@@ -599,6 +621,17 @@ const (
 	BlockedPermission BlockedKind = "permission"
 )
 
+type SettingsState string
+
+const (
+	SettingsVerified   SettingsState = "verified"
+	SettingsUnverified SettingsState = "unverified"
+)
+
+func (state SettingsState) Valid() bool {
+	return state == SettingsVerified || state == SettingsUnverified
+}
+
 type InterruptionReason string
 
 const (
@@ -608,19 +641,22 @@ const (
 )
 
 type Event struct {
-	Kind         EventKind
-	MessageID    string
-	TurnID       string
-	Text         string
-	Content      MessageContent
-	Timestamp    time.Time
-	Activity     ActivityKind
-	Blocked      BlockedKind
-	Interruption InterruptionReason
-	Failure      ProviderError
-	Tool         *ToolActivity
-	Interaction  *InteractionRequest
-	Resolution   *InteractionResolution
+	Kind          EventKind
+	MessageID     string
+	TurnID        string
+	Text          string
+	Content       MessageContent
+	Timestamp     time.Time
+	Activity      ActivityKind
+	Blocked       BlockedKind
+	Interruption  InterruptionReason
+	Failure       ProviderError
+	Tool          *ToolActivity
+	Interaction   *InteractionRequest
+	Resolution    *InteractionResolution
+	SettingsState SettingsState
+	Settings      *ExecutionSettings
+	Presentation  *ModelPresentation
 }
 
 func NewUserMessageEvent(turnID, messageID string, content MessageContent, at time.Time) Event {
@@ -647,6 +683,14 @@ func NewInteractionResolvedEvent(resolution InteractionResolution) Event {
 	copyOfResolution := resolution
 	return Event{Kind: EventInteractionResolved, Resolution: &copyOfResolution}
 }
+func NewVerifiedSettingsEvent(turnID string, settings ExecutionSettings, presentation ModelPresentation) Event {
+	copyOfSettings := settings
+	copyOfPresentation := presentation
+	return Event{Kind: EventSettings, TurnID: turnID, SettingsState: SettingsVerified, Settings: &copyOfSettings, Presentation: &copyOfPresentation}
+}
+func NewUnverifiedSettingsEvent(turnID string) Event {
+	return Event{Kind: EventSettings, TurnID: turnID, SettingsState: SettingsUnverified}
+}
 func NewBlockedEvent(turnID string, kind BlockedKind) Event {
 	return Event{Kind: EventBlocked, TurnID: turnID, Blocked: kind, Text: blockedMessage(kind)}
 }
@@ -658,7 +702,11 @@ func NewTerminalFailureEvent(turnID string, failure ProviderError) Event {
 	return Event{Kind: EventTerminalFailure, TurnID: turnID, Failure: failure}
 }
 func (e Event) Validate() error {
-	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil || e.Kind != EventUserMessage && !e.Content.Empty()
+	settingsStructured := e.SettingsState != "" || e.Settings != nil || e.Presentation != nil
+	if e.Kind != EventSettings && settingsStructured {
+		return errors.New("provider settings fields on non-settings event")
+	}
+	structured := e.Tool != nil || e.Interaction != nil || e.Resolution != nil || settingsStructured || e.Kind != EventUserMessage && !e.Content.Empty()
 	switch e.Kind {
 	case EventUserMessage:
 		if structured || !validID(e.TurnID) || !validID(e.MessageID) || e.Text != "" || e.Content.Validate() != nil || e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
@@ -692,8 +740,19 @@ func (e Event) Validate() error {
 			return errors.New("invalid provider interaction request event")
 		}
 	case EventInteractionResolved:
-		if e.Resolution == nil || e.Resolution.Validate() != nil || e.Tool != nil || e.Interaction != nil || e.TurnID != "" || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {
+		if e.Resolution == nil || e.Resolution.Validate() != nil || e.Tool != nil || e.Interaction != nil || e.TurnID != "" || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) || settingsStructured {
 			return errors.New("invalid provider interaction resolved event")
+		}
+	case EventSettings:
+		if e.Tool != nil || e.Interaction != nil || e.Resolution != nil || (e.TurnID != "" && !validID(e.TurnID)) || e.MessageID != "" || e.Text != "" || !e.Content.Empty() || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) || !e.SettingsState.Valid() {
+			return errors.New("invalid provider settings event")
+		}
+		if e.SettingsState == SettingsVerified {
+			if e.Settings == nil || e.Settings.Validate() != nil || e.Presentation == nil || e.Presentation.Validate() != nil {
+				return errors.New("invalid verified provider settings event")
+			}
+		} else if e.Settings != nil || e.Presentation != nil {
+			return errors.New("invalid unverified provider settings event")
 		}
 	case EventCompletion:
 		if structured || !validID(e.TurnID) || e.MessageID != "" || e.Text != "" || !e.Timestamp.IsZero() || e.Activity != "" || e.Blocked != "" || e.Interruption != "" || e.Failure != (ProviderError{}) {

@@ -292,14 +292,14 @@ function agentPayload(overrides = {}) {
 function agentEvent(type, payload, overrides = {}) {
   const textContent = (text) => ({ parts: text ? [{ type: "text", text }] : [] });
   if (type === "queue") payload = { ...payload, items: payload.items.map((item) => {
-    if (!Object.hasOwn(item, "message")) return item;
+    if (!Object.hasOwn(item, "message")) return { settings: null, ...item };
     const { message, ...rest } = item;
-    return { ...rest, content: textContent(message) };
+    return { settings: null, ...rest, content: textContent(message) };
   }) };
   if (type === "snapshot") payload = { ...payload, queue: payload.queue.map((item) => {
-    if (!Object.hasOwn(item, "message")) return item;
+    if (!Object.hasOwn(item, "message")) return { settings: null, ...item };
     const { message, ...rest } = item;
-    return { ...rest, content: textContent(message) };
+    return { settings: null, ...rest, content: textContent(message) };
   }) };
   if (type === "user_message" && Object.hasOwn(payload, "text")) {
     const { text, ...rest } = payload;
@@ -310,11 +310,13 @@ function agentEvent(type, payload, overrides = {}) {
     const { text, ...rest } = item;
     return { ...rest, content: textContent(text) };
   }) };
-  const versionedPayload = type === "snapshot" || type === "provider"
-    ? { supports_images: true, ...payload }
-    : payload;
+  const versionedPayload = type === "snapshot"
+    ? { supports_images: true, settings_state: null, effective_settings: null, catalog: [], ...payload }
+    : type === "provider"
+      ? { supports_images: true, ...payload }
+      : payload;
   return {
-    api_version: "3",
+    api_version: "4",
     event_id: agentIDs.event,
     conversation_id: agentIDs.conversation,
     type,
@@ -331,6 +333,46 @@ function snapshotEvent(overrides = {}) {
     context_state: "pending",
     active_turn_id: null,
   }, overrides);
+}
+
+const codexCatalog = [{
+  model: "gpt-5.6-sol",
+  model_display_name: "5.6 Sol",
+  description: "Strong general-purpose coding model.",
+  default_effort: "high",
+  supported_reasoning_efforts: [
+    { effort: "medium", description: "Balanced reasoning." },
+    { effort: "high", description: "Deeper reasoning." },
+    { effort: "xhigh", description: "Maximum reasoning." },
+  ],
+  supports_images: true,
+  default: true,
+  supports_fast: true,
+}, {
+  model: "gpt-5.6-luna",
+  model_display_name: "5.6 Luna",
+  description: "Fast focused coding model.",
+  default_effort: "medium",
+  supported_reasoning_efforts: [{ effort: "medium", description: "Balanced reasoning." }],
+  supports_images: false,
+  default: false,
+  supports_fast: false,
+}];
+const codexSolSettings = { model: "gpt-5.6-sol", effort: "high", speed: "fast", model_display_name: "5.6 Sol", selectable: true };
+
+function codexSnapshotEvent({ settings = codexSolSettings, event = {}, payload = {} } = {}) {
+  const model = codexCatalog.find(({ model: value }) => value === settings.model);
+  return agentEvent("snapshot", {
+    lifecycle: "ready",
+    queue: [],
+    context_state: "accepted",
+    active_turn_id: null,
+    supports_images: model?.supports_images ?? false,
+    settings_state: "verified",
+    effective_settings: settings,
+    catalog: codexCatalog,
+    ...payload,
+  }, event);
 }
 
 function fixedIDFactory() {
@@ -398,7 +440,7 @@ describe("local agent source and commands", () => {
   test("builds an exact context-free connect command", () => {
     const command = createConnectCommand({ payload: agentPayload(), clientID: agentIDs.message, replayAfter: agentIDs.event, idFactory: fixedIDFactory });
     expect(command).toEqual({
-      api_version: "3",
+      api_version: "4",
       command_id: agentIDs.command,
       client_id: agentIDs.message,
       conversation_id: null,
@@ -408,6 +450,7 @@ describe("local agent source and commands", () => {
         resource: agentPayload().local_agent.resource,
         context_digest: "0".repeat(64),
         replay_after: agentIDs.event,
+        settings: null,
       },
     });
     expect(JSON.stringify(command)).not.toContain(agentPayload().markdown);
@@ -471,7 +514,7 @@ describe("local agent source and commands", () => {
 
 describe("local agent transport and event state", () => {
   test("probes only the literal loopback status endpoint before consent", async () => {
-    const fetchImpl = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ available: true, api_version: "3", origin_trusted: true }) }));
+    const fetchImpl = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ available: true, api_version: "4", origin_trusted: true }) }));
     const transport = createAgentTransport({ payload: agentPayload(), port: 9123, clientID: agentIDs.message, fetchImpl, WebSocketImpl: undefined, idFactory: fixedIDFactory });
     await expect(transport.connect()).rejects.toThrow("consent");
     await expect(transport.probe()).resolves.toEqual({ ok: true, code: null });
@@ -519,7 +562,7 @@ describe("local agent transport and event state", () => {
     expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "POST", body: png, credentials: "omit", referrerPolicy: "no-referrer" });
     expect(fetchImpl.mock.calls[0][1].headers).toEqual({
       "Content-Type": "image/png",
-      "X-Agent-Whiteboard-API-Version": "3",
+      "X-Agent-Whiteboard-API-Version": "4",
       "X-Agent-Whiteboard-Client-ID": agentIDs.message,
       "X-Agent-Whiteboard-Conversation-ID": agentIDs.conversation,
       "X-Agent-Whiteboard-Provider": "codex",
@@ -547,7 +590,7 @@ describe("local agent transport and event state", () => {
     await transport.connect();
     expect(transport.transportKind).toBe("fallback");
     expect(fetchImpl.mock.calls[0][0]).toBe("http://127.0.0.1:8568/api/v1/agent/connect");
-    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": "3" });
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": "4" });
     expect(fetchImpl.mock.calls[0][1].body).not.toContain("Creator summary");
     transport.close();
   });
@@ -575,7 +618,7 @@ describe("local agent transport and event state", () => {
 
   test("strictly rejects unknown event fields, malformed IDs, and raw provider fields", () => {
     expect(() => decodeAgentEvent(JSON.stringify({ ...snapshotEvent(), extra: true }))).toThrow(TypeError);
-    expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"3"', '"api_version":"3","api_version":"3"'))).toThrow(TypeError);
+    expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"4"', '"api_version":"4","api_version":"4"'))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent({ event_id: "short" })))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "hello", reasoning: "secret" })))).toThrow(TypeError);
   });
@@ -757,7 +800,7 @@ describe("local agent transport and event state", () => {
   test("requires command-result correlation and surfaces only validated stable errors", () => {
     const state = createAgentState();
     applyAgentEvent(state, snapshotEvent());
-    const command = createAgentCommand({ type: "new", payload: {}, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
+    const command = createAgentCommand({ type: "new", payload: { settings: null }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
     registerAgentCommand(state, command);
     const result = agentEvent("command_result", { command_id: command.command_id, status: "rejected", error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" } }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" });
     expect(applyAgentEvent(state, result)).toBe(true);
@@ -860,7 +903,7 @@ describe("local agent rendering and controls", () => {
     instances[0].options.onEvent(agentEvent("assistant_message", {
       turn_id: agentIDs.turn, message_id: agentIDs.message, text: "Pi finished in the background.", created_at: "2026-07-27T03:04:05Z",
     }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
-    instances[1].options.onEvent(snapshotEvent());
+    instances[1].options.onEvent(codexSnapshotEvent());
     expect(drawer.elements.timeline.textContent).not.toContain("Pi finished in the background.");
 
     drawer.elements.providerSelect.value = "pi";
@@ -883,7 +926,7 @@ describe("local agent rendering and controls", () => {
           consented: false,
           probe: vi.fn(async () => ({ ok: true, code: null })),
           grantConsent: vi.fn(() => { transport.consented = true; }),
-          connect: vi.fn(async () => { options.onEvent(snapshotEvent()); }),
+          connect: vi.fn(async () => { options.onEvent(options.provider === "codex" ? codexSnapshotEvent() : snapshotEvent()); }),
           reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
         };
         instances.push(transport);
@@ -915,7 +958,7 @@ describe("local agent rendering and controls", () => {
       probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent: vi.fn(), connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
     };
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
-    options.onEvent(snapshotEvent());
+    options.onEvent(codexSnapshotEvent());
     options.onEvent(agentEvent("tool_activity", {
       activity_id: agentIDs.archive, kind: "file_change", status: "failed", title: "Update viewer", summary: "Patch failed", detail: "viewer.js was not changed",
     }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
@@ -1092,6 +1135,123 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
+  test("captures Codex settings for connect, submit, New, queue summaries, and accepted preference", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
+    localStorage.setItem("agent-whiteboard-codex-settings-v1", JSON.stringify({ model: "gpt-5.6-luna", effort: "medium", speed: "standard" }));
+    let options;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const sent = [];
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(),
+      send: vi.fn(async (command) => { sent.push(command); }),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    expect(options.initialSettings()).toEqual({ model: "gpt-5.6-luna", effort: "medium", speed: "standard" });
+    options.onEvent(codexSnapshotEvent());
+    expect(options.initialSettings()).toEqual({ model: "gpt-5.6-sol", effort: "high", speed: "fast" });
+    expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Fast");
+
+    drawer.elements.modelControl.button.click();
+    drawer.elements.modelControl.menu.querySelector('[data-settings-section="effort"]').click();
+    drawer.elements.modelControl.menu.querySelector('[data-settings-value="xhigh"]').click();
+    drawer.elements.modelControl.menu.querySelector('[data-settings-section="speed"]').click();
+    drawer.elements.modelControl.menu.querySelector('[data-settings-value="standard"]').click();
+    drawer.elements.message.value = "use this tuple";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({ type: "submit", payload: { settings: { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" } } });
+    expect(drawer.elements.message.value).toBe("use this tuple");
+
+    options.onEvent(agentEvent("queue", { items: [{
+      turn_id: agentIDs.turn, message_id: agentIDs.message, message: "queued",
+      settings: { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard", model_display_name: "5.6 Sol", selectable: true },
+    }] }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    expect(drawer.elements.queue.querySelector(".agent-queue-settings")?.textContent).toBe("5.6 Sol · Extra high · Standard");
+    drawer.elements.queue.querySelector(".agent-message-editor").value = "edited";
+    drawer.elements.queue.querySelector("button").click();
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]).toMatchObject({ type: "queue_edit", payload: { message_id: agentIDs.message } });
+    expect(sent[1].payload).not.toHaveProperty("settings");
+
+    drawer.elements.drawer.querySelector(".agent-overflow-button").click();
+    [...drawer.elements.overflowMenu.querySelectorAll("button")].find((item) => item.textContent === "New conversation").click();
+    await vi.waitFor(() => expect(sent).toHaveLength(3));
+    expect(sent[2]).toMatchObject({ type: "new", payload: { settings: { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" } } });
+
+    expect(JSON.parse(localStorage.getItem("agent-whiteboard-codex-settings-v1"))).toEqual({ model: "gpt-5.6-luna", effort: "medium", speed: "standard" });
+    options.onEvent(agentEvent("settings", {
+      settings_state: "verified",
+      effective_settings: { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard", model_display_name: "5.6 Sol", selectable: true },
+      catalog: codexCatalog,
+      accepted_turn_id: sent[0].payload.turn_id,
+    }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    expect(JSON.parse(localStorage.getItem("agent-whiteboard-codex-settings-v1"))).toEqual({ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" });
+    drawer.destroy();
+    confirm.mockRestore();
+  });
+
+  test("keeps a later Codex menu edit after own acceptance and ignores unrelated accepted preference for the draft", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
+    let options;
+    const sent = [];
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async (command) => sent.push(command)),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(codexSnapshotEvent());
+    drawer.elements.message.value = "submit fast";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    drawer.elements.modelControl.button.click();
+    drawer.elements.modelControl.menu.querySelector('[data-settings-section="speed"]').click();
+    drawer.elements.modelControl.menu.querySelector('[data-settings-value="standard"]').click();
+    options.onEvent(agentEvent("settings", {
+      settings_state: "verified", effective_settings: codexSolSettings, catalog: codexCatalog, accepted_turn_id: sent[0].payload.turn_id,
+    }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Standard");
+    expect(JSON.parse(localStorage.getItem("agent-whiteboard-codex-settings-v1"))).toEqual({ model: "gpt-5.6-sol", effort: "high", speed: "fast" });
+
+    options.onEvent(agentEvent("settings", {
+      settings_state: "verified",
+      effective_settings: { model: "gpt-5.6-luna", effort: "medium", speed: "standard", model_display_name: "5.6 Luna", selectable: true },
+      catalog: codexCatalog,
+      accepted_turn_id: "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+    }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Standard");
+    expect(JSON.parse(localStorage.getItem("agent-whiteboard-codex-settings-v1"))).toEqual({ model: "gpt-5.6-luna", effort: "medium", speed: "standard" });
+    drawer.destroy();
+  });
+
+  test("keeps Codex draft and message intact when settings become unverified or submit is rejected", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(codexSnapshotEvent());
+    drawer.elements.message.value = "do not lose me";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    const command = transport.send.mock.calls[0][0];
+    options.onEvent(agentEvent("command_result", {
+      command_id: command.command_id, status: "rejected",
+      error: { code: "invalid_model_configuration", message: "The selected model settings are no longer available.", action: "configure_model" },
+    }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    expect(drawer.elements.message.value).toBe("do not lose me");
+    expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Fast");
+
+    options.onEvent(agentEvent("settings", { settings_state: "unverified", effective_settings: null, catalog: codexCatalog, accepted_turn_id: null }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    expect(drawer.elements.modelControl.button.disabled).toBe(true);
+    expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Fast. Model options unavailable");
+    expect(drawer.elements.message.value).toBe("do not lose me");
+    drawer.destroy();
+  });
+
   test("stages multiple picked and pasted images, previews them, and sends ready references in order", async () => {
     let options;
     const ids = [agentIDs.archive, "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII"];
@@ -1135,6 +1295,8 @@ describe("local agent rendering and controls", () => {
         { image_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", name: "paste.webp" },
       ],
     });
+    const submitted = transport.send.mock.calls[0][0];
+    options.onEvent(agentEvent("command_result", { command_id: submitted.command_id, status: "succeeded" }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
     expect(drawer.elements.attachmentList.children).toHaveLength(0);
     expect(revokeObjectURL).toHaveBeenCalledTimes(3);
     drawer.destroy();
@@ -1286,7 +1448,8 @@ describe("local agent rendering and controls", () => {
     expect(transport.resetReplay).toHaveBeenCalledOnce();
     expect(document.querySelector(".agent-context")?.textContent).not.toMatch(/digest|delivery outcome|initial or replacement/iu);
     options.onEvent(snapshotEvent({ event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
-    expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(true);
+    expect(drawer.elements.message.value).toBe("second");
+    expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(false);
     drawer.destroy();
   });
 
@@ -1319,11 +1482,13 @@ describe("local agent rendering and controls", () => {
   });
 
   test("sanitizes chat Markdown, keeps Mermaid inert, and renders no raw reasoning fields", () => {
-    const html = renderAgentMarkdown('safe <img src=x onerror=alert(1)>\n\n![remote](https://tracker.invalid/pixel)\n\n```mermaid\ngraph TD; A-->B\n```', document);
+    const html = renderAgentMarkdown('safe <img src=x onerror=alert(1)>\n\n![remote](https://tracker.invalid/pixel)\n\n```mermaid\ngraph TD; A-->B\n```\n\n```go\nfunc ready() bool { return true }\n```', document);
     const host = document.createElement("div"); host.innerHTML = html;
     expect(host.querySelector("img")).toBeNull();
     expect(host.querySelector(".mermaid-placeholder")).toBeNull();
     expect(host.querySelector("code.language-mermaid")?.textContent).toContain("graph TD");
+    expect(host.querySelector("code.language-go")?.classList.contains("hljs")).toBe(true);
+    expect(host.querySelector("code.language-go .hljs-keyword")?.textContent).toBe("func");
   });
 
   test("renders shared queue edit/remove and archive restore/delete controls", async () => {

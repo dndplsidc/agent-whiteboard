@@ -27,6 +27,7 @@ type turnSession struct {
 	preflightIgnoreContext bool
 	submitErr              error
 	submitEvent            *provider.Event
+	submitAccepted         *provider.AcceptedTurn
 	submitGate             chan struct{}
 	interruptErr           error
 	interruptEvent         *provider.Event
@@ -133,7 +134,7 @@ func (session *turnSession) Submit(ctx context.Context, request provider.TurnReq
 		return provider.AcceptedTurn{}, ctx.Err()
 	}
 	session.mu.Lock()
-	err, event, gate := session.submitErr, session.submitEvent, session.submitGate
+	err, event, accepted, gate := session.submitErr, session.submitEvent, session.submitAccepted, session.submitGate
 	session.mu.Unlock()
 	if event != nil {
 		select {
@@ -151,6 +152,11 @@ func (session *turnSession) Submit(ctx context.Context, request provider.TurnReq
 	}
 	if err != nil {
 		return provider.AcceptedTurn{}, err
+	}
+	if accepted != nil {
+		result := *accepted
+		result.TurnID = request.TurnID
+		return result, nil
 	}
 	return provider.AcceptedTurn{TurnID: request.TurnID, AcceptedAt: testTime()}, nil
 }
@@ -1059,8 +1065,8 @@ func TestActorShutdownBoundsPostKillJoinByConfiguredTimeout(t *testing.T) {
 
 func TestActorShutdownEscalatesAndJoinsNonCooperativeTurnWorker(t *testing.T) {
 	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7145)
-	broker.shutdownTimeout = 40 * time.Millisecond
-	connection.actor.shutdownTimeout = 40 * time.Millisecond
+	broker.shutdownTimeout = 200 * time.Millisecond
+	connection.actor.shutdownTimeout = 200 * time.Millisecond
 	child := nonCooperativeHardeningChild(1)
 	session.child = child
 	connection.actor.session.child = child

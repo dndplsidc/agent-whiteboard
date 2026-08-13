@@ -42,6 +42,7 @@ type handoffRequest struct {
 	commandID string
 	clientID  string
 	old       *sessionHandle
+	settings  *provider.ExecutionSettings
 }
 
 type handoffResult struct {
@@ -62,6 +63,13 @@ func (actor *conversation) commandHandoff(results chan<- handoffResult, command 
 	request := handoffRequest{
 		kind: handoffNew, before: cloneMapping(actor.mapping), commandID: command.CommandID,
 		clientID: command.ClientID, old: actor.session,
+	}
+	if payload, ok := command.Payload.(protocol.NewPayload); ok {
+		settings, code := validateCommandSettings(actor.identity.Provider, actor.domainCatalog, payload.Settings)
+		if code != "" {
+			return code
+		}
+		request.settings = settings
 	}
 	if archiveID != "" {
 		request.kind = handoffRestore
@@ -234,7 +242,7 @@ func (broker *Broker) runHandoff(slot *conversationSlot, oldActor *conversation,
 		if err != nil {
 			return result
 		}
-		createRequest := provider.CreateRequest{Provider: oldActor.identity.Provider, Access: accessForProvider(oldActor.identity.Provider), Workspace: workspace}
+		createRequest := provider.CreateRequest{Provider: oldActor.identity.Provider, Access: accessForProvider(oldActor.identity.Provider), Workspace: workspace, Settings: request.settings}
 		if createRequest.Validate() != nil {
 			if exactMapping(broker.state, oldActor.identity, request.before) {
 				cleanupCandidate(true)
@@ -277,9 +285,11 @@ func (broker *Broker) runHandoff(slot *conversationSlot, oldActor *conversation,
 			cleanupCandidate(exactMapping(broker.state, oldActor.identity, request.before))
 			return result
 		}
-		current = statepkg.Session{
-			ConversationID: id, NativeSession: ref, CreatedAt: at, UpdatedAt: at,
-			ProviderLabel: string(native.Provider), ModelLabel: native.Model,
+		current, err = stateSessionFromNative(id, native, at)
+		if err != nil {
+			result.code = protocol.ErrorProviderProtocolFailure
+			cleanupCandidate(exactMapping(broker.state, oldActor.identity, request.before))
+			return result
 		}
 		candidateDrainer = startTemporaryDrainer(candidate.events)
 	} else {

@@ -22,7 +22,7 @@ const (
 )
 
 func TestDecodeConnectCommandContract(t *testing.T) {
-	input := `{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"pi","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","replay_after":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`
+	input := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"pi","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","replay_after":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","settings":null}}`
 
 	command, err := protocol.DecodeCommand([]byte(input))
 	require.NoError(t, err)
@@ -50,7 +50,7 @@ func TestProviderNamesAreClosedAndCodexConnectRoundTrips(t *testing.T) {
 	require.False(t, protocol.ProviderName("other").Valid())
 	require.Equal(t, []protocol.ProviderName{protocol.ProviderPi, protocol.ProviderCodex}, protocol.AllProviderNames())
 
-	input := `{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"codex","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}`
+	input := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"codex","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","settings":null}}`
 	command, err := protocol.DecodeCommand([]byte(input))
 	require.NoError(t, err)
 	require.Equal(t, protocol.ProviderCodex, command.Payload.(protocol.ConnectPayload).Provider)
@@ -74,7 +74,7 @@ func TestDecodeSubmitCarriesCompleteInitialOrReplacementContext(t *testing.T) {
 		})
 	}
 
-	withoutContext := `{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"follow up"}]}}}`
+	withoutContext := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"follow up"}]},"settings":null}}`
 	decoded, err := protocol.DecodeCommand([]byte(withoutContext))
 	require.NoError(t, err)
 	payload := decoded.Payload.(protocol.SubmitPayload)
@@ -84,16 +84,16 @@ func TestDecodeSubmitCarriesCompleteInitialOrReplacementContext(t *testing.T) {
 
 func TestAllCommandPayloadsAreClosedAndValidated(t *testing.T) {
 	commands := []string{
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_edit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"edited"}]}}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_remove","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"interrupt","payload":{"turn_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"retry","payload":{"turn_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"new","payload":{}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"archive_list","payload":{"limit":50}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"archive_restore","payload":{"archive_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"archive_delete","payload":{"archive_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"history_page","payload":{"before":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","limit":100}}`,
-		`{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"resync","payload":{"after_event_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_edit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"edited"}]}}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_remove","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"interrupt","payload":{"turn_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"retry","payload":{"turn_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"new","payload":{"settings":null}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"archive_list","payload":{"limit":50}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"archive_restore","payload":{"archive_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"archive_delete","payload":{"archive_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"history_page","payload":{"before":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","limit":100}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"resync","payload":{"after_event_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
 	}
 	for _, input := range commands {
 		decoded, err := protocol.DecodeCommand([]byte(input))
@@ -103,7 +103,7 @@ func TestAllCommandPayloadsAreClosedAndValidated(t *testing.T) {
 }
 
 func TestInteractionResponseCommandIsStrictAndBounded(t *testing.T) {
-	input := `{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"interaction_respond","payload":{"request_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","kind":"user_input","option_id":"","answers":{"target":["local"]}}}`
+	input := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"interaction_respond","payload":{"request_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","kind":"user_input","option_id":"","answers":{"target":["local"]}}}`
 	command, err := protocol.DecodeCommand([]byte(input))
 	require.NoError(t, err)
 	payload := command.Payload.(protocol.InteractionResponsePayload)
@@ -141,7 +141,7 @@ func TestToolAndInteractionEventsRoundTripWithoutNativeIdentifiers(t *testing.T)
 }
 
 func TestCommandStrictDecoding(t *testing.T) {
-	valid := `{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_remove","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`
+	valid := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_remove","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`
 	tests := map[string]string{
 		"unknown envelope field":     strings.Replace(valid, `"payload":`, `"extra":1,"payload":`, 1),
 		"duplicate envelope field":   strings.Replace(valid, `"type":`, `"type":"queue_remove","type":`, 1),
@@ -152,7 +152,7 @@ func TestCommandStrictDecoding(t *testing.T) {
 		"missing conversation field": strings.Replace(valid, `"conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",`, ``, 1),
 		"unexpected null":            strings.Replace(valid, `"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"`, `"message_id":null`, 1),
 		"wrong payload":              strings.Replace(valid, `"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"`, `"turn_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"`, 1),
-		"bad version":                strings.Replace(valid, `"api_version":"3"`, `"api_version":"2"`, 1),
+		"bad version":                strings.Replace(valid, `"api_version":"4"`, `"api_version":"3"`, 1),
 		"bad id":                     strings.Replace(valid, idA, "short", 1),
 		"bad enum":                   strings.Replace(valid, `"type":"queue_remove"`, `"type":"native_raw"`, 1),
 	}
@@ -169,7 +169,7 @@ func TestCommandStrictDecoding(t *testing.T) {
 }
 
 func TestConnectRejectsMalformedNestedSecurityValues(t *testing.T) {
-	valid := `{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"pi","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}`
+	valid := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"pi","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","settings":null}}`
 	tests := map[string]string{
 		"nested duplicate":    strings.Replace(valid, `"kind":"markdown"`, `"kind":"markdown","kind":"markdown"`, 1),
 		"uppercase digest":    strings.Replace(valid, digest, strings.ToUpper(digest), 1),
@@ -194,7 +194,7 @@ func TestConnectRejectsMalformedNestedSecurityValues(t *testing.T) {
 }
 
 func TestCommandBoundsAreMeasuredInBytes(t *testing.T) {
-	ordinary := `{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_edit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"` + strings.Repeat("é", protocol.MaxMessageBytes/2+1) + `"}]}}}`
+	ordinary := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_edit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"` + strings.Repeat("é", protocol.MaxMessageBytes/2+1) + `"}]}}}`
 	_, err := protocol.DecodeCommand([]byte(ordinary))
 	require.ErrorIs(t, err, protocol.ErrInvalidMessage)
 
@@ -216,7 +216,7 @@ func TestAcceptedExactBoundMessagesAndQueuesAlwaysFitWireFrames(t *testing.T) {
 	require.Equal(t, 64<<10, protocol.MaxMessageBytes)
 	require.Equal(t, 192<<10, protocol.MaxOrdinaryCommandBytes)
 	require.Equal(t, 96<<10, protocol.MaxQueueBytes)
-	require.Equal(t, 256<<10, protocol.MaxEventBytes)
+	require.Equal(t, 1<<20, protocol.MaxEventBytes)
 
 	conversationID := idC
 	worstCharacters := []string{"\t", "\n", "\r", `"`, `\`, "\u2028"}
@@ -253,7 +253,7 @@ func TestAcceptedExactBoundMessagesAndQueuesAlwaysFitWireFrames(t *testing.T) {
 	require.NoError(t, protocol.ValidateQueue(queue))
 	for _, payload := range []protocol.EventPayload{
 		protocol.QueuePayload{Items: queue},
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: queue, ContextState: protocol.ContextPending},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: queue, ContextState: protocol.ContextPending, Catalog: []protocol.CatalogModel{}},
 	} {
 		encoded, err := protocol.EncodeEvent(validEvent(payload))
 		require.NoError(t, err, "%T", payload)
@@ -366,7 +366,7 @@ func TestEventEnvelopeAndEveryPayloadTypeRoundTrip(t *testing.T) {
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
 	turnID := idC
 	payloads := []protocol.EventPayload{
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, ActiveTurnID: nil},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, ActiveTurnID: nil, Catalog: []protocol.CatalogModel{}},
 		protocol.CommandResultPayload{CommandID: idA, Status: protocol.CommandSucceeded},
 		protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{}, NextCursor: nil},
 		protocol.HistoryPayload{CommandID: idA, Items: []protocol.ArchiveItem{}, NextCursor: nil},
@@ -470,7 +470,7 @@ func TestActiveTurnIdentityIsExplicitAcrossSubmissionQueueAndEvents(t *testing.T
 
 	active := idC
 	event := validEvent(protocol.SnapshotPayload{
-		Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: idA, MessageID: idB, Content: protocol.TextContent("next")}}, ContextState: protocol.ContextAccepted, ActiveTurnID: &active,
+		Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: idA, MessageID: idB, Content: protocol.TextContent("next")}}, ContextState: protocol.ContextAccepted, ActiveTurnID: &active, Catalog: []protocol.CatalogModel{},
 	})
 	encoded, err := protocol.EncodeEvent(event)
 	require.NoError(t, err)
@@ -556,7 +556,7 @@ func TestNewEventContractFieldsAreRequired(t *testing.T) {
 		payload protocol.EventPayload
 		field   string
 	}{
-		{"snapshot active turn", protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, ActiveTurnID: &active}, `,"active_turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`},
+		{"snapshot active turn", protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, ActiveTurnID: &active, Catalog: []protocol.CatalogModel{}}, `,"active_turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`},
 		{"queue item turn", protocol.QueuePayload{Items: []protocol.QueueItem{{TurnID: idC, MessageID: idA, Content: protocol.TextContent("queued")}}}, `"turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",`},
 		{"timeline command", protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{{ItemID: idB, Kind: protocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `"command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",`},
 		{"timeline item", protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{{ItemID: idB, Kind: protocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `"item_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",`},
@@ -631,7 +631,7 @@ func assertNoForbiddenWireKeys(t *testing.T, value any) {
 }
 
 func validSubmitJSON(revision string) string {
-	return `{"api_version":"3","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"question"}]},"context":{"revision":"` + revision + `","markdown":"# page","creator_context":"creator summary","title":"Page title","url":"https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"digest":"2955a3d16e16b3a1044e95e84aea4cd29b37440217bdaff323fb32e31b47159b"}}}`
+	return `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"question"}]},"context":{"revision":"` + revision + `","markdown":"# page","creator_context":"creator summary","title":"Page title","url":"https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"digest":"2955a3d16e16b3a1044e95e84aea4cd29b37440217bdaff323fb32e31b47159b"},"settings":null}}`
 }
 
 func exactBytes(character string, size int) string {

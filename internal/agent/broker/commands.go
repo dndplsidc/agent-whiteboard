@@ -140,6 +140,7 @@ func commandFingerprint(command protocol.Command) ([sha256.Size]byte, error) {
 		writer.resource(payload.Resource)
 		writer.text(payload.ContextDigest)
 		writer.text(payload.ReplayAfter)
+		writer.settings(payload.Settings)
 	case protocol.SubmitPayload:
 		writer.text(payload.TurnID)
 		writer.text(payload.MessageID)
@@ -160,6 +161,7 @@ func commandFingerprint(command protocol.Command) ([sha256.Size]byte, error) {
 			writer.text(payload.Context.URL)
 			writer.resource(payload.Context.Resource)
 		}
+		writer.settings(payload.Settings)
 	case protocol.QueueEditPayload:
 		writer.text(payload.MessageID)
 		encoded, err := json.Marshal(payload.Content)
@@ -171,8 +173,8 @@ func commandFingerprint(command protocol.Command) ([sha256.Size]byte, error) {
 		writer.text(payload.MessageID)
 	case protocol.TurnReferencePayload:
 		writer.text(payload.TurnID)
-	case protocol.EmptyPayload:
-		// The command type fully identifies an empty payload.
+	case protocol.NewPayload:
+		writer.settings(payload.Settings)
 	case protocol.PageRequestPayload:
 		writer.text(payload.Before)
 		writer.integer(int64(payload.Limit))
@@ -218,6 +220,15 @@ func (writer fingerprintWriter) boolean(value bool) {
 		return
 	}
 	writer.bytes([]byte{0})
+}
+func (writer fingerprintWriter) settings(value *protocol.ExecutionSettings) {
+	writer.boolean(value != nil)
+	if value == nil {
+		return
+	}
+	writer.text(value.Model)
+	writer.text(value.Effort)
+	writer.text(string(value.Speed))
 }
 func (writer fingerprintWriter) integer(value int64) {
 	var encoded [8]byte

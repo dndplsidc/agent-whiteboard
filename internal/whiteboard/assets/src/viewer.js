@@ -4,6 +4,21 @@ import MarkdownIt from "markdown-it";
 import mermaid from "mermaid";
 import { createMarkdownContextController, imageReference, indexMarkdownTokens } from "./markdown-context.js";
 import { createMessageEditor, cloneMessageContent, messageContentBytes, normalizeMessageContent, renderMessageContent } from "./message-editor.js";
+import {
+  cloneExecutionSettings,
+  createCodexDraftState,
+  createModelSettingsControl,
+  editCodexDraft,
+  formatEffort,
+  readCodexSettingsPreference,
+  reconcileCodexDraft,
+  recordCodexSubmission,
+  settingsCompatibility,
+  validExecutionSettings,
+  validModelCatalog,
+  validPresentedExecutionSettings,
+  writeCodexSettingsPreference,
+} from "./model-settings.js";
 
 export const DEFAULT_TITLE = "Untitled whiteboard";
 export const THEME_STORAGE_KEY = "agent-whiteboard-theme";
@@ -453,10 +468,10 @@ export const DEFAULT_AGENT_DRAWER_WIDTH = 420;
 export const MIN_AGENT_DRAWER_WIDTH = 360;
 export const MAX_AGENT_DRAWER_WIDTH = 720;
 export const AGENT_DRAWER_DOCK_BREAKPOINT = 64 * 16;
-export const AGENT_API_VERSION = "3";
-export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v3";
+export const AGENT_API_VERSION = "4";
+export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v4";
 export const MAX_AGENT_MESSAGE_BYTES = 64 * 1024;
-export const MAX_AGENT_EVENT_BYTES = 256 * 1024;
+export const MAX_AGENT_EVENT_BYTES = 1024 * 1024;
 export const MAX_AGENT_IMAGES_PER_TURN = 8;
 export const MAX_AGENT_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_AGENT_TURN_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -509,6 +524,7 @@ const ERROR_DEFINITIONS = {
   provider_protocol_failure: ["The provider protocol operation failed.", "restart_provider"],
   provider_malformed_stream: ["The provider returned a malformed event stream.", "restart_provider"],
   acceptance_outcome_unknown: ["The provider turn acceptance outcome is unknown.", "refresh_state"],
+  invalid_model_configuration: ["The selected model settings are no longer available.", "configure_model"],
   image_input_unsupported: ["The selected model does not support image input.", "configure_model"],
   image_unsupported: ["The selected file is not a supported image.", "none"],
   image_too_large: ["The selected image is too large.", "none"],
@@ -763,15 +779,16 @@ function commandEnvelope({ type, payload, clientID, conversationID, idFactory })
   };
 }
 
-export function createConnectCommand({ payload, provider = "pi", clientID, replayAfter, idFactory = generateAgentID }) {
+export function createConnectCommand({ payload, provider = "pi", settings = null, clientID, replayAfter, idFactory = generateAgentID }) {
   validateViewerPayload(payload);
   if (payload.local_agent.enabled !== true) throw new TypeError("local agent is disabled");
-  if (!PROVIDERS.has(provider)) throw new TypeError("invalid agent provider");
+  if (!PROVIDERS.has(provider) || provider === "pi" && settings !== null || settings !== null && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
   if (replayAfter && !validID(replayAfter)) throw new TypeError("invalid replay event ID");
   const connectPayload = {
     provider,
     resource: { ...payload.local_agent.resource },
     context_digest: payload.local_agent.context_digest,
+    settings: cloneExecutionSettings(settings),
   };
   if (replayAfter) connectPayload.replay_after = replayAfter;
   return commandEnvelope({ type: "connect", payload: connectPayload, clientID, conversationID: null, idFactory });
@@ -794,16 +811,17 @@ export function createPageContext(payload, { title, url, revision }) {
   };
 }
 
-export function createSubmitCommand({ content, message, images = [], payload, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
+export function createSubmitCommand({ content, message, images = [], payload, provider = "pi", settings = null, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
   let orderedContent;
   try { orderedContent = content ?? normalizeMessageContent({ parts: message ? [{ type: "text", text: message }] : [] }); }
   catch { throw new TypeError("invalid agent message"); }
   if (!validContentAndImages(orderedContent, images, false) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
+  if (!PROVIDERS.has(provider) || provider === "pi" && settings !== null || provider === "codex" && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const turnID = idFactory();
   const messageID = idFactory();
   if (!validID(turnID) || !validID(messageID)) throw new TypeError("invalid agent command identity");
-  const submitPayload = { turn_id: turnID, message_id: messageID, content: cloneMessageContent(orderedContent) };
+  const submitPayload = { turn_id: turnID, message_id: messageID, content: cloneMessageContent(orderedContent), settings: cloneExecutionSettings(settings) };
   if (images.length > 0) submitPayload.images = images.map((image) => ({ ...image }));
   if (revision === "initial" || revision === "replacement") {
     submitPayload.context = createPageContext(payload, { title, url, revision });
@@ -817,7 +835,7 @@ export function createAgentCommand({ type, payload, clientID, conversationID, id
     queue_edit: () => exactObject(payload, ["message_id", "content"]) && validID(payload.message_id) && validMessageContent(payload.content),
     queue_remove: () => exactObject(payload, ["message_id"]) && validID(payload.message_id),
     interrupt: () => exactObject(payload, ["turn_id"]) && validID(payload.turn_id),
-    new: () => exactObject(payload, []),
+    new: () => exactObject(payload, ["settings"]) && (payload.settings === null || validExecutionSettings(payload.settings)),
     archive_list: () => exactObject(payload, [], ["before", "limit"]) && (!payload.before || validID(payload.before)) && (!Object.hasOwn(payload, "limit") || Number.isInteger(payload.limit) && payload.limit >= 0 && payload.limit <= 100),
     history_page: () => exactObject(payload, [], ["before", "limit"]) && (!payload.before || validID(payload.before)) && (!Object.hasOwn(payload, "limit") || Number.isInteger(payload.limit) && payload.limit >= 0 && payload.limit <= 100),
     archive_restore: () => exactObject(payload, ["archive_id"]) && validID(payload.archive_id),
@@ -836,7 +854,14 @@ function validBrowserError(value) {
 }
 
 function validQueueItem(item) {
-  return exactObject(item, ["turn_id", "message_id", "content"], ["images"]) && validID(item.turn_id) && validID(item.message_id) && validContentAndImages(item.content, item.images ?? []);
+  return exactObject(item, ["turn_id", "message_id", "content", "settings"], ["images"])
+    && validID(item.turn_id) && validID(item.message_id) && validContentAndImages(item.content, item.images ?? [])
+    && (item.settings === null || validPresentedExecutionSettings(item.settings));
+}
+
+function queueItemBytes(item) {
+  const settings = item.settings;
+  return messageContentBytes(item.content) + (settings ? encoder.encode(settings.model + settings.effort + settings.speed + settings.model_display_name).length : 0);
 }
 
 function validTimelineItem(item) {
@@ -906,10 +931,28 @@ function validActiveTurn(lifecycle, turnID) {
   return lifecycle === "responding" ? turnID !== null : turnID === null;
 }
 
+function validSettingsSnapshot(settingsState, effectiveSettings, catalog) {
+  if (!validModelCatalog(catalog)) return false;
+  if (settingsState === null) return effectiveSettings === null && catalog.length === 0;
+  if (settingsState === "unverified") return effectiveSettings === null;
+  if (settingsState !== "verified" || !validPresentedExecutionSettings(effectiveSettings)) return false;
+  if (!effectiveSettings.selectable) return true;
+  const model = catalog.find(({ model }) => model === effectiveSettings.model);
+  return model !== undefined
+    && model.model_display_name === effectiveSettings.model_display_name
+    && settingsCompatibility(catalog, cloneExecutionSettings(effectiveSettings)).compatible;
+}
+
 function validateEventPayload(type, payload) {
   switch (type) {
-    case "snapshot":
-      return exactObject(payload, ["lifecycle", "queue", "context_state", "active_turn_id", "supports_images"]) && lifecycleValues.has(payload.lifecycle) && Array.isArray(payload.queue) && payload.queue.length <= MAX_QUEUE_ITEMS && payload.queue.every(validQueueItem) && contextValues.has(payload.context_state) && validActiveTurn(payload.lifecycle, payload.active_turn_id) && typeof payload.supports_images === "boolean";
+    case "snapshot": {
+      if (!exactObject(payload, ["lifecycle", "queue", "context_state", "active_turn_id", "supports_images", "settings_state", "effective_settings", "catalog"])
+        || !lifecycleValues.has(payload.lifecycle) || !Array.isArray(payload.queue) || payload.queue.length > MAX_QUEUE_ITEMS || !payload.queue.every(validQueueItem)
+        || !contextValues.has(payload.context_state) || !validActiveTurn(payload.lifecycle, payload.active_turn_id) || typeof payload.supports_images !== "boolean"
+        || !validSettingsSnapshot(payload.settings_state, payload.effective_settings, payload.catalog)) return false;
+      const selected = payload.effective_settings?.selectable && payload.catalog.find(({ model }) => model === payload.effective_settings.model);
+      return !selected || selected.supports_images === payload.supports_images;
+    }
     case "command_result":
       return exactObject(payload, ["command_id", "status"], ["error"]) && validID(payload.command_id) && ["succeeded", "rejected"].includes(payload.status) && (payload.status === "succeeded" ? !Object.hasOwn(payload, "error") : validBrowserError(payload.error));
     case "timeline":
@@ -928,6 +971,12 @@ function validateEventPayload(type, payload) {
       return exactObject(payload, ["state", "turn_id"]) && lifecycleValues.has(payload.state) && validActiveTurn(payload.state, payload.turn_id);
     case "provider":
       return exactObject(payload, ["provider", "state", "supports_images"], ["model"]) && PROVIDERS.has(payload.provider) && providerValues.has(payload.state) && typeof payload.supports_images === "boolean" && (!Object.hasOwn(payload, "model") || validText(payload.model, 512, true)) && (payload.state !== "ready" || validText(payload.model, 512));
+    case "settings":
+      return exactObject(payload, ["settings_state", "effective_settings", "catalog", "accepted_turn_id"])
+        && validSettingsSnapshot(payload.settings_state, payload.effective_settings, payload.catalog)
+        && payload.settings_state !== null
+        && (payload.accepted_turn_id === null || validID(payload.accepted_turn_id))
+        && (payload.settings_state === "verified" || payload.accepted_turn_id === null);
     case "context":
       return exactObject(payload, ["digest", "state"]) && DIGEST_PATTERN.test(payload.digest) && contextValues.has(payload.state);
     case "activity":
@@ -962,7 +1011,7 @@ export function validateAgentEvent(value) {
   if (value.type === "history" && (new Set(payload.items.map((item) => item.archive_id)).size !== payload.items.length || (payload.next_cursor !== null && (payload.items.length === 0 || payload.next_cursor !== payload.items.at(-1).archive_id)))) throw new TypeError("invalid agent event");
   if (["snapshot", "queue"].includes(value.type)) {
     const items = value.type === "snapshot" ? payload.queue : payload.items;
-    if (new Set(items.map((item) => item.message_id)).size !== items.length || new Set(items.map((item) => item.turn_id)).size !== items.length || items.reduce((total, item) => total + messageContentBytes(item.content), 0) > 96 * 1024) throw new TypeError("invalid agent event");
+    if (new Set(items.map((item) => item.message_id)).size !== items.length || new Set(items.map((item) => item.turn_id)).size !== items.length || items.reduce((total, item) => total + queueItemBytes(item), 0) > 96 * 1024) throw new TypeError("invalid agent event");
   }
   return value;
 }
@@ -1077,6 +1126,9 @@ export function createAgentState(provider = "pi") {
     contextDigest: null,
     provider: { provider, state: "starting", model: "", supportsImages: false },
     supportsImages: false,
+    settingsState: null,
+    effectiveSettings: null,
+    catalog: [],
     timeline: [],
     queue: [],
     archives: [],
@@ -1123,8 +1175,10 @@ export function applyAgentEvent(state, untrustedEvent) {
   const draft = {
     ...state,
     provider: { ...state.provider },
+    effectiveSettings: state.effectiveSettings ? { ...state.effectiveSettings } : null,
+    catalog: state.catalog.map((model) => ({ ...model, supported_reasoning_efforts: model.supported_reasoning_efforts.map((effort) => ({ ...effort })) })),
     timeline: state.timeline.map((item) => ({ ...item, content: item.content ? cloneMessageContent(item.content) : undefined, images: item.images?.map((image) => ({ ...image })) })),
-    queue: state.queue.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })) })),
+    queue: state.queue.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })), settings: item.settings ? { ...item.settings } : null })),
     archives: state.archives.map((item) => ({ ...item })),
     errors: state.errors.map((item) => ({ ...item })),
     seenEventIDs: new Set(state.seenEventIDs),
@@ -1154,9 +1208,12 @@ function applyAgentEventMutable(state, untrustedEvent) {
       state.lifecycle = payload.lifecycle;
       state.activeTurnID = payload.active_turn_id;
       state.contextState = payload.context_state;
-      state.queue = payload.queue.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })) }));
+      state.queue = payload.queue.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })), settings: item.settings ? { ...item.settings } : null }));
       state.supportsImages = payload.supports_images;
       state.provider.supportsImages = payload.supports_images;
+      state.settingsState = payload.settings_state;
+      state.effectiveSettings = payload.effective_settings ? { ...payload.effective_settings } : null;
+      state.catalog = payload.catalog.map((model) => ({ ...model, supported_reasoning_efforts: model.supported_reasoning_efforts.map((effort) => ({ ...effort })) }));
       state.connected = true;
       break;
     case "timeline": {
@@ -1194,7 +1251,12 @@ function applyAgentEventMutable(state, untrustedEvent) {
       else appendTimeline(state, { kind: "assistant", ...payload });
       break;
     }
-    case "queue": state.queue = payload.items.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })) })); break;
+    case "queue": state.queue = payload.items.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })), settings: item.settings ? { ...item.settings } : null })); break;
+    case "settings":
+      state.settingsState = payload.settings_state;
+      state.effectiveSettings = payload.effective_settings ? { ...payload.effective_settings } : null;
+      state.catalog = payload.catalog.map((model) => ({ ...model, supported_reasoning_efforts: model.supported_reasoning_efforts.map((effort) => ({ ...effort })) }));
+      break;
     case "lifecycle": state.lifecycle = payload.state; state.activeTurnID = payload.turn_id; break;
     case "provider":
       if (payload.provider !== state.provider.provider) throw new TypeError("agent provider changed unexpectedly");
@@ -1250,7 +1312,11 @@ function applyAgentEventMutable(state, untrustedEvent) {
 export function renderAgentMarkdown(source, doc = document) {
   const markdown = createMarkdownRenderer([], { mermaidEnabled: false });
   const rendered = markdown.render(source);
-  return purifierFor(doc).sanitize(rendered, { FORBID_TAGS: ["img", "picture", "source", "audio", "video"] });
+  const sanitized = purifierFor(doc).sanitize(rendered, { FORBID_TAGS: ["img", "picture", "source", "audio", "video"] });
+  const template = doc.createElement("template");
+  template.innerHTML = sanitized;
+  highlightCode(template.content);
+  return template.innerHTML;
 }
 
 function safeHTTPErrorCode(body, fallback) {
@@ -1270,6 +1336,7 @@ export function createAgentTransport({
   WebSocketImpl = globalThis.WebSocket,
   onEvent = () => {},
   onDisconnect = () => {},
+  initialSettings = null,
   idFactory = generateAgentID,
 } = {}) {
   let socket;
@@ -1385,7 +1452,8 @@ export function createAgentTransport({
   }
 
   function connectCommand() {
-    return createConnectCommand({ payload, provider, clientID, replayAfter: lastEventID, idFactory });
+    const settings = typeof initialSettings === "function" ? initialSettings() : initialSettings;
+    return createConnectCommand({ payload, provider, settings: settings ?? null, clientID, replayAfter: lastEventID, idFactory });
   }
 
   async function fallbackConnect(command) {
@@ -1596,6 +1664,7 @@ function appendAgentMessage(doc, container, item, providerName = "Pi", appendIma
   const article = doc.createElement("article");
   article.className = `agent-message agent-message-${item.kind}`;
   const label = doc.createElement("strong");
+  label.className = "agent-message-author";
   label.textContent = item.kind === "assistant" ? providerName : "You";
   const body = doc.createElement("div");
   body.className = "agent-message-body";
@@ -1828,6 +1897,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let contextCommandID = null;
   let contextDeliveryUnknown = false;
   let destroyed = false;
+  let toastTimer = null;
   let handoffCommandID = null;
   let attachmentSerial = 0;
   let draftAttachments = [];
@@ -1863,6 +1933,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   overlay.type = "button";
   overlay.className = "agent-overlay";
   overlay.setAttribute("aria-label", "Close local agent");
+
+  const toast = doc.createElement("div");
+  toast.className = "agent-toast";
+  toast.setAttribute("role", "status");
+  toast.setAttribute("aria-live", "polite");
+  toast.setAttribute("aria-atomic", "true");
+  toast.hidden = true;
 
   const drawer = doc.createElement("aside");
   drawer.id = "agent-whiteboard-agent-drawer";
@@ -2127,7 +2204,21 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   imageButton.type = "button";
   imageButton.className = "agent-image-button";
   imageButton.setAttribute("aria-label", "Add images");
-  imageButton.textContent = "+";
+  const imageIcon = createSVGElement(doc, "svg", {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "1.8",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true",
+  });
+  imageIcon.append(
+    createSVGElement(doc, "rect", { x: "3.5", y: "4.5", width: "17", height: "15", rx: "2.5" }),
+    createSVGElement(doc, "circle", { cx: "9", cy: "10", r: "1.5" }),
+    createSVGElement(doc, "path", { d: "m5.5 17 4.2-4.2 2.8 2.8 2.3-2.3 3.7 3.7" }),
+  );
+  imageButton.append(imageIcon);
   const contextChip = doc.createElement("button");
   contextChip.type = "button";
   contextChip.className = "agent-composer-chip";
@@ -2137,6 +2228,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   queueChip.className = "agent-composer-chip";
   queueChip.textContent = "Queue · 0";
   queueChip.hidden = true;
+  const modelControl = createModelSettingsControl({ doc, onSelect: (next) => selectDraftSettings(next) });
   const stopButton = doc.createElement("button");
   stopButton.type = "button";
   stopButton.className = "agent-stop-button";
@@ -2146,7 +2238,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   sendButton.className = "agent-send-button";
   sendButton.setAttribute("aria-label", "Send");
   sendButton.textContent = "↑";
-  composerBar.append(imageButton, contextChip, queueChip, stopButton, sendButton);
+  composerBar.append(imageButton, contextChip, queueChip, modelControl.element, stopButton, sendButton);
   composer.append(imagePicker, attachmentList, attachmentStatus, message, composerBar);
   const composerFineprint = doc.createElement("p");
   composerFineprint.className = "agent-composer-fineprint";
@@ -2164,18 +2256,36 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   separator.setAttribute("aria-label", "Resize Page agent pane");
 
   drawer.append(header, separator, setup, settings, actions, contextDetails, timeline, queue, archives, composerWrap);
-  doc.body.append(overlay, drawer, toggle);
+  doc.body.append(overlay, drawer, toggle, toast);
 
   function buildController(provider) {
-    const owned = { provider, state: createAgentState(provider), transport: null, reconnectTimer: null, connecting: false, contextRevision: undefined, contextAccepted: false, contextCommandID: null, contextDeliveryUnknown: false, handoffCommandID: null, pendingSubmitCommandID: null };
+    const initialSettings = provider === "codex" ? readCodexSettingsPreference(storage) : null;
+    const owned = { provider, state: createAgentState(provider), settingsDraft: createCodexDraftState(initialSettings), transport: null, reconnectTimer: null, connecting: false, contextRevision: undefined, contextAccepted: false, contextCommandID: null, contextDeliveryUnknown: false, handoffCommandID: null, pendingSubmitCommandID: null, pendingSubmission: null };
     owned.transport = transportFactory({
       payload,
       provider,
       port,
+      initialSettings: () => provider === "codex" ? cloneExecutionSettings(owned.settingsDraft.draft) : null,
       onEvent(event) {
         if (!applyAgentEvent(owned.state, event)) return;
+        if (provider === "codex" && (event.type === "snapshot" || event.type === "settings")) {
+          reconcileCodexDraft(owned.settingsDraft, {
+            identity: event.conversation_id,
+            settingsState: event.payload.settings_state,
+            effectiveSettings: event.payload.effective_settings,
+            catalog: event.payload.catalog,
+            acceptedTurnID: event.type === "settings" ? event.payload.accepted_turn_id : null,
+          });
+          if (event.type === "settings" && event.payload.settings_state === "verified" && event.payload.accepted_turn_id !== null) {
+            writeCodexSettingsPreference(storage, cloneExecutionSettings(event.payload.effective_settings));
+          }
+        }
         if (event.type === "command_result" && event.payload.command_id === owned.handoffCommandID && event.payload.status === "rejected") owned.handoffCommandID = null;
-        if (event.type === "command_result" && event.payload.command_id === owned.pendingSubmitCommandID) owned.pendingSubmitCommandID = null;
+        if (event.type === "command_result" && event.payload.command_id === owned.pendingSubmitCommandID) {
+          if (event.payload.status === "succeeded") completePendingSubmission(owned);
+          owned.pendingSubmitCommandID = null;
+          owned.pendingSubmission = null;
+        }
         if (event.type === "command_result" && event.payload.command_id === owned.contextCommandID && event.payload.status === "rejected") owned.contextCommandID = null;
         if (event.type === "snapshot" && owned.contextDeliveryUnknown) {
           if (owned.contextCommandID !== null) owned.state.pendingCommandIDs.delete(owned.contextCommandID);
@@ -2199,6 +2309,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         owned.state.connected = false;
         owned.state.lifecycle = "unavailable";
         owned.pendingSubmitCommandID = null;
+        owned.pendingSubmission = null;
         if (owned.contextCommandID !== null) {
           owned.contextDeliveryUnknown = true;
           resetControllerForFreshSnapshot(owned, { preserveContextDelivery: true });
@@ -2216,6 +2327,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           owned.state.freshArchiveCommandIDs.clear();
           owned.state.contextState = "pending";
           owned.state.contextDigest = null;
+          owned.state.settingsState = null;
+          owned.state.effectiveSettings = null;
+          owned.state.catalog = [];
           owned.contextAccepted = false;
           owned.contextRevision = undefined;
           owned.contextCommandID = null;
@@ -2406,7 +2520,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (next && focus) restoreFocus = doc.activeElement;
     if (!next && resizing) finishResize({ persist: false });
     open = next;
-    if (wasOpen && !open) clearDraftAttachments();
+    if (wasOpen && !open) {
+      modelControl.close();
+      clearDraftAttachments();
+    }
     const modal = open && !isDockedViewport();
     drawer.classList.toggle("is-open", open);
     overlay.classList.toggle("is-open", open && modal);
@@ -2423,8 +2540,32 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
   }
 
+  function currentCodexSettings() {
+    if (selectedProvider !== "codex" || state.settingsState !== "verified") return null;
+    const candidate = controller.settingsDraft.draft;
+    return candidate && settingsCompatibility(state.catalog, candidate).compatible ? cloneExecutionSettings(candidate) : null;
+  }
+
+  function selectedModelSupportsImages() {
+    if (selectedProvider !== "codex") return state.supportsImages;
+    const candidate = controller.settingsDraft.draft;
+    const model = candidate && state.catalog.find(({ model: value }) => value === candidate.model);
+    if (model) return model.supports_images;
+    return candidate && state.effectiveSettings && candidate.model === state.effectiveSettings.model ? state.supportsImages : false;
+  }
+
+  function selectDraftSettings(next) {
+    if (selectedProvider !== "codex") return;
+    try {
+      editCodexDraft(controller.settingsDraft, next);
+      render();
+    } catch {
+      showTransientStatus("Model settings unavailable", "Choose another option", "The live Codex catalog no longer supports that combination.");
+    }
+  }
+
   function submitBlocked() {
-    return state.contextState === "pending" && contextRevision === undefined || contextCommandID !== null || contextDeliveryUnknown;
+    return state.contextState === "pending" && contextRevision === undefined || contextCommandID !== null || contextDeliveryUnknown || pendingSubmitCommandID !== null || selectedProvider === "codex" && currentCodexSettings() === null;
   }
 
   function revokeObjectURL(url) {
@@ -2448,7 +2589,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     const preparing = draftAttachments.some((item) => item.status === "preparing");
     const hasReadyImage = draftAttachments.some((item) => item.status === "ready");
     const hasMessage = messageEditor.getContent().parts.length > 0;
-    sendButton.disabled = submitBlocked() || preparing || (!hasMessage && !hasReadyImage);
+    const incompatibleImages = (hasReadyImage || draftInlineVisuals.size > 0) && !selectedModelSupportsImages();
+    sendButton.disabled = submitBlocked() || preparing || incompatibleImages || (!hasMessage && !hasReadyImage);
   }
 
   function handleDraftContentChange(content) {
@@ -2503,7 +2645,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   async function addInlineImage(metadata) {
     setOpen(true, { focus: false });
     showView("conversation", { focus: false });
-    if (!state.connected || !state.supportsImages || !transport.conversationID) {
+    if (!state.connected || !selectedModelSupportsImages() || !transport.conversationID) {
       showTransientStatus("Image reference unavailable", "Connect an image-capable model", "Connect Page Agent with image input enabled, then add this image again.");
       throw new Error("Connect an image-capable Page Agent before adding this image.");
     }
@@ -2522,7 +2664,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     draftInlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size });
     const reference = imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name);
     messageEditor.insertReference(reference);
-    attachmentStatus.textContent = `Added ${reference.label} to the message.`;
+    announce(`Added ${reference.label} to the message.`);
     return reference;
   }
 
@@ -2590,7 +2732,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function addImageFiles(files) {
-    if (!state.connected || !state.supportsImages) {
+    if (!state.connected || !selectedModelSupportsImages()) {
       showTransientStatus("Images unavailable", "Choose another model", "The selected model does not support image input.");
       return;
     }
@@ -2642,6 +2784,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
 
   function clearDraftAttachments({ deleteStaged = true } = {}) {
     for (const item of [...draftAttachments]) removeAttachment(item, { deleteStaged });
+  }
+
+  function completePendingSubmission(owner) {
+    const submission = owner.pendingSubmission;
+    if (!submission || owner !== controller) return;
+    if (JSON.stringify(messageEditor.getContent()) === JSON.stringify(submission.content)) {
+      for (const { image_id: imageID } of inlineImages(submission.content)) draftInlineVisuals.delete(imageID);
+      messageEditor.clear();
+      resizeComposer();
+    }
+    for (const item of submission.attachments) removeAttachment(item, { deleteStaged: false });
   }
 
   function appendDescriptorImages(parent, images) {
@@ -2746,7 +2899,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       connectButton.disabled = connectionState === "connecting";
     }
     settings.hidden = activeView !== "settings";
-    newMenuButton.disabled = !state.connected;
+    newMenuButton.disabled = !state.connected || selectedProvider === "codex" && currentCodexSettings() === null;
     archivesMenuButton.disabled = !state.connected;
     reconnectMenuButton.disabled = transport.consented !== true;
     composerWrap.hidden = !state.connected || activeView !== "conversation";
@@ -2767,8 +2920,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     contextDetails.setAttribute("aria-hidden", String(activeView !== "context"));
     archives.hidden = activeView !== "archives";
     const contextAttached = state.contextState === "accepted" || state.contextState === "unchanged";
-    imageButton.disabled = !state.connected || !state.supportsImages;
-    imageButton.title = state.supportsImages ? "Add PNG, JPEG, GIF, or WebP images" : "The selected model does not support image input.";
+    const draftSupportsImages = selectedModelSupportsImages();
+    imageButton.disabled = !state.connected || !draftSupportsImages;
+    imageButton.title = draftSupportsImages ? "Add PNG, JPEG, GIF, or WebP images" : "The selected model does not support image input.";
+    const codexDraft = selectedProvider === "codex" ? controller.settingsDraft : null;
+    modelControl.render({
+      visible: selectedProvider === "codex",
+      enabled: state.connected && state.settingsState === "verified" && state.catalog.length > 0,
+      settings: codexDraft?.draft ?? null,
+      presentation: codexDraft?.effectivePresentation ?? state.effectiveSettings,
+      catalog: state.catalog,
+    });
     renderDraftAttachments();
     stopButton.disabled = state.activeTurnID === null;
     stopButton.hidden = state.activeTurnID === null;
@@ -2889,8 +3051,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         void sendCommand("queue_edit", { message_id: item.message_id, content });
       });
       remove.addEventListener("click", () => void sendCommand("queue_remove", { message_id: item.message_id }));
-      if (item.images?.length) appendDescriptorImages(row, item.images);
-      row.append(input, save, remove); queue.append(row);
+      const queuedContent = doc.createElement("div");
+      queuedContent.className = "agent-queue-content";
+      queuedContent.append(input);
+      if (item.settings) {
+        const summary = doc.createElement("p");
+        summary.className = "agent-queue-settings";
+        summary.textContent = `${item.settings.model_display_name} · ${formatEffort(item.settings.effort)} · ${item.settings.speed === "fast" ? "Fast" : "Standard"}`;
+        queuedContent.append(summary);
+      }
+      if (item.images?.length) appendDescriptorImages(queuedContent, item.images);
+      row.append(queuedContent, save, remove); queue.append(row);
     }
     archives.replaceChildren();
     const archivesHeading = doc.createElement("h3");
@@ -2916,6 +3087,20 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       more.textContent = "Load more archives";
       more.addEventListener("click", () => void sendCommand("archive_list", { before: state.archiveCursor, limit: 50 }));
       archives.append(more);
+    }
+  }
+
+  function announce(messageText) {
+    if (toastTimer !== null) doc.defaultView?.clearTimeout?.(toastTimer);
+    const value = String(messageText ?? "").trim();
+    toast.textContent = value;
+    toast.hidden = value === "";
+    if (value !== "") {
+      toastTimer = doc.defaultView?.setTimeout?.(() => {
+        toast.hidden = true;
+        toast.textContent = "";
+        toastTimer = null;
+      }, 2400) ?? null;
     }
   }
 
@@ -3062,6 +3247,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     persistAgentPreference(storage, AGENT_PROVIDER_STORAGE_KEY, selectedProvider);
     loadController(controllers.get(selectedProvider) ?? buildController(selectedProvider));
     activeView = "conversation";
+    modelControl.close();
     overflowMenu.hidden = true;
     overflowButton.setAttribute("aria-expanded", "false");
     render();
@@ -3157,23 +3343,29 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       return;
     }
     const revision = target.state.contextState === "pending" ? target.contextRevision : undefined;
-    const command = createSubmitCommand({ content, images: imageReferences, payload, clientID: target.transport.clientID, conversationID: target.transport.conversationID, title: pageTitle, url: pageURL, revision });
+    const executionSettings = selectedProvider === "codex" ? currentCodexSettings() : null;
+    if (selectedProvider === "codex" && executionSettings === null) {
+      showTransientStatus("Model options unavailable", "Choose valid settings", "Reconnect or choose a model, effort, and speed supported by the live Codex catalog.");
+      return;
+    }
+    if (selectedProvider === "codex" && (imageReferences.length > 0 || inlineImages(content).length > 0) && !selectedModelSupportsImages()) {
+      showTransientStatus("Images unavailable", "Choose another model", "The selected model does not support image input.");
+      return;
+    }
+    const command = createSubmitCommand({ content, images: imageReferences, payload, provider: selectedProvider, settings: executionSettings, clientID: target.transport.clientID, conversationID: target.transport.conversationID, title: pageTitle, url: pageURL, revision });
     registerAgentCommand(target.state, command);
     target.pendingSubmitCommandID = command.command_id;
+    target.pendingSubmission = { content: cloneMessageContent(content), attachments: [...sentAttachments] };
+    if (selectedProvider === "codex") recordCodexSubmission(target.settingsDraft, command.payload.turn_id);
     if (revision !== undefined) target.contextCommandID = command.command_id;
     loadController(target);
     render();
     try {
       await target.transport.send(command);
-      if (target === controller && JSON.stringify(messageEditor.getContent()) === JSON.stringify(content)) {
-        for (const { image_id: imageID } of inlineImages(content)) draftInlineVisuals.delete(imageID);
-        messageEditor.clear();
-        resizeComposer();
-      }
-      for (const item of sentAttachments) removeAttachment(item, { deleteStaged: false });
     }
     catch (error) {
       target.pendingSubmitCommandID = null;
+      target.pendingSubmission = null;
       if (error?.code) target.state.pendingCommandIDs.delete(command.command_id);
       if (target.contextCommandID === command.command_id) {
         if (error?.code) target.contextCommandID = null;
@@ -3195,7 +3387,16 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     scheduleReconnect();
   });
   newButton.addEventListener("click", () => {
-    if (doc.defaultView?.confirm("Archive this conversation and start a new one?")) { clearDraftAttachments(); clearDraftInlineVisuals(); showView("conversation"); void forcedConversationCommand("new", {}); }
+    if (!doc.defaultView?.confirm("Archive this conversation and start a new one?")) return;
+    const executionSettings = selectedProvider === "codex" ? currentCodexSettings() : null;
+    if (selectedProvider === "codex" && executionSettings === null) {
+      showTransientStatus("Model options unavailable", "New conversation not started", "Choose settings supported by the live Codex catalog.");
+      return;
+    }
+    clearDraftAttachments();
+    clearDraftInlineVisuals();
+    showView("conversation");
+    void forcedConversationCommand("new", { settings: executionSettings });
   });
   historyButton.addEventListener("click", () => { showView("archives"); });
   function onOverflowOutsidePointerDown(event) {
@@ -3207,6 +3408,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   doc.addEventListener("pointerdown", onOverflowOutsidePointerDown);
   doc.addEventListener("keydown", onKeydown);
   function onKeydown(event) {
+    if (event.defaultPrevented) return;
     if (!overflowMenu.hidden && event.target?.getAttribute?.("role") === "menuitem" && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       const items = enabledOverflowItems();
       const current = items.indexOf(event.target);
@@ -3250,7 +3452,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   return {
     get state() { return state; },
     get transport() { return transport; },
-    elements: { toggle, drawer, close, overlay, separator, overflowButton, overflowMenu, backButton, headerActions, providerSelect, setup, settings, contextDetails, portInput, connectButton, composerWrap, composer, message, imagePicker, imageButton, attachmentList, attachmentStatus, sendButton, stopButton, timeline, queue, archives },
+    elements: { toggle, drawer, close, overlay, toast, separator, overflowButton, overflowMenu, backButton, headerActions, providerSelect, setup, settings, contextDetails, portInput, connectButton, composerWrap, composer, message, imagePicker, imageButton, modelControl, attachmentList, attachmentStatus, sendButton, stopButton, timeline, queue, archives },
     get open() { return open; },
     setOpen,
     probe,
@@ -3263,15 +3465,15 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       return content;
     },
     addImageReference: addInlineImage,
-    announce(messageText) {
-      attachmentStatus.textContent = messageText;
-    },
+    announce,
     destroy() {
       destroyed = true;
+      if (toastTimer !== null) doc.defaultView?.clearTimeout?.(toastTimer);
       clearDraftInlineVisuals();
       for (const editor of queueEditors) editor.destroy();
       queueEditors = [];
       clearDraftAttachments();
+      modelControl.destroy();
       messageEditor.destroy();
       for (const url of imageObjectURLs.values()) revokeObjectURL(url);
       imageObjectURLs.clear();
@@ -3289,7 +3491,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       separator.removeEventListener("dblclick", onSeparatorDoubleClick);
       doc.body.classList.remove("agent-drawer-modal-open", "agent-drawer-docked-open");
       doc.documentElement.style.removeProperty("--agent-drawer-width");
-      toggle.remove(); overlay.remove(); drawer.remove();
+      toggle.remove(); overlay.remove(); drawer.remove(); toast.remove();
     },
   };
 }

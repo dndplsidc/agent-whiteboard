@@ -381,12 +381,12 @@ function createLoopbackBroker(initialAllowedOrigin) {
         record,
         200,
         { ...corsHeaders(), "Content-Type": "application/json", "Cache-Control": "no-store" },
-        '{"available":true,"api_version":"3"}',
+        '{"available":true,"api_version":"4"}',
       );
       return;
     }
     if (request.method === "POST" && request.url === "/api/v1/agent/connect") {
-      if (request.headers["x-agent-whiteboard-api-version"] !== "3") {
+      if (request.headers["x-agent-whiteboard-api-version"] !== "4") {
         send(response, record, 400, corsHeaders(), '{"error":"unsupported API version"}');
         return;
       }
@@ -407,7 +407,7 @@ function createLoopbackBroker(initialAllowedOrigin) {
   server.on("upgrade", (request, socket) => {
     const record = requestRecord(request);
     requests.push(record);
-    if (!originAllowed(request) || request.url !== "/api/v1/agent/connect") {
+    if (!originAllowed(request) || request.url !== "/api/v1/agent/connect" || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v4") {
       record.status = 403;
       socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
       return;
@@ -425,13 +425,14 @@ function createLoopbackBroker(initialAllowedOrigin) {
     }
     const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
     record.status = 101;
-    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept };
+    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v4" };
     socket.write(
       [
         "HTTP/1.1 101 Switching Protocols",
         "Upgrade: websocket",
         "Connection: Upgrade",
         `Sec-WebSocket-Accept: ${accept}`,
+        "Sec-WebSocket-Protocol: agent-whiteboard.v4",
         "",
         "",
       ].join("\r\n"),
@@ -471,9 +472,38 @@ function createSidebarBroker(initialAllowedOrigin) {
   const fixtureImages = new Map();
   let imageSequence = 300;
   let nextImageFailure = null;
+  const codexCatalog = [{
+    model: "gpt-5.6-sol",
+    model_display_name: "5.6 Sol",
+    description: "Strong general-purpose coding model.",
+    default_effort: "high",
+    supported_reasoning_efforts: [
+      { effort: "medium", description: "Balanced reasoning." },
+      { effort: "high", description: "Deeper reasoning." },
+      { effort: "xhigh", description: "Maximum reasoning." },
+    ],
+    supports_images: true,
+    default: true,
+    supports_fast: true,
+  }, {
+    model: "gpt-5.6-luna",
+    model_display_name: "5.6 Luna",
+    description: "Fast focused coding model.",
+    default_effort: "medium",
+    supported_reasoning_efforts: [{ effort: "medium", description: "Balanced reasoning." }],
+    supports_images: false,
+    default: false,
+    supports_fast: false,
+  }];
+  const presentedSettings = (settings) => {
+    const model = codexCatalog.find(({ model: value }) => value === settings.model);
+    if (!model) throw new Error(`unknown fixture model: ${settings.model}`);
+    return { ...settings, model_display_name: model.model_display_name, selectable: true };
+  };
+  const defaultCodexSettings = presentedSettings({ model: "gpt-5.6-sol", effort: "high", speed: "fast" });
   const providerDefinitions = {
     pi: { conversationID: protocolID(201), model: "fixture-model", sequence: 1, identitySequence: 40, archiveID: protocolID(220) },
-    codex: { conversationID: protocolID(202), model: "fixture-codex-model", sequence: 101, identitySequence: 80, archiveID: protocolID(221) },
+    codex: { conversationID: protocolID(202), model: defaultCodexSettings.model_display_name, sequence: 101, identitySequence: 80, archiveID: protocolID(221) },
   };
   const createProviderState = (provider) => {
     const definition = providerDefinitions[provider];
@@ -481,11 +511,20 @@ function createSidebarBroker(initialAllowedOrigin) {
       provider,
       ...definition,
       available: true,
-      supportsImages: true,
+      supportsImages: provider === "codex" ? codexCatalog[0].supports_images : true,
+      settingsState: provider === "codex" ? "verified" : null,
+      effectiveSettings: provider === "codex" ? { ...defaultCodexSettings } : null,
+      catalog: provider === "codex" ? structuredClone(codexCatalog) : [],
+      rejectNextSettings: false,
+      rejectionCatalog: null,
+      applyConnectSettings: false,
+      acceptedSettings: [],
+      createdSettings: [],
       contextState: "pending",
       contextDigest: "0".repeat(64),
       holdResponses: false,
       phaseResponses: false,
+      responseText: null,
       activeTurn: null,
       pendingResponse: null,
       queue: [],
@@ -519,7 +558,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     return { image_id: image.id, name: image.name, media_type: image.mediaType };
   };
   const nextEvent = (state, type, payload) => ({
-    api_version: "3",
+    api_version: "4",
     event_id: protocolID(state.sequence++),
     conversation_id: state.conversationID,
     type,
@@ -528,10 +567,13 @@ function createSidebarBroker(initialAllowedOrigin) {
   });
   const snapshotPayload = (state) => ({
     lifecycle: state.activeTurn === null ? "ready" : "responding",
-    queue: state.queue.map((item) => ({ ...item })),
+    queue: state.queue.map((item) => structuredClone(item)),
     context_state: state.contextState,
     active_turn_id: state.activeTurn,
     supports_images: state.supportsImages,
+    settings_state: state.settingsState,
+    effective_settings: state.effectiveSettings === null ? null : { ...state.effectiveSettings },
+    catalog: structuredClone(state.catalog),
   });
   const archivePayload = (state) => ({
     archive_id: state.archiveID,
@@ -592,7 +634,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     if (!state.pendingResponse) throw new Error(`no pending ${provider} sidebar response for ${phase}`);
     const response = state.pendingResponse;
     const firstDelta = provider === "codex" ? "Codex fixture " : "Fixture ";
-    const finalText = provider === "codex" ? "Codex fixture reply" : "Fixture reply";
+    const finalText = state.responseText ?? (provider === "codex" ? "Codex fixture reply" : "Fixture reply");
     if (phase === "first_delta" && response.phase === "responding") {
       emit(state, "assistant_delta", { turn_id: response.turnID, message_id: response.assistantID, text: firstDelta });
       response.phase = "first_delta";
@@ -610,15 +652,59 @@ function createSidebarBroker(initialAllowedOrigin) {
       emit(state, "completion", { turn_id: response.turnID });
       state.activeTurn = null;
       state.pendingResponse = null;
+      if (state.queue.length > 0) {
+        const next = state.queue.shift();
+        emit(state, "queue", { items: state.queue.map((item) => structuredClone(item)) });
+        if (state.provider === "codex") acceptCodexSettings(state, {
+          model: next.settings.model,
+          effort: next.settings.effort,
+          speed: next.settings.speed,
+        }, next.turn_id);
+        state.activeTurn = next.turn_id;
+        emit(state, "user_message", {
+          turn_id: next.turn_id,
+          message_id: next.message_id,
+          content: next.content,
+          ...(next.images?.length ? { images: next.images } : {}),
+          created_at: response.createdAt,
+        });
+        emit(state, "lifecycle", { state: "responding", turn_id: next.turn_id });
+        state.pendingResponse = { turnID: next.turn_id, assistantID: protocolID(state.identitySequence++), createdAt: response.createdAt, phase: "responding" };
+      }
       return;
     }
     throw new Error(`sidebar response cannot release ${phase} from ${response.phase}`);
+  };
+  const acceptCodexSettings = (state, settings, turnID) => {
+    state.effectiveSettings = presentedSettings(settings);
+    state.model = state.effectiveSettings.model_display_name;
+    state.supportsImages = state.catalog.find(({ model }) => model === settings.model).supports_images;
+    state.acceptedSettings.push({ turn_id: turnID, settings: structuredClone(settings) });
+    emit(state, "settings", {
+      settings_state: "verified",
+      effective_settings: { ...state.effectiveSettings },
+      catalog: structuredClone(state.catalog),
+      accepted_turn_id: turnID,
+    });
+    emit(state, "provider", { provider: state.provider, state: "ready", model: state.model, supports_images: state.supportsImages });
   };
   const handleCommand = (command, connectedProvider) => {
     const state = stateForCommand(command, connectedProvider);
     if (command.type === "history_page") {
       targetedEvent(state, "timeline", { command_id: command.command_id, items: [...state.history].reverse(), next_cursor: null }, command.client_id);
     } else if (command.type === "submit") {
+      if (state.provider === "codex" && state.rejectNextSettings) {
+        state.rejectNextSettings = false;
+        state.catalog = state.rejectionCatalog ?? state.catalog;
+        state.rejectionCatalog = null;
+        emit(state, "settings", {
+          settings_state: "verified",
+          effective_settings: { ...state.effectiveSettings },
+          catalog: structuredClone(state.catalog),
+          accepted_turn_id: null,
+        });
+        return commandResult(state, command, { code: "invalid_model_configuration", message: "The selected model settings are no longer available.", action: "configure_model" });
+      }
       const inlineReferences = command.payload.content.parts.filter((part) => part.type === "reference" && part.reference.kind === "image");
       if ((command.payload.images?.length ?? 0) + inlineReferences.length > 0 && !state.supportsImages) {
         return commandResult(state, command, { code: "image_input_unsupported", message: "The selected model does not support image input.", action: "configure_model" });
@@ -631,9 +717,16 @@ function createSidebarBroker(initialAllowedOrigin) {
       }
       const imageDescriptors = (command.payload.images ?? []).map((image) => claimFixtureImage(state, command, image));
       if (state.activeTurn !== null) {
-        state.queue.push({ turn_id: command.payload.turn_id, message_id: command.payload.message_id, content, ...(imageDescriptors.length ? { images: imageDescriptors } : {}) });
-        emit(state, "queue", { items: state.queue.map((item) => ({ ...item })) });
+        state.queue.push({
+          turn_id: command.payload.turn_id,
+          message_id: command.payload.message_id,
+          content,
+          settings: state.provider === "codex" ? presentedSettings(command.payload.settings) : null,
+          ...(imageDescriptors.length ? { images: imageDescriptors } : {}),
+        });
+        emit(state, "queue", { items: state.queue.map((item) => structuredClone(item)) });
       } else {
+        if (state.provider === "codex") acceptCodexSettings(state, command.payload.settings, command.payload.turn_id);
         if (command.payload.context) {
           state.contextState = "accepted";
           state.contextDigest = command.payload.context.digest;
@@ -655,10 +748,37 @@ function createSidebarBroker(initialAllowedOrigin) {
           emitResponsePhase("completion", state.provider);
         }
       }
+    } else if (command.type === "new") {
+      if (state.provider === "codex" && state.rejectNextSettings) {
+        state.rejectNextSettings = false;
+        return commandResult(state, command, { code: "invalid_model_configuration", message: "The selected model settings are no longer available.", action: "configure_model" });
+      }
+      state.createdSettings.push(command.payload.settings === null ? null : structuredClone(command.payload.settings));
+      const result = commandResult(state, command);
+      state.conversationID = protocolID(state.identitySequence++);
+      state.contextState = "pending";
+      state.activeTurn = null;
+      state.pendingResponse = null;
+      state.queue = [];
+      state.history = [];
+      if (state.provider === "codex") {
+        state.effectiveSettings = presentedSettings(command.payload.settings);
+        state.model = state.effectiveSettings.model_display_name;
+        state.supportsImages = state.catalog.find(({ model }) => model === command.payload.settings.model).supports_images;
+      }
+      setImmediate(() => {
+        for (const stream of [...streams]) {
+          if (stream.provider === state.provider) stream.response.end();
+        }
+        for (const connection of [...webSockets]) {
+          if (connection.provider === state.provider) connection.socket.destroy();
+        }
+      });
+      return result;
     } else if (command.type === "queue_edit") {
       const item = state.queue.find((candidate) => candidate.message_id === command.payload.message_id);
       if (item) item.content = structuredClone(command.payload.content);
-      emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
+      emit(state, "queue", { items: state.queue.map((candidate) => structuredClone(candidate)) });
     } else if (command.type === "queue_remove") {
       const index = state.queue.findIndex((candidate) => candidate.message_id === command.payload.message_id);
       if (index >= 0) {
@@ -707,7 +827,7 @@ function createSidebarBroker(initialAllowedOrigin) {
       return;
     }
     if (request.method === "GET" && request.url === "/api/v1/agent/status") {
-      sendJSON(response, record, 200, { available: true, api_version: "3", origin_trusted: true });
+      sendJSON(response, record, 200, { available: true, api_version: "4", origin_trusted: true });
       return;
     }
     const chunks = [];
@@ -767,6 +887,12 @@ function createSidebarBroker(initialAllowedOrigin) {
           sendJSON(response, record, 503, { error: { code: "provider_missing", message: "The selected provider executable is not available.", action: "install_provider" } });
           return;
         }
+        if (state.provider === "codex" && state.applyConnectSettings && command.payload.settings !== null) {
+          state.effectiveSettings = presentedSettings(command.payload.settings);
+          state.model = state.effectiveSettings.model_display_name;
+          state.supportsImages = state.catalog.find(({ model }) => model === command.payload.settings.model).supports_images;
+          state.applyConnectSettings = false;
+        }
         const events = bootstrapEvents(state, command.payload.replay_after);
         if (events === null) {
           sendJSON(response, record, 409, { error: { code: "replay_window_unavailable", message: "The requested replay window is no longer available.", action: "reload_conversation" } });
@@ -792,7 +918,7 @@ function createSidebarBroker(initialAllowedOrigin) {
   server.on("upgrade", (request, socket) => {
     const record = requestRecord(request);
     requests.push(record);
-    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v3") {
+    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v4") {
       record.status = 503;
       socket.end("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
       return;
@@ -800,13 +926,13 @@ function createSidebarBroker(initialAllowedOrigin) {
     const key = request.headers["sec-websocket-key"];
     const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
     record.status = 101;
-    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v3" };
+    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v4" };
     socket.write([
       "HTTP/1.1 101 Switching Protocols",
       "Upgrade: websocket",
       "Connection: Upgrade",
       `Sec-WebSocket-Accept: ${accept}`,
-      "Sec-WebSocket-Protocol: agent-whiteboard.v3",
+      "Sec-WebSocket-Protocol: agent-whiteboard.v4",
       "",
       "",
     ].join("\r\n"));
@@ -848,9 +974,51 @@ function createSidebarBroker(initialAllowedOrigin) {
     setWebSocketEnabled(value) { webSocketEnabled = value; },
     setHoldResponses(value, provider = "pi") { providerState(provider).holdResponses = value; },
     setPhaseResponses(value, provider = "pi") { providerState(provider).phaseResponses = value; },
+    preparePendingResponse(provider = "pi") {
+      const state = providerState(provider);
+      if (state.activeTurn === null || state.pendingResponse !== null) throw new Error(`cannot prepare ${provider} sidebar response`);
+      state.pendingResponse = { turnID: state.activeTurn, assistantID: protocolID(state.identitySequence++), createdAt: "2026-07-27T03:04:05Z", phase: "responding" };
+    },
+    setResponseText(value, provider = "pi") { providerState(provider).responseText = value; },
     releaseResponsePhase: emitResponsePhase,
     setProviderAvailable(provider, value) { providerState(provider).available = value; },
     setSupportsImages(provider, value) { providerState(provider).supportsImages = value; },
+    rejectNextSettings(provider = "codex") {
+      const state = providerState(provider);
+      state.rejectNextSettings = true;
+      state.rejectionCatalog = structuredClone(state.catalog);
+      state.rejectionCatalog.push({
+        model: "gpt-5.6-nova", model_display_name: "5.6 Nova", description: "Newly refreshed model.", default_effort: "medium",
+        supported_reasoning_efforts: [{ effort: "medium", description: "Balanced reasoning." }], supports_images: true, default: false, supports_fast: false,
+      });
+    },
+    setNewMapping(provider = "codex") { providerState(provider).applyConnectSettings = true; },
+    refreshCatalog(catalog, provider = "codex") {
+      const state = providerState(provider);
+      state.catalog = structuredClone(catalog);
+      emit(state, "settings", {
+        settings_state: state.settingsState,
+        effective_settings: state.effectiveSettings === null ? null : { ...state.effectiveSettings },
+        catalog: structuredClone(state.catalog),
+        accepted_turn_id: null,
+      });
+    },
+    restoreSettings(settings, provider = "codex") {
+      const state = providerState(provider);
+      state.effectiveSettings = presentedSettings(settings);
+      state.model = state.effectiveSettings.model_display_name;
+      state.supportsImages = state.catalog.find(({ model }) => model === settings.model).supports_images;
+      emit(state, "archive", { action: "restored", archive_id: state.archiveID });
+      emit(state, "settings", {
+        settings_state: "verified",
+        effective_settings: { ...state.effectiveSettings },
+        catalog: structuredClone(state.catalog),
+        accepted_turn_id: null,
+      });
+      emit(state, "provider", { provider: state.provider, state: "ready", model: state.model, supports_images: state.supportsImages });
+    },
+    acceptedSettings(provider = "codex") { return structuredClone(providerState(provider).acceptedSettings); },
+    createdSettings(provider = "codex") { return structuredClone(providerState(provider).createdSettings); },
     failNextImageUpload() {
       nextImageFailure = { status: 500, error: { code: "image_storage_failure", message: "The selected image could not be stored safely.", action: "try_again" } };
     },
@@ -1203,9 +1371,17 @@ export const test = base.extend({
           setWebSocketEnabled: broker.setWebSocketEnabled,
           setHoldResponses: broker.setHoldResponses,
           setPhaseResponses: broker.setPhaseResponses,
+          preparePendingResponse: broker.preparePendingResponse,
+          setResponseText: broker.setResponseText,
           releaseResponsePhase: broker.releaseResponsePhase,
           setProviderAvailable: broker.setProviderAvailable,
           setSupportsImages: broker.setSupportsImages,
+          rejectNextSettings: broker.rejectNextSettings,
+          setNewMapping: broker.setNewMapping,
+          refreshCatalog: broker.refreshCatalog,
+          restoreSettings: broker.restoreSettings,
+          acceptedSettings: broker.acceptedSettings,
+          createdSettings: broker.createdSettings,
           failNextImageUpload: broker.failNextImageUpload,
           disconnectProvider: broker.disconnectProvider,
           emitToolActivity: broker.emitToolActivity,

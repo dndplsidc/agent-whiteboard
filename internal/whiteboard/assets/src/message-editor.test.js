@@ -22,6 +22,7 @@ describe("ordered message model", () => {
       { type: "text", text: " after" },
     ] }));
     expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector(".agent-message-reference-label")?.textContent).toBe("<img onerror=alert(1)>");
     expect(container.textContent).toBe("before <img onerror=alert(1)> after");
   });
 });
@@ -34,6 +35,7 @@ describe("message editor", () => {
     editor.insertReference(reference("a", "Selected sentence"));
     const token = editor.element.querySelector(".agent-message-reference");
     expect(token.contentEditable).toBe("false");
+    expect(token.querySelector(".agent-message-reference-label")?.textContent).toBe("Selected sentence");
     expect(editor.getContent().parts.map(({ type }) => type)).toEqual(["text", "reference", "text"]);
     editor.element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     editor.element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));

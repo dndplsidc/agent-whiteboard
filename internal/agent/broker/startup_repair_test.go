@@ -57,6 +57,22 @@ func (*repairState) Create(statepkg.Identity, statepkg.Session, time.Time) (stat
 	return statepkg.CommitNotApplied, errors.New("create is not available")
 }
 
+func (state *repairState) UpdateCurrentSettings(_ statepkg.Identity, conversationID string, nativeSession provider.NativeSessionRef, settings provider.ExecutionSettings, presentation provider.ModelPresentation, at time.Time) (statepkg.CommitOutcome, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.mapping == nil || state.mapping.Current == nil || state.mapping.Current.ConversationID != conversationID || state.mapping.Current.NativeSession != nativeSession {
+		return statepkg.CommitNotApplied, errors.New("settings update rejected")
+	}
+	copySettings := settings
+	copyPresentation := presentation
+	state.mapping.Current.Settings = &copySettings
+	state.mapping.Current.Presentation = &copyPresentation
+	state.mapping.Current.ModelLabel = presentation.ModelDisplayName
+	state.mapping.Current.UpdatedAt = at
+	state.mapping.UpdatedAt = at
+	return statepkg.CommitApplied, nil
+}
+
 func (state *repairState) ObserveRevision(_ statepkg.Identity, revision statepkg.Revision, at time.Time) (statepkg.CommitOutcome, error) {
 	state.mu.Lock()
 	state.observeCalls++

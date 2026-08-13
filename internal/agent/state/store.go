@@ -186,10 +186,14 @@ func (store *Store) Update(identity Identity, update func(*Mapping) error) (Comm
 }
 
 func (store *Store) updateAt(identity Identity, at time.Time, update func(*Mapping) error) (CommitOutcome, error) {
-	return store.updateAtExpected(identity, nil, at, update)
+	return store.updateAtExpectedTransition(identity, nil, at, update, nil)
 }
 
 func (store *Store) updateAtExpected(identity Identity, expected *Mapping, at time.Time, update func(*Mapping) error) (CommitOutcome, error) {
+	return store.updateAtExpectedTransition(identity, expected, at, update, nil)
+}
+
+func (store *Store) updateAtExpectedTransition(identity Identity, expected *Mapping, at time.Time, update func(*Mapping) error, settings *settingsTransition) (CommitOutcome, error) {
 	key, err := ConversationKey(identity)
 	if err != nil {
 		return CommitNotApplied, err
@@ -213,7 +217,7 @@ func (store *Store) updateAtExpected(identity Identity, expected *Mapping, at ti
 		return CommitNotApplied, err
 	}
 	clampSessionTimes(&mapping, before)
-	if err := validateSessionTransitions(mapping, before); err != nil {
+	if err := validateSessionTransitions(mapping, before, settings); err != nil {
 		return CommitNotApplied, err
 	}
 	mapping.SchemaVersion = SchemaVersion
@@ -224,6 +228,38 @@ func (store *Store) updateAtExpected(identity Identity, expected *Mapping, at ti
 	}
 	mapping.UpdatedAt = at
 	return store.commitLocked(key, mapping, &original)
+}
+
+type settingsTransition struct {
+	conversationID string
+	nativeSession  string
+	settings       provider.ExecutionSettings
+	presentation   provider.ModelPresentation
+}
+
+// UpdateCurrentSettings atomically changes the complete effective tuple and
+// presentation only when the intended Codex conversation and native session
+// are still current.
+func (store *Store) UpdateCurrentSettings(identity Identity, conversationID string, nativeSession provider.NativeSessionRef, settings provider.ExecutionSettings, presentation provider.ModelPresentation, at time.Time) (CommitOutcome, error) {
+	if identity.Validate() != nil || identity.Provider != provider.NameCodex || common.ValidateID(conversationID) != nil || !nativeSession.Valid() || settings.Validate() != nil || presentation.Validate() != nil || !validStoredTime(at) {
+		return CommitNotApplied, errors.New("invalid current settings transition")
+	}
+	if _, err := validateNativeSessionRef(nativeSession.Value()); err != nil {
+		return CommitNotApplied, errors.New("invalid current settings transition")
+	}
+	transition := &settingsTransition{conversationID: conversationID, nativeSession: nativeSession.Value(), settings: settings, presentation: presentation}
+	return store.updateAtExpectedTransition(identity, nil, at, func(mapping *Mapping) error {
+		if mapping.Current == nil || mapping.Current.ConversationID != conversationID || mapping.Current.NativeSession.Value() != nativeSession.Value() {
+			return errors.New("current session changed")
+		}
+		copyOfSettings := settings
+		copyOfPresentation := presentation
+		mapping.Current.Settings = &copyOfSettings
+		mapping.Current.Presentation = &copyOfPresentation
+		mapping.Current.ModelLabel = presentation.ModelDisplayName
+		mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
+		return nil
+	}, transition)
 }
 
 func (store *Store) NewConversation(identity Identity, current Session, at time.Time) (CommitOutcome, error) {
@@ -754,16 +790,27 @@ func (store *Store) begin(key string) (func(), error) {
 }
 
 type sessionSnapshot struct {
-	updatedAt time.Time
-	committed *Revision
-	observed  *Revision
-	prepared  *PreparedCommit
+	updatedAt     time.Time
+	nativeSession string
+	settings      *provider.ExecutionSettings
+	presentation  *provider.ModelPresentation
+	committed     *Revision
+	observed      *Revision
+	prepared      *PreparedCommit
 }
 
 func snapshotSessions(mapping Mapping) map[string]sessionSnapshot {
 	snapshots := make(map[string]sessionSnapshot, len(mapping.Archives)+1)
 	add := func(session Session) {
-		snapshot := sessionSnapshot{updatedAt: session.UpdatedAt}
+		snapshot := sessionSnapshot{updatedAt: session.UpdatedAt, nativeSession: session.NativeSession.Value()}
+		if session.Settings != nil {
+			settings := *session.Settings
+			snapshot.settings = &settings
+		}
+		if session.Presentation != nil {
+			presentation := *session.Presentation
+			snapshot.presentation = &presentation
+		}
 		if session.Committed != nil {
 			committed := *session.Committed
 			snapshot.committed = &committed
@@ -801,7 +848,7 @@ func clampSessionTimes(mapping *Mapping, before map[string]sessionSnapshot) {
 	}
 }
 
-func validateSessionTransitions(mapping Mapping, before map[string]sessionSnapshot) error {
+func validateSessionTransitions(mapping Mapping, before map[string]sessionSnapshot, allowedSettings *settingsTransition) error {
 	after := make(map[string]Session, len(mapping.Archives)+1)
 	if mapping.Current != nil {
 		after[mapping.Current.ConversationID] = *mapping.Current
@@ -816,6 +863,13 @@ func validateSessionTransitions(mapping Mapping, before map[string]sessionSnapsh
 				return errors.New("cannot remove a session with an unresolved prepared revision")
 			}
 			continue
+		}
+		settingsChanged := !equalExecutionSettingsPointers(previous.settings, current.Settings) || !equalModelPresentationPointers(previous.presentation, current.Presentation)
+		if settingsChanged {
+			allowed := allowedSettings != nil && id == allowedSettings.conversationID && previous.nativeSession == allowedSettings.nativeSession && current.NativeSession.Value() == allowedSettings.nativeSession && current.Settings != nil && *current.Settings == allowedSettings.settings && current.Presentation != nil && *current.Presentation == allowedSettings.presentation
+			if !allowed {
+				return errors.New("cannot change execution settings outside an exact current-session transition")
+			}
 		}
 		if previous.prepared != nil {
 			switch {
@@ -847,6 +901,20 @@ func validateSessionTransitions(mapping Mapping, before map[string]sessionSnapsh
 		}
 	}
 	return nil
+}
+
+func equalExecutionSettingsPointers(left, right *provider.ExecutionSettings) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func equalModelPresentationPointers(left, right *provider.ModelPresentation) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func equalRevisionPointers(left, right *Revision) bool {

@@ -16,21 +16,25 @@ const (
 // QueuedTurn is the broker-owned form of one follow-up. Context is copied on
 // enqueue and remains private to the queue until a turn is dequeued.
 type QueuedTurn struct {
-	TurnID      string
-	MessageID   string
-	Content     provider.MessageContent
-	Images      []provider.ImageInput
-	Descriptors []protocol.ImageDescriptor
-	Context     *provider.PageContext
+	TurnID       string
+	MessageID    string
+	Content      provider.MessageContent
+	Images       []provider.ImageInput
+	Descriptors  []protocol.ImageDescriptor
+	Context      *provider.PageContext
+	Settings     *provider.ExecutionSettings
+	Presentation *provider.ModelPresentation
 }
 
 type queueItem struct {
-	turnID      string
-	messageID   string
-	content     provider.MessageContent
-	images      []provider.ImageInput
-	descriptors []protocol.ImageDescriptor
-	context     *provider.PageContext
+	turnID       string
+	messageID    string
+	content      provider.MessageContent
+	images       []provider.ImageInput
+	descriptors  []protocol.ImageDescriptor
+	context      *provider.PageContext
+	settings     *provider.ExecutionSettings
+	presentation *provider.ModelPresentation
 }
 
 // Queue is a pure, non-concurrent FIFO. Its byte bound counts UTF-8 message
@@ -42,6 +46,30 @@ type Queue struct {
 }
 
 func NewQueue() *Queue { return &Queue{} }
+
+func cloneProviderSettings(settings *provider.ExecutionSettings) *provider.ExecutionSettings {
+	if settings == nil {
+		return nil
+	}
+	copyOfSettings := *settings
+	return &copyOfSettings
+}
+
+func cloneProviderPresentation(presentation *provider.ModelPresentation) *provider.ModelPresentation {
+	if presentation == nil {
+		return nil
+	}
+	copyOfPresentation := *presentation
+	return &copyOfPresentation
+}
+
+func providerSettingsBytes(settings *provider.ExecutionSettings, presentation *provider.ModelPresentation) int {
+	if settings == nil || presentation == nil {
+		return 0
+	}
+	return len(settings.Model) + len(settings.Effort) + len(settings.Speed) + len(presentation.ModelDisplayName)
+}
+
 func (queue *Queue) Len() int {
 	if queue == nil {
 		return 0
@@ -123,25 +151,28 @@ func (queue *Queue) Enqueue(turn QueuedTurn) error {
 	if turn.Context != nil && queue.hasContext {
 		return ErrQueueContextConflict
 	}
-	if len(queue.items) >= MaxQueueItems || queue.bytes+turn.Content.SemanticBytes() > MaxQueueBytes {
+	settingsBytes := providerSettingsBytes(turn.Settings, turn.Presentation)
+	if len(queue.items) >= MaxQueueItems || queue.bytes+turn.Content.SemanticBytes()+settingsBytes > MaxQueueBytes {
 		return ErrQueueFull
 	}
 	queue.items = append(queue.items, queueItem{
-		turnID:      turn.TurnID,
-		messageID:   turn.MessageID,
-		content:     turn.Content.Clone(),
-		images:      append([]provider.ImageInput(nil), turn.Images...),
-		descriptors: append([]protocol.ImageDescriptor(nil), turn.Descriptors...),
-		context:     cloneProviderContext(turn.Context),
+		turnID:       turn.TurnID,
+		messageID:    turn.MessageID,
+		content:      turn.Content.Clone(),
+		images:       append([]provider.ImageInput(nil), turn.Images...),
+		descriptors:  append([]protocol.ImageDescriptor(nil), turn.Descriptors...),
+		context:      cloneProviderContext(turn.Context),
+		settings:     cloneProviderSettings(turn.Settings),
+		presentation: cloneProviderPresentation(turn.Presentation),
 	})
-	queue.bytes += turn.Content.SemanticBytes()
+	queue.bytes += turn.Content.SemanticBytes() + settingsBytes
 	queue.hasContext = queue.hasContext || turn.Context != nil
 	return nil
 }
 
 func (turn QueuedTurn) validate() error {
-	request := provider.TurnRequest{TurnID: turn.TurnID, MessageID: turn.MessageID, Content: turn.Content, Images: turn.Images, Context: turn.Context}
-	if err := request.Validate(); err != nil {
+	request := provider.TurnRequest{TurnID: turn.TurnID, MessageID: turn.MessageID, Content: turn.Content, Images: turn.Images, Context: turn.Context, Settings: turn.Settings}
+	if err := request.Validate(); err != nil || (turn.Settings == nil) != (turn.Presentation == nil) || turn.Presentation != nil && turn.Presentation.Validate() != nil {
 		return ErrQueueInvalid
 	}
 	if len(turn.Images) != len(turn.Descriptors) {
@@ -176,7 +207,7 @@ func (queue *Queue) EditAndRemovedImages(messageID string, content provider.Mess
 			return nil, ErrQueueInvalid
 		}
 		images, descriptors, ok := reorderEditedImages(queue.items[index], content)
-		if !ok || (provider.TurnRequest{TurnID: validQueueID, MessageID: messageID, Content: content, Images: images}).Validate() != nil {
+		if !ok || (provider.TurnRequest{TurnID: validQueueID, MessageID: messageID, Content: content, Images: images, Settings: queue.items[index].settings}).Validate() != nil {
 			return nil, ErrQueueInvalid
 		}
 		newBytes := queue.bytes - queue.items[index].content.SemanticBytes() + content.SemanticBytes()
@@ -217,7 +248,7 @@ func (queue *Queue) Remove(messageID string) error {
 			queue.hasContext = false
 		}
 		zeroProviderContext(item.context)
-		queue.bytes -= item.content.SemanticBytes()
+		queue.bytes -= item.content.SemanticBytes() + providerSettingsBytes(item.settings, item.presentation)
 		copy(queue.items[index:], queue.items[index+1:])
 		queue.items[len(queue.items)-1] = queueItem{}
 		queue.items = queue.items[:len(queue.items)-1]
@@ -233,7 +264,7 @@ func (queue *Queue) peek() (provider.TurnRequest, bool) {
 		return provider.TurnRequest{}, false
 	}
 	item := queue.items[0]
-	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Content: item.content.Clone(), Images: append([]provider.ImageInput(nil), item.images...), Context: item.context}, true
+	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Content: item.content.Clone(), Images: append([]provider.ImageInput(nil), item.images...), Context: item.context, Settings: cloneProviderSettings(item.settings)}, true
 }
 
 // Dequeue transfers ownership of the context to the caller. The queue itself
@@ -246,11 +277,11 @@ func (queue *Queue) Dequeue() (provider.TurnRequest, bool) {
 	item := queue.items[0]
 	queue.items[0] = queueItem{}
 	queue.items = queue.items[1:]
-	queue.bytes -= item.content.SemanticBytes()
+	queue.bytes -= item.content.SemanticBytes() + providerSettingsBytes(item.settings, item.presentation)
 	if item.context != nil {
 		queue.hasContext = false
 	}
-	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Content: item.content, Images: append([]provider.ImageInput(nil), item.images...), Context: item.context}, true
+	return provider.TurnRequest{TurnID: item.turnID, MessageID: item.messageID, Content: item.content, Images: append([]provider.ImageInput(nil), item.images...), Context: item.context, Settings: item.settings}, true
 }
 
 // Items exposes only browser-safe queue values. Context bytes never enter the
@@ -265,7 +296,7 @@ func (queue *Queue) Items() []protocol.QueueItem {
 		if err != nil {
 			return []protocol.QueueItem{}
 		}
-		items[index] = protocol.QueueItem{TurnID: item.turnID, MessageID: item.messageID, Content: content, Images: ordinaryImageDescriptors(item.content, item.descriptors)}
+		items[index] = protocol.QueueItem{TurnID: item.turnID, MessageID: item.messageID, Content: content, Images: ordinaryImageDescriptors(item.content, item.descriptors), Settings: presentedProtocolSettings(item.settings, item.presentation)}
 	}
 	return items
 }

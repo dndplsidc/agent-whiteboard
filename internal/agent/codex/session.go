@@ -53,58 +53,117 @@ type Session struct {
 	view         *sessionChild
 	workspace    string
 	capabilities provider.Capabilities
+	catalog      nativeCatalog
 
-	mu           sync.Mutex
-	active       *nativeTurn
-	activities   map[string]string
-	toolStates   map[string]provider.ToolActivity
-	interactions map[string]nativeInteraction
-	closed       bool
-	closeOnce    sync.Once
-	eventMu      sync.Mutex
-	eventsClosed bool
+	mu                 sync.Mutex
+	settingsUnverified bool
+	rerouteTarget      string
+	settingsGeneration uint64
+	active             *nativeTurn
+	activities         map[string]string
+	toolStates         map[string]provider.ToolActivity
+	interactions       map[string]nativeInteraction
+	closed             bool
+	closeOnce          sync.Once
+	eventMu            sync.Mutex
+	eventsClosed       bool
 }
 
-func newSession(driver *Driver, runtime *runtime, native provider.NativeSession, workspace string, capabilities provider.Capabilities) *Session {
+func newSession(driver *Driver, runtime *runtime, native provider.NativeSession, workspace string, capabilities provider.Capabilities, catalog nativeCatalog) *Session {
 	view := newSessionChild()
 	return &Session{
-		driver: driver, runtime: runtime, native: native, threadID: native.Ref.Value(), events: make(chan provider.Event, 512), view: view, workspace: workspace, capabilities: capabilities,
+		driver: driver, runtime: runtime, native: native, threadID: native.Ref.Value(), events: make(chan provider.Event, 512), view: view, workspace: workspace, capabilities: capabilities, catalog: catalog.clone(),
 		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
 	}
 }
 
-func (session *Session) NativeSession() provider.NativeSession { return session.native }
-func (session *Session) Model() string                         { return session.native.Model }
-func (session *Session) Capabilities() provider.Capabilities   { return session.capabilities }
-func (session *Session) Events() <-chan provider.Event         { return session.events }
-func (session *Session) Child() provider.ManagedChild          { return session.view }
+func (session *Session) NativeSession() provider.NativeSession {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	native := session.native
+	if native.Settings != nil {
+		settings := *native.Settings
+		native.Settings = &settings
+	}
+	if native.Presentation != nil {
+		presentation := *native.Presentation
+		native.Presentation = &presentation
+	}
+	return native
+}
+func (session *Session) Model() string {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.native.Model
+}
+func (session *Session) Capabilities() provider.Capabilities {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.capabilities
+}
+func (session *Session) Events() <-chan provider.Event { return session.events }
+func (session *Session) Child() provider.ManagedChild  { return session.view }
+
+func (session *Session) currentCatalog() nativeCatalog {
+	if session.runtime != nil {
+		catalog := session.runtime.modelCatalog()
+		if len(catalog.models) != 0 {
+			return catalog
+		}
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.catalog.clone()
+}
 
 func (session *Session) Preflight(_ context.Context, request provider.PreflightRequest) (provider.PreflightResult, error) {
-	if request.Validate() != nil {
+	if request.Validate() != nil || request.Turn.Settings == nil {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	if len(request.Turn.Images) != 0 && !session.capabilities.Images {
+	session.mu.Lock()
+	unverified := session.settingsUnverified
+	closed := session.closed
+	session.mu.Unlock()
+	if unverified || closed {
+		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	settings, _, _, capabilities, err := session.currentCatalog().resolveSubmitted(*request.Turn.Settings)
+	if err != nil {
+		return provider.PreflightResult{}, err
+	}
+	if len(request.Turn.Images) != 0 && !capabilities.Images {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
 	}
 	// App Server owns compaction and capacity enforcement. These values satisfy
-	// the legacy neutral contract without estimating a Codex context window.
-	return provider.PreflightResult{ResolvedModel: session.native.Model, EstimatedInputTokens: 1, EffectiveCapacityTokens: int(^uint(0) >> 1), SafetyMarginTokens: 0}, nil
+	// the neutral contract without estimating a Codex context window.
+	return provider.PreflightResult{ResolvedModel: settings.Model, EstimatedInputTokens: 1, EffectiveCapacityTokens: int(^uint(0) >> 1), SafetyMarginTokens: 0}, nil
 }
 
 func (session *Session) Submit(ctx context.Context, request provider.TurnRequest) (provider.AcceptedTurn, error) {
-	if request.Validate() != nil {
+	if request.Validate() != nil || request.Settings == nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	if len(request.Images) != 0 && !session.capabilities.Images {
+	catalog := session.currentCatalog()
+	settings, nativeModel, presentation, capabilities, err := catalog.resolveSubmitted(*request.Settings)
+	if err != nil {
+		return provider.AcceptedTurn{}, err
+	}
+	if len(request.Images) != 0 && !capabilities.Images {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
 	}
-	envelope, err := provider.Build(request, provider.PolicyConfigured)
+	canonicalRequest := request
+	canonicalRequest.Settings = &settings
+	envelope, err := provider.Build(canonicalRequest, provider.PolicyConfigured)
 	if err != nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	defer wipe(envelope)
-	turn := &nativeTurn{request: request}
+	turn := &nativeTurn{request: canonicalRequest}
 	session.mu.Lock()
+	if session.settingsUnverified {
+		session.mu.Unlock()
+		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
 	if session.closed || session.active != nil {
 		session.mu.Unlock()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
@@ -121,15 +180,25 @@ func (session *Session) Submit(ctx context.Context, request provider.TurnRequest
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageStorageFailure)
 	}
 	result, releaseStream, err := session.runtime.callOrdered(ctx, "turn/start", map[string]any{
-		"threadId": session.threadID,
-		"input":    input,
+		"threadId":    session.threadID,
+		"input":       input,
+		"model":       nativeModel,
+		"effort":      settings.Effort,
+		"serviceTier": nativeServiceTierValue(settings.Speed),
 	})
 	if err != nil {
+		releaseStream()
 		session.mu.Lock()
 		if session.active == turn {
 			session.active = nil
 		}
 		session.mu.Unlock()
+		var typed provider.ProviderError
+		if errors.As(err, &typed) && typed.Code() == provider.ErrorInvalidModelConfiguration {
+			if refreshErr := session.runtime.refreshModelCatalog(ctx); refreshErr != nil {
+				return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+			}
+		}
 		return provider.AcceptedTurn{}, err
 	}
 	defer releaseStream()
@@ -150,6 +219,14 @@ func (session *Session) Submit(ctx context.Context, request provider.TurnRequest
 		session.mu.Unlock()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
 	}
+	copyOfSettings := settings
+	copyOfPresentation := presentation
+	session.native.Model = settings.Model
+	session.native.Settings = &copyOfSettings
+	session.native.Presentation = &copyOfPresentation
+	session.native.UpdatedAt = acceptedAt
+	session.capabilities = capabilities
+	session.catalog = catalog.clone()
 	turn.nativeID = response.Turn.ID
 	buffered := append([]bufferedNativeEvent(nil), turn.buffered...)
 	turn.buffered = nil
@@ -166,7 +243,9 @@ func (session *Session) Submit(ctx context.Context, request provider.TurnRequest
 		}
 		session.handleNotification(event.method, event.params)
 	}
-	return provider.AcceptedTurn{TurnID: request.TurnID, AcceptedAt: acceptedAt}, nil
+	acceptedSettings := settings
+	acceptedPresentation := presentation
+	return provider.AcceptedTurn{TurnID: request.TurnID, AcceptedAt: acceptedAt, Settings: &acceptedSettings, Presentation: &acceptedPresentation}, nil
 }
 
 func (session *Session) Interrupt(ctx context.Context, accepted provider.AcceptedTurn) error {
@@ -190,6 +269,12 @@ func (session *Session) History(ctx context.Context, request provider.HistoryReq
 		return provider.HistoryPage{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	result, err := session.runtime.call(ctx, "thread/read", map[string]any{"threadId": session.threadID, "includeTurns": true})
+	if errors.Is(err, errHistoryUnavailableBeforeFirstMessage) {
+		if request.BeforeMessageID != "" {
+			return provider.HistoryPage{}, provider.NewProviderError(provider.ErrorProtocolFailure)
+		}
+		return provider.HistoryPage{}, nil
+	}
 	if err != nil {
 		return provider.HistoryPage{}, err
 	}
@@ -238,6 +323,9 @@ func (session *Session) Reconcile(ctx context.Context, reference provider.TurnRe
 		return provider.TurnUnknown, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	result, err := session.runtime.call(ctx, "thread/read", map[string]any{"threadId": session.threadID, "includeTurns": true})
+	if errors.Is(err, errHistoryUnavailableBeforeFirstMessage) {
+		return provider.TurnNotAccepted, nil
+	}
 	if err != nil {
 		return provider.TurnUnknown, err
 	}
@@ -472,7 +560,7 @@ func (session *Session) closeEvents() {
 
 func importantEvent(kind provider.EventKind) bool {
 	switch kind {
-	case provider.EventInteractionRequest, provider.EventInteractionResolved, provider.EventCompletion, provider.EventInterruption, provider.EventTerminalFailure:
+	case provider.EventInteractionRequest, provider.EventInteractionResolved, provider.EventSettings, provider.EventCompletion, provider.EventInterruption, provider.EventTerminalFailure:
 		return true
 	default:
 		return false

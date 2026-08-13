@@ -93,6 +93,8 @@ func MapProviderError(failure provider.ProviderError) BrokerError {
 		code = protocol.ErrorContextTooLarge
 	case provider.ErrorAcceptanceUnknown:
 		code = protocol.ErrorAcceptanceOutcomeUnknown
+	case provider.ErrorInvalidModelConfiguration:
+		code = protocol.ErrorInvalidModelConfiguration
 	case provider.ErrorImageInputUnsupported:
 		code = protocol.ErrorImageInputUnsupported
 	case provider.ErrorImageUnsupported:

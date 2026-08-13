@@ -62,26 +62,27 @@ func testProviderContext(resource provider.Resource) provider.PageContext {
 
 func TestProviderAndReadinessErrorsAreExhaustivelyMappedWithoutCauses(t *testing.T) {
 	expected := map[provider.ProviderErrorCode]protocol.BrowserErrorCode{
-		provider.ErrorNotReady:               protocol.ErrorProviderStartupFailed,
-		provider.ErrorReadinessFailed:        protocol.ErrorProviderStartupFailed,
-		provider.ErrorMissingExecutable:      protocol.ErrorProviderMissing,
-		provider.ErrorStartupFailed:          protocol.ErrorProviderStartupFailed,
-		provider.ErrorAuthenticationRequired: protocol.ErrorAuthenticationRequired,
-		provider.ErrorNoUsableModel:          protocol.ErrorNoUsableModel,
-		provider.ErrorContentOnlyUnavailable: protocol.ErrorContentOnlyUnavailable,
-		provider.ErrorProtocolIncompatible:   protocol.ErrorProviderProtocolFailure,
-		provider.ErrorProtocolFailure:        protocol.ErrorProviderProtocolFailure,
-		provider.ErrorMalformedStream:        protocol.ErrorProviderMalformedStream,
-		provider.ErrorChildExited:            protocol.ErrorProviderCrashed,
-		provider.ErrorNativeSessionMissing:   protocol.ErrorNativeSessionMissing,
-		provider.ErrorContextTooLarge:        protocol.ErrorContextTooLarge,
-		provider.ErrorAcceptanceUnknown:      protocol.ErrorAcceptanceOutcomeUnknown,
-		provider.ErrorImageInputUnsupported:  protocol.ErrorImageInputUnsupported,
-		provider.ErrorImageUnsupported:       protocol.ErrorImageUnsupported,
-		provider.ErrorImageTooLarge:          protocol.ErrorImageTooLarge,
-		provider.ErrorImageTurnLimit:         protocol.ErrorImageTurnLimit,
-		provider.ErrorImageMissing:           protocol.ErrorImageMissing,
-		provider.ErrorImageStorageFailure:    protocol.ErrorImageStorageFailure,
+		provider.ErrorNotReady:                  protocol.ErrorProviderStartupFailed,
+		provider.ErrorReadinessFailed:           protocol.ErrorProviderStartupFailed,
+		provider.ErrorMissingExecutable:         protocol.ErrorProviderMissing,
+		provider.ErrorStartupFailed:             protocol.ErrorProviderStartupFailed,
+		provider.ErrorAuthenticationRequired:    protocol.ErrorAuthenticationRequired,
+		provider.ErrorNoUsableModel:             protocol.ErrorNoUsableModel,
+		provider.ErrorContentOnlyUnavailable:    protocol.ErrorContentOnlyUnavailable,
+		provider.ErrorProtocolIncompatible:      protocol.ErrorProviderProtocolFailure,
+		provider.ErrorProtocolFailure:           protocol.ErrorProviderProtocolFailure,
+		provider.ErrorMalformedStream:           protocol.ErrorProviderMalformedStream,
+		provider.ErrorChildExited:               protocol.ErrorProviderCrashed,
+		provider.ErrorNativeSessionMissing:      protocol.ErrorNativeSessionMissing,
+		provider.ErrorContextTooLarge:           protocol.ErrorContextTooLarge,
+		provider.ErrorAcceptanceUnknown:         protocol.ErrorAcceptanceOutcomeUnknown,
+		provider.ErrorInvalidModelConfiguration: protocol.ErrorInvalidModelConfiguration,
+		provider.ErrorImageInputUnsupported:     protocol.ErrorImageInputUnsupported,
+		provider.ErrorImageUnsupported:          protocol.ErrorImageUnsupported,
+		provider.ErrorImageTooLarge:             protocol.ErrorImageTooLarge,
+		provider.ErrorImageTurnLimit:            protocol.ErrorImageTurnLimit,
+		provider.ErrorImageMissing:              protocol.ErrorImageMissing,
+		provider.ErrorImageStorageFailure:       protocol.ErrorImageStorageFailure,
 	}
 	for _, code := range provider.AllProviderErrorCodes() {
 		failure := provider.NewProviderError(code)
@@ -226,7 +227,7 @@ func TestReplayLogUsesWireBytesEvictsExactlyAndFiltersTargets(t *testing.T) {
 	clientA := testID('D')
 	clientB := testID('E')
 	now := testTime()
-	first := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(1), ConversationID: conversation, Type: protocol.EventQueue, Timestamp: now, Payload: protocol.QueuePayload{Items: []protocol.QueueItem{{TurnID: testID('F'), MessageID: testID('G'), Content: protocol.TextContent("✓")}}}}
+	first := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(1), ConversationID: conversation, Type: protocol.EventQueue, Timestamp: now, Payload: protocol.QueuePayload{Items: []protocol.QueueItem{{TurnID: testID('F'), MessageID: testID('G'), Content: protocol.TextContent("✓"), Settings: nil}}}}
 	encoded, err := protocol.EncodeEvent(first)
 	require.NoError(t, err)
 	require.NoError(t, log.Append(first))
@@ -269,7 +270,7 @@ func TestReplayLogUsesWireBytesEvictsExactlyAndFiltersTargets(t *testing.T) {
 func TestReplayLogReturnsStablePayloadCopies(t *testing.T) {
 	log := NewReplayLog()
 	active := testID('D')
-	event := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: protocol.EventSnapshot, Timestamp: testTime(), Payload: protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Content: protocol.TextContent("original")}}, ContextState: protocol.ContextPending, ActiveTurnID: &active}}
+	event := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: protocol.EventSnapshot, Timestamp: testTime(), Payload: protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Content: protocol.TextContent("original"), Settings: nil}}, ContextState: protocol.ContextPending, ActiveTurnID: &active, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}}}
 	require.NoError(t, log.Append(event))
 	payload := event.Payload.(protocol.SnapshotPayload)
 	payload.Queue[0].Content.Parts[0].Text = "changed"
@@ -300,7 +301,7 @@ func TestReplayClonesPreserveRequiredEmptySlices(t *testing.T) {
 	conversation := testID('K')
 	client := testID('L')
 	payloads := []protocol.EventPayload{
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}},
 		protocol.QueuePayload{Items: []protocol.QueueItem{}},
 		protocol.TimelinePayload{CommandID: testID('M'), Items: []protocol.TimelineItem{}, NextCursor: nil},
 		protocol.HistoryPayload{CommandID: testID('N'), Items: []protocol.ArchiveItem{}, NextCursor: nil},

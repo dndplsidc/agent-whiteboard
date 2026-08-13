@@ -212,7 +212,7 @@ func (broker *Broker) Connect(ctx context.Context, origin string, command protoc
 		broker.mu.Unlock()
 
 		if creator {
-			go broker.initializeSlot(slot, identity)
+			go broker.initializeSlot(slot, identity, payload.Settings)
 		}
 		select {
 		case <-slot.ready:
@@ -255,8 +255,8 @@ func (broker *Broker) Connect(ctx context.Context, origin string, command protoc
 
 }
 
-func (broker *Broker) initializeSlot(slot *conversationSlot, identity statepkg.Identity) {
-	actor, startErr := broker.startConversation(broker.lifecycleCtx, identity)
+func (broker *Broker) initializeSlot(slot *conversationSlot, identity statepkg.Identity, initialSettings *protocol.ExecutionSettings) {
+	actor, startErr := broker.startConversation(broker.lifecycleCtx, identity, initialSettings)
 	if startErr != nil && broker.lifecycleCtx.Err() != nil {
 		startErr = NewBrokerError(protocol.ErrorBrokerShuttingDown)
 	}
@@ -287,7 +287,7 @@ func (broker *Broker) watchActor(identity statepkg.Identity, slot *conversationS
 	broker.mu.Unlock()
 }
 
-func (broker *Broker) startConversation(ctx context.Context, identity statepkg.Identity) (*conversation, error) {
+func (broker *Broker) startConversation(ctx context.Context, identity statepkg.Identity, initialSettings *protocol.ExecutionSettings) (*conversation, error) {
 	driver := broker.drivers.Lookup(identity.Provider)
 	if common.IsNil(driver) {
 		return nil, NewBrokerError(protocol.ErrorProviderMissing)
@@ -305,7 +305,7 @@ func (broker *Broker) startConversation(ctx context.Context, identity statepkg.I
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 	}
-	return broker.createConversation(ctx, identity, driver)
+	return broker.createConversation(ctx, identity, driver, initialSettings)
 }
 
 func (broker *Broker) readiness(ctx context.Context, name provider.Name, driver provider.Driver) error {
@@ -322,7 +322,7 @@ func (broker *Broker) readiness(ctx context.Context, name provider.Name, driver 
 	return nil
 }
 
-func (broker *Broker) createConversation(ctx context.Context, identity statepkg.Identity, driver provider.Driver) (*conversation, error) {
+func (broker *Broker) createConversation(ctx context.Context, identity statepkg.Identity, driver provider.Driver, initialSettings *protocol.ExecutionSettings) (*conversation, error) {
 	if err := broker.readiness(ctx, identity.Provider, driver); err != nil {
 		return nil, err
 	}
@@ -334,7 +334,12 @@ func (broker *Broker) createConversation(ctx context.Context, identity statepkg.
 	if err != nil {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 	}
-	request := provider.CreateRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), Workspace: workspace}
+	catalog, err := loadModelCatalog(ctx, identity.Provider, driver)
+	if err != nil {
+		broker.cleanupWorkspace(identity, conversationID)
+		return nil, NewBrokerError(protocol.ErrorProviderProtocolFailure)
+	}
+	request := provider.CreateRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), Workspace: workspace, Settings: compatibleInitialSettings(catalog, initialSettings)}
 	if request.Validate() != nil {
 		broker.cleanupWorkspace(identity, conversationID)
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
@@ -367,9 +372,10 @@ func (broker *Broker) createConversation(ctx context.Context, identity statepkg.
 		broker.compensateCreate(identity, handle, native.Ref, conversationID)
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 	}
-	current := statepkg.Session{
-		ConversationID: conversationID, NativeSession: ref,
-		CreatedAt: at, UpdatedAt: at, ProviderLabel: string(native.Provider), ModelLabel: native.Model,
+	current, err := stateSessionFromNative(conversationID, native, at)
+	if err != nil {
+		broker.compensateCreate(identity, handle, native.Ref, conversationID)
+		return nil, NewBrokerError(protocol.ErrorProviderProtocolFailure)
 	}
 	outcome, commitErr := broker.state.Create(identity, current, at)
 	if outcome == statepkg.CommitApplied && commitErr == nil {

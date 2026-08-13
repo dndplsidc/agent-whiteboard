@@ -68,16 +68,29 @@ type durablePrepared struct {
 	Phase           CommitPhase  `json:"phase"`
 }
 
+type durableSettings struct {
+	Model  string                  `json:"model"`
+	Effort string                  `json:"effort"`
+	Speed  provider.ExecutionSpeed `json:"speed"`
+}
+
+type durableModelPresentation struct {
+	ModelDisplayName string `json:"model_display_name"`
+	Selectable       bool   `json:"selectable"`
+}
+
 type durableSession struct {
-	ConversationID  string           `json:"conversation_id"`
-	NativeReference string           `json:"native_session_ref"`
-	CreatedAt       time.Time        `json:"created_at"`
-	UpdatedAt       time.Time        `json:"updated_at"`
-	ProviderLabel   string           `json:"provider_label"`
-	ModelLabel      string           `json:"model_label"`
-	Committed       *durableRevision `json:"committed"`
-	Observed        *durableRevision `json:"observed"`
-	PreparedCommit  *durablePrepared `json:"prepared_commit"`
+	ConversationID  string                    `json:"conversation_id"`
+	NativeReference string                    `json:"native_session_ref"`
+	CreatedAt       time.Time                 `json:"created_at"`
+	UpdatedAt       time.Time                 `json:"updated_at"`
+	ProviderLabel   string                    `json:"provider_label"`
+	ModelLabel      string                    `json:"model_label"`
+	Settings        *durableSettings          `json:"settings"`
+	Presentation    *durableModelPresentation `json:"model_presentation"`
+	Committed       *durableRevision          `json:"committed"`
+	Observed        *durableRevision          `json:"observed"`
+	PreparedCommit  *durablePrepared          `json:"prepared_commit"`
 }
 
 type durableMapping struct {
@@ -163,6 +176,7 @@ func encodeSession(session Session) durableSession {
 	return durableSession{
 		ConversationID: session.ConversationID, NativeReference: session.NativeSession.Value(), CreatedAt: session.CreatedAt, UpdatedAt: session.UpdatedAt,
 		ProviderLabel: session.ProviderLabel, ModelLabel: session.ModelLabel,
+		Settings: encodeSettings(session.Settings), Presentation: encodePresentation(session.Presentation),
 		Committed: encodeRevision(session.Committed), Observed: encodeRevision(session.Observed), PreparedCommit: encodePrepared(session.PreparedCommit),
 	}
 }
@@ -175,8 +189,37 @@ func decodeSession(durable durableSession) (Session, error) {
 	return Session{
 		ConversationID: durable.ConversationID, NativeSession: ref, CreatedAt: durable.CreatedAt, UpdatedAt: durable.UpdatedAt,
 		ProviderLabel: durable.ProviderLabel, ModelLabel: durable.ModelLabel,
+		Settings: decodeSettings(durable.Settings), Presentation: decodePresentation(durable.Presentation),
 		Committed: decodeRevision(durable.Committed), Observed: decodeRevision(durable.Observed), PreparedCommit: decodePrepared(durable.PreparedCommit),
 	}, nil
+}
+
+func encodeSettings(settings *provider.ExecutionSettings) *durableSettings {
+	if settings == nil {
+		return nil
+	}
+	return &durableSettings{Model: settings.Model, Effort: settings.Effort, Speed: settings.Speed}
+}
+
+func decodeSettings(settings *durableSettings) *provider.ExecutionSettings {
+	if settings == nil {
+		return nil
+	}
+	return &provider.ExecutionSettings{Model: settings.Model, Effort: settings.Effort, Speed: settings.Speed}
+}
+
+func encodePresentation(presentation *provider.ModelPresentation) *durableModelPresentation {
+	if presentation == nil {
+		return nil
+	}
+	return &durableModelPresentation{ModelDisplayName: presentation.ModelDisplayName, Selectable: presentation.Selectable}
+}
+
+func decodePresentation(presentation *durableModelPresentation) *provider.ModelPresentation {
+	if presentation == nil {
+		return nil
+	}
+	return &provider.ModelPresentation{ModelDisplayName: presentation.ModelDisplayName, Selectable: presentation.Selectable}
 }
 
 func encodeRevision(revision *Revision) *durableRevision {
@@ -247,13 +290,35 @@ func validateDurableShape(encoded []byte) error {
 }
 
 func validateDurableSessionShape(encoded []byte) error {
-	session, err := exactJSONObject(encoded, "conversation_id", "native_session_ref", "created_at", "updated_at", "provider_label", "model_label", "committed", "observed", "prepared_commit")
+	session, err := exactJSONObject(encoded, "conversation_id", "native_session_ref", "created_at", "updated_at", "provider_label", "model_label", "settings", "model_presentation", "committed", "observed", "prepared_commit")
 	if err != nil {
 		return err
 	}
 	for _, name := range []string{"conversation_id", "native_session_ref", "created_at", "updated_at", "provider_label", "model_label"} {
 		if isJSONNull(session[name]) {
 			return fmt.Errorf("field %q must not be null", name)
+		}
+	}
+	if !isJSONNull(session["settings"]) {
+		settings, err := exactJSONObject(session["settings"], "model", "effort", "speed")
+		if err != nil {
+			return fmt.Errorf("field %q: %w", "settings", err)
+		}
+		for field, value := range settings {
+			if isJSONNull(value) {
+				return fmt.Errorf("field %q.%s must not be null", "settings", field)
+			}
+		}
+	}
+	if !isJSONNull(session["model_presentation"]) {
+		presentation, err := exactJSONObject(session["model_presentation"], "model_display_name", "selectable")
+		if err != nil {
+			return fmt.Errorf("field %q: %w", "model_presentation", err)
+		}
+		for field, value := range presentation {
+			if isJSONNull(value) {
+				return fmt.Errorf("field %q.%s must not be null", "model_presentation", field)
+			}
 		}
 	}
 	for _, name := range []string{"committed", "observed"} {

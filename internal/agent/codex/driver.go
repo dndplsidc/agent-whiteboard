@@ -81,6 +81,22 @@ func (driver *Driver) Readiness(ctx context.Context) provider.Readiness {
 	return provider.Readiness{State: provider.Ready, Provider: provider.NameCodex, Model: model}
 }
 
+func (driver *Driver) ModelCatalog(ctx context.Context) (provider.ModelCatalog, error) {
+	if driver == nil {
+		return provider.ModelCatalog{}, provider.NewProviderError(provider.ErrorNotReady)
+	}
+	runtime, release, err := driver.acquireRuntime(ctx)
+	if err != nil {
+		return provider.ModelCatalog{}, err
+	}
+	defer release()
+	catalog := runtime.modelCatalog().visibleCatalog()
+	if catalog.Validate() != nil {
+		return provider.ModelCatalog{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	return catalog, nil
+}
+
 func (driver *Driver) Create(ctx context.Context, request provider.CreateRequest) (provider.Session, error) {
 	if driver == nil || request.Provider != provider.NameCodex || request.Validate() != nil {
 		return nil, provider.NewProviderError(provider.ErrorStartupFailed)
@@ -90,15 +106,26 @@ func (driver *Driver) Create(ctx context.Context, request provider.CreateRequest
 		return nil, err
 	}
 	defer release()
-	result, err := runtime.call(ctx, "thread/start", map[string]any{"cwd": request.Workspace})
+	catalog := runtime.modelCatalog()
+	params := map[string]any{"cwd": request.Workspace}
+	if request.Settings != nil {
+		settings, nativeModel, _, _, resolveErr := catalog.resolveSubmitted(*request.Settings)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		params["model"] = nativeModel
+		params["serviceTier"] = nativeServiceTierValue(settings.Speed)
+		params["config"] = map[string]any{"model_reasoning_effort": settings.Effort}
+	}
+	result, err := runtime.call(ctx, "thread/start", params)
 	if err != nil {
 		return nil, err
 	}
-	thread, err := parseThreadResponse(result)
+	thread, err := parseThreadResponse(result, catalog)
 	if err != nil {
 		return nil, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
-	return driver.activate(runtime, thread.ID, thread.Model, request.Workspace)
+	return driver.activate(runtime, thread, request.Workspace, catalog)
 }
 
 func (driver *Driver) Resume(ctx context.Context, request provider.ResumeRequest) (provider.Session, error) {
@@ -114,11 +141,15 @@ func (driver *Driver) Resume(ctx context.Context, request provider.ResumeRequest
 	if err != nil {
 		return nil, err
 	}
-	thread, err := parseThreadResponse(result)
-	if err != nil || thread.ID != request.NativeSession.Value() {
+	catalog := runtime.modelCatalog()
+	thread, err := parseThreadResponse(result, catalog)
+	if err != nil {
+		return nil, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	if thread.ID != request.NativeSession.Value() {
 		return nil, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	return driver.activate(runtime, thread.ID, thread.Model, request.Workspace)
+	return driver.activate(runtime, thread, request.Workspace, catalog)
 }
 
 func (driver *Driver) Inspect(ctx context.Context, request provider.InspectRequest) (provider.NativeSession, error) {
@@ -130,15 +161,19 @@ func (driver *Driver) Inspect(ctx context.Context, request provider.InspectReque
 		return provider.NativeSession{}, err
 	}
 	defer release()
-	result, err := runtime.call(ctx, "thread/read", map[string]any{"threadId": request.NativeSession.Value(), "includeTurns": false})
+	result, err := runtime.call(ctx, "thread/resume", map[string]any{"threadId": request.NativeSession.Value()})
 	if err != nil {
 		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	thread, err := parseThreadResponse(result)
-	if err != nil || thread.ID != request.NativeSession.Value() {
+	catalog := runtime.modelCatalog()
+	thread, err := parseThreadResponse(result, catalog)
+	if err != nil {
+		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	if thread.ID != request.NativeSession.Value() {
 		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	return driver.native(thread.ID, thread.Model)
+	return driver.native(thread.ID, thread.Settings, thread.Presentation)
 }
 
 func (driver *Driver) Delete(ctx context.Context, request provider.DeleteRequest) error {
@@ -238,36 +273,34 @@ func (driver *Driver) releaseRuntime(runtime *runtime) {
 	}
 }
 
-func (driver *Driver) activate(runtime *runtime, threadID, model, workspace string) (*Session, error) {
-	if threadID == "" || model == "" {
+func (driver *Driver) activate(runtime *runtime, thread threadResponse, workspace string, catalog nativeCatalog) (*Session, error) {
+	if thread.ID == "" || thread.Settings.Validate() != nil || thread.Presentation.Validate() != nil {
 		return nil, provider.NewProviderError(provider.ErrorNoUsableModel)
 	}
-	native, err := driver.native(threadID, model)
+	native, err := driver.native(thread.ID, thread.Settings, thread.Presentation)
 	if err != nil {
 		return nil, err
 	}
-	capabilities, known := runtime.models[model]
-	if !known {
-		capabilities = provider.Capabilities{}
-	}
-	session := newSession(driver, runtime, native, workspace, capabilities)
+	session := newSession(driver, runtime, native, workspace, thread.Capabilities, catalog)
 	if err := runtime.register(session); err != nil {
 		return nil, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	driver.mu.Lock()
 	driver.stopIdleLocked()
-	driver.lastModel = model
+	driver.lastModel = thread.Presentation.ModelDisplayName
 	driver.mu.Unlock()
 	return session, nil
 }
 
-func (driver *Driver) native(threadID, model string) (provider.NativeSession, error) {
+func (driver *Driver) native(threadID string, settings provider.ExecutionSettings, presentation provider.ModelPresentation) (provider.NativeSession, error) {
 	ref, err := provider.NewNativeSessionRef(threadID)
 	if err != nil {
 		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
 	now := driver.config.Clock.Now().UTC()
-	native := provider.NativeSession{Ref: ref, Provider: provider.NameCodex, Model: model, CreatedAt: now, UpdatedAt: now}
+	copyOfSettings := settings
+	copyOfPresentation := presentation
+	native := provider.NativeSession{Ref: ref, Provider: provider.NameCodex, Model: settings.Model, Settings: &copyOfSettings, Presentation: &copyOfPresentation, CreatedAt: now, UpdatedAt: now}
 	if native.Validate() != nil {
 		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
@@ -339,29 +372,42 @@ func (driver *Driver) newID() (string, error) {
 }
 
 type threadResponse struct {
-	ID    string
-	Model string
+	ID           string
+	Settings     provider.ExecutionSettings
+	Presentation provider.ModelPresentation
+	Capabilities provider.Capabilities
 }
 
-func parseThreadResponse(raw json.RawMessage) (threadResponse, error) {
-	var response struct {
-		Model  string `json:"model"`
-		Thread struct {
-			ID    string `json:"id"`
-			Model string `json:"model"`
-		} `json:"thread"`
-	}
-	if json.Unmarshal(raw, &response) != nil || response.Thread.ID == "" {
+func parseThreadResponse(raw json.RawMessage, catalog nativeCatalog) (threadResponse, error) {
+	var fields map[string]json.RawMessage
+	if validateJSONStructure(raw) != nil || json.Unmarshal(raw, &fields) != nil {
 		return threadResponse{}, errors.New("invalid thread response")
 	}
-	model := response.Model
-	if model == "" {
-		model = response.Thread.Model
+	var thread struct {
+		ID string `json:"id"`
 	}
-	if model == "" {
-		return threadResponse{}, errors.New("thread has no model")
+	var model string
+	if json.Unmarshal(fields["thread"], &thread) != nil || thread.ID == "" || json.Unmarshal(fields["model"], &model) != nil || model == "" {
+		return threadResponse{}, errors.New("invalid thread response")
 	}
-	return threadResponse{ID: response.Thread.ID, Model: model}, nil
+	effortRaw, effortExists := fields["reasoningEffort"]
+	tierRaw, tierExists := fields["serviceTier"]
+	if !effortExists || !tierExists {
+		return threadResponse{}, errors.New("thread response lacks effective settings")
+	}
+	effort := ""
+	if !isJSONNull(effortRaw) && json.Unmarshal(effortRaw, &effort) != nil {
+		return threadResponse{}, errors.New("invalid thread reasoning effort")
+	}
+	tier := ""
+	if !isJSONNull(tierRaw) && json.Unmarshal(tierRaw, &tier) != nil {
+		return threadResponse{}, errors.New("invalid thread service tier")
+	}
+	settings, presentation, capabilities, err := catalog.resolveEffective(model, effort, tier)
+	if err != nil {
+		return threadResponse{}, err
+	}
+	return threadResponse{ID: thread.ID, Settings: settings, Presentation: presentation, Capabilities: capabilities}, nil
 }
 
 func validAbsolutePath(value string) bool {
@@ -369,3 +415,4 @@ func validAbsolutePath(value string) bool {
 }
 
 var _ provider.Driver = (*Driver)(nil)
+var _ provider.SelectableDriver = (*Driver)(nil)
