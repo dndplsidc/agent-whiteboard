@@ -2094,9 +2094,20 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   consentList.hidden = true;
   const guidance = doc.createElement("p");
   guidance.className = "agent-guidance";
+  const connectionStatus = doc.createElement("div");
+  connectionStatus.className = "agent-connection-status";
+  const connectionStatusDot = doc.createElement("span");
+  connectionStatusDot.className = "agent-connection-status-dot";
+  connectionStatusDot.setAttribute("aria-hidden", "true");
+  const connectionStatusText = doc.createElement("span");
+  connectionStatusText.className = "agent-connection-status-text";
+  connectionStatusText.setAttribute("role", "status");
+  connectionStatusText.setAttribute("aria-live", "polite");
   const checkButton = doc.createElement("button");
   checkButton.type = "button";
+  checkButton.className = "agent-connection-retry";
   checkButton.textContent = "Check again";
+  connectionStatus.append(connectionStatusDot, connectionStatusText, checkButton);
   const setupCheckButton = doc.createElement("button");
   setupCheckButton.type = "button";
   setupCheckButton.textContent = "Check again";
@@ -2131,7 +2142,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   contextDisclosureChevron.textContent = "›";
   contextDisclosure.append(contextDisclosureIcon, contextDisclosureCopy, contextDisclosureChevron);
   setup.append(setupBody, contextDisclosure);
-  settings.append(settingsHeading, portLabel, guidance, checkButton);
+  settings.append(settingsHeading, portLabel, guidance, connectionStatus);
 
   const actions = doc.createElement("div");
   actions.className = "agent-actions";
@@ -3061,15 +3072,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       connectButton.disabled = connectionState === "connecting";
     }
     settings.hidden = activeView !== "settings";
-    checkButton.textContent = connectionState === "checking"
-      ? "Checking…"
+    connectionStatus.dataset.state = connectionState;
+    connectionStatusText.textContent = connectionState === "checking"
+      ? "Checking local broker…"
       : connectionState === "ready"
-        ? "Broker available ✓"
+        ? "Broker available"
         : brokerCode === "local_network_permission_denied"
-          ? "Local access blocked ✕"
-          : `No broker on port ${port} ✕`;
+          ? "Local access blocked"
+          : `No broker on port ${port}`;
+    checkButton.textContent = connectionState === "offline" ? "Try again" : "Check again";
     checkButton.disabled = connectionState === "checking";
-    checkButton.dataset.state = connectionState;
+    checkButton.hidden = connectionState === "checking";
     newMenuButton.disabled = !state.connected || selectedProvider === "codex" && currentCodexSettings() === null;
     archivesMenuButton.disabled = !state.connected;
     reconnectMenuButton.disabled = transport.consented !== true;

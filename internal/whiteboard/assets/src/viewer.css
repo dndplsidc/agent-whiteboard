@@ -633,6 +633,8 @@ body.agent-drawer-modal-open .agent-toast {
 .agent-drawer[data-focus-modality="pointer"] textarea:focus-visible,
 .agent-drawer[data-focus-modality="pointer"] summary:focus,
 .agent-drawer[data-focus-modality="pointer"] summary:focus-visible {
+  border-color: var(--awb-border);
+  box-shadow: none;
   outline: 0;
 }
 
@@ -867,6 +869,16 @@ body.agent-drawer-modal-open .agent-toast {
   padding: 0.55rem;
 }
 
+.agent-settings input[type="number"] {
+  appearance: textfield;
+}
+
+.agent-settings input[type="number"]::-webkit-inner-spin-button,
+.agent-settings input[type="number"]::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
 .agent-guidance,
 .agent-consent,
 .agent-context p {
@@ -878,16 +890,46 @@ body.agent-drawer-modal-open .agent-toast {
   line-height: 1.45;
 }
 
-.agent-settings button[data-state="ready"] {
-  background: color-mix(in srgb, #2f9e6f 12%, var(--awb-surface));
-  border-color: color-mix(in srgb, #2f9e6f 38%, var(--awb-border));
-  color: color-mix(in srgb, #2f9e6f 74%, var(--awb-foreground));
+.agent-connection-status {
+  align-items: center;
+  color: var(--awb-muted);
+  display: flex;
+  font-size: 0.75rem;
+  gap: 0.45rem;
+  min-height: 1.75rem;
 }
 
-.agent-settings button[data-state="offline"] {
-  background: color-mix(in srgb, #dc2626 9%, var(--awb-surface));
-  border-color: color-mix(in srgb, #dc2626 38%, var(--awb-border));
-  color: color-mix(in srgb, #dc2626 78%, var(--awb-foreground));
+.agent-connection-status-dot {
+  background: var(--awb-muted);
+  border-radius: 999px;
+  flex: none;
+  height: 0.42rem;
+  width: 0.42rem;
+}
+
+.agent-connection-status[data-state="ready"] .agent-connection-status-dot {
+  background: #2f9e6f;
+}
+
+.agent-connection-status[data-state="offline"] .agent-connection-status-dot {
+  background: #d14343;
+}
+
+.agent-connection-status[data-state="checking"] .agent-connection-status-dot {
+  animation: agent-response-dance 1.2s ease-in-out infinite;
+}
+
+.agent-connection-retry {
+  background: transparent !important;
+  border: 0 !important;
+  color: var(--awb-link) !important;
+  font-size: inherit !important;
+  margin-left: 0.15rem;
+  padding: 0.15rem 0.2rem !important;
+}
+
+.agent-connection-retry:hover:not([disabled]) {
+  text-decoration: underline;
 }
 
 .agent-primary,
