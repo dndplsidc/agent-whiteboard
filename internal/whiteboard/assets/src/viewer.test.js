@@ -311,7 +311,7 @@ function agentEvent(type, payload, overrides = {}) {
     return { ...rest, content: textContent(text) };
   }) };
   const versionedPayload = type === "snapshot"
-    ? { supports_images: true, settings_state: null, effective_settings: null, catalog: [], ...payload }
+    ? { supports_images: true, settings_state: null, effective_settings: null, catalog: [], skills_state: null, skills: [], supports_compact: false, ...payload }
     : type === "provider"
       ? { supports_images: true, ...payload }
       : payload;
@@ -331,7 +331,7 @@ function snapshotEvent(overrides = {}) {
     lifecycle: "ready",
     queue: [],
     context_state: "pending",
-    active_turn_id: null,
+    active_work: null,
   }, overrides);
 }
 
@@ -366,11 +366,14 @@ function codexSnapshotEvent({ settings = codexSolSettings, event = {}, payload =
     lifecycle: "ready",
     queue: [],
     context_state: "accepted",
-    active_turn_id: null,
+    active_work: null,
     supports_images: model?.supports_images ?? false,
     settings_state: "verified",
     effective_settings: settings,
     catalog: codexCatalog,
+    skills_state: "ready",
+    skills: [],
+    supports_compact: true,
     ...payload,
   }, event);
 }
@@ -489,6 +492,12 @@ describe("local agent source and commands", () => {
     expect(createSubmitCommand({ ...common, message: "Compare these", images }).payload.images).toEqual(images);
     expect(() => createSubmitCommand({ ...common, message: "", images: [] })).toThrow(TypeError);
     expect(() => createSubmitCommand({ ...common, message: "", images: Array.from({ length: 9 }, (_, index) => ({ image_id: String(index).padStart(32, "I"), name: `${index}.png` })) })).toThrow(TypeError);
+  });
+
+  test("builds strict compact and work interrupt commands", () => {
+    expect(createAgentCommand({ type: "compact", payload: { work_id: agentIDs.turn }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory }).payload.work_id).toBe(agentIDs.turn);
+    expect(createAgentCommand({ type: "interrupt", payload: { work_id: agentIDs.turn }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory }).payload.work_id).toBe(agentIDs.turn);
+    expect(() => createAgentCommand({ type: "interrupt", payload: { turn_id: agentIDs.turn }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory })).toThrow(TypeError);
   });
 
   test("accepts only HTTPS or literal-loopback HTTP page context URLs", () => {
@@ -702,6 +711,17 @@ describe("local agent transport and event state", () => {
     expect(state.timeline).toContainEqual(expect.objectContaining({ kind: "tool", status: "completed", summary: "Passed" }));
     expect(state.timeline.filter((item) => item.kind === "tool")).toHaveLength(1);
     expect(state.interactions).toEqual([expect.objectContaining({ title: "Approve command", resolved: true, option_id: "accept" })]);
+  });
+
+  test("replaces safe skills and updates keyed compaction state", () => {
+    const state = createAgentState("codex");
+    applyAgentEvent(state, codexSnapshotEvent({ payload: { skills: [{ id: agentIDs.archive, name: "review-helper", display_name: "Review helper", description: "Review work", scope: "repo" }] } }));
+    expect(state.skills).toEqual([expect.objectContaining({ name: "review-helper" })]);
+    applyAgentEvent(state, agentEvent("skill_catalog", { state: "ready", skills: [] }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    applyAgentEvent(state, agentEvent("compaction", { work_id: agentIDs.turn, status: "running" }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    applyAgentEvent(state, agentEvent("compaction", { work_id: agentIDs.turn, status: "completed" }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
+    expect(state.skills).toEqual([]);
+    expect(state.compactions).toEqual([{ work_id: agentIDs.turn, status: "completed" }]);
   });
 
   test("bounds retained and unresolved interaction state", () => {
@@ -1119,7 +1139,7 @@ describe("local agent rendering and controls", () => {
       pageTitle: "Agent board", pageURL: "https://board.example/m/abc",
       transportFactory: (input) => { options = input; return transport; },
     });
-    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" } }));
 
     const headerActions = drawer.elements.drawer.querySelector(".agent-header-actions");
     expect(headerActions?.contains(drawer.elements.overflowButton)).toBe(true);
@@ -1132,6 +1152,48 @@ describe("local agent rendering and controls", () => {
     expect(drawer.elements.timeline.querySelector(".agent-response-loading")?.getAttribute("aria-label")).toBe("Pi is responding");
     expect(drawer.elements.composer.parentElement?.classList.contains("agent-composer-wrap")).toBe(true);
     expect(drawer.elements.message.placeholder).toBe("Ask about this page…");
+    drawer.destroy();
+  });
+
+  test("selects native skills, runs compact, blocks busy submission, and exposes Stop", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
+    let options;
+    const sent = [];
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(),
+      send: vi.fn(async (command) => { sent.push(command); }),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    const skill = { id: agentIDs.archive, name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" };
+    options.onEvent(codexSnapshotEvent({ payload: { skills: [skill] } }));
+
+    drawer.elements.message.value = "$rev";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(drawer.elements.completionMenu.hidden).toBe(false);
+    expect(drawer.elements.completionMenu.textContent).toContain("Review helper");
+    drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(drawer.elements.message.querySelector(".agent-message-skill")?.textContent).toBe("$review-helper");
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(sent.some(({ type }) => type === "submit")).toBe(true));
+    expect(sent.find(({ type }) => type === "submit").payload.content.parts.some(({ type }) => type === "skill")).toBe(true);
+
+    drawer.elements.message.value = "/compact";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(sent.some(({ type }) => type === "compact")).toBe(true));
+    expect(sent.find(({ type }) => type === "compact").payload.work_id).toHaveLength(32);
+
+    options.onEvent(agentEvent("lifecycle", { state: "compacting", active_work: { work_id: agentIDs.turn, kind: "compact", state: "running" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    options.onEvent(agentEvent("compaction", { work_id: agentIDs.turn, status: "running" }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    expect(drawer.elements.sendButton.hidden).toBe(true);
+    expect(drawer.elements.stopButton.hidden).toBe(false);
+    expect(drawer.elements.timeline.textContent).toContain("Compacting context…");
+    drawer.elements.message.value = "preserved draft";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(sent.filter(({ type }) => type === "submit")).toHaveLength(1);
+    drawer.elements.stopButton.click();
+    await vi.waitFor(() => expect(sent.at(-1)).toMatchObject({ type: "interrupt", payload: { work_id: agentIDs.turn } }));
+    expect(drawer.elements.message.value).toBe("preserved draft");
     drawer.destroy();
   });
 
@@ -1268,7 +1330,7 @@ describe("local agent rendering and controls", () => {
       revokeObjectURL: { configurable: true, value: revokeObjectURL },
     });
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null, supports_images: true }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true }));
     const picker = drawer.elements.imagePicker;
     const first = new File([new Uint8Array([137, 80, 78, 71])], "diagram.png", { type: "image/png" });
     const second = new File([new Uint8Array([255, 216, 255])], "photo.jpg", { type: "image/jpeg" });
@@ -1312,7 +1374,7 @@ describe("local agent rendering and controls", () => {
     };
     Object.defineProperty(window, "fetch", { configurable: true, value: vi.fn(async () => ({ ok: true, url: "data:image/png;base64,iVBORw0KGgo=", blob: async () => new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" }) })) });
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, pageURL: "https://board.example/m/abc", transportFactory: (input) => { options = input; return transport; } });
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null, supports_images: true }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true }));
     const image = document.createElement("img");
     image.src = "data:image/png;base64,iVBORw0KGgo=";
     const metadata = { id: "2", ordinal: 1, alt: "Architecture", block: "2", startLine: 4, endLine: 5, headingPath: [{ level: 2, title: "Design", ordinal: 1 }], element: image, referenceID: "H".repeat(32) };
@@ -1338,7 +1400,7 @@ describe("local agent rendering and controls", () => {
     let options;
     const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(), uploadImage: vi.fn() };
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null, supports_images: false }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: false }));
     expect(drawer.elements.imageButton.disabled).toBe(true);
     expect(drawer.elements.imageButton.title).toContain("does not support image input");
     drawer.destroy();
@@ -1358,7 +1420,7 @@ describe("local agent rendering and controls", () => {
       revokeObjectURL: { configurable: true, value: revokeObjectURL },
     });
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null, supports_images: true }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true }));
     drawer.setOpen(true, { focus: false });
     const file = new File([new Uint8Array([137, 80, 78, 71])], "close.png", { type: "image/png" });
     Object.defineProperty(drawer.elements.imagePicker, "files", { configurable: true, value: [file] });
@@ -1386,7 +1448,7 @@ describe("local agent rendering and controls", () => {
       revokeObjectURL: { configurable: true, value: vi.fn() },
     });
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null }));
     const file = new File([new Uint8Array([137, 80, 78, 71])], "retry.png", { type: "image/png" });
     Object.defineProperty(drawer.elements.imagePicker, "files", { configurable: true, value: [file] });
     drawer.elements.imagePicker.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1666,7 +1728,7 @@ describe("local agent rendering and controls", () => {
     drawer.elements.backButton.click();
     expect(document.activeElement).toBe(drawer.elements.overflowButton);
 
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null }));
     chooseMenu("Archives");
     await vi.waitFor(() => expect(sent.filter((command) => command.type === "archive_list")).toHaveLength(1));
     const firstList = sent.filter((command) => command.type === "archive_list").at(-1);
@@ -1719,7 +1781,7 @@ describe("local agent rendering and controls", () => {
     let options;
     const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null }));
     Object.defineProperty(drawer.elements.message, "scrollHeight", { configurable: true, value: 240 });
     drawer.elements.message.dispatchEvent(new Event("input", { bubbles: true }));
     expect(drawer.elements.message.style.height).toBe("160px");
@@ -1736,7 +1798,7 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.dispatchEvent(composing);
     expect(transport.send).toHaveBeenCalledOnce();
 
-    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
     drawer.elements.message.value = "queue this";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
@@ -1751,7 +1813,7 @@ describe("local agent rendering and controls", () => {
     let options;
     const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(() => new Promise(() => {})), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null }));
     drawer.elements.message.value = "first";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Sending"));
@@ -1774,29 +1836,29 @@ describe("local agent rendering and controls", () => {
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
     const loading = () => drawer.elements.timeline.querySelector(".agent-response-loading");
 
-    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" } }));
     expect(loading()?.textContent).toContain("Pi is responding");
     options.onEvent(agentEvent("error", { error: { code: "provider_startup_failed", message: "The selected provider could not be started.", action: "try_again" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
     expect(loading()).not.toBeNull();
     options.onEvent(agentEvent("completion", { turn_id: agentIDs.turn }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
     expect(loading()).toBeNull();
 
-    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" } }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
     expect(loading()).not.toBeNull();
     options.onEvent(agentEvent("interruption", { turn_id: agentIDs.turn, reason: "requested" }, { event_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK" }));
     expect(loading()).toBeNull();
 
-    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" } }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
     expect(loading()).not.toBeNull();
-    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_turn_id: null }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
     expect(loading()).toBeNull();
 
-    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" } }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }));
     expect(loading()).not.toBeNull();
     options.onDisconnect(new Error("closed"));
     expect(loading()).toBeNull();
 
-    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_turn_id: agentIDs.turn }, { event_id: "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO" }));
+    options.onEvent(agentEvent("snapshot", { lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" } }, { event_id: "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO" }));
     options.onEvent(agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "partial" }, { event_id: "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP" }));
     expect(loading()).toBeNull();
     options.onEvent(agentEvent("assistant_message", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "final answer", created_at: "2026-07-27T03:04:05Z" }, { event_id: "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ" }));
