@@ -941,6 +941,27 @@ test("uses styled confirmations for New, Restore, and Delete with exact commands
   await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "archive_delete")).toHaveLength(1);
 });
 
+test("keeps confirmation focus exclusive in the docked drawer", async ({ context, page, localAgentSidebar }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Docked confirmation\n", creatorContext: "Focus context.\n" });
+  await connectSidebar(page);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "New conversation" }).click();
+  const dialog = page.getByRole("dialog", { name: "Start a new conversation?" });
+  const cancel = dialog.getByRole("button", { name: "Cancel" });
+  const confirm = dialog.getByRole("button", { name: "Start new" });
+  await expect(cancel).toBeFocused();
+  await cancel.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await confirm.press("Tab");
+  await expect(cancel).toBeFocused();
+  await expect(page.locator(".agent-drawer > [inert]")).not.toHaveCount(0);
+  await cancel.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".agent-drawer")).toHaveClass(/is-open/u);
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
+});
+
 test("keeps confirmation focus exclusive in the narrow modal drawer", async ({ context, page, localAgentSidebar }) => {
   await page.setViewportSize({ width: 390, height: 720 });
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Narrow confirmation\n", creatorContext: "Focus context.\n" });

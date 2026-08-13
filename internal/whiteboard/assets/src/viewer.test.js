@@ -1666,6 +1666,48 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
+  test("keeps a newer confirmation open after stale completion and restores focus after confirmed removal", async () => {
+    let options;
+    let resolveRestore;
+    const calls = [];
+    const restorePending = new Promise((resolve) => { resolveRestore = resolve; });
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(),
+      send: vi.fn(async (command) => {
+        calls.push(command);
+        if (command.type === "archive_restore") await restorePending;
+        if (command.type === "archive_delete") options.onEvent(agentEvent("archive", { action: "deleted", archive_id: agentIDs.archive }, { event_id: "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY" }));
+      }),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(snapshotEvent());
+    drawer.elements.overflowButton.click();
+    [...drawer.elements.overflowMenu.querySelectorAll("button")].find((button) => button.textContent === "Archives").click();
+    await vi.waitFor(() => expect(calls.at(-1)?.type).toBe("archive_list"));
+    options.onEvent(agentEvent("history", { command_id: calls.at(-1).command_id, items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider: "pi", model: "fixture", preview: "Saved" }], next_cursor: null }, { event_id: "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ" }));
+    const backdrop = drawer.elements.drawer.querySelector(".agent-confirmation-backdrop");
+    drawer.elements.archives.querySelector('[data-archive-action="restore"]').click();
+    backdrop.querySelector(".agent-confirmation-primary").click();
+    await vi.waitFor(() => expect(calls.filter(({ type }) => type === "archive_restore")).toHaveLength(1));
+    window.dispatchEvent(new Event("resize"));
+    drawer.elements.archives.querySelector('[data-archive-action="delete"]').click();
+    expect(backdrop.querySelector("h3")?.textContent).toBe("Delete this archive permanently?");
+    expect(backdrop.querySelector("button").disabled).toBe(false);
+    resolveRestore();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(backdrop.hidden).toBe(false);
+    expect(backdrop.querySelector("h3")?.textContent).toBe("Delete this archive permanently?");
+
+    backdrop.querySelector(".agent-confirmation-primary").click();
+    backdrop.querySelector(".agent-confirmation-primary").click();
+    await vi.waitFor(() => expect(calls.filter(({ type }) => type === "archive_delete")).toHaveLength(1));
+    await vi.waitFor(() => expect(backdrop.hidden).toBe(true));
+    expect(document.activeElement).toBe(drawer.elements.backButton);
+    drawer.destroy();
+  });
+
   test("traps focus and exposes modal semantics at the mobile breakpoint", () => {
     const previousMatchMedia = window.matchMedia;
     window.matchMedia = vi.fn(() => ({ matches: true }));
