@@ -1159,6 +1159,7 @@ export function createAgentState(provider = "pi") {
     skills: [],
     supportsCompact: false,
     compactions: [],
+    transcriptSequence: 0,
     timeline: [],
     queue: [],
     archives: [],
@@ -1239,6 +1240,8 @@ function applyAgentEventMutable(state, untrustedEvent) {
   state.connected = true;
   state.seenEventIDs.add(event.event_id);
   while (state.seenEventIDs.size > MAX_STATE_EVENTS) state.seenEventIDs.delete(state.seenEventIDs.values().next().value);
+  const transcriptOrder = state.transcriptSequence;
+  state.transcriptSequence += 1;
   const payload = event.payload;
   switch (event.type) {
     case "snapshot":
@@ -1276,7 +1279,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
       break;
     }
     case "user_message":
-      appendTimeline(state, { kind: "user", ...payload });
+      appendTimeline(state, { kind: "user", ...payload, transcript_order: transcriptOrder });
       break;
     case "assistant_delta": {
       const current = state.timeline.find((item) => item.kind === "assistant" && item.message_id === payload.message_id);
@@ -1284,13 +1287,13 @@ function applyAgentEventMutable(state, untrustedEvent) {
         const next = `${current.text}${payload.text}`;
         if (encoder.encode(next).length > MAX_AGENT_MESSAGE_BYTES) throw new TypeError("agent stream message is too large");
         current.text = next;
-      } else appendTimeline(state, { kind: "assistant", ...payload, text: payload.text, streaming: true });
+      } else appendTimeline(state, { kind: "assistant", ...payload, text: payload.text, streaming: true, created_at: event.timestamp, transcript_order: transcriptOrder });
       break;
     }
     case "assistant_message": {
       const current = state.timeline.find((item) => item.kind === "assistant" && item.message_id === payload.message_id);
       if (current) Object.assign(current, payload, { streaming: false });
-      else appendTimeline(state, { kind: "assistant", ...payload });
+      else appendTimeline(state, { kind: "assistant", ...payload, transcript_order: transcriptOrder });
       break;
     }
     case "queue": state.queue = payload.items.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })), settings: item.settings ? { ...item.settings } : null })); break;
@@ -1301,7 +1304,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
     case "compaction": {
       const current = state.compactions.find((item) => item.work_id === payload.work_id);
       if (current) current.status = payload.status;
-      else state.compactions.push({ ...payload });
+      else state.compactions.push({ ...payload, created_at: event.timestamp, transcript_order: transcriptOrder });
       state.compactions = state.compactions.slice(-20);
       break;
     }
@@ -1317,18 +1320,18 @@ function applyAgentEventMutable(state, untrustedEvent) {
       state.supportsImages = payload.supports_images;
       break;
     case "context": state.contextDigest = payload.digest; state.contextState = payload.state; break;
-    case "activity": appendTimeline(state, { kind: "activity", activity: payload.kind, text: payload.summary, created_at: event.timestamp, item_id: event.event_id }); break;
-    case "blocked": appendTimeline(state, { kind: "activity", activity: "blocked", blockedKind: payload.kind, text: payload.message, created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
-    case "error": state.errors.push({ ...payload.error }); state.errors = state.errors.slice(-20); appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
+    case "activity": appendTimeline(state, { kind: "activity", activity: payload.kind, text: payload.summary, created_at: event.timestamp, item_id: event.event_id, transcript_order: transcriptOrder }); break;
+    case "blocked": appendTimeline(state, { kind: "activity", activity: "blocked", blockedKind: payload.kind, text: payload.message, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
+    case "error": state.errors.push({ ...payload.error }); state.errors = state.errors.slice(-20); appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
     case "completion": state.lifecycle = "ready"; state.activeWork = null; break;
-    case "interruption": state.lifecycle = "interrupted"; state.activeWork = null; appendTimeline(state, { kind: "activity", activity: "interruption", text: "The active response was interrupted and was not replayed automatically.", created_at: event.timestamp, item_id: event.event_id, expanded: true }); break;
+    case "interruption": state.lifecycle = "interrupted"; state.activeWork = null; appendTimeline(state, { kind: "activity", activity: "interruption", text: "The active response was interrupted and was not replayed automatically.", created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
     case "archive":
       if (payload.action === "deleted" || payload.action === "restored") state.archives = state.archives.filter((item) => item.archive_id !== payload.archive_id);
       break;
     case "tool_activity": {
       const current = state.timeline.find((item) => item.kind === "tool" && item.activity_id === payload.activity_id);
       if (current) Object.assign(current, payload, { kind: "tool", tool_kind: payload.kind });
-      else appendTimeline(state, { ...payload, kind: "tool", tool_kind: payload.kind, item_id: payload.activity_id, created_at: event.timestamp });
+      else appendTimeline(state, { ...payload, kind: "tool", tool_kind: payload.kind, item_id: payload.activity_id, created_at: event.timestamp, transcript_order: transcriptOrder });
       break;
     }
     case "interaction_request":
@@ -1358,7 +1361,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
       if (payload.status === "rejected") {
         state.freshArchiveCommandIDs.delete(payload.command_id);
         state.errors.push({ ...payload.error });
-        appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true });
+        appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder });
       }
       state.errors = state.errors.slice(-20);
       break;
@@ -2461,6 +2464,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           owned.state.skills = [];
           owned.state.supportsCompact = false;
           owned.state.compactions = [];
+          owned.state.transcriptSequence = 0;
           owned.state.activeWork = null;
           owned.contextAccepted = false;
           owned.contextRevision = undefined;
@@ -2505,6 +2509,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     target.state.timeline = [];
     target.state.interactions = [];
     target.state.compactions = [];
+    target.state.transcriptSequence = 0;
     target.state.activeWork = null;
     target.state.skillsState = null;
     target.state.skills = [];
@@ -3287,8 +3292,29 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       older.addEventListener("click", () => void sendCommand("history_page", { before: state.timelineCursor, limit: 50 }));
       timeline.append(older);
     }
-    for (const item of state.timeline) {
-      if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages, onReference);
+    const transcriptItems = [
+      ...state.timeline.map((item) => ({ type: "timeline", item })),
+      ...state.compactions.map((item) => ({ type: "compaction", item })),
+    ].sort((left, right) => {
+      const timeDifference = Date.parse(left.item.created_at) - Date.parse(right.item.created_at);
+      if (Number.isFinite(timeDifference) && timeDifference !== 0) return timeDifference;
+      return (left.item.transcript_order ?? 0) - (right.item.transcript_order ?? 0);
+    });
+    for (const entry of transcriptItems) {
+      const item = entry.item;
+      if (entry.type === "compaction") {
+        const presentations = {
+          running: { tone: "info", icon: "compact", title: "Compacting context…", animated: true },
+          stopping: { tone: "info", icon: "stop", title: "Stopping compaction…", animated: true },
+          completed: { tone: "success", icon: "check", title: "Context compacted" },
+          interrupted: { tone: "stopped", icon: "stop", title: "Compaction stopped" },
+          failed: { tone: "error", icon: "error", title: "Compaction failed" },
+        };
+        const row = appendStatusNotice(timeline, { ...presentations[item.status], className: "agent-compaction-row" });
+        row.dataset.status = item.status;
+        row.setAttribute("role", "status");
+        row.setAttribute("aria-label", `Compaction ${item.status}`);
+      } else if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages, onReference);
       else if (item.kind === "tool") appendToolActivity(doc, timeline, item);
       else if (item.activity === "interruption") {
         appendStatusNotice(timeline, { tone: "stopped", icon: "stop", title: "Response stopped", text: item.text, className: "agent-activity-interruption" });
@@ -3333,19 +3359,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
     for (const request of state.interactions) {
       appendInteractionCard(doc, timeline, request, (optionID, answers) => respondToInteraction(request, optionID, answers));
-    }
-    for (const compact of state.compactions) {
-      const presentations = {
-        running: { tone: "info", icon: "compact", title: "Compacting context…", animated: true },
-        stopping: { tone: "info", icon: "stop", title: "Stopping compaction…", animated: true },
-        completed: { tone: "success", icon: "check", title: "Context compacted" },
-        interrupted: { tone: "stopped", icon: "stop", title: "Compaction stopped" },
-        failed: { tone: "error", icon: "error", title: "Compaction failed" },
-      };
-      const row = appendStatusNotice(timeline, { ...presentations[compact.status], className: "agent-compaction-row" });
-      row.dataset.status = compact.status;
-      row.setAttribute("role", "status");
-      row.setAttribute("aria-label", `Compaction ${compact.status}`);
     }
     const activeTurnID = state.activeWork?.kind === "turn" ? state.activeWork.work_id : null;
     const hasActiveAssistant = activeTurnID !== null && state.timeline.some((item) => item.kind === "assistant" && item.turn_id === activeTurnID);

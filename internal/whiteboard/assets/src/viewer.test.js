@@ -721,7 +721,12 @@ describe("local agent transport and event state", () => {
     applyAgentEvent(state, agentEvent("compaction", { work_id: agentIDs.turn, status: "running" }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
     applyAgentEvent(state, agentEvent("compaction", { work_id: agentIDs.turn, status: "completed" }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
     expect(state.skills).toEqual([]);
-    expect(state.compactions).toEqual([{ work_id: agentIDs.turn, status: "completed" }]);
+    expect(state.compactions).toEqual([{
+      work_id: agentIDs.turn,
+      status: "completed",
+      created_at: "2026-07-27T03:04:05Z",
+      transcript_order: 2,
+    }]);
   });
 
   test("bounds retained and unresolved interaction state", () => {

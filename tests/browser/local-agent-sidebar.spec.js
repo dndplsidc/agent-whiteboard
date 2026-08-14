@@ -272,6 +272,28 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   expect(parsedCommands(localAgentSidebar.brokerRequests).at(-1)).toMatchObject({ type: "interrupt" });
 });
 
+test("keeps completed compaction in its original transcript position", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Compaction order\n", creatorContext: "Compaction order context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  await connectSidebar(page, "codex");
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+  await composer.fill("/compact");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-compaction-row")).toContainText("Compacting context…");
+  localAgentSidebar.completeCompact("completed", "codex");
+  await expect(page.locator(".agent-compaction-row")).toContainText("Context compacted");
+  await composer.fill("What is this page about?");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-message-assistant")).toContainText(/fixture reply/iu);
+  const order = await page.locator(".agent-timeline").evaluate((timeline) => [...timeline.children].map((element) => {
+    if (element.classList.contains("agent-compaction-row")) return "compaction";
+    if (element.classList.contains("agent-message-user")) return "user";
+    if (element.classList.contains("agent-message-assistant")) return "assistant";
+    return "other";
+  }));
+  expect(order.indexOf("compaction")).toBeLessThan(order.indexOf("user"));
+  expect(order.indexOf("compaction")).toBeLessThan(order.indexOf("assistant"));
+});
+
 test("keeps the keyboard-selected skill visible while navigating the full list", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Skill navigation\n", creatorContext: "Skill navigation context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
   localAgentSidebar.setSkills(Array.from({ length: 12 }, (_, index) => ({
