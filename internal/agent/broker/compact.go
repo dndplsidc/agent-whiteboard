@@ -11,7 +11,8 @@ func (actor *conversation) commandCompact(attachments map[*clientAttachment]stru
 	if actor.identity.Provider != provider.NameCodex || !actor.supportsCompact {
 		return false, protocol.ErrorCompactUnsupported
 	}
-	if actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.recoveryActive || actor.dispatchBlocked || actor.stopping || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil || actor.lifecycle != protocol.LifecycleReady {
+	idleLifecycle := actor.lifecycle == protocol.LifecycleReady || actor.lifecycle == protocol.LifecycleInterrupted
+	if actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.recoveryActive || actor.dispatchBlocked || actor.stopping || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil || !idleLifecycle {
 		return false, protocol.ErrorInvalidState
 	}
 	session, ok := actor.session.session.(provider.ManualCompactSession)

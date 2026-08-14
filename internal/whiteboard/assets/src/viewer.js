@@ -2831,7 +2831,21 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       const icon = doc.createElement("span");
       icon.className = "agent-completion-option-icon";
       icon.setAttribute("aria-hidden", "true");
-      icon.textContent = completionMode === "skill" ? "◇" : "/";
+      if (completionMode === "skill") icon.textContent = "◇";
+      else {
+        const commandIcon = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+        commandIcon.setAttribute("viewBox", "0 0 24 24");
+        commandIcon.setAttribute("focusable", "false");
+        const commandPath = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+        commandPath.setAttribute("d", "M5 7l5 5-5 5m8 0h6");
+        commandPath.setAttribute("fill", "none");
+        commandPath.setAttribute("stroke", "currentColor");
+        commandPath.setAttribute("stroke-linecap", "round");
+        commandPath.setAttribute("stroke-linejoin", "round");
+        commandPath.setAttribute("stroke-width", "2");
+        commandIcon.append(commandPath);
+        icon.append(commandIcon);
+      }
       const copy = doc.createElement("span");
       copy.className = "agent-completion-option-copy";
       const label = doc.createElement("strong");

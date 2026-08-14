@@ -1212,6 +1212,9 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.value = "/co";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
     expect(drawer.elements.completionMenu.textContent).toContain("/compact");
+    const commandIcon = drawer.elements.completionMenu.querySelector(".agent-completion-option-icon");
+    expect(commandIcon?.textContent).toBe("");
+    expect(commandIcon?.querySelector("svg")).not.toBeNull();
     drawer.elements.message.value = "/nope";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
     expect(drawer.elements.completionMenu.hidden).toBe(true);

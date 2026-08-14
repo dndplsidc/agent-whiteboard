@@ -1912,9 +1912,17 @@ body.agent-drawer-modal-open .agent-toast {
 }
 
 .agent-completion-option-icon {
+  align-items: center;
   color: var(--awb-muted);
+  display: flex;
   font-size: 0.76rem;
+  justify-content: center;
   text-align: center;
+}
+
+.agent-completion-option-icon svg {
+  height: 0.9rem;
+  width: 0.9rem;
 }
 
 .agent-completion-option-copy {

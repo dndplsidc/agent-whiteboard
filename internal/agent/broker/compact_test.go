@@ -135,6 +135,13 @@ func TestCodexCompactLifecycleAndStopAreSharedAcrossTabs(t *testing.T) {
 		require.Equal(t, protocol.LifecycleInterrupted, lifecycle.State)
 		require.Nil(t, lifecycle.ActiveWork)
 	}
+
+	nextWorkID := sequenceID(8236)
+	next := codexCompact(sequenceID(8237), firstClientID, conversationID, nextWorkID)
+	nextResult, err := first.Command(context.Background(), next)
+	require.NoError(t, err)
+	requireCommandResult(t, nextResult, protocol.CommandSucceeded, "")
+	require.Equal(t, nextWorkID, receiveLifecycle(t, session.compacted).WorkID)
 }
 
 func TestCodexCompactUnsupportedDowngradesRuntimeCapability(t *testing.T) {
