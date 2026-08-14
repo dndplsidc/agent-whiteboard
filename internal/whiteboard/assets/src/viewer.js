@@ -3276,7 +3276,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages, onReference);
       else if (item.kind === "tool") appendToolActivity(doc, timeline, item);
       else if (item.activity === "interruption") {
-        appendStatusNotice(timeline, { tone: "stopped", icon: "■", title: "Response stopped", text: item.text, className: "agent-activity-interruption" });
+        appendStatusNotice(timeline, { tone: "stopped", icon: "×", title: "Response stopped", text: item.text, className: "agent-activity-interruption" });
       } else if (["status", "retry", "compaction", "blocked", "error"].includes(item.activity)) {
         const labels = {
           status: "Status update",
@@ -3324,7 +3324,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         running: { tone: "info", icon: "•", title: "Compacting context…", animated: true },
         stopping: { tone: "info", icon: "■", title: "Stopping compaction…", animated: true },
         completed: { tone: "success", icon: "✓", title: "Context compacted" },
-        interrupted: { tone: "stopped", icon: "■", title: "Compaction stopped" },
+        interrupted: { tone: "stopped", icon: "×", title: "Compaction stopped" },
         failed: { tone: "error", icon: "!", title: "Compaction failed" },
       };
       const row = appendStatusNotice(timeline, { ...presentations[compact.status], className: "agent-compaction-row" });
