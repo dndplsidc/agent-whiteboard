@@ -1703,6 +1703,13 @@ body.agent-drawer-modal-open .agent-toast {
   gap: 0.35rem;
 }
 
+.agent-archive-actions button {
+  font-size: 0.7rem;
+  line-height: 1.2;
+  min-height: 1.9rem;
+  padding: 0.3rem 0.52rem;
+}
+
 .agent-archive-actions button[data-archive-action="delete"] {
   background: transparent;
   border-color: transparent;

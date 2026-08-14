@@ -953,6 +953,14 @@ test("renders archive loading, populated, and empty states without false emptine
   const archive = page.locator(".agent-archive-card");
   await expect(archive).toContainText("Pi · fixture-model");
   await expect(archive).toContainText("Updated Jul 26, 2026");
+  const [restoreBox, deleteBox] = await Promise.all([
+    archive.getByRole("button", { name: "Restore" }).boundingBox(),
+    archive.getByRole("button", { name: "Delete" }).boundingBox(),
+  ]);
+  expect(restoreBox).not.toBeNull();
+  expect(deleteBox).not.toBeNull();
+  expect(restoreBox.height).toBeLessThanOrEqual(34);
+  expect(deleteBox.height).toBeLessThanOrEqual(34);
 
   await page.getByRole("button", { name: "Back to conversation" }).click();
   localAgentSidebar.setArchiveMode("empty");
