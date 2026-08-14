@@ -192,6 +192,13 @@ test("keeps header pointer focus borderless while retaining keyboard focus", asy
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Header focus\n", creatorContext: "Focus context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
   const provider = page.getByLabel("Conversation provider");
+  const providerStyle = await provider.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { appearance: style.appearance, backgroundImage: style.backgroundImage, paddingRight: Number.parseFloat(style.paddingRight) };
+  });
+  expect(providerStyle.appearance).toBe("none");
+  expect(providerStyle.backgroundImage).not.toBe("none");
+  expect(providerStyle.paddingRight).toBeGreaterThanOrEqual(26);
   await provider.click();
   expect(await provider.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
   await page.keyboard.press("Tab");
@@ -202,6 +209,10 @@ test("keeps header pointer focus borderless while retaining keyboard focus", asy
 test("shows connection recheck success and an explicit wrong-port failure in settings", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Connection feedback\n", creatorContext: "Connection context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await expect(page.locator(".agent-setup-icon svg")).toBeVisible();
+  const connectBox = await page.getByRole("button", { name: "Connect to Codex", exact: true }).boundingBox();
+  expect(connectBox).not.toBeNull();
+  expect(connectBox.height).toBeLessThanOrEqual(34);
   await page.getByRole("button", { name: "Open Page agent menu" }).click();
   await page.getByRole("menuitem", { name: "Connection settings" }).click();
   const check = page.locator(".agent-connection-retry");
@@ -219,6 +230,13 @@ test("shows connection recheck success and an explicit wrong-port failure in set
   await check.click();
   expect(await check.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
   await expect(page.locator(".agent-guidance")).toContainText("No compatible broker responded on port 1");
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  await expect(page.locator(".agent-setup-icon svg")).toBeVisible();
+  for (const label of ["Check again", "Connection settings"]) {
+    const box = await page.getByRole("button", { name: label, exact: true }).boundingBox();
+    expect(box).not.toBeNull();
+    expect(box.height).toBeLessThanOrEqual(34);
+  }
 });
 
 test("invokes Codex skills and compacts without queueing a busy draft", async ({ context, page, localAgentSidebar }) => {

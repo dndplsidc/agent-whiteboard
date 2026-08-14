@@ -2076,10 +2076,20 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   setup.className = "agent-setup";
   const setupBody = doc.createElement("div");
   setupBody.className = "agent-setup-body";
-  const setupIcon = doc.createElement("span");
+  const setupIcon = doc.createElement("div");
   setupIcon.className = "agent-setup-icon";
   setupIcon.setAttribute("aria-hidden", "true");
-  setupIcon.textContent = "⌁";
+  const setupIconSVG = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  setupIconSVG.setAttribute("viewBox", "0 0 24 24");
+  setupIconSVG.setAttribute("focusable", "false");
+  const setupIconPath = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+  setupIconPath.setAttribute("fill", "none");
+  setupIconPath.setAttribute("stroke", "currentColor");
+  setupIconPath.setAttribute("stroke-linecap", "round");
+  setupIconPath.setAttribute("stroke-linejoin", "round");
+  setupIconPath.setAttribute("stroke-width", "2");
+  setupIconSVG.append(setupIconPath);
+  setupIcon.append(setupIconSVG);
   const setupHeading = doc.createElement("h3");
   setupHeading.textContent = "Checking local broker…";
 
@@ -3196,7 +3206,14 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     setup.dataset.state = connectionState;
     if (!state.connected) {
       const ready = connectionState === "ready" || connectionState === "connecting";
-      setupIcon.textContent = ready ? "✓" : "⌁";
+      const setupIconState = connectionState === "checking" || connectionState === "connecting" ? "checking" : ready ? "ready" : "offline";
+      const setupIconPaths = {
+        checking: "M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7",
+        offline: "M3 3l18 18M9 8V4m6 4V4m3 8v1a6 6 0 0 1-.47 2.33M6 8v5a6 6 0 0 0 7.68 5.76M12 19v2",
+        ready: "M5 12l4 4L19 6",
+      };
+      setupIcon.dataset.icon = setupIconState;
+      setupIconPath.setAttribute("d", setupIconPaths[setupIconState]);
       setupHeading.textContent = ready
         ? connectionState === "connecting" ? `Connecting to ${providerName}…` : "Ready to connect"
         : connectionState === "checking" ? "Checking local broker…" : `${providerName} isn’t available on this device`;

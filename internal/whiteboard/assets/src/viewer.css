@@ -597,14 +597,19 @@ body.agent-drawer-modal-open .agent-toast {
 }
 
 .agent-provider-select {
-  background: var(--awb-code-background);
+  appearance: none;
+  background-color: var(--awb-code-background);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='2'%3E%3Cpath d='m7 9 5 5 5-5'/%3E%3C/svg%3E");
+  background-position: right 0.58rem center;
+  background-repeat: no-repeat;
+  background-size: 0.78rem;
   border: 1px solid var(--awb-border);
   border-radius: 0.45rem;
   color: var(--awb-foreground);
   font: inherit;
   font-size: 0.7rem;
   height: 2rem;
-  padding: 0 1.6rem 0 0.5rem;
+  padding: 0 1.85rem 0 0.58rem;
 }
 
 .agent-icon-button {
@@ -816,14 +821,22 @@ body.agent-drawer-modal-open .agent-toast {
   align-items: center;
   background: var(--awb-accent-soft);
   border: 1px solid var(--awb-border);
-  border-radius: 0.85rem;
+  border-radius: 0.65rem;
   color: var(--awb-link);
   display: inline-flex;
-  font-size: 1rem;
-  height: 3.1rem;
+  height: 2.5rem;
   justify-content: center;
-  margin-bottom: 1.05rem;
-  width: 3.1rem;
+  margin-bottom: 0.85rem;
+  width: 2.5rem;
+}
+
+.agent-setup-icon svg {
+  height: 1.15rem;
+  width: 1.15rem;
+}
+
+.agent-setup-icon[data-icon="checking"] svg {
+  animation: agent-icon-spin 1s linear infinite;
 }
 
 .agent-setup[data-state="ready"] .agent-setup-icon,
@@ -1077,6 +1090,17 @@ body.agent-drawer-modal-open .agent-toast {
   cursor: pointer;
   font: inherit;
   padding: 0.45rem 0.7rem;
+}
+
+.agent-setup .agent-setup-buttons button {
+  font-size: 0.72rem;
+  line-height: 1.2;
+  min-height: 2rem;
+  padding: 0.35rem 0.62rem;
+}
+
+.agent-setup-buttons .agent-primary {
+  min-width: 0;
 }
 
 .agent-primary {
@@ -1613,6 +1637,10 @@ body.agent-drawer-modal-open .agent-toast {
   font: inherit;
   font-size: 0.72rem;
   padding: 0.45rem 0.62rem;
+}
+
+@keyframes agent-icon-spin {
+  to { transform: rotate(360deg); }
 }
 
 @keyframes agent-response-dance {
