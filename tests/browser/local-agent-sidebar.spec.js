@@ -261,6 +261,7 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   await composer.fill("/compact");
   await composer.press("Enter");
   await expect(page.locator(".agent-compaction-row")).toContainText("Compacting context…");
+  await expect(page.locator(".agent-compaction-row .agent-status-notice-icon svg")).toBeVisible();
   expect(parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "compact")).toBe(true);
   await composer.fill("preserved next draft");
   await composer.press("Enter");
@@ -269,6 +270,35 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   await expect(page.locator(".agent-compaction-row")).toContainText("Compaction stopped");
   await expect(composer).toHaveText("preserved next draft");
   expect(parsedCommands(localAgentSidebar.brokerRequests).at(-1)).toMatchObject({ type: "interrupt" });
+});
+
+test("keeps the keyboard-selected skill visible while navigating the full list", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Skill navigation\n", creatorContext: "Skill navigation context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  localAgentSidebar.setSkills(Array.from({ length: 12 }, (_, index) => ({
+    id: `${String(index).padStart(31, "A")}B`,
+    name: `skill-${String(index + 1).padStart(2, "0")}`,
+    display_name: `Skill ${String(index + 1).padStart(2, "0")}`,
+    description: `Description for skill ${index + 1}`,
+    scope: "user",
+  })));
+  await connectSidebar(page, "codex");
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+  await composer.fill("$");
+  const suggestions = page.getByRole("listbox", { name: "Composer suggestions" });
+  await expect(suggestions).toBeVisible();
+  for (let index = 0; index < 11; index += 1) await composer.press("ArrowDown");
+  const active = suggestions.locator('[aria-selected="true"]');
+  await expect(active).toContainText("Skill 12");
+  const [suggestionsBox, activeBox, scrollTop] = await Promise.all([
+    suggestions.boundingBox(),
+    active.boundingBox(),
+    suggestions.evaluate((element) => element.scrollTop),
+  ]);
+  expect(suggestionsBox).not.toBeNull();
+  expect(activeBox).not.toBeNull();
+  expect(activeBox.y).toBeGreaterThanOrEqual(suggestionsBox.y);
+  expect(activeBox.y + activeBox.height).toBeLessThanOrEqual(suggestionsBox.y + suggestionsBox.height + 1);
+  expect(scrollTop).toBeGreaterThan(0);
 });
 
 test("uses the versioned WebSocket for connect and subsequent commands", async ({
@@ -508,6 +538,7 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   const interrupted = page.locator(".agent-activity-interruption");
   await expect(interrupted).toContainText("Response stopped");
   await expect(interrupted).toContainText("not replayed automatically");
+  await expect(interrupted.locator(".agent-status-notice-icon svg")).toBeVisible();
   expect(await interrupted.evaluate((element) => element.tagName)).toBe("DIV");
 
   const types = parsedCommands(localAgentSidebar.brokerRequests).map((command) => command.type);
@@ -814,6 +845,19 @@ test("uses accessible Codex model controls and captures accepted exact settings"
   await pill.press("Enter");
   const menu = page.locator(".agent-model-menu");
   await expect(menu).toBeVisible();
+  const [pillBox, menuBox, drawerBox] = await Promise.all([
+    pill.boundingBox(),
+    menu.boundingBox(),
+    page.locator(".agent-drawer").boundingBox(),
+  ]);
+  expect(pillBox).not.toBeNull();
+  expect(menuBox).not.toBeNull();
+  expect(drawerBox).not.toBeNull();
+  const pillCenter = pillBox.x + pillBox.width / 2;
+  expect(pillCenter).toBeGreaterThanOrEqual(menuBox.x);
+  expect(pillCenter).toBeLessThanOrEqual(menuBox.x + menuBox.width);
+  expect(menuBox.x).toBeGreaterThanOrEqual(drawerBox.x);
+  expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(drawerBox.x + drawerBox.width + 1);
   await expect(menu.locator('[data-settings-section="model"]')).toBeFocused();
   await menu.locator('[data-settings-section="model"]').press("ArrowRight");
   const luna = menu.locator('[data-settings-value="gpt-5.6-luna"]');

@@ -2848,6 +2848,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     });
     completionMenu.hidden = false;
     message.setAttribute("aria-activedescendant", `agent-completion-${completionIndex}`);
+    completionMenu.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
   }
 
   function submitBlocked() {
@@ -3276,7 +3277,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       if (item.kind === "user" || item.kind === "assistant") appendAgentMessage(doc, timeline, item, providerName, appendDescriptorImages, onReference);
       else if (item.kind === "tool") appendToolActivity(doc, timeline, item);
       else if (item.activity === "interruption") {
-        appendStatusNotice(timeline, { tone: "stopped", icon: "×", title: "Response stopped", text: item.text, className: "agent-activity-interruption" });
+        appendStatusNotice(timeline, { tone: "stopped", icon: "stop", title: "Response stopped", text: item.text, className: "agent-activity-interruption" });
       } else if (["status", "retry", "compaction", "blocked", "error"].includes(item.activity)) {
         const labels = {
           status: "Status update",
@@ -3291,7 +3292,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         const guidanceText = actionGuidance(item.action, doc);
         const text = guidanceText ? `${item.text} ${guidanceText}` : item.text;
         const tone = item.activity === "error" ? "error" : item.activity === "blocked" ? "warning" : "neutral";
-        const icon = item.activity === "error" ? "!" : item.activity === "blocked" ? "×" : item.activity === "retry" ? "↻" : "•";
+        const icon = item.activity === "error" ? "error" : item.activity === "blocked" ? "blocked" : item.activity === "retry" ? "retry" : "info";
         appendStatusNotice(timeline, { tone, icon, title, text, className: `agent-activity-${item.activity}` });
       } else {
         const details = doc.createElement("details");
@@ -3321,11 +3322,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
     for (const compact of state.compactions) {
       const presentations = {
-        running: { tone: "info", icon: "•", title: "Compacting context…", animated: true },
-        stopping: { tone: "info", icon: "■", title: "Stopping compaction…", animated: true },
-        completed: { tone: "success", icon: "✓", title: "Context compacted" },
-        interrupted: { tone: "stopped", icon: "×", title: "Compaction stopped" },
-        failed: { tone: "error", icon: "!", title: "Compaction failed" },
+        running: { tone: "info", icon: "compact", title: "Compacting context…", animated: true },
+        stopping: { tone: "info", icon: "stop", title: "Stopping compaction…", animated: true },
+        completed: { tone: "success", icon: "check", title: "Context compacted" },
+        interrupted: { tone: "stopped", icon: "stop", title: "Compaction stopped" },
+        failed: { tone: "error", icon: "error", title: "Compaction failed" },
       };
       const row = appendStatusNotice(timeline, { ...presentations[compact.status], className: "agent-compaction-row" });
       row.dataset.status = compact.status;
@@ -3455,15 +3456,35 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
   }
 
-  function appendStatusNotice(parent, { tone = "neutral", icon = "•", title, text, animated = false, className = "" }) {
+  function appendStatusNotice(parent, { tone = "neutral", icon = "info", title, text, animated = false, className = "" }) {
     const notice = doc.createElement("div");
     notice.className = `agent-status-notice${className ? ` ${className}` : ""}`;
     notice.dataset.tone = tone;
     if (animated) notice.dataset.animated = "true";
-    const glyph = doc.createElement("span");
+    const glyph = doc.createElement("div");
     glyph.className = "agent-status-notice-icon";
     glyph.setAttribute("aria-hidden", "true");
-    glyph.textContent = icon;
+    const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("focusable", "false");
+    const path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+    const paths = {
+      blocked: "M5 5l14 14M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
+      check: "M5 12l4 4L19 6",
+      compact: "M3 3l6 6m0-5v5H4m17-6-6 6m0-5v5h5M3 21l6-6m-5 0h5v5m12 1-6-6m0 5v-5h5",
+      error: "M12 8v5m0 3h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
+      info: "M12 11v5m0-8h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
+      retry: "M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7",
+      stop: "M8 8h8v8H8z",
+    };
+    path.setAttribute("d", paths[icon] ?? paths.info);
+    path.setAttribute("fill", icon === "stop" ? "currentColor" : "none");
+    path.setAttribute("stroke", icon === "stop" ? "none" : "currentColor");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    path.setAttribute("stroke-width", "2");
+    svg.append(path);
+    glyph.append(svg);
     const copy = doc.createElement("div");
     const heading = doc.createElement("strong");
     heading.textContent = title;

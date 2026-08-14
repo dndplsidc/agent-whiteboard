@@ -1017,6 +1017,11 @@ function createSidebarBroker(initialAllowedOrigin) {
     setAllowedOrigin(origin) { allowedOrigin = origin; },
     setWebSocketEnabled(value) { webSocketEnabled = value; },
     setHoldResponses(value, provider = "pi") { providerState(provider).holdResponses = value; },
+    setSkills(skills, provider = "codex") {
+      const state = providerState(provider);
+      state.skillsState = "ready";
+      state.skills = structuredClone(skills);
+    },
     setHoldInterruptCompletion(value, provider = "pi") { providerState(provider).holdInterruptCompletion = value; },
     releaseInterruptCompletion(provider = "pi") {
       const state = providerState(provider);
@@ -1444,6 +1449,7 @@ export const test = base.extend({
           resetBrokerState: broker.resetState,
           setWebSocketEnabled: broker.setWebSocketEnabled,
           setHoldResponses: broker.setHoldResponses,
+          setSkills: broker.setSkills,
           setHoldInterruptCompletion: broker.setHoldInterruptCompletion,
           releaseInterruptCompletion: broker.releaseInterruptCompletion,
           setPhaseResponses: broker.setPhaseResponses,
