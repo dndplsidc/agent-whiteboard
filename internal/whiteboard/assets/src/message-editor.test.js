@@ -55,10 +55,10 @@ describe("message editor", () => {
   test("inserts non-editable skills and marks catalog drift unavailable", () => {
     const editor = createMessageEditor({ doc: document, content: { parts: [{ type: "text", text: "check" }] } });
     document.body.append(editor.element);
-    editor.insertSkill({ id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", name: "review-helper" });
+    editor.insertSkill({ id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", name: "review-helper", display_name: "Review helper" });
     const token = editor.element.querySelector(".agent-message-skill");
     expect(token.contentEditable).toBe("false");
-    expect(token.textContent).toBe("$review-helper");
+    expect(token.textContent).toBe("Skill: Review helper");
     expect(editor.getContent().parts.some(({ type }) => type === "skill")).toBe(true);
     editor.markUnavailableSkills([]);
     expect(token.classList.contains("is-unavailable")).toBe(true);

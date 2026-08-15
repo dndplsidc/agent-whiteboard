@@ -2810,7 +2810,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (!tail || tail.type !== "text") return null;
     const text = tail.text;
     const skill = /(?:^|\s)\$([\p{L}\p{N}_.-]*)$/u.exec(text);
-    if (skill) return { mode: "skill", query: skill[1].toLocaleLowerCase() };
+    if (skill) return { mode: "skill", query: skill[1].toLocaleLowerCase(), replacement: `$${skill[1]}` };
     const slash = content.parts.length === 1 ? /^\/([a-z]*)$/u.exec(text) : null;
     if (slash && text !== "/compact" && state.supportsCompact) return { mode: "slash", query: slash[1] };
     return null;
@@ -2820,7 +2820,16 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     const item = completionItems[index];
     if (!item) return false;
     if (completionMode === "slash") messageEditor.setContent({ parts: [{ type: "text", text: "/compact" }] });
-    else messageEditor.insertSkill(item);
+    else {
+      const match = completionQuery();
+      const content = messageEditor.getContent();
+      const tail = content.parts.at(-1);
+      if (match?.mode === "skill" && tail?.type === "text" && tail.text.endsWith(match.replacement)) {
+        tail.text = tail.text.slice(0, -match.replacement.length);
+        messageEditor.setContent(content);
+      }
+      messageEditor.insertSkill(item);
+    }
     closeCompletionMenu();
     updateComposerAvailability();
     return true;

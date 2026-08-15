@@ -106,6 +106,18 @@ function referenceLabel(reference) {
   return `${kind}: ${reference.label}`;
 }
 
+function skillDisplayLabel(skill) {
+  const displayName = typeof skill?.display_name === "string" ? skill.display_name.trim() : "";
+  if (displayName) return displayName;
+  const nativeName = typeof skill?.name === "string" ? skill.name.split(":").at(-1) : "";
+  const readable = nativeName.replace(/[-_]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return readable ? `${readable[0].toLocaleUpperCase()}${readable.slice(1)}` : "Skill";
+}
+
+function skillTokenText(skill, displayName) {
+  return `Skill: ${displayName || skillDisplayLabel(skill)}`;
+}
+
 function referenceLabelElement(doc, label) {
   const element = doc.createElement("span");
   element.className = "agent-message-reference-label";
@@ -127,7 +139,7 @@ export function renderMessageContent(doc, content, { interactive = true, onRefer
       const token = doc.createElement("span");
       token.className = "agent-message-skill";
       token.dataset.skillId = part.skill.id;
-      token.textContent = `$${part.skill.name}`;
+      token.textContent = skillTokenText(part.skill);
       fragment.append(token);
       continue;
     }
@@ -158,6 +170,7 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
   let composing = false;
   const references = new Map();
   const skills = new Map();
+  const skillDisplayNames = new Map();
 
   function render() {
     references.clear();
@@ -172,8 +185,9 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
         token.className = "agent-message-skill";
         token.contentEditable = "false";
         token.dataset.skillId = part.skill.id;
-        token.setAttribute("aria-label", `Skill $${part.skill.name}. Press Backspace or Delete to remove.`);
-        token.textContent = `$${part.skill.name}`;
+        const displayName = skillDisplayNames.get(part.skill.id) || skillDisplayLabel(part.skill);
+        token.setAttribute("aria-label", `${skillTokenText(part.skill, displayName)}. Press Backspace or Delete to remove.`);
+        token.textContent = skillTokenText(part.skill, displayName);
         root.append(token);
       } else {
         references.set(part.reference.id, structuredClone(part.reference));
@@ -323,6 +337,7 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
     },
     insertSkill(skill) {
       if (!skill || typeof skill.id !== "string" || typeof skill.name !== "string" || model.parts.some((part) => part.type === "skill" && (part.skill.id === skill.id || part.skill.name === skill.name))) return cloneMessageContent(model);
+      skillDisplayNames.set(skill.id, skillDisplayLabel(skill));
       const result = insertAtomicPart(model, { type: "skill", skill: { id: skill.id, name: skill.name } }, savedCaret);
       model = result.content;
       savedCaret = result.caret;

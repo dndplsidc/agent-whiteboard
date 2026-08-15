@@ -262,7 +262,8 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   await composer.fill("$rev");
   await expect(suggestions).not.toContainText("Personal helper");
   await composer.press("Enter");
-  await expect(composer.locator(".agent-message-skill")).toHaveText("$review-helper");
+  await expect(composer.locator(".agent-message-skill")).toHaveText("Skill: Review helper");
+  await expect(composer).not.toContainText("$");
   await composer.press("End");
   await composer.pressSequentially(" check this page");
   await composer.press("Enter");

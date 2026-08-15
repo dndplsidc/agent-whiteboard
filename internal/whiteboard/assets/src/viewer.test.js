@@ -1200,7 +1200,8 @@ describe("local agent rendering and controls", () => {
     expect(drawer.elements.completionMenu.textContent).not.toContain("Test helper");
     expect(drawer.elements.completionMenu.querySelector(".agent-completion-option-scope")?.textContent).toBe("Repo");
     drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    expect(drawer.elements.message.querySelector(".agent-message-skill")?.textContent).toBe("$review-helper");
+    expect(drawer.elements.message.querySelector(".agent-message-skill")?.textContent).toBe("Skill: Review helper");
+    expect(drawer.elements.message.textContent).not.toContain("$");
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(sent.some(({ type }) => type === "submit")).toBe(true));
     expect(sent.find(({ type }) => type === "submit").payload.content.parts.some(({ type }) => type === "skill")).toBe(true);
