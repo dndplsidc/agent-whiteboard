@@ -2159,7 +2159,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const contextDisclosureIcon = doc.createElement("span");
   contextDisclosureIcon.className = "agent-context-disclosure-icon";
   contextDisclosureIcon.setAttribute("aria-hidden", "true");
-  contextDisclosureIcon.textContent = "≡";
+  const contextDisclosureIconSVG = createSVGElement(doc, "svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" });
+  contextDisclosureIconSVG.append(
+    createSVGElement(doc, "path", { d: "M6.5 3.5h7l4 4v13h-11z" }),
+    createSVGElement(doc, "path", { d: "M13.5 3.5v4h4M9 12h6M9 16h6" }),
+  );
+  contextDisclosureIcon.append(contextDisclosureIconSVG);
   const contextDisclosureCopy = doc.createElement("div");
   const contextDisclosureHeading = doc.createElement("strong");
   contextDisclosureHeading.textContent = "Page context";
@@ -2169,7 +2174,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const contextDisclosureChevron = doc.createElement("span");
   contextDisclosureChevron.className = "agent-context-disclosure-chevron";
   contextDisclosureChevron.setAttribute("aria-hidden", "true");
-  contextDisclosureChevron.textContent = "›";
+  const contextDisclosureChevronSVG = createSVGElement(doc, "svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" });
+  contextDisclosureChevronSVG.append(createSVGElement(doc, "path", { d: "m9 6 6 6-6 6" }));
+  contextDisclosureChevron.append(contextDisclosureChevronSVG);
   contextDisclosure.append(contextDisclosureIcon, contextDisclosureCopy, contextDisclosureChevron);
   setup.append(setupBody, contextDisclosure);
   settings.append(settingsHeading, portLabel, connectionStatus);

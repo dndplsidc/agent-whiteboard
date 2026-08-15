@@ -62,8 +62,12 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   await expect(page.locator(".agent-provider-label")).toBeHidden();
   await expect(page.locator(".agent-consent")).toContainText("sends no page content");
   await expect(page.locator(".agent-consent-list")).toContainText("Complete Markdown and creator notes");
-  await expect(page.locator(".agent-context-disclosure")).toContainText("Markdown + creator notes");
-  await expect(page.locator(".agent-context-disclosure")).not.toContainText(/shared|uncertain/iu);
+  const contextDisclosure = page.locator(".agent-context-disclosure");
+  await expect(contextDisclosure).toContainText("Markdown + creator notes");
+  await expect(contextDisclosure).not.toContainText(/shared|uncertain/iu);
+  await expect(contextDisclosure.locator(".agent-context-disclosure-icon svg")).toHaveCount(1);
+  await expect(contextDisclosure.locator(".agent-context-disclosure-chevron svg")).toHaveCount(1);
+  await expect(contextDisclosure.locator(":scope > div > span")).toHaveCSS("font-size", "10.56px");
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
 
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");

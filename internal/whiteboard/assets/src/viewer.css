@@ -922,7 +922,7 @@ body.agent-drawer-modal-open .agent-toast {
   font-size: 0.72rem;
 }
 
-.agent-context-disclosure > div:first-child span {
+.agent-context-disclosure > div > span {
   color: var(--awb-muted);
   font-size: 0.66rem;
   margin-top: 0.08rem;
@@ -938,16 +938,26 @@ body.agent-drawer-modal-open .agent-toast {
   border-radius: 0.45rem;
   color: var(--awb-muted);
   display: inline-flex;
-  font-size: 0.8rem;
   height: 1.8rem;
   justify-content: center;
   width: 1.8rem;
 }
 
+.agent-context-disclosure-icon svg {
+  height: 0.9rem;
+  width: 0.9rem;
+}
+
 .agent-context-disclosure-chevron {
+  align-items: center;
   color: var(--awb-muted);
-  font-size: 1.1rem;
-  text-align: right;
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
+.agent-context-disclosure-chevron svg {
+  height: 0.85rem;
+  width: 0.85rem;
 }
 
 .agent-settings label {
