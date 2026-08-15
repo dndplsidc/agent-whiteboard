@@ -3322,6 +3322,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       ...state.timeline.map((item) => ({ type: "timeline", item })),
       ...state.compactions.map((item) => ({ type: "compaction", item })),
     ].sort((left, right) => {
+      const sameTurn = left.item.turn_id && left.item.turn_id === right.item.turn_id;
+      if (sameTurn && left.item.kind === "tool" && right.item.kind === "assistant") return -1;
+      if (sameTurn && left.item.kind === "assistant" && right.item.kind === "tool") return 1;
       const timeDifference = Date.parse(left.item.created_at) - Date.parse(right.item.created_at);
       if (Number.isFinite(timeDifference) && timeDifference !== 0) return timeDifference;
       return (left.item.transcript_order ?? 0) - (right.item.transcript_order ?? 0);

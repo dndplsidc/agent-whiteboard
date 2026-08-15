@@ -262,7 +262,10 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   await composer.fill("$rev");
   await expect(suggestions).not.toContainText("Personal helper");
   await composer.press("Enter");
-  await expect(composer.locator(".agent-message-skill")).toHaveText("Skill: Review helper");
+  const skillPill = composer.locator(".agent-message-skill");
+  await expect(skillPill).toHaveText("Skill: Review helper");
+  await expect(skillPill).toHaveCSS("margin-left", "0px");
+  await expect(skillPill).toHaveCSS("margin-right", "0px");
   await expect(composer).not.toContainText("$");
   await composer.press("End");
   await composer.pressSequentially(" check this page");
@@ -289,6 +292,45 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   await expect(page.locator(".agent-compaction-row")).toContainText("Compaction stopped");
   await expect(composer).toHaveText("preserved next draft");
   expect(parsedCommands(localAgentSidebar.brokerRequests).at(-1)).toMatchObject({ type: "interrupt" });
+});
+
+test("keeps Codex command activity ahead of the streamed answer", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Stable skill stream\n", creatorContext: "Stable stream context.\n" });
+  localAgentSidebar.setSkills([{ id: "W7W7W7W7W7W7W7W7W7W7W7W7W7W7W7W7", name: "devflow", display_name: "devflow", description: "Software change workflow.", scope: "user" }]);
+  localAgentSidebar.setPhaseResponses(true, "codex");
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+  await composer.fill("$dev");
+  await composer.press("Enter");
+  await composer.press("End");
+  await composer.pressSequentially(" tell me about this skill");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-live-status")).toHaveText("Responding");
+  const turnID = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit").payload.turn_id;
+  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
+  localAgentSidebar.emitToolActivity("codex", {
+    turn_id: turnID,
+    kind: "command",
+    status: "completed",
+    title: "Command",
+    summary: "Loaded the devflow skill.",
+    detail: "Read SKILL.md",
+  });
+
+  const streamedItems = page.locator(".agent-timeline > .agent-tool-activity, .agent-timeline > .agent-message-assistant");
+  await expect(streamedItems).toHaveCount(2);
+  await expect(streamedItems.first()).toHaveClass(/agent-tool-activity/u);
+  await expect(streamedItems.last()).toHaveClass(/agent-message-assistant/u);
+
+  localAgentSidebar.releaseResponsePhase("later_delta", "codex");
+  await expect(streamedItems.first()).toHaveClass(/agent-tool-activity/u);
+  localAgentSidebar.releaseResponsePhase("completion", "codex");
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+  await expect(streamedItems.first()).toHaveClass(/agent-tool-activity/u);
+  await expect(streamedItems.last()).toHaveClass(/agent-message-assistant/u);
 });
 
 test("keeps completed compaction in its original transcript position", async ({ context, page, localAgentSidebar }) => {
