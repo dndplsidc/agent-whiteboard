@@ -205,9 +205,10 @@ test("keeps header pointer focus borderless while retaining keyboard focus", asy
   expect(providerStyle.paddingRight).toBeGreaterThanOrEqual(26);
   await provider.click();
   expect(await provider.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
-  await page.keyboard.press("Tab");
-  const focused = page.locator(":focus");
-  expect(await focused.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
+  await page.getByRole("button", { name: "Close local agent", exact: true }).focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(provider).toBeFocused();
+  expect(await provider.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
 });
 
 test("shows connection recheck success and an explicit wrong-port failure in settings", async ({ context, page, localAgentSidebar }) => {
