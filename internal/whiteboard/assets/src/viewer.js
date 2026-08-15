@@ -2841,7 +2841,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     completionMode = match.mode;
     completionItems = match.mode === "slash"
       ? [{ id: "compact", name: "/compact", display_name: "/compact", description: "Summarize the conversation to prevent hitting the context limit." }].filter((command) => command.name.slice(1).startsWith(match.query))
-      : state.skills.filter((skill) => skill.name.toLocaleLowerCase().includes(match.query) || (skill.display_name ?? "").toLocaleLowerCase().includes(match.query)).filter((skill) => !messageEditor.getContent().parts.some((part) => part.type === "skill" && part.skill.id === skill.id)).slice(0, 12);
+      : state.skills.filter((skill) => skill.name.toLocaleLowerCase().includes(match.query) || (skill.display_name ?? "").toLocaleLowerCase().includes(match.query)).filter((skill) => !messageEditor.getContent().parts.some((part) => part.type === "skill" && part.skill.id === skill.id));
     if (completionItems.length === 0) { closeCompletionMenu(); return; }
     completionIndex = Math.min(completionIndex, completionItems.length - 1);
     completionMenu.replaceChildren();

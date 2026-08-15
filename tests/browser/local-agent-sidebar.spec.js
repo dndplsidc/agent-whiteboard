@@ -315,7 +315,7 @@ test("keeps completed compaction in its original transcript position", async ({ 
 
 test("keeps the keyboard-selected skill visible while navigating the full list", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Skill navigation\n", creatorContext: "Skill navigation context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
-  localAgentSidebar.setSkills(Array.from({ length: 12 }, (_, index) => ({
+  localAgentSidebar.setSkills(Array.from({ length: 14 }, (_, index) => ({
     id: `${String(index).padStart(31, "A")}B`,
     name: `skill-${String(index + 1).padStart(2, "0")}`,
     display_name: `Skill ${String(index + 1).padStart(2, "0")}`,
@@ -327,9 +327,10 @@ test("keeps the keyboard-selected skill visible while navigating the full list",
   await composer.fill("$");
   const suggestions = page.getByRole("listbox", { name: "Composer suggestions" });
   await expect(suggestions).toBeVisible();
-  for (let index = 0; index < 11; index += 1) await composer.press("ArrowDown");
+  await expect(suggestions.locator(".agent-completion-option")).toHaveCount(14);
+  for (let index = 0; index < 13; index += 1) await composer.press("ArrowDown");
   const active = suggestions.locator('[aria-selected="true"]');
-  await expect(active).toContainText("Skill 12");
+  await expect(active).toContainText("Skill 14");
   const [suggestionsBox, activeBox, scrollTop] = await Promise.all([
     suggestions.boundingBox(),
     active.boundingBox(),
