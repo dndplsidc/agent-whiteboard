@@ -265,8 +265,9 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
 
   function renderRoot() {
     const model = catalogModel(current.catalog, current.settings.model);
+    const presentedModel = current.presentation?.model === current.settings.model ? current.presentation.model_display_name : null;
     const values = {
-      model: current.presentation?.model_display_name ?? model?.model_display_name ?? current.settings.model,
+      model: presentedModel ?? model?.model_display_name ?? current.settings.model,
       effort: formatEffort(current.settings.effort),
       speed: current.settings.speed === "fast" ? "Fast" : "Standard",
     };

@@ -3,13 +3,16 @@ const encoder = new TextEncoder();
 export const MESSAGE_LIMITS = Object.freeze({
   parts: 64,
   references: 16,
+  skills: 16,
   bytes: 64 * 1024,
 });
 
 export function cloneMessageContent(content) {
-  return { parts: (content?.parts ?? []).map((part) => part.type === "text"
-    ? { type: "text", text: part.text }
-    : { type: "reference", reference: structuredClone(part.reference) }) };
+  return { parts: (content?.parts ?? []).map((part) => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    if (part.type === "skill") return { type: "skill", skill: { ...part.skill } };
+    return { type: "reference", reference: structuredClone(part.reference) };
+  }) };
 }
 
 export function normalizeMessageContent(content) {
@@ -23,11 +26,16 @@ export function normalizeMessageContent(content) {
       else parts.push({ type: "text", text: candidate.text });
       continue;
     }
+    if (candidate?.type === "skill" && candidate.skill && typeof candidate.skill.id === "string" && typeof candidate.skill.name === "string") {
+      parts.push({ type: "skill", skill: { id: candidate.skill.id, name: candidate.skill.name } });
+      continue;
+    }
     if (candidate?.type !== "reference" || !candidate.reference) throw new TypeError("invalid reference part");
     parts.push({ type: "reference", reference: structuredClone(candidate.reference) });
   }
   const normalized = { parts };
-  if (parts.length > MESSAGE_LIMITS.parts || parts.filter(({ type }) => type === "reference").length > MESSAGE_LIMITS.references || messageContentBytes(normalized) > MESSAGE_LIMITS.bytes) {
+  const skills = parts.filter(({ type }) => type === "skill");
+  if (parts.length > MESSAGE_LIMITS.parts || parts.filter(({ type }) => type === "reference").length > MESSAGE_LIMITS.references || skills.length > MESSAGE_LIMITS.skills || new Set(skills.map(({ skill }) => skill.id)).size !== skills.length || new Set(skills.map(({ skill }) => skill.name)).size !== skills.length || messageContentBytes(normalized) > MESSAGE_LIMITS.bytes) {
     throw new RangeError("message content is too large");
   }
   return normalized;
@@ -37,13 +45,14 @@ export function messageContentBytes(content) {
   let bytes = 0;
   for (const part of content?.parts ?? []) {
     if (part.type === "text") bytes += encoder.encode(part.text).length;
+    else if (part.type === "skill") bytes += encoder.encode(part.skill.id + part.skill.name).length;
     else if (part.reference) bytes += encoder.encode(JSON.stringify(part.reference)).length;
   }
   return bytes;
 }
 
 export function messageContentText(content) {
-  return (content?.parts ?? []).map((part) => part.type === "text" ? part.text : `[${part.reference.label}]`).join("");
+  return (content?.parts ?? []).map((part) => part.type === "text" ? part.text : part.type === "skill" ? `$${part.skill.name}` : `[${part.reference.label}]`).join("");
 }
 
 function normalizedCaret(content, caret) {
@@ -51,7 +60,7 @@ function normalizedCaret(content, caret) {
   if (caret.part < 0) return { part: 0, offset: 0 };
   if (caret.part >= content.parts.length) return { part: content.parts.length, offset: 0 };
   const part = content.parts[caret.part];
-  if (part.type === "reference") return { part: caret.part + (caret.offset > 0 ? 1 : 0), offset: 0 };
+  if (part.type !== "text") return { part: caret.part + (caret.offset > 0 ? 1 : 0), offset: 0 };
   return { part: caret.part, offset: Math.min(Math.max(caret.offset, 0), [...part.text].length) };
 }
 
@@ -60,9 +69,8 @@ function splitScalars(value, offset) {
   return [scalars.slice(0, offset).join(""), scalars.slice(offset).join("")];
 }
 
-export function insertMessageReference(content, reference, caret) {
+function insertAtomicPart(content, atomicPart, caret) {
   const current = normalizeMessageContent(content);
-  if (!reference || typeof reference !== "object") throw new TypeError("invalid reference");
   const position = normalizedCaret(current, caret);
   const before = current.parts.slice(0, position.part);
   const after = current.parts.slice(position.part);
@@ -84,13 +92,30 @@ export function insertMessageReference(content, reference, caret) {
     trailingSpace = true;
   }
   const insertedIndex = before.length;
-  const next = normalizeMessageContent({ parts: [...before, { type: "reference", reference }, ...after] });
+  const next = normalizeMessageContent({ parts: [...before, atomicPart, ...after] });
   return { content: next, caret: { part: insertedIndex + 1, offset: trailingSpace ? 1 : 0 } };
+}
+
+export function insertMessageReference(content, reference, caret) {
+  if (!reference || typeof reference !== "object") throw new TypeError("invalid reference");
+  return insertAtomicPart(content, { type: "reference", reference }, caret);
 }
 
 function referenceLabel(reference) {
   const kind = reference.kind === "section" ? "Section" : reference.kind === "image" ? "Image" : "Selection";
   return `${kind}: ${reference.label}`;
+}
+
+function skillDisplayLabel(skill) {
+  const displayName = typeof skill?.display_name === "string" ? skill.display_name.trim() : "";
+  if (displayName) return displayName;
+  const nativeName = typeof skill?.name === "string" ? skill.name.split(":").at(-1) : "";
+  const readable = nativeName.replace(/[-_]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return readable ? `${readable[0].toLocaleUpperCase()}${readable.slice(1)}` : "Skill";
+}
+
+function skillTokenText(skill, displayName) {
+  return `Skill: ${displayName || skillDisplayLabel(skill)}`;
 }
 
 function referenceLabelElement(doc, label) {
@@ -108,6 +133,14 @@ export function renderMessageContent(doc, content, { interactive = true, onRefer
       text.className = "agent-message-text-part";
       text.textContent = part.text;
       fragment.append(text);
+      continue;
+    }
+    if (part.type === "skill") {
+      const token = doc.createElement("span");
+      token.className = "agent-message-skill";
+      token.dataset.skillId = part.skill.id;
+      token.textContent = skillTokenText(part.skill);
+      fragment.append(token);
       continue;
     }
     const token = doc.createElement(interactive && onReference ? "button" : "span");
@@ -136,13 +169,26 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
   let savedCaret = { part: model.parts.length, offset: 0 };
   let composing = false;
   const references = new Map();
+  const skills = new Map();
+  const skillDisplayNames = new Map();
 
   function render() {
     references.clear();
+    skills.clear();
     root.replaceChildren();
     for (const part of model.parts) {
       if (part.type === "text") {
         root.append(doc.createTextNode(part.text));
+      } else if (part.type === "skill") {
+        skills.set(part.skill.id, { ...part.skill });
+        const token = doc.createElement("span");
+        token.className = "agent-message-skill";
+        token.contentEditable = "false";
+        token.dataset.skillId = part.skill.id;
+        const displayName = skillDisplayNames.get(part.skill.id) || skillDisplayLabel(part.skill);
+        token.setAttribute("aria-label", `${skillTokenText(part.skill, displayName)}. Press Backspace or Delete to remove.`);
+        token.textContent = skillTokenText(part.skill, displayName);
+        root.append(token);
       } else {
         references.set(part.reference.id, structuredClone(part.reference));
         const token = doc.createElement("span");
@@ -169,7 +215,7 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
     for (const node of prefix.childNodes) {
       if (node.nodeType === 3) {
         offset = [...node.textContent].length;
-      } else if (node.nodeType === 1 && node.dataset?.referenceId) {
+      } else if (node.nodeType === 1 && (node.dataset?.referenceId || node.dataset?.skillId)) {
         part += 1;
         offset = 0;
       } else {
@@ -201,6 +247,8 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
     for (const node of root.childNodes) {
       if (node.nodeType === 1 && node.dataset?.referenceId && references.has(node.dataset.referenceId)) {
         parts.push({ type: "reference", reference: references.get(node.dataset.referenceId) });
+      } else if (node.nodeType === 1 && node.dataset?.skillId && skills.has(node.dataset.skillId)) {
+        parts.push({ type: "skill", skill: skills.get(node.dataset.skillId) });
       } else {
         const text = node.textContent ?? "";
         if (text) parts.push({ type: "text", text });
@@ -262,7 +310,7 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
     }
     const direction = event.key === "Backspace" ? -1 : event.key === "Delete" ? 1 : 0;
     const token = direction && adjacentToken(direction);
-    if (token?.nodeType === 1 && token.dataset?.referenceId) {
+    if (token?.nodeType === 1 && (token.dataset?.referenceId || token.dataset?.skillId)) {
       event.preventDefault();
       token.remove();
       readDOM();
@@ -286,6 +334,25 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
       restoreCaret();
       onChange(cloneMessageContent(model));
       return cloneMessageContent(model);
+    },
+    insertSkill(skill) {
+      if (!skill || typeof skill.id !== "string" || typeof skill.name !== "string" || model.parts.some((part) => part.type === "skill" && (part.skill.id === skill.id || part.skill.name === skill.name))) return cloneMessageContent(model);
+      skillDisplayNames.set(skill.id, skillDisplayLabel(skill));
+      const result = insertAtomicPart(model, { type: "skill", skill: { id: skill.id, name: skill.name } }, savedCaret);
+      model = result.content;
+      savedCaret = result.caret;
+      render();
+      restoreCaret();
+      onChange(cloneMessageContent(model));
+      return cloneMessageContent(model);
+    },
+    markUnavailableSkills(availableIDs) {
+      const available = new Set(availableIDs);
+      for (const token of root.querySelectorAll(".agent-message-skill")) {
+        const unavailable = !available.has(token.dataset.skillId);
+        token.classList.toggle("is-unavailable", unavailable);
+        token.setAttribute("aria-invalid", String(unavailable));
+      }
     },
     focus() { restoreCaret(); },
     destroy() { doc.removeEventListener("selectionchange", onSelectionChange); root.remove(); },

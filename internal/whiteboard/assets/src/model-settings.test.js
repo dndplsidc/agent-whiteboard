@@ -137,6 +137,7 @@ describe("Codex settings menu", () => {
     expect(control.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Fast");
     control.button.click();
     expect([...control.menu.querySelectorAll('[role="menuitem"]')].map((item) => item.dataset.settingsSection)).toEqual(["model", "effort", "speed"]);
+    expect(control.menu.querySelector('[data-settings-section="model"] small')?.textContent).toBe("5.6 Sol");
 
     const modelRow = control.menu.querySelector('[data-settings-section="model"]');
     modelRow.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
@@ -150,6 +151,18 @@ describe("Codex settings menu", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(control.menu.hidden).toBe(true);
     expect(document.activeElement).toBe(control.button);
+    control.destroy();
+  });
+
+  test("uses the selected draft model in both the pill and root menu when effective presentation is stale", () => {
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings: fastSol, presentation: { ...standardLuna, model_display_name: "GPT-5.5", selectable: true }, catalog });
+
+    expect(control.button.getAttribute("aria-label")).toContain("5.6 Sol");
+    control.button.click();
+    expect(control.menu.querySelector('[data-settings-section="model"] small')?.textContent).toBe("5.6 Sol");
+    expect(control.menu.textContent).not.toContain("GPT-5.5");
     control.destroy();
   });
 

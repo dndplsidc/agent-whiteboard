@@ -131,7 +131,7 @@ func snapshotEvent() protocol.Event {
 		ConversationID: conversation,
 		Type:           protocol.EventSnapshot,
 		Timestamp:      time.Unix(2, 0).UTC(),
-		Payload:        protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}},
+		Payload:        protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}},
 	}
 }
 

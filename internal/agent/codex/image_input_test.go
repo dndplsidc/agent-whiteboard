@@ -22,7 +22,7 @@ func TestBuildTurnInputUsesTextThenOrderedLocalImages(t *testing.T) {
 	require.NoError(t, os.WriteFile(first, []byte("first"), 0o600))
 	require.NoError(t, os.WriteFile(second, []byte("second"), 0o600))
 
-	input, err := buildTurnInput(workspace, []byte("envelope"), []provider.ImageInput{
+	input, err := buildTurnInput(workspace, []byte("envelope"), nil, []provider.ImageInput{
 		{ID: strings.Repeat("A", 32), Name: "first.png", MediaType: "image/png", Bytes: 5, Path: first},
 		{ID: strings.Repeat("B", 32), Name: "second.webp", MediaType: "image/webp", Bytes: 6, Path: second},
 	})
@@ -42,7 +42,7 @@ func TestBuildTurnInputRejectsPathsOutsideWorkspaceAndSymlinks(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, insideLink))
 
 	for _, path := range []string{outside, insideLink} {
-		_, err := buildTurnInput(workspace, []byte("envelope"), []provider.ImageInput{{ID: strings.Repeat("A", 32), Name: "image.png", MediaType: "image/png", Bytes: 5, Path: path}})
+		_, err := buildTurnInput(workspace, []byte("envelope"), nil, []provider.ImageInput{{ID: strings.Repeat("A", 32), Name: "image.png", MediaType: "image/png", Bytes: 5, Path: path}})
 		require.Error(t, err)
 	}
 }

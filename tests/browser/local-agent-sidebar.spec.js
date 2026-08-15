@@ -20,7 +20,8 @@ async function openSidebarPage({ context, page, fixture, markdown, creatorContex
   fixture.resetBrokerRequests();
   fixture.resetBrokerState();
   await page.goto(resource.url);
-  await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
+  const expectedProvider = preferences["agent-whiteboard-agent-provider"] === "codex" ? "Codex" : "Pi";
+  await expect(page.locator(".agent-live-status")).toHaveText(`${expectedProvider} ready`);
   return resource;
 }
 
@@ -61,8 +62,12 @@ test("keeps page context behind explicit consent and uses the HTTP fallback", as
   await expect(page.locator(".agent-provider-label")).toBeHidden();
   await expect(page.locator(".agent-consent")).toContainText("sends no page content");
   await expect(page.locator(".agent-consent-list")).toContainText("Complete Markdown and creator notes");
-  await expect(page.locator(".agent-context-disclosure")).toContainText("Markdown + creator notes");
-  await expect(page.locator(".agent-context-disclosure")).not.toContainText(/shared|uncertain/iu);
+  const contextDisclosure = page.locator(".agent-context-disclosure");
+  await expect(contextDisclosure).toContainText("Markdown + creator notes");
+  await expect(contextDisclosure).not.toContainText(/shared|uncertain/iu);
+  await expect(contextDisclosure.locator(".agent-context-disclosure-icon svg")).toHaveCount(1);
+  await expect(contextDisclosure.locator(".agent-context-disclosure-chevron svg")).toHaveCount(1);
+  await expect(contextDisclosure.locator(":scope > div > span")).toHaveCSS("font-size", "10.56px");
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
 
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
@@ -185,6 +190,212 @@ test("adds a rendered raster as a private inline image reference", async ({ cont
   const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
   expect(submit.payload.images).toBeUndefined();
   expect(submit.payload.content.parts[0].reference).toMatchObject({ kind: "image", visual: { name: "image-1.png", alt: "Architecture" } });
+});
+
+test("keeps header pointer focus borderless while retaining keyboard focus", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Header focus\n", creatorContext: "Focus context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  const provider = page.getByLabel("Conversation provider");
+  const providerStyle = await provider.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { appearance: style.appearance, backgroundImage: style.backgroundImage, paddingRight: Number.parseFloat(style.paddingRight) };
+  });
+  expect(providerStyle.appearance).toBe("none");
+  expect(providerStyle.backgroundImage).not.toBe("none");
+  expect(providerStyle.paddingRight).toBeGreaterThanOrEqual(26);
+  await provider.click();
+  expect(await provider.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+  await page.getByRole("button", { name: "Close local agent", exact: true }).focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(provider).toBeFocused();
+  expect(await provider.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
+});
+
+test("shows connection recheck success and an explicit wrong-port failure in settings", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Connection feedback\n", creatorContext: "Connection context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await expect(page.locator(".agent-setup-icon svg")).toBeVisible();
+  const connectBox = await page.getByRole("button", { name: "Connect to Codex", exact: true }).boundingBox();
+  expect(connectBox).not.toBeNull();
+  expect(connectBox.height).toBeLessThanOrEqual(34);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Connection settings" }).click();
+  const check = page.locator(".agent-connection-retry");
+  const status = page.locator(".agent-connection-status-text");
+  await check.click();
+  await expect(status).toHaveText("Broker available");
+  await expect(page.locator(".agent-guidance")).toContainText("local broker is available");
+  const portInput = page.getByLabel("Local agent broker port");
+  await portInput.click();
+  expect(await portInput.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+  await portInput.fill("1");
+  await portInput.press("Tab");
+  await expect(status).toHaveText("No broker on port 1");
+  await expect(check).toHaveText("Try again");
+  await check.click();
+  expect(await check.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
+  await expect(page.locator(".agent-guidance")).toContainText("No compatible broker responded on port 1");
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  await expect(page.locator(".agent-setup-icon svg")).toBeVisible();
+  for (const label of ["Check again", "Connection settings"]) {
+    const box = await page.getByRole("button", { name: label, exact: true }).boundingBox();
+    expect(box).not.toBeNull();
+    expect(box.height).toBeLessThanOrEqual(34);
+  }
+});
+
+test("invokes Codex skills and compacts without queueing a busy draft", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex skills and compact\n", creatorContext: "Codex feature context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  await connectSidebar(page, "codex");
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+
+  await composer.fill("$");
+  const suggestions = page.getByRole("listbox", { name: "Composer suggestions" });
+  await expect(suggestions).toContainText("Review helper");
+  await expect(suggestions).toContainText("Personal helper with an intentionally long name");
+  await expect(suggestions.getByText("User", { exact: true })).toBeVisible();
+  const longSkill = suggestions.locator(".agent-completion-option").filter({ hasText: "Personal helper" });
+  const longSkillBox = await longSkill.boundingBox();
+  const longSkillScrollWidth = await longSkill.evaluate((element) => element.scrollWidth);
+  expect(longSkillBox).not.toBeNull();
+  expect(longSkillScrollWidth).toBeLessThanOrEqual(Math.ceil(longSkillBox.width));
+  const suggestionsBox = await suggestions.boundingBox();
+  const composerBox = await page.locator(".agent-composer").boundingBox();
+  expect(suggestionsBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(suggestionsBox.y + suggestionsBox.height).toBeLessThanOrEqual(composerBox.y);
+  await composer.fill("$rev");
+  await expect(suggestions).not.toContainText("Personal helper");
+  await composer.press("Enter");
+  const skillPill = composer.locator(".agent-message-skill");
+  await expect(skillPill).toHaveText("Skill: Review helper");
+  await expect(skillPill).toHaveCSS("margin-left", "0px");
+  await expect(skillPill).toHaveCSS("margin-right", "0px");
+  await expect(composer).not.toContainText("$");
+  await composer.press("End");
+  await composer.pressSequentially(" check this page");
+  await composer.press("Enter");
+  await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "submit")).toBe(true);
+  const skillSubmit = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit");
+  expect(skillSubmit.payload.content.parts.some((part) => part.type === "skill" && part.skill.name === "review-helper")).toBe(true);
+  expect(JSON.stringify(skillSubmit)).not.toMatch(/\/Users\/|SKILL\.md/u);
+
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+  await composer.fill("/co");
+  await expect(suggestions).toContainText("/compact");
+  await composer.fill("/nope");
+  await expect(suggestions).toBeHidden();
+  await composer.fill("/compact");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-compaction-row")).toContainText("Compacting context…");
+  await expect(page.locator(".agent-compaction-row .agent-status-notice-icon svg")).toBeVisible();
+  expect(parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "compact")).toBe(true);
+  await composer.fill("preserved next draft");
+  await composer.press("Enter");
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "submit")).toHaveLength(1);
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(page.locator(".agent-compaction-row")).toContainText("Compaction stopped");
+  await expect(composer).toHaveText("preserved next draft");
+  expect(parsedCommands(localAgentSidebar.brokerRequests).at(-1)).toMatchObject({ type: "interrupt" });
+});
+
+test("keeps Codex command activity at its native transcript position", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Stable skill stream\n", creatorContext: "Stable stream context.\n" });
+  localAgentSidebar.setSkills([{ id: "W7W7W7W7W7W7W7W7W7W7W7W7W7W7W7W7", name: "devflow", display_name: "devflow", description: "Software change workflow.", scope: "user" }]);
+  localAgentSidebar.setPhaseResponses(true, "codex");
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("codex");
+  await connectSidebar(page, "codex");
+
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+  await composer.fill("$dev");
+  await composer.press("Enter");
+  await composer.press("End");
+  await composer.pressSequentially(" tell me about this skill");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-live-status")).toHaveText("Responding");
+  const turnID = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit").payload.turn_id;
+  localAgentSidebar.emitAssistantMessage("codex", {
+    turn_id: turnID,
+    message_id: "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1t",
+    text: "I will inspect the skill.",
+    created_at: "2026-07-27T03:04:05Z",
+  });
+  localAgentSidebar.emitToolActivity("codex", {
+    turn_id: turnID,
+    kind: "command",
+    status: "completed",
+    title: "Command",
+    summary: "Loaded the devflow skill.",
+    detail: "Read SKILL.md",
+  });
+  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
+
+  const streamedItems = page.locator(".agent-timeline > .agent-tool-activity, .agent-timeline > .agent-message-assistant");
+  await expect(streamedItems).toHaveCount(3);
+  await expect(streamedItems.nth(0)).toHaveClass(/agent-message-assistant/u);
+  await expect(streamedItems.nth(1)).toHaveClass(/agent-tool-activity/u);
+  await expect(streamedItems.nth(2)).toHaveClass(/agent-message-assistant/u);
+
+  localAgentSidebar.releaseResponsePhase("later_delta", "codex");
+  await expect(streamedItems.nth(1)).toHaveClass(/agent-tool-activity/u);
+  localAgentSidebar.releaseResponsePhase("completion", "codex");
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+  await expect(streamedItems.nth(0)).toHaveClass(/agent-message-assistant/u);
+  await expect(streamedItems.nth(1)).toHaveClass(/agent-tool-activity/u);
+  await expect(streamedItems.nth(2)).toHaveClass(/agent-message-assistant/u);
+});
+
+test("keeps completed compaction in its original transcript position", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Compaction order\n", creatorContext: "Compaction order context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  await connectSidebar(page, "codex");
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+  await composer.fill("/compact");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-compaction-row")).toContainText("Compacting context…");
+  localAgentSidebar.completeCompact("completed", "codex");
+  await expect(page.locator(".agent-compaction-row")).toContainText("Context compacted");
+  await composer.fill("What is this page about?");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-message-assistant")).toContainText(/fixture reply/iu);
+  const order = await page.locator(".agent-timeline").evaluate((timeline) => [...timeline.children].map((element) => {
+    if (element.classList.contains("agent-compaction-row")) return "compaction";
+    if (element.classList.contains("agent-message-user")) return "user";
+    if (element.classList.contains("agent-message-assistant")) return "assistant";
+    return "other";
+  }));
+  expect(order.indexOf("compaction")).toBeLessThan(order.indexOf("user"));
+  expect(order.indexOf("compaction")).toBeLessThan(order.indexOf("assistant"));
+});
+
+test("keeps the keyboard-selected skill visible while navigating the full list", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Skill navigation\n", creatorContext: "Skill navigation context.\n", preferences: { "agent-whiteboard-agent-provider": "codex" } });
+  localAgentSidebar.setSkills(Array.from({ length: 14 }, (_, index) => ({
+    id: `${String(index).padStart(31, "A")}B`,
+    name: `skill-${String(index + 1).padStart(2, "0")}`,
+    display_name: `Skill ${String(index + 1).padStart(2, "0")}`,
+    description: `Description for skill ${index + 1}`,
+    scope: "user",
+  })));
+  await connectSidebar(page, "codex");
+  const composer = page.getByLabel("Message Codex about this whiteboard");
+  await composer.fill("$");
+  const suggestions = page.getByRole("listbox", { name: "Composer suggestions" });
+  await expect(suggestions).toBeVisible();
+  await expect(suggestions.locator(".agent-completion-option")).toHaveCount(14);
+  for (let index = 0; index < 13; index += 1) await composer.press("ArrowDown");
+  const active = suggestions.locator('[aria-selected="true"]');
+  await expect(active).toContainText("Skill 14");
+  const [suggestionsBox, activeBox, scrollTop] = await Promise.all([
+    suggestions.boundingBox(),
+    active.boundingBox(),
+    suggestions.evaluate((element) => element.scrollTop),
+  ]);
+  expect(suggestionsBox).not.toBeNull();
+  expect(activeBox).not.toBeNull();
+  expect(activeBox.y).toBeGreaterThanOrEqual(suggestionsBox.y);
+  expect(activeBox.y + activeBox.height).toBeLessThanOrEqual(suggestionsBox.y + suggestionsBox.height + 1);
+  expect(scrollTop).toBeGreaterThan(0);
 });
 
 test("uses the versioned WebSocket for connect and subsequent commands", async ({
@@ -392,7 +603,7 @@ test("aligns the mobile viewer controls on one inset toolbar line", async ({
   expect(Math.abs(themeInset - agentInset)).toBeLessThanOrEqual(1);
 });
 
-test("keeps queue submission and Stop available with Enter and Shift+Enter", async ({
+test("keeps queue submission and keyboard Stop available with Enter and Shift+Enter", async ({
   context,
   page,
   localAgentSidebar,
@@ -407,7 +618,10 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   await expect(composer).toHaveText("Line one\n");
   await composer.fill("Keep this turn active.");
   await composer.press("Enter");
-  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  const stop = page.getByRole("button", { name: "Stop", exact: true });
+  await expect(stop).toBeEnabled();
+  await expect(stop.locator(".agent-stop-icon")).toBeVisible();
+  await expect(stop).toHaveText("");
   await composer.fill("Queued follow-up.");
   await composer.press("Enter");
   const queued = page.getByLabel("Edit queued message");
@@ -417,12 +631,19 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   await expect(page.getByLabel("Edit queued message")).toHaveText("Edited follow-up.");
   await page.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(page.getByLabel("Edit queued message")).toHaveCount(0);
-  await page.getByRole("button", { name: "Stop", exact: true }).click();
-  await expect(page.locator(".agent-activity-interruption")).toContainText("not replayed automatically");
+  await composer.focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".agent-drawer")).toBeVisible();
+  const interrupted = page.locator(".agent-activity-interruption");
+  await expect(interrupted).toContainText("Response stopped");
+  await expect(interrupted).toContainText("not replayed automatically");
+  await expect(interrupted.locator(".agent-status-notice-icon svg")).toBeVisible();
+  expect(await interrupted.evaluate((element) => element.tagName)).toBe("DIV");
 
   const types = parsedCommands(localAgentSidebar.brokerRequests).map((command) => command.type);
   expect(types).toEqual(expect.arrayContaining(["submit", "queue_edit", "queue_remove", "interrupt"]));
   expect(types.filter((type) => type === "submit")).toHaveLength(2);
+  expect(types.filter((type) => type === "interrupt")).toHaveLength(1);
 });
 
 test("picks and pastes multiple images with previews, retry, queue, and styled focus", async ({
@@ -566,8 +787,9 @@ test("shows authoritative loading, progressive streaming, alternate views, and s
   localAgentSidebar.emitBlocked("permission");
   await expect(page.locator(".agent-activity-visible_summary summary")).toHaveText("Work summary");
   await expect(page.locator(".agent-activity-visible_summary")).not.toHaveAttribute("open", "");
-  await expect(page.locator(".agent-activity-blocked summary")).toHaveText(["Tool request blocked", "Permission request blocked"]);
+  await expect(page.locator(".agent-activity-blocked strong")).toHaveText(["Tool request blocked", "Permission request blocked"]);
   await expect(page.locator(".agent-activity-blocked").first()).toContainText("content-only policy");
+  await expect(page.locator(".agent-activity-blocked").first()).toHaveAttribute("data-tone", "warning");
   await expect(page.locator(".agent-timeline")).not.toContainText("thinking_delta");
 
   localAgentSidebar.releaseResponsePhase("completion");
@@ -723,6 +945,19 @@ test("uses accessible Codex model controls and captures accepted exact settings"
   await pill.press("Enter");
   const menu = page.locator(".agent-model-menu");
   await expect(menu).toBeVisible();
+  const [pillBox, menuBox, drawerBox] = await Promise.all([
+    pill.boundingBox(),
+    menu.boundingBox(),
+    page.locator(".agent-drawer").boundingBox(),
+  ]);
+  expect(pillBox).not.toBeNull();
+  expect(menuBox).not.toBeNull();
+  expect(drawerBox).not.toBeNull();
+  const pillCenter = pillBox.x + pillBox.width / 2;
+  expect(pillCenter).toBeGreaterThanOrEqual(menuBox.x);
+  expect(pillCenter).toBeLessThanOrEqual(menuBox.x + menuBox.width);
+  expect(menuBox.x).toBeGreaterThanOrEqual(drawerBox.x);
+  expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(drawerBox.x + drawerBox.width + 1);
   await expect(menu.locator('[data-settings-section="model"]')).toBeFocused();
   await menu.locator('[data-settings-section="model"]').press("ArrowRight");
   const luna = menu.locator('[data-settings-value="gpt-5.6-luna"]');
@@ -749,7 +984,7 @@ test("uses accessible Codex model controls and captures accepted exact settings"
   await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key)), codexSettingsKey)).toEqual({ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" });
 });
 
-test("keeps queued Codex settings immutable and preserves a rejected draft", async ({ context, page, localAgentSidebar }) => {
+test("preserves a busy Codex draft without queue admission", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex queue\n", creatorContext: "Queue settings context.\n" });
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
   await page.getByLabel("Conversation provider").selectOption("codex");
@@ -773,47 +1008,131 @@ test("keeps queued Codex settings immutable and preserves a rejected draft", asy
   await composer.fill("Queued xhigh turn.");
   await composer.press("Enter");
 
-  await expect(page.locator(".agent-queue-settings")).toHaveText([
-    "5.6 Sol · High · Standard",
-    "5.6 Sol · Extra high · Standard",
-  ]);
+  await expect(page.locator(".agent-queue-settings")).toHaveCount(0);
   const submits = parsedCommands(localAgentSidebar.brokerRequests).filter((command) => command.type === "submit");
-  expect(submits.map(({ payload }) => payload.settings)).toEqual([
-    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
-    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
-    { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" },
-  ]);
-
-  localAgentSidebar.preparePendingResponse("codex");
-  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
-  localAgentSidebar.releaseResponsePhase("later_delta", "codex");
-  localAgentSidebar.releaseResponsePhase("completion", "codex");
-  await expect.poll(() => localAgentSidebar.acceptedSettings().map(({ settings }) => settings)).toEqual([
-    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
-    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
-  ]);
-  await expect(page.locator(".agent-queue-settings")).toHaveText(["5.6 Sol · Extra high · Standard"]);
-  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
-  localAgentSidebar.releaseResponsePhase("later_delta", "codex");
-  localAgentSidebar.releaseResponsePhase("completion", "codex");
-  await expect.poll(() => localAgentSidebar.acceptedSettings().map(({ settings }) => settings)).toEqual([
-    { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
-    { model: "gpt-5.6-sol", effort: "high", speed: "standard" },
-    { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" },
-  ]);
-
-  localAgentSidebar.rejectNextSettings();
-  await composer.fill("Keep this rejected draft.");
-  await composer.press("Enter");
-  await expect(page.locator(".agent-activity-error")).toContainText("The selected model settings are no longer available.");
-  await expect(composer).toHaveText("Keep this rejected draft.");
+  expect(submits).toHaveLength(1);
+  await expect(composer).toHaveText("Queued xhigh turn.");
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(composer).toHaveText("Queued xhigh turn.");
   await expect(pill).toBeEnabled();
   await expect(pill).toHaveAccessibleName("Model 5.6 Sol, effort Extra high, speed Standard");
   if (await menu.isVisible()) await menu.press("Escape");
-  await pill.click();
-  await menu.locator('[data-settings-section="model"]').click();
-  await expect(menu.locator('[data-settings-value="gpt-5.6-nova"]')).toBeVisible();
-  await expect(menu.locator('[data-settings-value="gpt-5.6-nova"]')).toContainText("Choose a supported effort first.");
+});
+
+test("renders archive loading, populated, and empty states without false emptiness", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Archive states\n", creatorContext: "Archive context.\n" });
+  await connectSidebar(page);
+  localAgentSidebar.setArchiveDelay(true);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await expect(page.getByRole("status")).toContainText("Loading archived conversations");
+  await expect(page.getByText("No archived conversations")).toHaveCount(0);
+  localAgentSidebar.releaseArchiveList();
+  const archive = page.locator(".agent-archive-card");
+  await expect(archive).toContainText("Pi · fixture-model");
+  await expect(archive).toContainText("Updated Jul 26, 2026");
+  const [restoreBox, deleteBox] = await Promise.all([
+    archive.getByRole("button", { name: "Restore" }).boundingBox(),
+    archive.getByRole("button", { name: "Delete" }).boundingBox(),
+  ]);
+  expect(restoreBox).not.toBeNull();
+  expect(deleteBox).not.toBeNull();
+  expect(restoreBox.height).toBeLessThanOrEqual(34);
+  expect(deleteBox.height).toBeLessThanOrEqual(34);
+
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  localAgentSidebar.setArchiveMode("empty");
+  localAgentSidebar.setArchiveDelay(false);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await expect(page.getByText("No archived conversations")).toBeVisible();
+  await expect(page.locator(".agent-archives")).toContainText("Conversations you replace or restore will appear here.");
+
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  localAgentSidebar.setArchiveMode("paginated");
+  localAgentSidebar.setArchiveDelay(false);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await expect(page.locator(".agent-archive-card")).toHaveCount(1);
+  localAgentSidebar.setArchiveDelay(true);
+  await page.getByRole("button", { name: "Load more archives" }).click();
+  await expect(page.locator(".agent-archive-card")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Loading…" })).toBeDisabled();
+  localAgentSidebar.releaseArchiveList();
+  await expect(page.locator(".agent-archive-card")).toHaveCount(2);
+});
+
+test("uses styled confirmations for New, Restore, and Delete with exact commands", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Confirmations\n", creatorContext: "Confirmation context.\n" });
+  await connectSidebar(page);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "New conversation" }).click();
+  let dialog = page.getByRole("dialog", { name: "Start a new conversation?" });
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await dialog.press("Escape");
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
+
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  const archive = page.locator(".agent-archive-card");
+  await archive.getByRole("button", { name: "Restore" }).click();
+  dialog = page.getByRole("dialog", { name: "Restore this conversation?" });
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "archive_restore")).toHaveLength(0);
+  await archive.getByRole("button", { name: "Restore" }).click();
+  await page.getByRole("dialog", { name: "Restore this conversation?" }).getByRole("button", { name: "Restore" }).click();
+  await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "archive_restore")).toHaveLength(1);
+
+  await page.getByRole("button", { name: "Back to conversation" }).click();
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "Archives" }).click();
+  await page.locator(".agent-archive-card").getByRole("button", { name: "Delete" }).click();
+  dialog = page.getByRole("dialog", { name: "Delete this archive permanently?" });
+  await expect(dialog).toContainText("cannot be recovered");
+  await dialog.getByRole("button", { name: "Delete" }).click();
+  await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "archive_delete")).toHaveLength(1);
+});
+
+test("keeps confirmation focus exclusive in the docked drawer", async ({ context, page, localAgentSidebar }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Docked confirmation\n", creatorContext: "Focus context.\n" });
+  await connectSidebar(page);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "New conversation" }).click();
+  const dialog = page.getByRole("dialog", { name: "Start a new conversation?" });
+  const cancel = dialog.getByRole("button", { name: "Cancel" });
+  const confirm = dialog.getByRole("button", { name: "Start new" });
+  await expect(cancel).toBeFocused();
+  await cancel.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await confirm.press("Tab");
+  await expect(cancel).toBeFocused();
+  await expect(page.locator(".agent-drawer > [inert]")).not.toHaveCount(0);
+  await cancel.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".agent-drawer")).toHaveClass(/is-open/u);
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
+});
+
+test("keeps confirmation focus exclusive in the narrow modal drawer", async ({ context, page, localAgentSidebar }) => {
+  await page.setViewportSize({ width: 390, height: 720 });
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Narrow confirmation\n", creatorContext: "Focus context.\n" });
+  await connectSidebar(page);
+  await page.getByRole("button", { name: "Open Page agent menu" }).click();
+  await page.getByRole("menuitem", { name: "New conversation" }).click();
+  const dialog = page.getByRole("dialog", { name: "Start a new conversation?" });
+  const cancel = dialog.getByRole("button", { name: "Cancel" });
+  const confirm = dialog.getByRole("button", { name: "Start new" });
+  await expect(cancel).toBeFocused();
+  await cancel.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await confirm.press("Tab");
+  await expect(cancel).toBeFocused();
+  await expect(page.locator(".agent-drawer > [inert]")).not.toHaveCount(0);
+  await cancel.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".agent-drawer")).toHaveClass(/is-open/u);
+  expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
 });
 
 test("uses the visible Codex pill for New without updating accepted preference", async ({ context, page, localAgentSidebar }) => {
@@ -830,8 +1149,10 @@ test("uses the visible Codex pill for New without updating accepted preference",
   await menu.locator('[data-settings-value="standard"]').click();
   await menu.press("Escape");
   await page.getByRole("button", { name: "Open Page agent menu" }).click();
-  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("menuitem", { name: "New conversation" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Start a new conversation?" });
+  await expect(confirmation).toContainText("remain available in Archives");
+  await confirmation.getByRole("button", { name: "Start new" }).click();
   await expect.poll(() => localAgentSidebar.createdSettings()).toEqual([{ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" }]);
   await expect(page.locator(".agent-live-status")).toHaveText("Connected", { timeout: 5_000 });
   await expect(page.locator(".agent-provider-label")).toContainText("5.6 Sol");

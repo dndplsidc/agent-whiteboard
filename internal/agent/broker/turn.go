@@ -35,25 +35,39 @@ type turnWorkerKind uint8
 const (
 	turnWorkerSubmit turnWorkerKind = iota
 	turnWorkerInterrupt
+	turnWorkerCompactStart
+	turnWorkerCompactInterrupt
 )
 
 type deferredInterrupt struct {
 	commandID string
 	clientID  string
-	turnID    string
+	workID    string
+	kind      protocol.ActiveWorkKind
 }
 
 type turnWorkerResult struct {
-	generation uint64
-	kind       turnWorkerKind
-	turnID     string
-	accepted   provider.AcceptedTurn
-	commandID  string
-	clientID   string
-	err        error
+	generation      uint64
+	kind            turnWorkerKind
+	turnID          string
+	accepted        provider.AcceptedTurn
+	acceptedCompact provider.AcceptedCompact
+	workID          string
+	commandID       string
+	clientID        string
+	err             error
 }
 
 func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struct{}, turnResults chan<- turnWorkerResult, command protocol.Command, payload protocol.SubmitPayload) (bool, protocol.BrowserErrorCode) {
+	if code := actor.validateSelectedSkills(payload.Content); code != "" {
+		return false, code
+	}
+	if actor.identity.Provider == provider.NameCodex && (actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil) {
+		return false, protocol.ErrorActiveTurnConflict
+	}
+	if actor.compact != nil {
+		return false, protocol.ErrorInvalidState
+	}
 	if actor.active != nil && (actor.active.request.TurnID == payload.TurnID || actor.active.request.MessageID == payload.MessageID) {
 		return false, protocol.ErrorInvalidState
 	}
@@ -82,7 +96,7 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 	if code != "" {
 		return false, releaseOnFailure(code)
 	}
-	if actor.active == nil && actor.queue.Empty() {
+	if actor.active == nil && actor.compact == nil && actor.queue.Empty() {
 		if code := actor.prepareTurn(request); code != "" {
 			zeroProviderContext(request.Context)
 			return false, releaseOnFailure(code)
@@ -241,26 +255,41 @@ func (actor *conversation) startSubmitWorker(results chan<- turnWorkerResult, re
 	}()
 }
 
-func (actor *conversation) commandInterrupt(results chan<- turnWorkerResult, command protocol.Command, payload protocol.TurnReferencePayload) (bool, protocol.BrowserErrorCode) {
-	if actor.active == nil || actor.active.phase != turnRunning || actor.active.accepted == nil || actor.active.request.TurnID != payload.TurnID || actor.deferredInterrupt != nil {
+func (actor *conversation) commandInterrupt(attachments map[*clientAttachment]struct{}, results chan<- turnWorkerResult, command protocol.Command, payload protocol.WorkReferencePayload) (bool, protocol.BrowserErrorCode) {
+	if actor.deferredInterrupt != nil {
 		return false, protocol.ErrorInvalidState
 	}
-	if actor.workerSettled != nil {
-		actor.deferredInterrupt = &deferredInterrupt{commandID: command.CommandID, clientID: command.ClientID, turnID: payload.TurnID}
+	if actor.active != nil && actor.active.phase == turnRunning && actor.active.accepted != nil && actor.active.request.TurnID == payload.WorkID {
+		actor.active.phase = turnInterrupting
+		actor.publishShared(attachments, actor.lifecyclePayload())
+		if actor.workerSettled != nil {
+			actor.deferredInterrupt = &deferredInterrupt{commandID: command.CommandID, clientID: command.ClientID, workID: payload.WorkID, kind: protocol.ActiveWorkTurn}
+			return true, ""
+		}
+		actor.startTurnInterruptWorker(results, command.CommandID, command.ClientID)
 		return true, ""
 	}
-	actor.startInterruptWorker(results, command.CommandID, command.ClientID)
-	return true, ""
+	if actor.compact != nil && actor.compact.phase == compactRunning && actor.compact.accepted != nil && actor.compact.request.WorkID == payload.WorkID {
+		if actor.workerSettled != nil {
+			return false, protocol.ErrorInvalidState
+		}
+		actor.compact.phase = compactStopping
+		actor.publishShared(attachments, actor.lifecyclePayload())
+		actor.publishShared(attachments, protocol.CompactionPayload{WorkID: payload.WorkID, Status: protocol.CompactionStopping})
+		actor.startCompactInterruptWorker(results, command.CommandID, command.ClientID)
+		return true, ""
+	}
+	return false, protocol.ErrorInvalidState
 }
 
-func (actor *conversation) startInterruptWorker(results chan<- turnWorkerResult, commandID, clientID string) {
+func (actor *conversation) startTurnInterruptWorker(results chan<- turnWorkerResult, commandID, clientID string) {
 	accepted := *actor.active.accepted
 	actor.active.phase = turnInterrupting
 	actor.beginProviderWorker(providerWorkerInterrupt, commandID, clientID)
 	generation := actor.generation
 	go func() {
 		err := actor.session.session.Interrupt(actor.lifecycleCtx, accepted)
-		results <- turnWorkerResult{generation: generation, kind: turnWorkerInterrupt, turnID: accepted.TurnID, commandID: commandID, clientID: clientID, err: err}
+		results <- turnWorkerResult{generation: generation, kind: turnWorkerInterrupt, turnID: accepted.TurnID, workID: accepted.TurnID, commandID: commandID, clientID: clientID, err: err}
 	}()
 }
 
@@ -270,6 +299,10 @@ func (actor *conversation) handleTurnResult(attachments map[*clientAttachment]st
 		defer close(settled)
 	}
 	if result.generation != actor.generation || resolved {
+		return
+	}
+	if result.kind == turnWorkerCompactStart || result.kind == turnWorkerCompactInterrupt {
+		actor.handleCompactWorkerResult(attachments, results, result)
 		return
 	}
 	if actor.active == nil || actor.active.request.TurnID != result.turnID {
@@ -315,7 +348,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 			actor.refreshCatalog(attachments)
 		}
 		actor.publishBrowserError(attachments, code)
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 		if active.originCommandID != "" {
 			actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, code)
 		}
@@ -329,7 +362,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 			actor.contextState = protocol.ContextUnavailable
 			actor.lifecycle = protocol.LifecycleUnavailable
 			actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
-			actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+			actor.publishShared(attachments, actor.lifecyclePayload())
 			if active.originCommandID != "" {
 				actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, protocol.ErrorStateRepairFailed)
 			}
@@ -345,7 +378,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 			actor.contextState = protocol.ContextUnavailable
 			actor.lifecycle = protocol.LifecycleUnavailable
 			actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
-			actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+			actor.publishShared(attachments, actor.lifecyclePayload())
 			if active.originCommandID != "" {
 				actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, protocol.ErrorStateRepairFailed)
 			}
@@ -358,7 +391,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 	}
 	actor.lifecycle = protocol.LifecycleResponding
 	turnID := active.request.TurnID
-	actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle, TurnID: &turnID})
+	actor.publishShared(attachments, actor.lifecyclePayload())
 	if actor.identity.Provider == provider.NameCodex {
 		actor.publishShared(attachments, protocol.SettingsPayload{
 			SettingsState: protocol.SettingsVerified, EffectiveSettings: actor.presentedEffectiveSettings(accepted.Settings, accepted.Presentation),
@@ -376,6 +409,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 func (actor *conversation) handleInterruptResult(attachments map[*clientAttachment]struct{}, results chan<- turnWorkerResult, result turnWorkerResult) {
 	if result.err != nil {
 		actor.active.phase = turnRunning
+		actor.publishShared(attachments, actor.lifecyclePayload())
 		code := MapError(result.err).Code()
 		actor.completePendingCommand(attachments, result.commandID, result.clientID, code)
 		actor.flushPendingProviderEvents(attachments, results)
@@ -475,24 +509,24 @@ func (actor *conversation) finishActive(attachments map[*clientAttachment]struct
 	actor.active = nil
 	if actor.dispatchBlocked {
 		actor.lifecycle = protocol.LifecycleUnavailable
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 		return
 	}
 	if actor.mapping.Current != nil && actor.mapping.Current.PreparedCommit != nil {
 		actor.lifecycle = protocol.LifecycleUnavailable
 		actor.contextState = protocol.ContextUnavailable
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 		return
 	}
 	if actor.stopping || actor.queue.Empty() {
 		actor.lifecycle = terminalLifecycle
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 		return
 	}
 	if actor.workerSettled != nil {
 		actor.dispatchPending = true
 		actor.lifecycle = protocol.LifecycleReady
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 		return
 	}
 	actor.dispatchNext(attachments, results)
@@ -514,7 +548,7 @@ func (actor *conversation) dispatchNext(attachments map[*clientAttachment]struct
 			actor.lifecycle = protocol.LifecycleUnavailable
 			actor.publishBrowserError(attachments, code)
 		}
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 		return
 	}
 	request, ok := actor.queue.Dequeue()
@@ -526,6 +560,6 @@ func (actor *conversation) dispatchNext(attachments map[*clientAttachment]struct
 	actor.active = &activeTurn{request: request, phase: turnStarting}
 	actor.lifecycle = protocol.LifecycleConnecting
 	actor.publishShared(attachments, protocol.QueuePayload{Items: actor.queue.Items()})
-	actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+	actor.publishShared(attachments, actor.lifecyclePayload())
 	actor.startSubmitWorker(results, request)
 }

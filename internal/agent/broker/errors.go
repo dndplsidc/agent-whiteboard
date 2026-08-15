@@ -107,6 +107,10 @@ func MapProviderError(failure provider.ProviderError) BrokerError {
 		code = protocol.ErrorImageMissing
 	case provider.ErrorImageStorageFailure:
 		code = protocol.ErrorImageStorageFailure
+	case provider.ErrorSkillUnavailable:
+		code = protocol.ErrorSkillUnavailable
+	case provider.ErrorCompactUnsupported:
+		code = protocol.ErrorCompactUnsupported
 	default:
 		code = protocol.ErrorProviderProtocolFailure
 	}

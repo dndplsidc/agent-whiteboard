@@ -87,7 +87,7 @@ func (actor *conversation) commandArchiveList(attachments map[*clientAttachment]
 }
 
 func (actor *conversation) commandArchiveDelete(results chan<- archiveWorkerResult, command protocol.Command, request protocol.ArchiveReferencePayload) protocol.BrowserErrorCode {
-	if results == nil || actor.active != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.recoveryActive || actor.dispatchBlocked || actor.stopping || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil {
+	if results == nil || actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.recoveryActive || actor.dispatchBlocked || actor.stopping || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil {
 		return protocol.ErrorInvalidState
 	}
 	var archived *statepkg.Session
@@ -209,7 +209,7 @@ func (actor *conversation) handleArchiveResult(attachments map[*clientAttachment
 		actor.recoveryUnavailable = true
 		actor.lifecycle = protocol.LifecycleUnavailable
 		actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
-		actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+		actor.publishShared(attachments, actor.lifecyclePayload())
 	}
 	if result.code != "" {
 		actor.completePendingCommand(attachments, result.commandID, result.clientID, result.code)

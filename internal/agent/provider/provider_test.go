@@ -433,6 +433,7 @@ func TestProviderErrorTaxonomyIsClosedStaticAndRedacted(t *testing.T) {
 		provider.ErrorContextTooLarge, provider.ErrorAcceptanceUnknown, provider.ErrorInvalidModelConfiguration,
 		provider.ErrorImageInputUnsupported, provider.ErrorImageUnsupported, provider.ErrorImageTooLarge,
 		provider.ErrorImageTurnLimit, provider.ErrorImageMissing, provider.ErrorImageStorageFailure,
+		provider.ErrorSkillUnavailable, provider.ErrorCompactUnsupported,
 	}
 	require.Equal(t, codes, provider.AllProviderErrorCodes())
 	for _, code := range codes {

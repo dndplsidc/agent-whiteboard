@@ -86,7 +86,7 @@ func TestAllCommandPayloadsAreClosedAndValidated(t *testing.T) {
 	commands := []string{
 		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_edit","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"edited"}]}}}`,
 		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"queue_remove","payload":{"message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
-		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"interrupt","payload":{"turn_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
+		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"interrupt","payload":{"work_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
 		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"retry","payload":{"turn_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`,
 		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"new","payload":{"settings":null}}`,
 		`{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"archive_list","payload":{"limit":50}}`,
@@ -253,7 +253,7 @@ func TestAcceptedExactBoundMessagesAndQueuesAlwaysFitWireFrames(t *testing.T) {
 	require.NoError(t, protocol.ValidateQueue(queue))
 	for _, payload := range []protocol.EventPayload{
 		protocol.QueuePayload{Items: queue},
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: queue, ContextState: protocol.ContextPending, Catalog: []protocol.CatalogModel{}},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: queue, ContextState: protocol.ContextPending, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}},
 	} {
 		encoded, err := protocol.EncodeEvent(validEvent(payload))
 		require.NoError(t, err, "%T", payload)
@@ -365,8 +365,9 @@ func TestQueueReplayAndPageBounds(t *testing.T) {
 func TestEventEnvelopeAndEveryPayloadTypeRoundTrip(t *testing.T) {
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
 	turnID := idC
+	activeTurn := &protocol.ActiveWork{WorkID: turnID, Kind: protocol.ActiveWorkTurn, State: protocol.ActiveWorkRunning}
 	payloads := []protocol.EventPayload{
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, ActiveTurnID: nil, Catalog: []protocol.CatalogModel{}},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, ActiveWork: nil, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}},
 		protocol.CommandResultPayload{CommandID: idA, Status: protocol.CommandSucceeded},
 		protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{}, NextCursor: nil},
 		protocol.HistoryPayload{CommandID: idA, Items: []protocol.ArchiveItem{}, NextCursor: nil},
@@ -374,7 +375,7 @@ func TestEventEnvelopeAndEveryPayloadTypeRoundTrip(t *testing.T) {
 		protocol.AssistantDeltaPayload{TurnID: idC, MessageID: idA, Text: "part"},
 		protocol.AssistantMessagePayload{TurnID: idC, MessageID: idA, Text: "answer", CreatedAt: now},
 		protocol.QueuePayload{Items: []protocol.QueueItem{}},
-		protocol.LifecyclePayload{State: protocol.LifecycleResponding, TurnID: &turnID},
+		protocol.LifecyclePayload{State: protocol.LifecycleResponding, ActiveWork: activeTurn},
 		protocol.ProviderPayload{Provider: protocol.ProviderPi, State: protocol.ProviderReady, Model: "configured-default"},
 		protocol.ContextPayload{Digest: digest, State: protocol.ContextAccepted},
 		protocol.ActivityPayload{Kind: protocol.ActivityCompaction, Summary: "Conversation compacted."},
@@ -468,13 +469,13 @@ func TestActiveTurnIdentityIsExplicitAcrossSubmissionQueueAndEvents(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", decoded.Payload.(protocol.SubmitPayload).TurnID)
 
-	active := idC
+	active := &protocol.ActiveWork{WorkID: idC, Kind: protocol.ActiveWorkTurn, State: protocol.ActiveWorkRunning}
 	event := validEvent(protocol.SnapshotPayload{
-		Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: idA, MessageID: idB, Content: protocol.TextContent("next")}}, ContextState: protocol.ContextAccepted, ActiveTurnID: &active, Catalog: []protocol.CatalogModel{},
+		Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: idA, MessageID: idB, Content: protocol.TextContent("next")}}, ContextState: protocol.ContextAccepted, ActiveWork: active, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{},
 	})
 	encoded, err := protocol.EncodeEvent(event)
 	require.NoError(t, err)
-	require.Contains(t, string(encoded), `"active_turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`)
+	require.Contains(t, string(encoded), `"active_work":{"work_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","kind":"turn","state":"running"}`)
 	require.Contains(t, string(encoded), `"turn_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`)
 }
 
@@ -548,7 +549,7 @@ func TestEventRequiredFieldsAndTypedNilAreRejected(t *testing.T) {
 
 func TestNewEventContractFieldsAreRequired(t *testing.T) {
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
-	active := idC
+	active := &protocol.ActiveWork{WorkID: idC, Kind: protocol.ActiveWorkTurn, State: protocol.ActiveWorkRunning}
 	next := idB
 	archiveNext := idC
 	cases := []struct {
@@ -556,14 +557,14 @@ func TestNewEventContractFieldsAreRequired(t *testing.T) {
 		payload protocol.EventPayload
 		field   string
 	}{
-		{"snapshot active turn", protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, ActiveTurnID: &active, Catalog: []protocol.CatalogModel{}}, `,"active_turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`},
+		{"snapshot active work", protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, ActiveWork: active, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}}, `,"active_work":{"work_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","kind":"turn","state":"running"}`},
 		{"queue item turn", protocol.QueuePayload{Items: []protocol.QueueItem{{TurnID: idC, MessageID: idA, Content: protocol.TextContent("queued")}}}, `"turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",`},
 		{"timeline command", protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{{ItemID: idB, Kind: protocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `"command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",`},
 		{"timeline item", protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{{ItemID: idB, Kind: protocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `"item_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",`},
 		{"timeline cursor", protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{{ItemID: idB, Kind: protocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `,"next_cursor":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"`},
 		{"history command", protocol.HistoryPayload{CommandID: idA, Items: []protocol.ArchiveItem{{ArchiveID: idC, CreatedAt: now, UpdatedAt: now, Provider: protocol.ProviderPi}}, NextCursor: &archiveNext}, `"command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",`},
 		{"history cursor", protocol.HistoryPayload{CommandID: idA, Items: []protocol.ArchiveItem{{ArchiveID: idC, CreatedAt: now, UpdatedAt: now, Provider: protocol.ProviderPi}}, NextCursor: &archiveNext}, `,"next_cursor":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`},
-		{"lifecycle turn", protocol.LifecyclePayload{State: protocol.LifecycleResponding, TurnID: &active}, `,"turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"`},
+		{"lifecycle work", protocol.LifecyclePayload{State: protocol.LifecycleResponding, ActiveWork: active}, `,"active_work":{"work_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","kind":"turn","state":"running"}`},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

@@ -526,10 +526,22 @@ function createSidebarBroker(initialAllowedOrigin) {
       phaseResponses: false,
       responseText: null,
       activeTurn: null,
+      activeCompact: null,
+      holdInterruptCompletion: false,
+      pendingInterruptCompletion: null,
+      skillsState: provider === "codex" ? "ready" : null,
+      skills: provider === "codex" ? [
+        { id: protocolID(230), name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" },
+        { id: protocolID(231), name: "personal-helper-with-an-intentionally-long-name-for-narrow-layout", display_name: "Personal helper with an intentionally long name for narrow layout", description: "Use a personally installed skill with a long description that must remain contained in the compact row", scope: "user" },
+      ] : [],
+      supportsCompact: provider === "codex",
       pendingResponse: null,
       queue: [],
       history: [],
       interactions: new Map(),
+      archiveMode: "populated",
+      archiveDelay: null,
+      pendingArchiveResponse: null,
       holdInteractionResolution: false,
       eventLog: [],
       eventPositions: new Map(),
@@ -566,22 +578,25 @@ function createSidebarBroker(initialAllowedOrigin) {
     payload,
   });
   const snapshotPayload = (state) => ({
-    lifecycle: state.activeTurn === null ? "ready" : "responding",
+    lifecycle: state.activeCompact !== null ? "compacting" : state.activeTurn === null ? "ready" : "responding",
     queue: state.queue.map((item) => structuredClone(item)),
     context_state: state.contextState,
-    active_turn_id: state.activeTurn,
+    active_work: state.activeCompact !== null ? { work_id: state.activeCompact, kind: "compact", state: "running" } : state.activeTurn === null ? null : { work_id: state.activeTurn, kind: "turn", state: "running" },
     supports_images: state.supportsImages,
     settings_state: state.settingsState,
     effective_settings: state.effectiveSettings === null ? null : { ...state.effectiveSettings },
     catalog: structuredClone(state.catalog),
+    skills_state: state.skillsState,
+    skills: structuredClone(state.skills),
+    supports_compact: state.supportsCompact,
   });
-  const archivePayload = (state) => ({
-    archive_id: state.archiveID,
-    created_at: "2026-07-26T01:02:03Z",
-    updated_at: "2026-07-26T02:03:04Z",
+  const archivePayload = (state, { id = state.archiveID, createdAt = "2026-07-26T01:02:03Z", updatedAt = "2026-07-26T02:03:04Z", preview = "" } = {}) => ({
+    archive_id: id,
+    created_at: createdAt,
+    updated_at: updatedAt,
     provider: state.provider,
     model: state.model,
-    preview: "",
+    preview,
   });
   const corsHeaders = () => ({ "Access-Control-Allow-Origin": allowedOrigin, Vary: "Origin" });
   const sendJSON = (response, record, status, value) => {
@@ -668,7 +683,7 @@ function createSidebarBroker(initialAllowedOrigin) {
           ...(next.images?.length ? { images: next.images } : {}),
           created_at: response.createdAt,
         });
-        emit(state, "lifecycle", { state: "responding", turn_id: next.turn_id });
+        emit(state, "lifecycle", { state: "responding", active_work: { work_id: next.turn_id, kind: "turn", state: "running" } });
         state.pendingResponse = { turnID: next.turn_id, assistantID: protocolID(state.identitySequence++), createdAt: response.createdAt, phase: "responding" };
       }
       return;
@@ -737,7 +752,7 @@ function createSidebarBroker(initialAllowedOrigin) {
         state.history.push(user);
         state.activeTurn = command.payload.turn_id;
         emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, content: user.content, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt });
-        emit(state, "lifecycle", { state: "responding", turn_id: command.payload.turn_id });
+        emit(state, "lifecycle", { state: "responding", active_work: { work_id: command.payload.turn_id, kind: "turn", state: "running" } });
         const assistantID = protocolID(150 + state.history.length + (state.provider === "codex" ? 25 : 0));
         if (state.phaseResponses) {
           state.pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
@@ -786,12 +801,41 @@ function createSidebarBroker(initialAllowedOrigin) {
         state.queue.splice(index, 1);
       }
       emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
-    } else if (command.type === "interrupt" && state.activeTurn === command.payload.turn_id) {
-      emit(state, "interruption", { turn_id: state.activeTurn, reason: "requested" });
-      state.activeTurn = null;
-      state.pendingResponse = null;
+    } else if (command.type === "compact" && state.provider === "codex" && state.activeTurn === null && state.activeCompact === null) {
+      state.activeCompact = command.payload.work_id;
+      emit(state, "lifecycle", { state: "compacting", active_work: { work_id: state.activeCompact, kind: "compact", state: "running" } });
+      emit(state, "compaction", { work_id: state.activeCompact, status: "running" });
+    } else if (command.type === "interrupt" && state.activeTurn === command.payload.work_id) {
+      emit(state, "lifecycle", { state: "responding", active_work: { work_id: state.activeTurn, kind: "turn", state: "stopping" } });
+      const complete = () => {
+        emit(state, "interruption", { turn_id: state.activeTurn, reason: "requested" });
+        state.activeTurn = null;
+        state.pendingResponse = null;
+      };
+      if (state.holdInterruptCompletion) state.pendingInterruptCompletion = complete;
+      else complete();
+    } else if (command.type === "interrupt" && state.activeCompact === command.payload.work_id) {
+      emit(state, "lifecycle", { state: "compacting", active_work: { work_id: state.activeCompact, kind: "compact", state: "stopping" } });
+      emit(state, "compaction", { work_id: state.activeCompact, status: "stopping" });
+      const complete = () => {
+        emit(state, "compaction", { work_id: state.activeCompact, status: "interrupted" });
+        state.activeCompact = null;
+        emit(state, "lifecycle", { state: "interrupted", active_work: null });
+      };
+      if (state.holdInterruptCompletion) state.pendingInterruptCompletion = complete;
+      else complete();
     } else if (command.type === "archive_list") {
-      targetedEvent(state, "history", { command_id: command.command_id, items: [archivePayload(state)], next_cursor: null }, command.client_id);
+      const firstPage = !command.payload.before;
+      const paginated = state.archiveMode === "paginated";
+      const secondID = protocolID(state.provider === "codex" ? 223 : 222);
+      const items = state.archiveMode === "empty"
+        ? []
+        : firstPage
+          ? [archivePayload(state, { preview: "Earlier conversation" })]
+          : [archivePayload(state, { id: secondID, createdAt: "2026-07-25T01:02:03Z", updatedAt: "2026-07-25T02:03:04Z", preview: "Older conversation" })];
+      const respond = () => targetedEvent(state, "history", { command_id: command.command_id, items, next_cursor: paginated && firstPage ? state.archiveID : null }, command.client_id);
+      if (state.archiveDelay) state.pendingArchiveResponse = respond;
+      else respond();
     } else if (command.type === "archive_restore" || command.type === "archive_delete") {
       emit(state, "archive", { action: command.type === "archive_restore" ? "restored" : "deleted", archive_id: command.payload.archive_id });
     } else if (command.type === "interaction_respond") {
@@ -973,6 +1017,19 @@ function createSidebarBroker(initialAllowedOrigin) {
     setAllowedOrigin(origin) { allowedOrigin = origin; },
     setWebSocketEnabled(value) { webSocketEnabled = value; },
     setHoldResponses(value, provider = "pi") { providerState(provider).holdResponses = value; },
+    setSkills(skills, provider = "codex") {
+      const state = providerState(provider);
+      state.skillsState = "ready";
+      state.skills = structuredClone(skills);
+    },
+    setHoldInterruptCompletion(value, provider = "pi") { providerState(provider).holdInterruptCompletion = value; },
+    releaseInterruptCompletion(provider = "pi") {
+      const state = providerState(provider);
+      if (!state.pendingInterruptCompletion) throw new Error(`no pending ${provider} interrupt completion`);
+      const completion = state.pendingInterruptCompletion;
+      state.pendingInterruptCompletion = null;
+      completion();
+    },
     setPhaseResponses(value, provider = "pi") { providerState(provider).phaseResponses = value; },
     preparePendingResponse(provider = "pi") {
       const state = providerState(provider);
@@ -983,6 +1040,28 @@ function createSidebarBroker(initialAllowedOrigin) {
     releaseResponsePhase: emitResponsePhase,
     setProviderAvailable(provider, value) { providerState(provider).available = value; },
     setSupportsImages(provider, value) { providerState(provider).supportsImages = value; },
+    setArchiveMode(value, provider = "pi") { providerState(provider).archiveMode = value; },
+    setArchiveDelay(value, provider = "pi") { providerState(provider).archiveDelay = value; },
+    releaseArchiveList(provider = "pi") {
+      const state = providerState(provider);
+      if (!state.pendingArchiveResponse) throw new Error(`no delayed ${provider} archive response`);
+      const pending = state.pendingArchiveResponse;
+      state.pendingArchiveResponse = null;
+      pending();
+    },
+    refreshSkills(skills, provider = "codex") {
+      const state = providerState(provider);
+      state.skills = structuredClone(skills);
+      state.skillsState = "ready";
+      emit(state, "skill_catalog", { state: state.skillsState, skills: structuredClone(state.skills) });
+    },
+    completeCompact(status = "completed", provider = "codex") {
+      const state = providerState(provider);
+      if (state.activeCompact === null) throw new Error(`no active ${provider} compact work`);
+      emit(state, "compaction", { work_id: state.activeCompact, status });
+      state.activeCompact = null;
+      emit(state, "lifecycle", { state: status === "interrupted" ? "interrupted" : "ready", active_work: null });
+    },
     rejectNextSettings(provider = "codex") {
       const state = providerState(provider);
       state.rejectNextSettings = true;
@@ -1049,6 +1128,9 @@ function createSidebarBroker(initialAllowedOrigin) {
     emitActivity(kind, summary, provider = "pi") {
       const state = providerState(provider);
       emit(state, "activity", { kind, summary });
+    },
+    emitAssistantMessage(provider, payload) {
+      emit(providerState(provider), "assistant_message", payload);
     },
     emitToolActivity(provider, payload) {
       const state = providerState(provider);
@@ -1370,12 +1452,20 @@ export const test = base.extend({
           resetBrokerState: broker.resetState,
           setWebSocketEnabled: broker.setWebSocketEnabled,
           setHoldResponses: broker.setHoldResponses,
+          setSkills: broker.setSkills,
+          setHoldInterruptCompletion: broker.setHoldInterruptCompletion,
+          releaseInterruptCompletion: broker.releaseInterruptCompletion,
           setPhaseResponses: broker.setPhaseResponses,
           preparePendingResponse: broker.preparePendingResponse,
           setResponseText: broker.setResponseText,
           releaseResponsePhase: broker.releaseResponsePhase,
           setProviderAvailable: broker.setProviderAvailable,
           setSupportsImages: broker.setSupportsImages,
+          setArchiveMode: broker.setArchiveMode,
+          setArchiveDelay: broker.setArchiveDelay,
+          releaseArchiveList: broker.releaseArchiveList,
+          refreshSkills: broker.refreshSkills,
+          completeCompact: broker.completeCompact,
           rejectNextSettings: broker.rejectNextSettings,
           setNewMapping: broker.setNewMapping,
           refreshCatalog: broker.refreshCatalog,
@@ -1384,6 +1474,7 @@ export const test = base.extend({
           createdSettings: broker.createdSettings,
           failNextImageUpload: broker.failNextImageUpload,
           disconnectProvider: broker.disconnectProvider,
+          emitAssistantMessage: broker.emitAssistantMessage,
           emitToolActivity: broker.emitToolActivity,
           emitInteraction: broker.emitInteraction,
           setHoldInteractionResolution: broker.setHoldInteractionResolution,

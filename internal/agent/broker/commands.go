@@ -162,6 +162,8 @@ func commandFingerprint(command protocol.Command) ([sha256.Size]byte, error) {
 			writer.resource(payload.Context.Resource)
 		}
 		writer.settings(payload.Settings)
+	case protocol.CompactPayload:
+		writer.text(payload.WorkID)
 	case protocol.QueueEditPayload:
 		writer.text(payload.MessageID)
 		encoded, err := json.Marshal(payload.Content)
@@ -173,6 +175,8 @@ func commandFingerprint(command protocol.Command) ([sha256.Size]byte, error) {
 		writer.text(payload.MessageID)
 	case protocol.TurnReferencePayload:
 		writer.text(payload.TurnID)
+	case protocol.WorkReferencePayload:
+		writer.text(payload.WorkID)
 	case protocol.NewPayload:
 		writer.settings(payload.Settings)
 	case protocol.PageRequestPayload:

@@ -80,11 +80,13 @@ func (actor *conversation) resumePendingDispatch(attachments map[*clientAttachme
 	if actor.deferredInterrupt != nil {
 		deferred := actor.deferredInterrupt
 		actor.deferredInterrupt = nil
-		if actor.stopping || actor.active == nil || actor.active.phase != turnRunning || actor.active.accepted == nil || actor.active.request.TurnID != deferred.turnID {
+		if actor.stopping {
 			actor.completePendingCommand(attachments, deferred.commandID, deferred.clientID, protocol.ErrorInvalidState)
-		} else {
-			actor.startInterruptWorker(results, deferred.commandID, deferred.clientID)
+		} else if deferred.kind == protocol.ActiveWorkTurn && actor.active != nil && actor.active.phase == turnInterrupting && actor.active.accepted != nil && actor.active.request.TurnID == deferred.workID {
+			actor.startTurnInterruptWorker(results, deferred.commandID, deferred.clientID)
 			return
+		} else {
+			actor.completePendingCommand(attachments, deferred.commandID, deferred.clientID, protocol.ErrorInvalidState)
 		}
 	}
 	if !actor.dispatchPending {

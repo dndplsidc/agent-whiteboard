@@ -11,6 +11,7 @@ import (
 const (
 	MaxMessageParts           = 64
 	MaxMessageReferences      = 16
+	MaxMessageSkills          = 16
 	MaxReferenceQuoteBytes    = 16 << 10
 	MaxReferenceMarkdownBytes = 48 << 10
 	MaxReferenceLabelBytes    = 256
@@ -24,6 +25,7 @@ type MessagePartType string
 const (
 	MessagePartText      MessagePartType = "text"
 	MessagePartReference MessagePartType = "reference"
+	MessagePartSkill     MessagePartType = "skill"
 )
 
 type ReferenceKind string
@@ -42,6 +44,12 @@ type MessagePart struct {
 	Type      MessagePartType   `json:"type"`
 	Text      string            `json:"text,omitempty"`
 	Reference *ContextReference `json:"reference,omitempty"`
+	Skill     *SkillInvocation  `json:"skill,omitempty"`
+}
+
+type SkillInvocation struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 type ContextReference struct {
@@ -132,24 +140,44 @@ func (content MessageContent) ValidateCommand() error { return content.validate(
 
 func (content MessageContent) ValidateEvent() error { return content.validate(true) }
 
+func (content MessageContent) ValidateForProvider(provider ProviderName, event bool) error {
+	if !provider.Valid() {
+		return invalid(nil)
+	}
+	if err := content.validate(event); err != nil {
+		return err
+	}
+	if provider == ProviderPi {
+		for _, part := range content.Parts {
+			if part.Type == MessagePartSkill {
+				return invalid(nil)
+			}
+		}
+	}
+	return nil
+}
+
 func (content MessageContent) validate(event bool) error {
 	if len(content.Parts) > MaxMessageParts {
 		return errors.New("invalid message parts")
 	}
 	seen := make(map[string]struct{})
+	seenSkillIDs := make(map[string]struct{})
+	seenSkillNames := make(map[string]struct{})
 	references := 0
+	skills := 0
 	total := 0
 	previousText := false
 	for _, part := range content.Parts {
 		switch part.Type {
 		case MessagePartText:
-			if part.Reference != nil || part.Text == "" || previousText || !validBoundedText(part.Text, MaxMessageBytes, true) {
+			if part.Reference != nil || part.Skill != nil || part.Text == "" || previousText || !validBoundedText(part.Text, MaxMessageBytes, true) {
 				return errors.New("invalid text message part")
 			}
 			total += len(part.Text)
 			previousText = true
 		case MessagePartReference:
-			if part.Text != "" || part.Reference == nil || validateContextReference(*part.Reference, event) != nil {
+			if part.Text != "" || part.Reference == nil || part.Skill != nil || validateContextReference(*part.Reference, event) != nil {
 				return errors.New("invalid reference message part")
 			}
 			if _, duplicate := seen[part.Reference.ID]; duplicate {
@@ -159,10 +187,25 @@ func (content MessageContent) validate(event bool) error {
 			references++
 			total += referenceBytes(*part.Reference)
 			previousText = false
+		case MessagePartSkill:
+			if part.Text != "" || part.Reference != nil || part.Skill == nil || !validID(part.Skill.ID) || !validBoundedText(part.Skill.Name, MaxSkillNameBytes, true) {
+				return errors.New("invalid skill message part")
+			}
+			if _, duplicate := seenSkillIDs[part.Skill.ID]; duplicate {
+				return errors.New("duplicate message skill")
+			}
+			if _, duplicate := seenSkillNames[part.Skill.Name]; duplicate {
+				return errors.New("duplicate message skill name")
+			}
+			seenSkillIDs[part.Skill.ID] = struct{}{}
+			seenSkillNames[part.Skill.Name] = struct{}{}
+			skills++
+			total += len(part.Skill.ID) + len(part.Skill.Name)
+			previousText = false
 		default:
 			return errors.New("invalid message part type")
 		}
-		if total > MaxMessageBytes || references > MaxMessageReferences {
+		if total > MaxMessageBytes || references > MaxMessageReferences || skills > MaxMessageSkills {
 			return ErrMessageTooLarge
 		}
 	}
@@ -179,6 +222,10 @@ func (content MessageContent) Clone() MessageContent {
 			cloned := cloneContextReference(*part.Reference)
 			result.Parts[index].Reference = &cloned
 		}
+		if part.Skill != nil {
+			cloned := *part.Skill
+			result.Parts[index].Skill = &cloned
+		}
 	}
 	return result
 }
@@ -190,6 +237,8 @@ func (content MessageContent) SemanticBytes() int {
 			total += len(part.Text)
 		} else if part.Reference != nil {
 			total += referenceBytes(*part.Reference)
+		} else if part.Skill != nil {
+			total += len(part.Skill.ID) + len(part.Skill.Name)
 		}
 	}
 	return total

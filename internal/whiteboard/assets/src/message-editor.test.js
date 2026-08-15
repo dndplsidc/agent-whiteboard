@@ -14,6 +14,16 @@ describe("ordered message model", () => {
     expect(second.content.parts.filter(({ type }) => type === "reference").map(({ reference: item }) => item.id)).toEqual(["a", "b"]);
   });
 
+  test("keeps skill tokens ordered, distinct, and counted as content", () => {
+    const content = normalizeMessageContent({ parts: [
+      { type: "skill", skill: { id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", name: "review-helper" } },
+      { type: "text", text: " check this" },
+      { type: "skill", skill: { id: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", name: "test-helper" } },
+    ] });
+    expect(messageContentText(content)).toBe("$review-helper check this$test-helper");
+    expect(() => normalizeMessageContent({ parts: [...content.parts, content.parts[0]] })).toThrow(RangeError);
+  });
+
   test("renders hostile labels as text and reference order remains explicit", () => {
     const container = document.createElement("div");
     container.append(renderMessageContent(document, { parts: [
@@ -40,6 +50,19 @@ describe("message editor", () => {
     editor.element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     editor.element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
     expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  test("inserts non-editable skills and marks catalog drift unavailable", () => {
+    const editor = createMessageEditor({ doc: document, content: { parts: [{ type: "text", text: "check" }] } });
+    document.body.append(editor.element);
+    editor.insertSkill({ id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", name: "review-helper", display_name: "Review helper" });
+    const token = editor.element.querySelector(".agent-message-skill");
+    expect(token.contentEditable).toBe("false");
+    expect(token.textContent).toBe("Skill: Review helper");
+    expect(editor.getContent().parts.some(({ type }) => type === "skill")).toBe(true);
+    editor.markUnavailableSkills([]);
+    expect(token.classList.contains("is-unavailable")).toBe(true);
+    expect(token.getAttribute("aria-invalid")).toBe("true");
   });
 
   test("does not trust pasted token-shaped HTML", () => {

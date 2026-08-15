@@ -63,7 +63,7 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 				require.Equal(t, "# Whiteboard", string(envelope.Markdown))
 				require.Equal(t, provider.TextMessage("What changed?"), envelope.ReaderContent)
 				// Exercise notifications that arrive before turn/start is acknowledged.
-				child.send(t, notification("item/agentMessage/delta", map[string]any{"threadId": "native-thread", "turnId": "native-turn", "delta": "Working"}))
+				child.send(t, notification("item/agentMessage/delta", map[string]any{"threadId": "native-thread", "turnId": "native-turn", "itemId": "native-message", "delta": "Working"}))
 				child.send(t, map[string]any{"id": 700, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": "native-thread", "turnId": "native-turn", "itemId": "native-item", "startedAtMs": 1, "command": "go test ./...", "cwd": "/workspace", "reason": "Run the tests"}})
 				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"turn": map[string]any{"id": "native-turn"}}})
 				child.send(t, notification("item/started", map[string]any{"threadId": "native-thread", "turnId": "native-turn", "item": map[string]any{"id": "native-item", "type": "commandExecution", "command": "go test ./...", "cwd": "/workspace", "status": "inProgress"}}))
@@ -174,7 +174,7 @@ func TestTurnAcceptanceBarrierOrdersPreAckEventBeforeImmediatePostAckInteraction
 	<-input.wrote
 
 	lines := []string{
-		string(mustJSON(t, notification("item/agentMessage/delta", map[string]any{"threadId": "native-thread", "turnId": "native-turn", "delta": "pre-ack"}))),
+		string(mustJSON(t, notification("item/agentMessage/delta", map[string]any{"threadId": "native-thread", "turnId": "native-turn", "itemId": "native-preamble", "delta": "pre-ack"}))),
 		string(mustJSON(t, notification("thread/settings/updated", map[string]any{"threadId": "native-thread", "threadSettings": map[string]any{"model": "gpt-fixture", "effort": "medium", "serviceTier": nil}}))),
 		string(mustJSON(t, map[string]any{"id": 1, "result": map[string]any{"turn": map[string]any{"id": "native-turn"}}})),
 		string(mustJSON(t, map[string]any{"id": 700, "method": "item/commandExecution/requestApproval", "params": map[string]any{
@@ -1157,6 +1157,74 @@ func TestIncrementalToolOutputUsesExistingOpaqueActivityAndStaysBounded(t *testi
 	session.mu.Unlock()
 }
 
+func TestAgentMessagesPreserveNativeItemBoundariesAroundToolActivity(t *testing.T) {
+	now := time.Date(2026, 8, 14, 1, 2, 3, 0, time.UTC)
+	turnID := testID(1140)
+	session := &Session{
+		driver:   &Driver{config: Config{Clock: fixedClock{now}, IDs: &sequenceIDs{}}},
+		threadID: "native-thread", events: make(chan provider.Event, 8), view: newSessionChild(),
+		active:     &nativeTurn{request: provider.TurnRequest{TurnID: turnID}, nativeID: "native-turn"},
+		activities: make(map[string]string), toolStates: make(map[string]provider.ToolActivity), interactions: make(map[string]nativeInteraction),
+	}
+
+	session.handleNotification("item/agentMessage/delta", mustJSON(t, map[string]any{
+		"threadId": "native-thread", "turnId": "native-turn", "itemId": "native-preamble", "delta": "I will inspect the skill.",
+	}))
+	session.handleNotification("item/completed", mustJSON(t, map[string]any{
+		"threadId": "native-thread", "turnId": "native-turn", "item": map[string]any{"id": "native-preamble", "type": "agentMessage", "text": "I will inspect the skill."},
+	}))
+	session.handleNotification("item/started", mustJSON(t, map[string]any{
+		"threadId": "native-thread", "turnId": "native-turn", "item": map[string]any{"id": "native-command", "type": "commandExecution", "command": "read SKILL.md", "status": "inProgress"},
+	}))
+	session.handleNotification("item/agentMessage/delta", mustJSON(t, map[string]any{
+		"threadId": "native-thread", "turnId": "native-turn", "itemId": "native-answer", "delta": "Devflow is a workflow.",
+	}))
+	session.handleNotification("item/completed", mustJSON(t, map[string]any{
+		"threadId": "native-thread", "turnId": "native-turn", "item": map[string]any{"id": "native-answer", "type": "agentMessage", "text": "Devflow is a workflow."},
+	}))
+
+	events := make([]provider.Event, 5)
+	for index := range events {
+		events[index] = awaitEvent(t, session.events)
+	}
+	require.Equal(t, []provider.EventKind{
+		provider.EventAssistantDelta,
+		provider.EventAssistantMessage,
+		provider.EventToolActivity,
+		provider.EventAssistantDelta,
+		provider.EventAssistantMessage,
+	}, []provider.EventKind{events[0].Kind, events[1].Kind, events[2].Kind, events[3].Kind, events[4].Kind})
+	require.Equal(t, events[0].MessageID, events[1].MessageID)
+	require.Equal(t, events[3].MessageID, events[4].MessageID)
+	require.NotEqual(t, events[0].MessageID, events[3].MessageID)
+	for _, event := range events {
+		require.NotContains(t, event.MessageID, "native-")
+	}
+}
+
+func TestHistoryProjectionPreservesMultipleAgentItemsPerTurn(t *testing.T) {
+	turnID := testID(1141)
+	envelope, err := provider.Build(provider.TurnRequest{TurnID: turnID, MessageID: testID(1142), Content: provider.TextMessage("Explain the skill")}, provider.PolicyConfigured)
+	require.NoError(t, err)
+	raw := mustJSON(t, map[string]any{"thread": map[string]any{"id": "native-thread", "turns": []any{map[string]any{
+		"id": "native-turn", "status": "completed", "startedAt": 10,
+		"items": []any{
+			map[string]any{"id": "native-user", "type": "userMessage", "content": []any{map[string]any{"type": "text", "text": string(envelope)}}},
+			map[string]any{"id": "native-preamble", "type": "agentMessage", "text": "I will inspect it."},
+			map[string]any{"id": "native-command", "type": "commandExecution"},
+			map[string]any{"id": "native-answer", "type": "agentMessage", "text": "Devflow is a workflow."},
+		},
+	}}}})
+
+	items, err := projectHistory(raw, "native-thread")
+	require.NoError(t, err)
+	require.Len(t, items, 3)
+	require.Equal(t, []provider.HistoryRole{provider.HistoryUser, provider.HistoryAssistant, provider.HistoryAssistant}, []provider.HistoryRole{items[0].Role, items[1].Role, items[2].Role})
+	require.Equal(t, []string{"I will inspect it.", "Devflow is a workflow."}, []string{items[1].Text, items[2].Text})
+	require.NotEqual(t, items[1].MessageID, items[2].MessageID)
+	require.NoError(t, (provider.HistoryPage{Items: items}).Validate())
+}
+
 func TestHistoryProjectionBoundsNativeTextAndAggregateSize(t *testing.T) {
 	turns := make([]any, 80)
 	for index := range turns {
@@ -1169,7 +1237,7 @@ func TestHistoryProjectionBoundsNativeTextAndAggregateSize(t *testing.T) {
 			"id": "native", "status": "completed", "startedAt": 10,
 			"items": []any{
 				map[string]any{"type": "userMessage", "content": []any{map[string]any{"type": "text", "text": string(envelope)}}},
-				map[string]any{"type": "agentMessage", "text": strings.Repeat("a", provider.MaxHistoryItemBytes*2)},
+				map[string]any{"id": "native-agent-" + strconv.Itoa(index), "type": "agentMessage", "text": strings.Repeat("a", provider.MaxHistoryItemBytes*2)},
 			},
 		}
 	}
@@ -1192,7 +1260,7 @@ func TestHistoryReturnsNewestFirstAndPagesTowardOlderMessages(t *testing.T) {
 			"id": "native-" + strconv.Itoa(index), "status": "completed", "startedAt": index + 1,
 			"items": []any{
 				map[string]any{"type": "userMessage", "content": []any{map[string]any{"type": "text", "text": string(envelope)}}},
-				map[string]any{"type": "agentMessage", "text": "answer " + strconv.Itoa(index)},
+				map[string]any{"id": "native-agent-" + strconv.Itoa(index), "type": "agentMessage", "text": "answer " + strconv.Itoa(index)},
 			},
 		}
 	}

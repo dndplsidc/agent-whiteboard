@@ -45,18 +45,108 @@ type turnSession struct {
 	respondGate            chan struct{}
 	respondErr             error
 	cancelled              chan string
+	skillCatalog           provider.SkillCatalog
+	supportsCompact        bool
+	compactErr             error
+	compactAccepted        *provider.AcceptedCompact
+	compactEvent           *provider.Event
+	compactGate            chan struct{}
+	compactInterruptErr    error
+	compactInterruptEvent  *provider.Event
+	compactInterruptGate   chan struct{}
+	compacted              chan provider.CompactRequest
+	compactInterrupted     chan provider.AcceptedCompact
 }
 
 func newTurnSession(ref string) *turnSession {
 	return &turnSession{
-		hardeningSession: newHardeningSession(ref),
-		preflightResult:  provider.PreflightResult{ResolvedModel: "model", EstimatedInputTokens: 10, EffectiveCapacityTokens: 100, SafetyMarginTokens: 10},
-		submitted:        make(chan provider.TurnRequest, 32),
-		interrupted:      make(chan provider.AcceptedTurn, 8),
-		responded:        make(chan provider.InteractionResponse, 8),
-		cancelled:        make(chan string, 8),
+		hardeningSession:   newHardeningSession(ref),
+		preflightResult:    provider.PreflightResult{ResolvedModel: "model", EstimatedInputTokens: 10, EffectiveCapacityTokens: 100, SafetyMarginTokens: 10},
+		submitted:          make(chan provider.TurnRequest, 32),
+		interrupted:        make(chan provider.AcceptedTurn, 8),
+		responded:          make(chan provider.InteractionResponse, 8),
+		cancelled:          make(chan string, 8),
+		skillCatalog:       provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}},
+		compacted:          make(chan provider.CompactRequest, 8),
+		compactInterrupted: make(chan provider.AcceptedCompact, 8),
 	}
 }
+func (session *turnSession) Skills(context.Context) provider.SkillCatalog {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.skillCatalog.Clone()
+}
+
+func (session *turnSession) SupportsCompact() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.supportsCompact
+}
+
+func (session *turnSession) Compact(ctx context.Context, request provider.CompactRequest) (provider.AcceptedCompact, error) {
+	leave := session.enterProviderCall()
+	defer leave()
+	select {
+	case session.compacted <- request:
+	case <-ctx.Done():
+		return provider.AcceptedCompact{}, ctx.Err()
+	}
+	session.mu.Lock()
+	accepted, event, gate, err := session.compactAccepted, session.compactEvent, session.compactGate, session.compactErr
+	session.mu.Unlock()
+	if event != nil {
+		select {
+		case session.events <- *event:
+		case <-ctx.Done():
+			return provider.AcceptedCompact{}, ctx.Err()
+		}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return provider.AcceptedCompact{}, ctx.Err()
+		}
+	}
+	if err != nil {
+		return provider.AcceptedCompact{}, err
+	}
+	if accepted != nil {
+		result := *accepted
+		result.WorkID = request.WorkID
+		return result, nil
+	}
+	return provider.AcceptedCompact{WorkID: request.WorkID, AcceptedAt: testTime()}, nil
+}
+
+func (session *turnSession) InterruptCompact(ctx context.Context, accepted provider.AcceptedCompact) error {
+	leave := session.enterProviderCall()
+	defer leave()
+	select {
+	case session.compactInterrupted <- accepted:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	session.mu.Lock()
+	event, gate, err := session.compactInterruptEvent, session.compactInterruptGate, session.compactInterruptErr
+	session.mu.Unlock()
+	if event != nil {
+		select {
+		case session.events <- *event:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
 func (session *turnSession) enterProviderCall() func() {
 	current := session.providerCalls.Add(1)
 	for observed := session.maximumProviderCalls.Load(); current > observed && !session.maximumProviderCalls.CompareAndSwap(observed, current); observed = session.maximumProviderCalls.Load() {
@@ -759,11 +849,15 @@ func TestFollowUpQueueEditRemoveFIFOAndInterruptPreserveQueue(t *testing.T) {
 	require.Len(t, queueEvent.Payload.(protocol.QueuePayload).Items, 1)
 	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
 
-	interrupt := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(7118), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandInterrupt, Payload: protocol.TurnReferencePayload{TurnID: activeTurnID}}
+	interrupt := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(7118), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandInterrupt, Payload: protocol.WorkReferencePayload{WorkID: activeTurnID}}
 	result, err = connection.Command(context.Background(), interrupt)
 	require.NoError(t, err)
 	requireCommandResult(t, result, protocol.CommandSucceeded, "")
 	require.Equal(t, activeTurnID, receiveLifecycle(t, session.interrupted).TurnID)
+	stopping := receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload)
+	require.NotNil(t, stopping.ActiveWork)
+	require.Equal(t, activeTurnID, stopping.ActiveWork.WorkID)
+	require.Equal(t, protocol.ActiveWorkStopping, stopping.ActiveWork.State)
 	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
 
 	session.events <- provider.NewInterruptionEvent(activeTurnID, provider.InterruptionRequested)
@@ -886,19 +980,25 @@ func TestCompletionRacingFailedInterruptStillTerminatesAndDrainsQueue(t *testing
 	session.interruptGate = gate
 	session.interruptErr = provider.NewProviderError(provider.ErrorProtocolFailure)
 	session.mu.Unlock()
-	interrupt := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(7130), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandInterrupt, Payload: protocol.TurnReferencePayload{TurnID: turnID}}
+	interrupt := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(7130), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandInterrupt, Payload: protocol.WorkReferencePayload{WorkID: turnID}}
 	commandDone := make(chan commandResponse, 1)
 	go func() {
 		event, err := connection.Command(context.Background(), interrupt)
 		commandDone <- commandResponse{event: event, err: err}
 	}()
 	receiveLifecycle(t, session.interrupted)
+	stopping := receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload)
+	require.NotNil(t, stopping.ActiveWork)
+	require.Equal(t, protocol.ActiveWorkStopping, stopping.ActiveWork.State)
 	session.events <- provider.NewActivityEvent("", provider.ActivityStatus, "interrupt barrier")
 	require.Equal(t, protocol.EventActivity, receiveLifecycle(t, connection.Events()).Type)
 	close(gate)
 	response := receiveLifecycle(t, commandDone)
 	require.NoError(t, response.err)
 	requireCommandResult(t, response.event, protocol.CommandRejected, protocol.ErrorProviderProtocolFailure)
+	running := receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload)
+	require.NotNil(t, running.ActiveWork)
+	require.Equal(t, protocol.ActiveWorkRunning, running.ActiveWork.State)
 	require.Equal(t, response.event, receiveLifecycle(t, connection.Events()))
 	require.Equal(t, protocol.EventCompletion, receiveLifecycle(t, connection.Events()).Type)
 	drainEvents(t, connection.Events(), 2)
@@ -1158,11 +1258,12 @@ func TestDisconnectedConversationContinuesDrainingQueuedTurns(t *testing.T) {
 	if snapshot.Lifecycle == protocol.LifecycleConnecting {
 		lifecycle := receiveLifecycle(t, reconnected.Events()).Payload.(protocol.LifecyclePayload)
 		require.Equal(t, protocol.LifecycleResponding, lifecycle.State)
-		require.Equal(t, queuedTurnID, *lifecycle.TurnID)
+		require.NotNil(t, lifecycle.ActiveWork)
+		require.Equal(t, queuedTurnID, lifecycle.ActiveWork.WorkID)
 	} else {
 		require.Equal(t, protocol.LifecycleResponding, snapshot.Lifecycle)
-		require.NotNil(t, snapshot.ActiveTurnID)
-		require.Equal(t, queuedTurnID, *snapshot.ActiveTurnID)
+		require.NotNil(t, snapshot.ActiveWork)
+		require.Equal(t, queuedTurnID, snapshot.ActiveWork.WorkID)
 	}
 }
 

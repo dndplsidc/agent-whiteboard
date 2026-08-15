@@ -208,7 +208,7 @@ func TestRecoveryNeverReplaysActiveTurnAndPreservesQueuedFollowUpOnFailure(t *te
 	require.NoError(t, err)
 	snapshot := receiveLifecycle(t, reconnected.Events()).Payload.(protocol.SnapshotPayload)
 	require.Equal(t, protocol.LifecycleUnavailable, snapshot.Lifecycle)
-	require.Nil(t, snapshot.ActiveTurnID)
+	require.Nil(t, snapshot.ActiveWork)
 	require.Equal(t, []protocol.QueueItem{{TurnID: queuedTurnID, MessageID: queuedMessageID, Content: protocol.TextContent("queued")}}, snapshot.Queue)
 	require.NoError(t, broker.Close(context.Background()))
 	driver.mu.Lock()
@@ -406,7 +406,7 @@ func TestRecoveryCompletesBlockedInterruptBeforeOldShutdownSettles(t *testing.T)
 	receiveLifecycle(t, old.submitted)
 	drainEvents(t, connection.Events(), 3)
 	conversationID := connection.ConversationID()
-	interrupt := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(1591), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandInterrupt, Payload: protocol.TurnReferencePayload{TurnID: turnID}}
+	interrupt := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(1591), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandInterrupt, Payload: protocol.WorkReferencePayload{WorkID: turnID}}
 	type interruptOutcome struct {
 		event protocol.Event
 		err   error
@@ -417,6 +417,9 @@ func TestRecoveryCompletesBlockedInterruptBeforeOldShutdownSettles(t *testing.T)
 		interruptDone <- interruptOutcome{event: result, err: commandErr}
 	}()
 	receiveLifecycle(t, old.interrupted)
+	stopping := receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload)
+	require.NotNil(t, stopping.ActiveWork)
+	require.Equal(t, protocol.ActiveWorkStopping, stopping.ActiveWork.State)
 	close(old.events)
 	require.Equal(t, protocol.ErrorProviderCrashed, receiveLifecycle(t, connection.Events()).Payload.(protocol.ErrorPayload).Error.Code())
 	interruptResult := receiveLifecycle(t, connection.Events())

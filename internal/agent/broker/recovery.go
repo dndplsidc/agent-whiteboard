@@ -50,6 +50,9 @@ func (actor *conversation) startRecovery(attachments map[*clientAttachment]struc
 		case providerWorkerInterrupt:
 			actor.completePendingCommand(attachments, actor.workerCommandID, actor.workerClientID, protocol.ErrorTurnInterrupted)
 			actor.workerResolved = true
+		case providerWorkerCompact:
+			actor.completePendingCommand(attachments, actor.workerCommandID, actor.workerClientID, protocol.ErrorProviderCrashed)
+			actor.workerResolved = true
 		}
 	}
 	if actor.active != nil {
@@ -61,12 +64,21 @@ func (actor *conversation) startRecovery(attachments map[*clientAttachment]struc
 		zeroProviderContext(actor.active.request.Context)
 		actor.active = nil
 	}
+	if actor.compact != nil {
+		if actor.compact.accepted != nil {
+			actor.publishShared(attachments, protocol.CompactionPayload{WorkID: actor.compact.request.WorkID, Status: protocol.CompactionFailed})
+		}
+		if actor.compact.originCommandID != "" {
+			actor.completePendingCommand(attachments, actor.compact.originCommandID, actor.compact.originClientID, protocol.ErrorProviderCrashed)
+		}
+		actor.compact = nil
+	}
 	if actor.deferredInterrupt != nil {
 		actor.completePendingCommand(attachments, actor.deferredInterrupt.commandID, actor.deferredInterrupt.clientID, protocol.ErrorTurnInterrupted)
 		actor.deferredInterrupt = nil
 	}
 	actor.lifecycle = protocol.LifecycleUnavailable
-	actor.publishShared(attachments, protocol.LifecyclePayload{State: actor.lifecycle})
+	actor.publishShared(attachments, actor.lifecyclePayload())
 
 	generation := actor.generation
 	mapping := cloneMapping(actor.mapping)

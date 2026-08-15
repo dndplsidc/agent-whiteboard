@@ -20,6 +20,9 @@ func (session *Session) handleNotification(method string, params json.RawMessage
 		session.handleServerRequestResolved(params)
 		return
 	}
+	if session.captureCompactNotification(method, params) {
+		return
+	}
 	nativeTurnID := notificationTurnID(method, params)
 	settingsNotification := method == "thread/settings/updated" || method == "model/rerouted"
 	session.mu.Lock()
@@ -49,13 +52,15 @@ func (session *Session) handleNotification(method string, params json.RawMessage
 	switch method {
 	case "item/agentMessage/delta":
 		var notification struct {
-			Delta string `json:"delta"`
+			ItemID string `json:"itemId"`
+			Delta  string `json:"delta"`
 		}
-		if json.Unmarshal(params, &notification) != nil || notification.Delta == "" || brokerTurnID == "" {
+		if json.Unmarshal(params, &notification) != nil || notification.ItemID == "" || notification.Delta == "" || brokerTurnID == "" {
 			return
 		}
+		messageID := provider.AssistantItemMessageID(brokerTurnID, notification.ItemID)
 		for _, delta := range splitText(notification.Delta, provider.MaxDeltaBytes) {
-			session.emit(provider.NewAssistantDeltaEvent(brokerTurnID, provider.AssistantMessageID(brokerTurnID), delta))
+			session.emit(provider.NewAssistantDeltaEvent(brokerTurnID, messageID, delta))
 		}
 	case "item/started":
 		session.handleItem(params, brokerTurnID, provider.ToolRunning)
@@ -157,8 +162,9 @@ func (session *Session) handleItem(params json.RawMessage, brokerTurnID string, 
 	}
 	switch item.Type {
 	case "agentMessage":
-		if forced == "" && brokerTurnID != "" && item.Text != "" {
-			session.emit(provider.NewAssistantMessageEvent(brokerTurnID, provider.AssistantMessageID(brokerTurnID), bounded(item.Text, provider.MaxEventTextBytes), session.driver.config.Clock.Now().UTC()))
+		if forced == "" && brokerTurnID != "" && item.ID != "" && item.Text != "" {
+			messageID := provider.AssistantItemMessageID(brokerTurnID, item.ID)
+			session.emit(provider.NewAssistantMessageEvent(brokerTurnID, messageID, bounded(item.Text, provider.MaxEventTextBytes), session.driver.config.Clock.Now().UTC()))
 		}
 		return
 	case "reasoning", "userMessage":

@@ -49,6 +49,8 @@ func codexSettingsSession(refValue string, settings provider.ExecutionSettings) 
 	session.native.Settings = &settings
 	session.native.Presentation = &presentation
 	session.capabilities.Images = settings.Model == "gpt-5.6-sol"
+	session.skillCatalog = provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{}}
+	session.supportsCompact = true
 	return session
 }
 
@@ -88,6 +90,10 @@ func codexSettingsFixture(t *testing.T, base uint64) (*Broker, *repairState, *tu
 	require.Equal(t, "gpt-5.6-sol", snapshot.EffectiveSettings.Model)
 	require.Len(t, snapshot.Catalog, 2)
 	return broker, state, session, connection, identity
+}
+
+func codexCompact(commandID, clientID, conversationID, workID string) protocol.Command {
+	return protocol.Command{APIVersion: protocol.APIVersion, CommandID: commandID, ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandCompact, Payload: protocol.CompactPayload{WorkID: workID}}
 }
 
 func codexSubmit(commandID, clientID, conversationID, turnID, messageID string, settings provider.ExecutionSettings) protocol.Command {

@@ -37,7 +37,15 @@ func TestConfiguredEnvelopeAllowsHostCapabilitiesWithoutChangingContextFraming(t
 func TestEnvelopeRejectsUnknownPolicyAndPreservesAssistantIdentity(t *testing.T) {
 	_, err := provider.Build(configuredTurn(), provider.Policy("other"))
 	require.Error(t, err)
-	require.Equal(t, "stVSb4YOw9X2A6f7QhzOnTHe9i-MheoK", provider.AssistantMessageID("YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"))
+	turnID := "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"
+	require.Equal(t, "stVSb4YOw9X2A6f7QhzOnTHe9i-MheoK", provider.AssistantMessageID(turnID))
+
+	first := provider.AssistantItemMessageID(turnID, "native-agent-item-1")
+	require.Equal(t, first, provider.AssistantItemMessageID(turnID, "native-agent-item-1"))
+	require.NotEqual(t, first, provider.AssistantItemMessageID(turnID, "native-agent-item-2"))
+	require.NotEqual(t, first, provider.AssistantMessageID(turnID))
+	require.Len(t, first, 32)
+	require.NotContains(t, first, "native-agent-item")
 }
 
 func configuredTurn() provider.TurnRequest {
