@@ -183,6 +183,17 @@ func AssistantMessageID(turnID string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:24])
 }
 
+// AssistantItemMessageID derives a stable protocol ID without exposing the provider's native item ID.
+func AssistantItemMessageID(turnID, nativeItemID string) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("agent-whiteboard-assistant-item-v1\x00"))
+	_, _ = hash.Write([]byte(turnID))
+	_, _ = hash.Write([]byte{'\x00'})
+	_, _ = hash.Write([]byte(nativeItemID))
+	sum := hash.Sum(nil)
+	return base64.RawURLEncoding.EncodeToString(sum[:24])
+}
+
 func (envelope Envelope) validate() error {
 	if !envelope.Policy.Valid() || envelope.ReaderContent.Validate() != nil {
 		return errors.New("invalid turn envelope policy or content")

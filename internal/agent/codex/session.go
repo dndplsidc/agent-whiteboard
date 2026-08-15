@@ -643,6 +643,7 @@ func projectHistory(raw json.RawMessage, expectedThreadID string) ([]provider.Hi
 	items := make([]provider.HistoryItem, 0, len(turns)*2)
 	for _, turn := range turns {
 		at := turnTime(turn)
+		turnID := ""
 		for _, item := range turn.Items {
 			switch item.Type {
 			case "userMessage":
@@ -651,13 +652,14 @@ func projectHistory(raw json.RawMessage, expectedThreadID string) ([]provider.Hi
 				if parseErr != nil || envelope.Policy != provider.PolicyConfigured {
 					continue
 				}
+				turnID = envelope.TurnID
 				items = append(items, provider.HistoryItem{TurnID: envelope.TurnID, MessageID: envelope.MessageID, Role: provider.HistoryUser, Content: envelope.ReaderContent.Clone(), CreatedAt: at})
 			case "agentMessage":
-				if len(items) == 0 || items[len(items)-1].Role != provider.HistoryUser || item.Text == "" {
+				if turnID == "" || item.ID == "" || item.Text == "" {
 					continue
 				}
-				user := items[len(items)-1]
-				items = append(items, provider.HistoryItem{TurnID: user.TurnID, MessageID: provider.AssistantMessageID(user.TurnID), Role: provider.HistoryAssistant, Text: bounded(cleanText(item.Text), provider.MaxHistoryItemBytes), CreatedAt: at})
+				messageID := provider.AssistantItemMessageID(turnID, item.ID)
+				items = append(items, provider.HistoryItem{TurnID: turnID, MessageID: messageID, Role: provider.HistoryAssistant, Text: bounded(cleanText(item.Text), provider.MaxHistoryItemBytes), CreatedAt: at})
 			}
 		}
 	}
@@ -757,6 +759,7 @@ type historyTurn struct {
 	Items       []historyItem `json:"items"`
 }
 type historyItem struct {
+	ID      string            `json:"id"`
 	Type    string            `json:"type"`
 	Text    string            `json:"text"`
 	Content []json.RawMessage `json:"content"`

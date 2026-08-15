@@ -294,7 +294,7 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   expect(parsedCommands(localAgentSidebar.brokerRequests).at(-1)).toMatchObject({ type: "interrupt" });
 });
 
-test("keeps Codex command activity ahead of the streamed answer", async ({ context, page, localAgentSidebar }) => {
+test("keeps Codex command activity at its native transcript position", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Stable skill stream\n", creatorContext: "Stable stream context.\n" });
   localAgentSidebar.setSkills([{ id: "W7W7W7W7W7W7W7W7W7W7W7W7W7W7W7W7", name: "devflow", display_name: "devflow", description: "Software change workflow.", scope: "user" }]);
   localAgentSidebar.setPhaseResponses(true, "codex");
@@ -310,7 +310,12 @@ test("keeps Codex command activity ahead of the streamed answer", async ({ conte
   await composer.press("Enter");
   await expect(page.locator(".agent-live-status")).toHaveText("Responding");
   const turnID = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit").payload.turn_id;
-  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
+  localAgentSidebar.emitAssistantMessage("codex", {
+    turn_id: turnID,
+    message_id: "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1t",
+    text: "I will inspect the skill.",
+    created_at: "2026-07-27T03:04:05Z",
+  });
   localAgentSidebar.emitToolActivity("codex", {
     turn_id: turnID,
     kind: "command",
@@ -319,18 +324,21 @@ test("keeps Codex command activity ahead of the streamed answer", async ({ conte
     summary: "Loaded the devflow skill.",
     detail: "Read SKILL.md",
   });
+  localAgentSidebar.releaseResponsePhase("first_delta", "codex");
 
   const streamedItems = page.locator(".agent-timeline > .agent-tool-activity, .agent-timeline > .agent-message-assistant");
-  await expect(streamedItems).toHaveCount(2);
-  await expect(streamedItems.first()).toHaveClass(/agent-tool-activity/u);
-  await expect(streamedItems.last()).toHaveClass(/agent-message-assistant/u);
+  await expect(streamedItems).toHaveCount(3);
+  await expect(streamedItems.nth(0)).toHaveClass(/agent-message-assistant/u);
+  await expect(streamedItems.nth(1)).toHaveClass(/agent-tool-activity/u);
+  await expect(streamedItems.nth(2)).toHaveClass(/agent-message-assistant/u);
 
   localAgentSidebar.releaseResponsePhase("later_delta", "codex");
-  await expect(streamedItems.first()).toHaveClass(/agent-tool-activity/u);
+  await expect(streamedItems.nth(1)).toHaveClass(/agent-tool-activity/u);
   localAgentSidebar.releaseResponsePhase("completion", "codex");
   await expect(page.locator(".agent-live-status")).toHaveText("Connected");
-  await expect(streamedItems.first()).toHaveClass(/agent-tool-activity/u);
-  await expect(streamedItems.last()).toHaveClass(/agent-message-assistant/u);
+  await expect(streamedItems.nth(0)).toHaveClass(/agent-message-assistant/u);
+  await expect(streamedItems.nth(1)).toHaveClass(/agent-tool-activity/u);
+  await expect(streamedItems.nth(2)).toHaveClass(/agent-message-assistant/u);
 });
 
 test("keeps completed compaction in its original transcript position", async ({ context, page, localAgentSidebar }) => {
@@ -590,7 +598,7 @@ test("aligns the mobile viewer controls on one inset toolbar line", async ({
   expect(Math.abs(themeInset - agentInset)).toBeLessThanOrEqual(1);
 });
 
-test("keeps queue submission and Stop available with Enter and Shift+Enter", async ({
+test("keeps queue submission and keyboard Stop available with Enter and Shift+Enter", async ({
   context,
   page,
   localAgentSidebar,
@@ -618,7 +626,9 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   await expect(page.getByLabel("Edit queued message")).toHaveText("Edited follow-up.");
   await page.getByRole("button", { name: "Remove", exact: true }).click();
   await expect(page.getByLabel("Edit queued message")).toHaveCount(0);
-  await stop.click();
+  await composer.focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".agent-drawer")).toBeVisible();
   const interrupted = page.locator(".agent-activity-interruption");
   await expect(interrupted).toContainText("Response stopped");
   await expect(interrupted).toContainText("not replayed automatically");
@@ -628,6 +638,7 @@ test("keeps queue submission and Stop available with Enter and Shift+Enter", asy
   const types = parsedCommands(localAgentSidebar.brokerRequests).map((command) => command.type);
   expect(types).toEqual(expect.arrayContaining(["submit", "queue_edit", "queue_remove", "interrupt"]));
   expect(types.filter((type) => type === "submit")).toHaveLength(2);
+  expect(types.filter((type) => type === "interrupt")).toHaveLength(1);
 });
 
 test("picks and pastes multiple images with previews, retry, queue, and styled focus", async ({

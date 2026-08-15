@@ -3322,9 +3322,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       ...state.timeline.map((item) => ({ type: "timeline", item })),
       ...state.compactions.map((item) => ({ type: "compaction", item })),
     ].sort((left, right) => {
-      const sameTurn = left.item.turn_id && left.item.turn_id === right.item.turn_id;
-      if (sameTurn && left.item.kind === "tool" && right.item.kind === "assistant") return -1;
-      if (sameTurn && left.item.kind === "assistant" && right.item.kind === "tool") return 1;
       const timeDifference = Date.parse(left.item.created_at) - Date.parse(right.item.created_at);
       if (Number.isFinite(timeDifference) && timeDifference !== 0) return timeDifference;
       return (left.item.transcript_order ?? 0) - (right.item.transcript_order ?? 0);
@@ -3798,6 +3795,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       event.stopImmediatePropagation();
       chooseCompletion();
     } else if (event.key === "Escape") {
+      if (state.activeWork !== null) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       closeCompletionMenu();
@@ -3885,7 +3883,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       }
     }
   });
-  stopButton.addEventListener("click", () => { if (state.activeWork?.state === "running") void sendCommand("interrupt", { work_id: state.activeWork.work_id }); });
+  function requestActiveWorkStop() {
+    if (state.activeWork?.state !== "running") return false;
+    void sendCommand("interrupt", { work_id: state.activeWork.work_id });
+    return true;
+  }
+  stopButton.addEventListener("click", requestActiveWorkStop);
   reconnectButton.addEventListener("click", () => {
     transport.close();
     state.connected = false;
@@ -3944,6 +3947,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         available[event.shiftKey ? (index <= 0 ? available.length - 1 : index - 1) : (index + 1) % available.length]?.focus();
         return;
       }
+      return;
+    }
+    if (event.key === "Escape" && state.activeWork !== null) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      requestActiveWorkStop();
       return;
     }
     if (!overflowMenu.hidden && event.target?.getAttribute?.("role") === "menuitem" && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {

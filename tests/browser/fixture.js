@@ -1129,6 +1129,9 @@ function createSidebarBroker(initialAllowedOrigin) {
       const state = providerState(provider);
       emit(state, "activity", { kind, summary });
     },
+    emitAssistantMessage(provider, payload) {
+      emit(providerState(provider), "assistant_message", payload);
+    },
     emitToolActivity(provider, payload) {
       const state = providerState(provider);
       const activityID = payload.activity_id ?? protocolID(state.identitySequence++);
@@ -1471,6 +1474,7 @@ export const test = base.extend({
           createdSettings: broker.createdSettings,
           failNextImageUpload: broker.failNextImageUpload,
           disconnectProvider: broker.disconnectProvider,
+          emitAssistantMessage: broker.emitAssistantMessage,
           emitToolActivity: broker.emitToolActivity,
           emitInteraction: broker.emitInteraction,
           setHoldInteractionResolution: broker.setHoldInteractionResolution,
