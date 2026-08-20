@@ -38,6 +38,84 @@ func (_m *MockClient) EXPECT() *MockClient_Expecter {
 	return &MockClient_Expecter{mock: &_m.Mock}
 }
 
+// CreateHTML provides a mock function for the type MockClient
+func (_mock *MockClient) CreateHTML(context1 context.Context, file webapi.File, file1 webapi.File, n *int64) (webapi.Resource, error) {
+	ret := _mock.Called(context1, file, file1, n)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateHTML")
+	}
+
+	var r0 webapi.Resource
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, webapi.File, webapi.File, *int64) (webapi.Resource, error)); ok {
+		return returnFunc(context1, file, file1, n)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, webapi.File, webapi.File, *int64) webapi.Resource); ok {
+		r0 = returnFunc(context1, file, file1, n)
+	} else {
+		r0 = ret.Get(0).(webapi.Resource)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, webapi.File, webapi.File, *int64) error); ok {
+		r1 = returnFunc(context1, file, file1, n)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_CreateHTML_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateHTML'
+type MockClient_CreateHTML_Call struct {
+	*mock.Call
+}
+
+// CreateHTML is a helper method to define mock.On call
+//   - context1 context.Context
+//   - file webapi.File
+//   - file1 webapi.File
+//   - n *int64
+func (_e *MockClient_Expecter) CreateHTML(context1 any, file any, file1 any, n any) *MockClient_CreateHTML_Call {
+	return &MockClient_CreateHTML_Call{Call: _e.mock.On("CreateHTML", context1, file, file1, n)}
+}
+
+func (_c *MockClient_CreateHTML_Call) Run(run func(context1 context.Context, file webapi.File, file1 webapi.File, n *int64)) *MockClient_CreateHTML_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 webapi.File
+		if args[1] != nil {
+			arg1 = args[1].(webapi.File)
+		}
+		var arg2 webapi.File
+		if args[2] != nil {
+			arg2 = args[2].(webapi.File)
+		}
+		var arg3 *int64
+		if args[3] != nil {
+			arg3 = args[3].(*int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_CreateHTML_Call) Return(resource webapi.Resource, err error) *MockClient_CreateHTML_Call {
+	_c.Call.Return(resource, err)
+	return _c
+}
+
+func (_c *MockClient_CreateHTML_Call) RunAndReturn(run func(context1 context.Context, file webapi.File, file1 webapi.File, n *int64) (webapi.Resource, error)) *MockClient_CreateHTML_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateImages provides a mock function for the type MockClient
 func (_mock *MockClient) CreateImages(context1 context.Context, files []webapi.File, n *int64) ([]webapi.Resource, error) {
 	ret := _mock.Called(context1, files, n)
@@ -190,84 +268,6 @@ func (_c *MockClient_CreateMarkdown_Call) RunAndReturn(run func(context1 context
 	return _c
 }
 
-// CreateWhiteboard provides a mock function for the type MockClient
-func (_mock *MockClient) CreateWhiteboard(context1 context.Context, whiteboardKind webapi.WhiteboardKind, file webapi.File, n *int64) (webapi.Resource, error) {
-	ret := _mock.Called(context1, whiteboardKind, file, n)
-
-	if len(ret) == 0 {
-		panic("no return value specified for CreateWhiteboard")
-	}
-
-	var r0 webapi.Resource
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, webapi.WhiteboardKind, webapi.File, *int64) (webapi.Resource, error)); ok {
-		return returnFunc(context1, whiteboardKind, file, n)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, webapi.WhiteboardKind, webapi.File, *int64) webapi.Resource); ok {
-		r0 = returnFunc(context1, whiteboardKind, file, n)
-	} else {
-		r0 = ret.Get(0).(webapi.Resource)
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, webapi.WhiteboardKind, webapi.File, *int64) error); ok {
-		r1 = returnFunc(context1, whiteboardKind, file, n)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockClient_CreateWhiteboard_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateWhiteboard'
-type MockClient_CreateWhiteboard_Call struct {
-	*mock.Call
-}
-
-// CreateWhiteboard is a helper method to define mock.On call
-//   - context1 context.Context
-//   - whiteboardKind webapi.WhiteboardKind
-//   - file webapi.File
-//   - n *int64
-func (_e *MockClient_Expecter) CreateWhiteboard(context1 any, whiteboardKind any, file any, n any) *MockClient_CreateWhiteboard_Call {
-	return &MockClient_CreateWhiteboard_Call{Call: _e.mock.On("CreateWhiteboard", context1, whiteboardKind, file, n)}
-}
-
-func (_c *MockClient_CreateWhiteboard_Call) Run(run func(context1 context.Context, whiteboardKind webapi.WhiteboardKind, file webapi.File, n *int64)) *MockClient_CreateWhiteboard_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 webapi.WhiteboardKind
-		if args[1] != nil {
-			arg1 = args[1].(webapi.WhiteboardKind)
-		}
-		var arg2 webapi.File
-		if args[2] != nil {
-			arg2 = args[2].(webapi.File)
-		}
-		var arg3 *int64
-		if args[3] != nil {
-			arg3 = args[3].(*int64)
-		}
-		run(
-			arg0,
-			arg1,
-			arg2,
-			arg3,
-		)
-	})
-	return _c
-}
-
-func (_c *MockClient_CreateWhiteboard_Call) Return(resource webapi.Resource, err error) *MockClient_CreateWhiteboard_Call {
-	_c.Call.Return(resource, err)
-	return _c
-}
-
-func (_c *MockClient_CreateWhiteboard_Call) RunAndReturn(run func(context1 context.Context, whiteboardKind webapi.WhiteboardKind, file webapi.File, n *int64) (webapi.Resource, error)) *MockClient_CreateWhiteboard_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // DeleteImage provides a mock function for the type MockClient
 func (_mock *MockClient) DeleteImage(context1 context.Context, s string) error {
 	ret := _mock.Called(context1, s)
@@ -384,6 +384,72 @@ func (_c *MockClient_DeleteWhiteboard_Call) Return(err error) *MockClient_Delete
 }
 
 func (_c *MockClient_DeleteWhiteboard_Call) RunAndReturn(run func(context1 context.Context, whiteboardKind webapi.WhiteboardKind, s string) error) *MockClient_DeleteWhiteboard_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetHTML provides a mock function for the type MockClient
+func (_mock *MockClient) GetHTML(context1 context.Context, s string) (webapi.HTMLResponse, error) {
+	ret := _mock.Called(context1, s)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetHTML")
+	}
+
+	var r0 webapi.HTMLResponse
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (webapi.HTMLResponse, error)); ok {
+		return returnFunc(context1, s)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) webapi.HTMLResponse); ok {
+		r0 = returnFunc(context1, s)
+	} else {
+		r0 = ret.Get(0).(webapi.HTMLResponse)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(context1, s)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_GetHTML_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetHTML'
+type MockClient_GetHTML_Call struct {
+	*mock.Call
+}
+
+// GetHTML is a helper method to define mock.On call
+//   - context1 context.Context
+//   - s string
+func (_e *MockClient_Expecter) GetHTML(context1 any, s any) *MockClient_GetHTML_Call {
+	return &MockClient_GetHTML_Call{Call: _e.mock.On("GetHTML", context1, s)}
+}
+
+func (_c *MockClient_GetHTML_Call) Run(run func(context1 context.Context, s string)) *MockClient_GetHTML_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_GetHTML_Call) Return(hTMLResponse webapi.HTMLResponse, err error) *MockClient_GetHTML_Call {
+	_c.Call.Return(hTMLResponse, err)
+	return _c
+}
+
+func (_c *MockClient_GetHTML_Call) RunAndReturn(run func(context1 context.Context, s string) (webapi.HTMLResponse, error)) *MockClient_GetHTML_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -510,6 +576,90 @@ func (_c *MockClient_PublicURL_Call) Return(s1 string, err error) *MockClient_Pu
 }
 
 func (_c *MockClient_PublicURL_Call) RunAndReturn(run func(s string) (string, error)) *MockClient_PublicURL_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateHTML provides a mock function for the type MockClient
+func (_mock *MockClient) UpdateHTML(context1 context.Context, s string, file webapi.File, file1 webapi.File, n *int64) (webapi.Resource, error) {
+	ret := _mock.Called(context1, s, file, file1, n)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateHTML")
+	}
+
+	var r0 webapi.Resource
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, webapi.File, webapi.File, *int64) (webapi.Resource, error)); ok {
+		return returnFunc(context1, s, file, file1, n)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, webapi.File, webapi.File, *int64) webapi.Resource); ok {
+		r0 = returnFunc(context1, s, file, file1, n)
+	} else {
+		r0 = ret.Get(0).(webapi.Resource)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, webapi.File, webapi.File, *int64) error); ok {
+		r1 = returnFunc(context1, s, file, file1, n)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_UpdateHTML_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateHTML'
+type MockClient_UpdateHTML_Call struct {
+	*mock.Call
+}
+
+// UpdateHTML is a helper method to define mock.On call
+//   - context1 context.Context
+//   - s string
+//   - file webapi.File
+//   - file1 webapi.File
+//   - n *int64
+func (_e *MockClient_Expecter) UpdateHTML(context1 any, s any, file any, file1 any, n any) *MockClient_UpdateHTML_Call {
+	return &MockClient_UpdateHTML_Call{Call: _e.mock.On("UpdateHTML", context1, s, file, file1, n)}
+}
+
+func (_c *MockClient_UpdateHTML_Call) Run(run func(context1 context.Context, s string, file webapi.File, file1 webapi.File, n *int64)) *MockClient_UpdateHTML_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 webapi.File
+		if args[2] != nil {
+			arg2 = args[2].(webapi.File)
+		}
+		var arg3 webapi.File
+		if args[3] != nil {
+			arg3 = args[3].(webapi.File)
+		}
+		var arg4 *int64
+		if args[4] != nil {
+			arg4 = args[4].(*int64)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_UpdateHTML_Call) Return(resource webapi.Resource, err error) *MockClient_UpdateHTML_Call {
+	_c.Call.Return(resource, err)
+	return _c
+}
+
+func (_c *MockClient_UpdateHTML_Call) RunAndReturn(run func(context1 context.Context, s string, file webapi.File, file1 webapi.File, n *int64) (webapi.Resource, error)) *MockClient_UpdateHTML_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -672,90 +822,6 @@ func (_c *MockClient_UpdateMarkdown_Call) Return(resource webapi.Resource, err e
 }
 
 func (_c *MockClient_UpdateMarkdown_Call) RunAndReturn(run func(context1 context.Context, s string, file webapi.File, file1 webapi.File, n *int64) (webapi.Resource, error)) *MockClient_UpdateMarkdown_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
-// UpdateWhiteboard provides a mock function for the type MockClient
-func (_mock *MockClient) UpdateWhiteboard(context1 context.Context, whiteboardKind webapi.WhiteboardKind, s string, file webapi.File, n *int64) (webapi.Resource, error) {
-	ret := _mock.Called(context1, whiteboardKind, s, file, n)
-
-	if len(ret) == 0 {
-		panic("no return value specified for UpdateWhiteboard")
-	}
-
-	var r0 webapi.Resource
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, webapi.WhiteboardKind, string, webapi.File, *int64) (webapi.Resource, error)); ok {
-		return returnFunc(context1, whiteboardKind, s, file, n)
-	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, webapi.WhiteboardKind, string, webapi.File, *int64) webapi.Resource); ok {
-		r0 = returnFunc(context1, whiteboardKind, s, file, n)
-	} else {
-		r0 = ret.Get(0).(webapi.Resource)
-	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, webapi.WhiteboardKind, string, webapi.File, *int64) error); ok {
-		r1 = returnFunc(context1, whiteboardKind, s, file, n)
-	} else {
-		r1 = ret.Error(1)
-	}
-	return r0, r1
-}
-
-// MockClient_UpdateWhiteboard_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateWhiteboard'
-type MockClient_UpdateWhiteboard_Call struct {
-	*mock.Call
-}
-
-// UpdateWhiteboard is a helper method to define mock.On call
-//   - context1 context.Context
-//   - whiteboardKind webapi.WhiteboardKind
-//   - s string
-//   - file webapi.File
-//   - n *int64
-func (_e *MockClient_Expecter) UpdateWhiteboard(context1 any, whiteboardKind any, s any, file any, n any) *MockClient_UpdateWhiteboard_Call {
-	return &MockClient_UpdateWhiteboard_Call{Call: _e.mock.On("UpdateWhiteboard", context1, whiteboardKind, s, file, n)}
-}
-
-func (_c *MockClient_UpdateWhiteboard_Call) Run(run func(context1 context.Context, whiteboardKind webapi.WhiteboardKind, s string, file webapi.File, n *int64)) *MockClient_UpdateWhiteboard_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 webapi.WhiteboardKind
-		if args[1] != nil {
-			arg1 = args[1].(webapi.WhiteboardKind)
-		}
-		var arg2 string
-		if args[2] != nil {
-			arg2 = args[2].(string)
-		}
-		var arg3 webapi.File
-		if args[3] != nil {
-			arg3 = args[3].(webapi.File)
-		}
-		var arg4 *int64
-		if args[4] != nil {
-			arg4 = args[4].(*int64)
-		}
-		run(
-			arg0,
-			arg1,
-			arg2,
-			arg3,
-			arg4,
-		)
-	})
-	return _c
-}
-
-func (_c *MockClient_UpdateWhiteboard_Call) Return(resource webapi.Resource, err error) *MockClient_UpdateWhiteboard_Call {
-	_c.Call.Return(resource, err)
-	return _c
-}
-
-func (_c *MockClient_UpdateWhiteboard_Call) RunAndReturn(run func(context1 context.Context, whiteboardKind webapi.WhiteboardKind, s string, file webapi.File, n *int64) (webapi.Resource, error)) *MockClient_UpdateWhiteboard_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -59,6 +59,11 @@ type turnWorkerResult struct {
 }
 
 func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struct{}, turnResults chan<- turnWorkerResult, command protocol.Command, payload protocol.SubmitPayload) (bool, protocol.BrowserErrorCode) {
+	// HTML source is intentionally opaque to Page Agent. Reject references
+	// before image claims, context preparation, queue mutation, or provider I/O.
+	if actor.identity.Kind == statepkg.ResourceHTML && messageContentHasReferences(payload.Content) {
+		return false, protocol.ErrorInvalidCommand
+	}
 	if code := actor.validateSelectedSkills(payload.Content); code != "" {
 		return false, code
 	}
@@ -152,6 +157,15 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 		actor.dispatchNext(attachments, turnResults)
 	}
 	return false, ""
+}
+
+func messageContentHasReferences(content protocol.MessageContent) bool {
+	for _, part := range content.Parts {
+		if part.Type == protocol.MessagePartReference {
+			return true
+		}
+	}
+	return false
 }
 
 func (actor *conversation) convertSubmittedTurn(payload protocol.SubmitPayload, images []provider.ImageInput, settings *provider.ExecutionSettings) (provider.TurnRequest, protocol.BrowserErrorCode) {

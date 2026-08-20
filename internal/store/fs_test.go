@@ -1012,7 +1012,7 @@ func TestFSConcurrentRepeatedCloseWaitsForOneCompletion(t *testing.T) {
 func TestFSContextCancellationPreservesCommittedGeneration(t *testing.T) {
 	root := t.TempDir()
 	fs := newTestFS(t, root)
-	record := whiteboardDomain.Whiteboard{ID: testID, Kind: whiteboardDomain.KindHTML, Source: []byte("old"), CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	record := whiteboardDomain.Whiteboard{ID: testID, Kind: whiteboardDomain.KindHTML, Source: []byte("old"), Context: []byte("old context"), CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	require.NoError(t, fs.Whiteboards().Create(context.Background(), record))
 	dir := filepath.Join(root, "whiteboards", testID)
 	before := decodeMetadata(t, filepath.Join(dir, "metadata.json"))["content_filename"]
@@ -1020,6 +1020,7 @@ func TestFSContextCancellationPreservesCommittedGeneration(t *testing.T) {
 	cancel()
 	replacement := record
 	replacement.Source = []byte("new")
+	replacement.Context = []byte("new context")
 
 	require.ErrorIs(t, fs.Whiteboards().Replace(canceled, replacement), context.Canceled)
 	after := decodeMetadata(t, filepath.Join(dir, "metadata.json"))["content_filename"]
@@ -1029,12 +1030,13 @@ func TestFSContextCancellationPreservesCommittedGeneration(t *testing.T) {
 	require.Equal(t, record.ID, got.ID)
 	require.Equal(t, record.Kind, got.Kind)
 	require.Equal(t, record.Source, got.Source)
+	require.Equal(t, record.Context, got.Context)
 	require.True(t, record.CreatedAt.Equal(got.CreatedAt))
 	require.True(t, record.UpdatedAt.Equal(got.UpdatedAt))
 	require.Nil(t, got.ExpiresAt)
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
-	require.Len(t, entries, 2)
+	require.Len(t, entries, 3)
 
 	require.ErrorIs(t, fs.Whiteboards().Delete(canceled, testID), context.Canceled)
 	require.ErrorIs(t, fs.Whiteboards().Ready(canceled), context.Canceled)

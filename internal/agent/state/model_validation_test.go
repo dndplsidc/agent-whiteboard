@@ -41,6 +41,13 @@ func TestIdentityAcceptsEachClosedProviderAndKeepsKeysSeparate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, piKey, codexKey)
 
+	html := pi
+	html.Kind = ResourceHTML
+	require.NoError(t, html.Validate())
+	htmlKey, err := ConversationKey(html)
+	require.NoError(t, err)
+	require.NotEqual(t, piKey, htmlKey)
+
 	invalid := pi
 	invalid.Provider = provider.Name("other")
 	require.Error(t, invalid.Validate())

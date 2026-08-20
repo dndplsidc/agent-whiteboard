@@ -408,7 +408,7 @@ func cloneProviderContext(context *provider.PageContext) *provider.PageContext {
 		return nil
 	}
 	copyOfContext := *context
-	copyOfContext.Markdown = cloneBytes(context.Markdown)
+	copyOfContext.Source = cloneBytes(context.Source)
 	copyOfContext.CreatorContext = cloneBytes(context.CreatorContext)
 	copyOfContext.Resource.ExpiresAt = cloneTimePointer(context.Resource.ExpiresAt)
 	return &copyOfContext
@@ -418,13 +418,13 @@ func zeroProviderContext(context *provider.PageContext) {
 	if context == nil {
 		return
 	}
-	for index := range context.Markdown {
-		context.Markdown[index] = 0
+	for index := range context.Source {
+		context.Source[index] = 0
 	}
 	for index := range context.CreatorContext {
 		context.CreatorContext[index] = 0
 	}
-	context.Markdown = nil
+	context.Source = nil
 	context.CreatorContext = nil
 	context.Title = ""
 	context.URL = ""

@@ -248,6 +248,17 @@ func TestServiceForwardsExactContextsAndValues(t *testing.T) {
 	require.Same(t, ctx, whiteboards.ctx)
 	require.Equal(t, facadeTestID, whiteboards.deletedID)
 
+	createdHTML, err := service.CreateHTML(ctx, CreateWhiteboardInput{
+		Source:  []byte("<!doctype html><html><head></head><body>exact</body></html>"),
+		Context: []byte("exact HTML creator context"), ExpiresInSeconds: &expires,
+	})
+	require.NoError(t, err)
+	require.Same(t, ctx, whiteboards.ctx)
+	require.Equal(t, KindHTML, whiteboards.created.Kind)
+	require.Equal(t, []byte("<!doctype html><html><head></head><body>exact</body></html>"), whiteboards.created.Source)
+	require.Equal(t, []byte("exact HTML creator context"), whiteboards.created.Context)
+	require.Equal(t, facadeTestID, createdHTML.ID)
+
 	png := validPNG(t)
 	createdImages, err := service.CreateImages(ctx, CreateImagesInput{Images: []ImageUpload{{Content: png, ExpiresInSeconds: &expires}}})
 	require.NoError(t, err)

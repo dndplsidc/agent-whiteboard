@@ -65,6 +65,28 @@ func TestConversationKeyCanonicalVector(t *testing.T) {
 	require.Error(t, err, "the loopback origin must also be exactly canonical")
 }
 
+func TestHTMLIdentityPersistsSeparatelyFromMarkdown(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	html := testIdentity()
+	html.Kind = ResourceHTML
+	markdownKey, err := ConversationKey(testIdentity())
+	require.NoError(t, err)
+	htmlKey, err := ConversationKey(html)
+	require.NoError(t, err)
+	require.NotEqual(t, markdownKey, htmlKey)
+
+	current := testSession(t, testID, "sessions/html.jsonl", now)
+	outcome, err := store.Create(html, current, now)
+	require.NoError(t, err)
+	require.Equal(t, CommitApplied, outcome)
+	loaded, err := store.Load(html)
+	require.NoError(t, err)
+	require.Equal(t, ResourceHTML, loaded.Identity.Kind)
+	_, err = store.Load(testIdentity())
+	require.Error(t, err)
+}
+
 func TestCreateLoadAndStrictDurableSchema(t *testing.T) {
 	store := openTestStore(t)
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)

@@ -59,6 +59,30 @@ func TestProviderNamesAreClosedAndCodexConnectRoundTrips(t *testing.T) {
 	require.JSONEq(t, input, string(encoded))
 }
 
+func TestDecodeHTMLSubmitCarriesExactFormatNeutralSource(t *testing.T) {
+	source := "<!doctype html><title>Exact</title>\x00"
+	creator := "creator notes\n"
+	digest, err := agent.CalculateContextDigestForKind(agent.ResourceKindHTML, []byte(source), []byte(creator))
+	require.NoError(t, err)
+	at := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
+	conversationID := idC
+	command := protocol.Command{APIVersion: protocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: protocol.CommandSubmit, Payload: protocol.SubmitPayload{
+		TurnID: idA, MessageID: idB, Content: protocol.TextContent("question"), Context: &protocol.PageContext{
+			Revision: protocol.ContextInitial, Source: source, CreatorContext: creator, Title: "HTML", URL: "https://whiteboard.example/whiteboards/html/" + idC,
+			Resource: protocol.Resource{Kind: protocol.ResourceHTML, ID: idC, CreatedAt: at, UpdatedAt: at}, Digest: digest,
+		},
+	}}
+	encoded, err := protocol.EncodeCommand(command)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"source":"<!doctype html>`)
+	require.NotContains(t, string(encoded), `"markdown":`)
+	decoded, err := protocol.DecodeCommand(encoded)
+	require.NoError(t, err)
+	context := decoded.Payload.(protocol.SubmitPayload).Context
+	require.Equal(t, protocol.ResourceHTML, context.Resource.Kind)
+	require.Equal(t, source, context.Source)
+}
+
 func TestDecodeSubmitCarriesCompleteInitialOrReplacementContext(t *testing.T) {
 	for _, revision := range []protocol.ContextRevision{protocol.ContextInitial, protocol.ContextReplacement} {
 		t.Run(string(revision), func(t *testing.T) {
@@ -68,7 +92,7 @@ func TestDecodeSubmitCarriesCompleteInitialOrReplacementContext(t *testing.T) {
 			payload := decoded.Payload.(protocol.SubmitPayload)
 			require.Equal(t, protocol.TextContent("question"), payload.Content)
 			require.NotNil(t, payload.Context)
-			require.Equal(t, "# page", payload.Context.Markdown)
+			require.Equal(t, "# page", payload.Context.Source)
 			require.Equal(t, "creator summary", payload.Context.CreatorContext)
 			require.Equal(t, revision, payload.Context.Revision)
 		})
@@ -174,7 +198,7 @@ func TestConnectRejectsMalformedNestedSecurityValues(t *testing.T) {
 		"nested duplicate":    strings.Replace(valid, `"kind":"markdown"`, `"kind":"markdown","kind":"markdown"`, 1),
 		"uppercase digest":    strings.Replace(valid, digest, strings.ToUpper(digest), 1),
 		"malformed timestamp": strings.Replace(valid, "2026-07-27T01:02:03Z", "yesterday", 1),
-		"wrong resource kind": strings.Replace(valid, `"kind":"markdown"`, `"kind":"html"`, 1),
+		"wrong resource kind": strings.Replace(valid, `"kind":"markdown"`, `"kind":"pdf"`, 1),
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -482,12 +506,12 @@ func TestActiveTurnIdentityIsExplicitAcrossSubmissionQueueAndEvents(t *testing.T
 func TestDefaultContextWorstCaseJSONEscapingFitsTransport(t *testing.T) {
 	require.Equal(t, 67<<20, protocol.MaxContextCommandBytes)
 	conversationID := idC
-	markdown := strings.Repeat("\x01", protocol.MaxMarkdownBytes)
+	markdown := strings.Repeat("\x01", protocol.MaxSourceBytes)
 	creatorContext := strings.Repeat("\x02", protocol.MaxCreatorContextBytes)
 	command := protocol.Command{
 		APIVersion: protocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: protocol.CommandSubmit,
 		Payload: protocol.SubmitPayload{TurnID: "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE", MessageID: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", Content: protocol.TextContent(strings.Repeat("\t", protocol.MaxMessageBytes)), Context: &protocol.PageContext{
-			Revision: protocol.ContextInitial, Markdown: markdown, CreatorContext: creatorContext, Title: strings.Repeat(`"`, protocol.MaxTitleBytes), URL: "https://whiteboard.example/?" + strings.Repeat("&", protocol.MaxURLBytes-len("https://whiteboard.example/?")),
+			Revision: protocol.ContextInitial, Source: markdown, CreatorContext: creatorContext, Title: strings.Repeat(`"`, protocol.MaxTitleBytes), URL: "https://whiteboard.example/?" + strings.Repeat("&", protocol.MaxURLBytes-len("https://whiteboard.example/?")),
 			Resource: protocol.Resource{Kind: protocol.ResourceMarkdown, ID: idC, CreatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC), UpdatedAt: time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)}, Digest: agent.CalculateContextDigest([]byte(markdown), []byte(creatorContext)),
 		}},
 	}
@@ -632,7 +656,7 @@ func assertNoForbiddenWireKeys(t *testing.T, value any) {
 }
 
 func validSubmitJSON(revision string) string {
-	return `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"question"}]},"context":{"revision":"` + revision + `","markdown":"# page","creator_context":"creator summary","title":"Page title","url":"https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"digest":"2955a3d16e16b3a1044e95e84aea4cd29b37440217bdaff323fb32e31b47159b"},"settings":null}}`
+	return `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"submit","payload":{"turn_id":"EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE","message_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","content":{"parts":[{"type":"text","text":"question"}]},"context":{"revision":"` + revision + `","source":"# page","creator_context":"creator summary","title":"Page title","url":"https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"digest":"2955a3d16e16b3a1044e95e84aea4cd29b37440217bdaff323fb32e31b47159b"},"settings":null}}`
 }
 
 func exactBytes(character string, size int) string {

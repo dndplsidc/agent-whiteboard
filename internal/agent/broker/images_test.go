@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -137,6 +138,112 @@ func TestImageSubmitClaimsOrderedInputsAndDecoratesUserEventsAndHistory(t *testi
 	require.Equal(t, user.Payload.(protocol.UserMessagePayload).Images, timeline.Payload.(protocol.TimelinePayload).Items[0].Images)
 	require.Equal(t, historyResult, receiveLifecycle(t, connection.Events()))
 	_ = resource
+}
+
+func TestHTMLAcceptsOrdinaryImagesButRejectsReferencesBeforeClaim(t *testing.T) {
+	t.Run("ordinary image", func(t *testing.T) {
+		store := newBrokerAttachmentStore()
+		broker, _, session, connection, clientID, _, _, page := turnImageFixtureForKind(t, 8020, store, true, RealTimerFactory{}, protocol.ResourceHTML)
+		defer broker.Close(context.Background())
+		conversationID := connection.ConversationID()
+		image := protocol.ImageReference{ImageID: sequenceID(8022), Name: "diagram.png"}
+		command := submitCommand(sequenceID(8023), clientID, conversationID, sequenceID(8024), sequenceID(8025), "", &page)
+		payload := command.Payload.(protocol.SubmitPayload)
+		payload.Images = []protocol.ImageReference{image}
+		command.Payload = payload
+		result, err := connection.Command(context.Background(), command)
+		require.NoError(t, err)
+		requireCommandResult(t, result, protocol.CommandSucceeded, "")
+		submitted := receiveLifecycle(t, session.submitted)
+		require.Equal(t, provider.ResourceHTML, submitted.Context.Resource.Kind)
+		store.mu.Lock()
+		require.Len(t, store.claims, 1)
+		store.mu.Unlock()
+	})
+
+	t.Run("reference rejected before image claim", func(t *testing.T) {
+		store := newBrokerAttachmentStore()
+		broker, state, session, connection, clientID, _, resource, page := turnImageFixtureForKind(t, 8030, store, true, RealTimerFactory{}, protocol.ResourceHTML)
+		defer broker.Close(context.Background())
+		conversationID := connection.ConversationID()
+		markdownResource := resource
+		markdownResource.Kind = protocol.ResourceMarkdown
+		reference := protocolTextReference(sequenceID(8032), "selection", "quoted text", markdownResource, page.Digest)
+		content := protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &reference}}}
+		command := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(8033), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandSubmit, Payload: protocol.SubmitPayload{TurnID: sequenceID(8034), MessageID: sequenceID(8035), Content: content, Images: []protocol.ImageReference{{ImageID: sequenceID(8036), Name: "must-not-claim.png"}}, Context: &page}}
+		result, err := connection.Command(context.Background(), command)
+		require.NoError(t, err)
+		requireCommandResult(t, result, protocol.CommandRejected, protocol.ErrorInvalidCommand)
+		require.EqualValues(t, 0, session.submissions.Load())
+		require.Equal(t, 0, state.prepareCalls)
+		store.mu.Lock()
+		require.Empty(t, store.claims)
+		store.mu.Unlock()
+	})
+}
+
+func TestHTMLQueueEditRejectsReferencesWithoutMutatingQueuedImages(t *testing.T) {
+	store := newBrokerAttachmentStore()
+	broker, _, session, connection, clientID, _, resource, page := turnImageFixtureForKind(t, 8040, store, true, RealTimerFactory{}, protocol.ResourceHTML)
+	defer broker.Close(context.Background())
+	conversationID := connection.ConversationID()
+
+	active := submitCommand(sequenceID(8042), clientID, conversationID, sequenceID(8043), sequenceID(8044), "active", &page)
+	result, err := connection.Command(context.Background(), active)
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandSucceeded, "")
+	receiveLifecycle(t, session.submitted)
+	drainEvents(t, connection.Events(), 3)
+
+	queuedMessageID := sequenceID(8045)
+	image := protocol.ImageReference{ImageID: sequenceID(8046), Name: "queued.png"}
+	queued := submitCommand(sequenceID(8047), clientID, conversationID, sequenceID(8048), queuedMessageID, "queued", nil)
+	queuedPayload := queued.Payload.(protocol.SubmitPayload)
+	queuedPayload.Images = []protocol.ImageReference{image}
+	queued.Payload = queuedPayload
+	result, err = connection.Command(context.Background(), queued)
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandSucceeded, "")
+	queueEvent := receiveLifecycle(t, connection.Events())
+	require.Equal(t, "queued.png", queueEvent.Payload.(protocol.QueuePayload).Items[0].Images[0].Name)
+	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
+
+	markdownResource := resource
+	markdownResource.Kind = protocol.ResourceMarkdown
+	reference := protocolTextReference(sequenceID(8049), "selection", "quoted text", markdownResource, strings.Repeat("a", 64))
+	invalidEdit := protocol.Command{
+		APIVersion: protocol.APIVersion, CommandID: sequenceID(8050), ClientID: clientID, ConversationID: &conversationID,
+		Type: protocol.CommandQueueEdit, Payload: protocol.QueueEditPayload{MessageID: queuedMessageID, Content: protocol.MessageContent{
+			Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &reference}},
+		}},
+	}
+	result, err = connection.Command(context.Background(), invalidEdit)
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandRejected, protocol.ErrorInvalidState)
+	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
+	unchanged := connection.actor.queue.Items()
+	require.Len(t, unchanged, 1)
+	require.Equal(t, "queued", unchanged[0].Content.Parts[0].Text)
+	require.Equal(t, []protocol.ImageDescriptor{{ImageID: image.ImageID, Name: image.Name, MediaType: "image/png"}}, unchanged[0].Images)
+
+	validEdit := protocol.Command{
+		APIVersion: protocol.APIVersion, CommandID: sequenceID(8051), ClientID: clientID, ConversationID: &conversationID,
+		Type: protocol.CommandQueueEdit, Payload: protocol.QueueEditPayload{MessageID: queuedMessageID, Content: protocol.TextContent("still queued")},
+	}
+	result, err = connection.Command(context.Background(), validEdit)
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandSucceeded, "")
+	queueEvent = receiveLifecycle(t, connection.Events())
+	item := queueEvent.Payload.(protocol.QueuePayload).Items[0]
+	require.Equal(t, "still queued", item.Content.Parts[0].Text)
+	require.Equal(t, []protocol.ImageDescriptor{{ImageID: image.ImageID, Name: image.Name, MediaType: "image/png"}}, item.Images)
+	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
+
+	store.mu.Lock()
+	require.Len(t, store.claims, 1)
+	require.Empty(t, store.released)
+	require.Equal(t, []protocol.ImageDescriptor{{ImageID: image.ImageID, Name: image.Name, MediaType: "image/png"}}, store.descriptors[queuedMessageID])
+	store.mu.Unlock()
 }
 
 func TestConversationPeriodicallySweepsStagedImages(t *testing.T) {
@@ -295,9 +402,18 @@ func turnImageFixture(t *testing.T, base uint64, attachments AttachmentStore, su
 }
 
 func turnImageFixtureWithTimers(t *testing.T, base uint64, attachments AttachmentStore, supportsImages bool, timers TimerFactory) (*Broker, *repairState, *turnSession, *Connection, string, statepkg.Identity, protocol.Resource, protocol.PageContext) {
+	return turnImageFixtureForKind(t, base, attachments, supportsImages, timers, protocol.ResourceMarkdown)
+}
+
+func turnImageFixtureForKind(t *testing.T, base uint64, attachments AttachmentStore, supportsImages bool, timers TimerFactory, kind protocol.ResourceKind) (*Broker, *repairState, *turnSession, *Connection, string, statepkg.Identity, protocol.Resource, protocol.PageContext) {
 	t.Helper()
 	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(base))
 	resource := testResource(identity.CapabilityID)
+	resource.Kind = kind
+	if kind == protocol.ResourceHTML {
+		identity.Kind = statepkg.ResourceHTML
+		mapping.Identity = identity
+	}
 	page := testPageContext(resource)
 	observed := statepkg.Revision{Digest: page.Digest, Revision: statepkg.RevisionInitial, SourceUpdatedAt: resource.UpdatedAt}
 	mapping.Current.Observed = &observed

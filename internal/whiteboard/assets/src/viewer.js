@@ -24,6 +24,7 @@ export const DEFAULT_TITLE = "Untitled whiteboard";
 export const THEME_STORAGE_KEY = "agent-whiteboard-theme";
 
 const THEME_CONTROL_CLEANUP = Symbol("theme-control-cleanup");
+const HTML_HOST_INSTANCE = Symbol("html-host-instance");
 
 const ALLOWED_THEMES = new Set(["light", "dark", "system"]);
 const MERMAID_SECURE_KEYS = [
@@ -360,6 +361,77 @@ function createThemeControl({ doc, container, controller }) {
   };
 }
 
+async function installThemeController({
+  doc,
+  container,
+  storage,
+  mediaQuery,
+  diagramSources = [],
+  semanticIndex = null,
+  renderResolvedTheme = async () => {},
+}) {
+  container[THEME_CONTROL_CLEANUP]?.();
+  container[THEME_CONTROL_CLEANUP] = undefined;
+  let theme = readTheme(storage);
+  let generation = 0;
+  let pendingRender = Promise.resolve();
+  let subscribed = false;
+
+  const onSystemThemeChange = () => {
+    if (theme === "system") queueThemeRender();
+  };
+
+  function syncSystemSubscription() {
+    if (theme === "system" && !subscribed) {
+      mediaQuery.addEventListener?.("change", onSystemThemeChange);
+      subscribed = true;
+    } else if (theme !== "system" && subscribed) {
+      mediaQuery.removeEventListener?.("change", onSystemThemeChange);
+      subscribed = false;
+    }
+  }
+
+  function queueThemeRender() {
+    const resolvedTheme = resolveTheme(theme, mediaQuery);
+    const renderGeneration = ++generation;
+    doc.documentElement.dataset.theme = resolvedTheme;
+    doc.documentElement.style.colorScheme = resolvedTheme;
+    pendingRender = pendingRender.then(() => renderResolvedTheme({
+      resolvedTheme,
+      generation: renderGeneration,
+      isCurrent: () => renderGeneration === generation,
+    }));
+    return pendingRender;
+  }
+
+  let themeControl;
+  const controller = {
+    diagramSources: [...diagramSources],
+    semanticIndex,
+    get theme() { return theme; },
+    async setTheme(value) {
+      theme = normalizeTheme(value);
+      persistTheme(storage, theme);
+      syncSystemSubscription();
+      await queueThemeRender();
+    },
+    settled() { return pendingRender; },
+    destroy() {
+      themeControl.destroy();
+      container[THEME_CONTROL_CLEANUP] = undefined;
+      if (subscribed) mediaQuery.removeEventListener?.("change", onSystemThemeChange);
+      subscribed = false;
+    },
+  };
+
+  themeControl = createThemeControl({ doc, container, controller });
+  container[THEME_CONTROL_CLEANUP] = themeControl.destroy;
+  persistTheme(storage, theme);
+  syncSystemSubscription();
+  await queueThemeRender();
+  return controller;
+}
+
 export async function renderWhiteboard(
   source,
   {
@@ -380,74 +452,22 @@ export async function renderWhiteboard(
   highlightCode(container);
   setDocumentTitle(container, doc);
 
-  let theme = readTheme(storage);
-  let generation = 0;
-  let pendingRender = Promise.resolve();
-  let subscribed = false;
-
-  const onSystemThemeChange = () => {
-    if (theme === "system") queueDiagramRender();
-  };
-
-  function syncSystemSubscription() {
-    if (theme === "system" && !subscribed) {
-      mediaQuery.addEventListener?.("change", onSystemThemeChange);
-      subscribed = true;
-    } else if (theme !== "system" && subscribed) {
-      mediaQuery.removeEventListener?.("change", onSystemThemeChange);
-      subscribed = false;
-    }
-  }
-
-  function queueDiagramRender() {
-    const selectedTheme = theme;
-    const resolvedTheme = resolveTheme(selectedTheme, mediaQuery);
-    const renderGeneration = ++generation;
-    doc.documentElement.dataset.theme = resolvedTheme;
-    doc.documentElement.style.colorScheme = resolvedTheme;
-    pendingRender = pendingRender.then(() =>
-      renderDiagrams({
-        container,
-        diagramSources,
-        doc,
-        resolvedTheme,
-        generation: renderGeneration,
-        isCurrent: () => renderGeneration === generation,
-      }),
-    );
-    return pendingRender;
-  }
-
-  const controller = {
-    diagramSources: [...diagramSources],
+  return installThemeController({
+    doc,
+    container,
+    storage,
+    mediaQuery,
+    diagramSources,
     semanticIndex,
-    get theme() {
-      return theme;
-    },
-    async setTheme(value) {
-      theme = normalizeTheme(value);
-      persistTheme(storage, theme);
-      syncSystemSubscription();
-      await queueDiagramRender();
-    },
-    settled() {
-      return pendingRender;
-    },
-    destroy() {
-      themeControl.destroy();
-      container[THEME_CONTROL_CLEANUP] = undefined;
-      if (subscribed) mediaQuery.removeEventListener?.("change", onSystemThemeChange);
-      subscribed = false;
-    },
-  };
-
-  const themeControl = createThemeControl({ doc, container, controller });
-  container[THEME_CONTROL_CLEANUP] = themeControl.destroy;
-
-  persistTheme(storage, theme);
-  syncSystemSubscription();
-  await queueDiagramRender();
-  return controller;
+    renderResolvedTheme: ({ resolvedTheme, generation, isCurrent }) => renderDiagrams({
+      container,
+      diagramSources,
+      doc,
+      resolvedTheme,
+      generation,
+      isCurrent,
+    }),
+  });
 }
 
 function viewerContainer(doc) {
@@ -665,25 +685,27 @@ function validContentAndImages(content, images, event = true) {
   return ids.length <= MAX_AGENT_IMAGES_PER_TURN && new Set(ids).size === ids.length;
 }
 
-function validResource(value) {
+function validResource(value, expectedKind) {
   if (!exactObject(value, ["kind", "id", "created_at", "updated_at", "expires_at"])) return false;
-  if (value.kind !== "markdown" || !validID(value.id) || !validDate(value.created_at) || !validDate(value.updated_at)) return false;
+  if (value.kind !== expectedKind || !["markdown", "html"].includes(value.kind) || !validID(value.id) || !validDate(value.created_at) || !validDate(value.updated_at)) return false;
   if (value.expires_at !== null && !validDate(value.expires_at)) return false;
   const created = Date.parse(value.created_at);
   return Date.parse(value.updated_at) >= created && (value.expires_at === null || Date.parse(value.expires_at) >= created);
 }
 
 export function validateViewerPayload(value) {
-  if (!isRecord(value) || typeof value.markdown !== "string" || encoder.encode(value.markdown).length > 10 * 1024 * 1024) throw new TypeError("invalid whiteboard source payload");
-  if (!Object.hasOwn(value, "local_agent")) {
-    if (!exactObject(value, ["markdown"])) throw new TypeError("invalid whiteboard source payload");
-    return { markdown: value.markdown, context: "", local_agent: { enabled: false } };
+  if (!isRecord(value) || !["markdown", "html"].includes(value.kind) || typeof value.source !== "string" || encoder.encode(value.source).length > 10 * 1024 * 1024) {
+    throw new TypeError("invalid whiteboard source payload");
   }
-  if (!exactObject(value, ["markdown", "context", "local_agent"]) || typeof value.context !== "string" || encoder.encode(value.context).length > 1024 * 1024) {
+  if (!Object.hasOwn(value, "local_agent")) {
+    if (value.kind !== "markdown" || !exactObject(value, ["kind", "source"])) throw new TypeError("invalid whiteboard source payload");
+    return { kind: value.kind, source: value.source, context: "", local_agent: { enabled: false } };
+  }
+  if (!exactObject(value, ["kind", "source", "context", "local_agent"]) || typeof value.context !== "string" || encoder.encode(value.context).length > 1024 * 1024 || value.kind === "html" && value.context.length === 0) {
     throw new TypeError("invalid whiteboard source payload");
   }
   const agent = value.local_agent;
-  if (!exactObject(agent, ["enabled", "context_digest", "resource"]) || agent.enabled !== true || !DIGEST_PATTERN.test(agent.context_digest) || !validResource(agent.resource)) {
+  if (!exactObject(agent, ["enabled", "context_digest", "resource"]) || agent.enabled !== true || !DIGEST_PATTERN.test(agent.context_digest) || !validResource(agent.resource, value.kind)) {
     throw new TypeError("invalid whiteboard source payload");
   }
   return value;
@@ -810,7 +832,7 @@ export function createPageContext(payload, { title, url, revision }) {
   if (!["initial", "replacement"].includes(revision) || !validText(title, 512) || !validText(url, 8 * 1024) || !allowedOrigin || parsedURL.username || parsedURL.password || !parsedURL.hostname) throw new TypeError("invalid page context");
   return {
     revision,
-    markdown: payload.markdown,
+    source: payload.source,
     creator_context: payload.context,
     title,
     url,
@@ -821,9 +843,13 @@ export function createPageContext(payload, { title, url, revision }) {
 
 export function createSubmitCommand({ content, message, images = [], payload, provider = "pi", settings = null, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
   let orderedContent;
-  try { orderedContent = content ?? normalizeMessageContent({ parts: message ? [{ type: "text", text: message }] : [] }); }
+  try { orderedContent = normalizeMessageContent(content ?? { parts: message ? [{ type: "text", text: message }] : [] }); }
   catch { throw new TypeError("invalid agent message"); }
+  if (orderedContent.parts.some((part) => part.type !== "text") && !orderedContent.parts.some((part) => part.type === "text" && part.text.trim() !== "")) {
+    orderedContent = { parts: orderedContent.parts.filter((part) => part.type !== "text") };
+  }
   if (!validContentAndImages(orderedContent, images, false) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
+  if (payload?.kind === "html" && orderedContent.parts.some((part) => part.type === "reference")) throw new TypeError("invalid agent message");
   if (!PROVIDERS.has(provider) || provider === "pi" && settings !== null || provider === "codex" && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const turnID = idFactory();
@@ -1701,7 +1727,7 @@ function actionGuidance(action, doc) {
     configure_model: "Configure a usable default model for the selected provider, then try again.",
     try_again: "Try the operation again; if it still fails, restart the broker.",
     restart_provider: "Restart the local agent broker before trying again.",
-    reduce_context: "Reduce the complete page Markdown or creator context before trying again.",
+    reduce_context: "Reduce the complete page source or creator context before trying again.",
     restore_session: "Restore an available archive or start a new conversation.",
     retry_turn: "Send a new message when ready; interrupted turns are never replayed automatically.",
     reload_board: "Reload the whiteboard to obtain its current complete revision.",
@@ -2114,7 +2140,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const consentList = doc.createElement("ul");
   consentList.className = "agent-consent-list";
   const contextListItem = doc.createElement("li");
-  contextListItem.textContent = "Complete Markdown and creator notes on the first message";
+  contextListItem.textContent = `Complete ${payload.kind === "html" ? "HTML source" : "Markdown"} and creator notes on the first message`;
   const accessListItem = doc.createElement("li");
   accessListItem.textContent = "Pi has no tools, files, network, or project access";
   consentList.append(contextListItem, accessListItem);
@@ -2169,7 +2195,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const contextDisclosureHeading = doc.createElement("strong");
   contextDisclosureHeading.textContent = "Page context";
   const contextDisclosureDescription = doc.createElement("span");
-  contextDisclosureDescription.textContent = "Markdown + creator notes";
+  contextDisclosureDescription.textContent = `${payload.kind === "html" ? "HTML source" : "Markdown"} + creator notes`;
   contextDisclosureCopy.append(contextDisclosureHeading, contextDisclosureDescription);
   const contextDisclosureChevron = doc.createElement("span");
   contextDisclosureChevron.className = "agent-context-disclosure-chevron";
@@ -2254,12 +2280,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     details.append(summary, preview);
     return details;
   };
-  const markdownCard = contextCard({ title: "Page Markdown", description: "Original page content", content: payload.markdown, label: "Page Markdown", open: true });
+  const sourceLabel = payload.kind === "html" ? "HTML source" : "Page Markdown";
+  const sourceCard = contextCard({ title: sourceLabel, description: "Original page content", content: payload.source, label: sourceLabel, open: true });
   const creatorCard = contextCard({ title: "Creator notes", description: "Notes supplied by the creator", content: payload.context, label: "Creator notes" });
   const contextPrivacy = doc.createElement("p");
   contextPrivacy.className = "agent-context-privacy";
   contextPrivacy.textContent = "Context is included with the next message that needs it—not when you simply open this panel.";
-  contextDetails.append(contextIntro, markdownCard, creatorCard, contextPrivacy);
+  contextDetails.append(contextIntro, sourceCard, creatorCard, contextPrivacy);
 
   const timeline = doc.createElement("section");
   timeline.className = "agent-timeline";
@@ -3694,7 +3721,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     closeConfirmation({ restore: false });
     const previousView = activeView;
     activeView = ["conversation", "settings", "context", "archives"].includes(view) ? view : "conversation";
-    if (activeView === "context") markdownCard.open = true;
+    if (activeView === "context") sourceCard.open = true;
     if (activeView === "archives" && previousView !== "archives" && state.connected) {
       state.archiveStatus = "loading";
       void sendCommand("archive_list", { limit: 50 }, { freshArchivePage: true });
@@ -4057,6 +4084,61 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   };
 }
 
+async function bootHTMLHost(payload, doc) {
+  const appBar = doc.querySelector("#agent-whiteboard-app-bar");
+  const themeSlot = doc.querySelector("#agent-whiteboard-app-bar-theme");
+  const agentSlot = doc.querySelector("#agent-whiteboard-app-bar-agent");
+  const surface = doc.querySelector("#agent-whiteboard-html-surface");
+  const frame = doc.querySelector("#agent-whiteboard-html-content");
+  if (!appBar || !themeSlot || !agentSlot || !surface || !frame || !surface.contains(frame)) {
+    throw new TypeError("invalid HTML host shell");
+  }
+  if (appBar[HTML_HOST_INSTANCE]) return appBar[HTML_HOST_INSTANCE];
+
+  const construction = (async () => {
+    const theme = await installThemeController({
+      doc,
+      container: themeSlot,
+      storage: browserStorage(doc),
+      mediaQuery: browserMediaQuery(doc),
+    });
+    let agent;
+    try {
+      agent = createAgentDrawer({ payload, doc });
+    } catch (error) {
+      theme.destroy();
+      throw error;
+    }
+    agentSlot.append(agent.elements.toggle);
+    let destroyed = false;
+    const viewer = {
+      kind: "html",
+      appBar,
+      surface,
+      frame,
+      theme,
+      agent,
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        if (appBar[HTML_HOST_INSTANCE] === viewer) appBar[HTML_HOST_INSTANCE] = undefined;
+        agent.destroy();
+        theme.destroy();
+      },
+    };
+    return viewer;
+  })();
+  appBar[HTML_HOST_INSTANCE] = construction;
+  try {
+    const viewer = await construction;
+    if (appBar[HTML_HOST_INSTANCE] === construction) appBar[HTML_HOST_INSTANCE] = viewer;
+    return viewer;
+  } catch (error) {
+    if (appBar[HTML_HOST_INSTANCE] === construction) appBar[HTML_HOST_INSTANCE] = undefined;
+    throw error;
+  }
+}
+
 export async function bootViewer(doc = document) {
   const sourceElement = doc.querySelector("#agent-whiteboard-source");
   if (!sourceElement) return undefined;
@@ -4064,8 +4146,11 @@ export async function bootViewer(doc = document) {
   try { parsed = JSON.parse(sourceElement.textContent || "null"); }
   catch { throw new TypeError("invalid whiteboard source payload"); }
   const payload = validateViewerPayload(parsed);
+  if (payload.kind === "html") return bootHTMLHost(payload, doc);
+
   const container = viewerContainer(doc);
-  const viewer = await renderWhiteboard(payload.markdown, { container, doc, contextEnabled: payload.local_agent.enabled });
+  const viewer = await renderWhiteboard(payload.source, { container, doc, contextEnabled: payload.local_agent.enabled });
+  viewer.kind = "markdown";
   if (payload.local_agent.enabled) {
     let contextController;
     viewer.agent = createAgentDrawer({ payload, doc, onReference: (reference) => contextController?.navigate(reference) ?? false });
@@ -4088,6 +4173,10 @@ export async function bootViewer(doc = document) {
 
 function startBrowserEntry() {
   void bootViewer().catch(() => {
+    if (document.querySelector("#agent-whiteboard-html-content")) {
+      document.body.dataset.agentBootstrap = "failed";
+      return;
+    }
     const container = viewerContainer(document);
     container.replaceChildren();
     const error = document.createElement("p");

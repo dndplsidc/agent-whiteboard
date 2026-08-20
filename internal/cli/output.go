@@ -38,6 +38,13 @@ type markdownOutput struct {
 	Context       string       `json:"context"`
 }
 
+type htmlOutput struct {
+	SchemaVersion int          `json:"schema_version"`
+	Resource      jsonResource `json:"resource"`
+	HTML          string       `json:"html"`
+	Context       string       `json:"context"`
+}
+
 type deleteOutput struct {
 	SchemaVersion int `json:"schema_version"`
 }
@@ -108,6 +115,25 @@ func writeMarkdown(writer io.Writer, client Client, response webapi.MarkdownResp
 		SchemaVersion: 1,
 		Resource:      resolved[0],
 		Markdown:      response.Markdown,
+		Context:       response.Context,
+	}); err != nil {
+		return err
+	}
+	_, err = writer.Write(output.Bytes())
+	return err
+}
+
+func writeHTML(writer io.Writer, client Client, response webapi.HTMLResponse) error {
+	resolved, err := resolveJSONResources(client, []webapi.Resource{response.Resource})
+	if err != nil {
+		return err
+	}
+
+	var output bytes.Buffer
+	if err := json.NewEncoder(&output).Encode(htmlOutput{
+		SchemaVersion: 1,
+		Resource:      resolved[0],
+		HTML:          response.HTML,
 		Context:       response.Context,
 	}); err != nil {
 		return err

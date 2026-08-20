@@ -6,12 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/agent"
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
 	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
@@ -90,10 +92,12 @@ func TestViewerDisabledRendersOnlySafelyEscapedSourceAndExactCSP(t *testing.T) {
 	require.Len(t, sourceScripts, 1)
 	require.Equal(t, "application/json", attribute(sourceScripts[0], "type"))
 	var payload struct {
-		Markdown string `json:"markdown"`
+		Kind   whiteboard.Kind `json:"kind"`
+		Source string          `json:"source"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(textContent(sourceScripts[0])), &payload))
-	require.Equal(t, source, payload.Markdown)
+	require.Equal(t, whiteboard.KindMarkdown, payload.Kind)
+	require.Equal(t, source, payload.Source)
 
 	scripts := findElements(document, "script", nil)
 	require.Len(t, scripts, 2)
@@ -152,8 +156,9 @@ func TestViewerEnabledRendersExactSafelyEscapedSourceContextAndFlag(t *testing.T
 	})
 	require.Len(t, sourceScripts, 1)
 	var payload struct {
-		Markdown   string `json:"markdown"`
-		Context    string `json:"context"`
+		Kind       whiteboard.Kind `json:"kind"`
+		Source     string          `json:"source"`
+		Context    string          `json:"context"`
 		LocalAgent struct {
 			Enabled       bool   `json:"enabled"`
 			ContextDigest string `json:"context_digest"`
@@ -167,7 +172,8 @@ func TestViewerEnabledRendersExactSafelyEscapedSourceContextAndFlag(t *testing.T
 		} `json:"local_agent"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(textContent(sourceScripts[0])), &payload))
-	require.Equal(t, source, payload.Markdown)
+	require.Equal(t, whiteboard.KindMarkdown, payload.Kind)
+	require.Equal(t, source, payload.Source)
 	require.Equal(t, creatorContext, payload.Context)
 	require.True(t, payload.LocalAgent.Enabled)
 	require.Equal(t, agent.CalculateContextDigest([]byte(source), []byte(creatorContext)), payload.LocalAgent.ContextDigest)
@@ -204,8 +210,117 @@ func TestViewerEnabledPreservesLegacyEmptyContext(t *testing.T) {
 		ID: testWhiteboardID, Kind: whiteboard.KindMarkdown, Source: []byte("legacy"), Context: nil,
 		CreatedAt: createdAt, UpdatedAt: createdAt,
 	}))
-	require.Contains(t, output.String(), `"markdown":"legacy","context":""`)
+	require.Contains(t, output.String(), `"kind":"markdown","source":"legacy","context":""`)
 	require.Contains(t, output.String(), `"enabled":true,"context_digest":"`)
+}
+
+func TestViewerEnabledRendersTrustedHTMLShellAndOpaqueChild(t *testing.T) {
+	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
+		CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
+	})
+	require.NoError(t, err)
+
+	source := `<!doctype html><html><head><title>  Exact &amp; bounded
+ title  </title></head><body><script>globalThis.publisher="HOSTILE"</script></body></html>`
+	creatorContext := "creator </script><notes>&\u2028"
+	createdAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	var output bytes.Buffer
+	require.NoError(t, viewer.Render(&output, whiteboard.Whiteboard{
+		ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: []byte(source), Context: []byte(creatorContext),
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+	}))
+
+	document, err := html.Parse(bytes.NewReader(output.Bytes()))
+	require.NoError(t, err)
+	require.Equal(t, "Exact & bounded title", textContent(findElements(document, "title", nil)[0]))
+	appBars := findElements(document, "header", func(node *html.Node) bool { return attribute(node, "id") == "agent-whiteboard-app-bar" })
+	require.Len(t, appBars, 1)
+	require.Equal(t, "Exact & bounded title", strings.TrimSpace(textContent(findElements(appBars[0], "span", func(node *html.Node) bool {
+		return attribute(node, "id") == "agent-whiteboard-app-title"
+	})[0])))
+
+	frames := findElements(document, "iframe", nil)
+	require.Len(t, frames, 1)
+	require.Equal(t, httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLContentSuffix, attribute(frames[0], "src"))
+	require.Equal(t, "allow-scripts", attribute(frames[0], "sandbox"))
+	require.Equal(t, "no-referrer", attribute(frames[0], "referrerpolicy"))
+	require.True(t, hasBooleanAttribute(frames[0], "credentialless"))
+
+	sourceScripts := findElements(document, "script", func(node *html.Node) bool { return attribute(node, "id") == "agent-whiteboard-source" })
+	require.Len(t, sourceScripts, 1)
+	var payload struct {
+		Kind       whiteboard.Kind `json:"kind"`
+		Source     string          `json:"source"`
+		Context    string          `json:"context"`
+		LocalAgent struct {
+			Enabled       bool   `json:"enabled"`
+			ContextDigest string `json:"context_digest"`
+		} `json:"local_agent"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(textContent(sourceScripts[0])), &payload))
+	require.Equal(t, whiteboard.KindHTML, payload.Kind)
+	require.Equal(t, source, payload.Source)
+	require.Equal(t, creatorContext, payload.Context)
+	require.True(t, payload.LocalAgent.Enabled)
+	wantDigest, err := agent.CalculateContextDigestForKind(string(whiteboard.KindHTML), []byte(source), []byte(creatorContext))
+	require.NoError(t, err)
+	require.Equal(t, wantDigest, payload.LocalAgent.ContextDigest)
+
+	raw := output.String()
+	require.NotContains(t, raw, `<script>globalThis.publisher="HOSTILE"</script>`)
+	require.NotContains(t, raw, creatorContext)
+	require.Contains(t, raw, `\u003cscript\u003eglobalThis.publisher`)
+	require.Contains(t, viewer.HTMLContentSecurityPolicy(), "frame-src 'self'")
+	require.Contains(t, viewer.HTMLContentSecurityPolicy(), "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*")
+	require.Contains(t, viewer.HTMLContentSecurityPolicy(), "img-src 'self' data: blob:")
+	require.NotEqual(t, whiteboard.StandaloneOuterContentSecurityPolicy, viewer.HTMLContentSecurityPolicy())
+}
+
+func TestViewerHTMLTitleFallsBackAndBoundsNormalizedText(t *testing.T) {
+	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
+		CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
+	})
+	require.NoError(t, err)
+
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{name: "missing", source: `<!doctype html><html><head></head><body></body></html>`, want: "Standalone whiteboard"},
+		{name: "blank", source: "<!doctype html><html><head><title> \n\t </title></head><body></body></html>", want: "Standalone whiteboard"},
+		{name: "bounded", source: `<!doctype html><html><head><title>` + strings.Repeat("界", 300) + `</title></head><body></body></html>`, want: strings.Repeat("界", 160)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			require.NoError(t, viewer.Render(&output, whiteboard.Whiteboard{ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: []byte(test.source)}))
+			document, parseErr := html.Parse(bytes.NewReader(output.Bytes()))
+			require.NoError(t, parseErr)
+			require.Equal(t, test.want, textContent(findElements(document, "title", nil)[0]))
+		})
+	}
+}
+
+func TestViewerHTMLRenderRejectsInvalidIDBeforeWritingAndPropagatesShortWrite(t *testing.T) {
+	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
+		CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
+	})
+	require.NoError(t, err)
+
+	var output bytes.Buffer
+	err = viewer.Render(&output, whiteboard.Whiteboard{ID: "malformed", Kind: whiteboard.KindHTML, Source: []byte("<!doctype html><title>Page</title>")})
+	require.Error(t, err)
+	require.Empty(t, output.Bytes())
+
+	err = viewer.Render(shortWriter{}, whiteboard.Whiteboard{ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: []byte("<!doctype html><title>Page</title>")})
+	require.ErrorIs(t, err, io.ErrShortWrite)
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(value []byte) (int, error) {
+	if len(value) == 0 {
+		return 0, nil
+	}
+	return len(value) - 1, nil
 }
 
 func countElements(root *html.Node, name string) int {

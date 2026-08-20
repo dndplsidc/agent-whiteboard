@@ -31,10 +31,10 @@ func TestBuildEnvelopeExactInitialBytes(t *testing.T) {
 	require.Equal(t, expected, encoded)
 	parsed, err := ParseEnvelope(encoded)
 	require.NoError(t, err)
-	require.Equal(t, request.Context.Markdown, parsed.Markdown)
+	require.Equal(t, request.Context.Source, parsed.Source)
 	require.Equal(t, request.Context.CreatorContext, parsed.CreatorContext)
 	require.Equal(t, request.Content, parsed.ReaderContent)
-	require.Equal(t, request.Context.Digest, agent.CalculateContextDigest(parsed.Markdown, parsed.CreatorContext))
+	require.Equal(t, request.Context.Digest, agent.CalculateContextDigest(parsed.Source, parsed.CreatorContext))
 }
 
 func TestBuildEnvelopeExactReplacementBytes(t *testing.T) {
@@ -46,7 +46,7 @@ func TestBuildEnvelopeExactReplacementBytes(t *testing.T) {
 	require.Equal(t, "replacement", parsed.Revision)
 	require.Equal(t, replacementInstructions, parsed.ApplicationInstructions)
 	require.Contains(t, parsed.ApplicationInstructions, "completely replaces all prior document context")
-	require.Equal(t, request.Context.Markdown, parsed.Markdown)
+	require.Equal(t, request.Context.Source, parsed.Source)
 }
 
 func TestBuildEnvelopeExactContinuationBytes(t *testing.T) {
@@ -69,12 +69,12 @@ func TestParseEnvelopeClonesContentBytes(t *testing.T) {
 	require.NoError(t, err)
 	parsed, err := ParseEnvelope(encoded)
 	require.NoError(t, err)
-	beforeMarkdown := bytes.Clone(parsed.Markdown)
+	beforeMarkdown := bytes.Clone(parsed.Source)
 	beforeContext := bytes.Clone(parsed.CreatorContext)
 	for index := range encoded {
 		encoded[index] = 0
 	}
-	require.Equal(t, beforeMarkdown, parsed.Markdown)
+	require.Equal(t, beforeMarkdown, parsed.Source)
 	require.Equal(t, beforeContext, parsed.CreatorContext)
 }
 
@@ -123,7 +123,7 @@ func TestParseEnvelopeRejectsMalformedAndNoncanonicalFrames(t *testing.T) {
 
 func TestBuildEnvelopeRejectsInvalidRequest(t *testing.T) {
 	request := envelopeRequest(provider.ContextInitial)
-	request.Context.Markdown = []byte{0xff}
+	request.Context.Source = []byte{0xff}
 	encoded, err := BuildEnvelope(request)
 	require.Error(t, err)
 	require.Nil(t, encoded)
@@ -138,7 +138,7 @@ func envelopeRequest(revision provider.ContextRevision) provider.TurnRequest {
 	return provider.TurnRequest{
 		TurnID: testTurnID, MessageID: testMessageID, Content: provider.TextMessage("reader\nmessage"),
 		Context: &provider.PageContext{
-			Revision: revision, Markdown: markdown, CreatorContext: creator, Title: "A title", URL: "https://example.test/board",
+			Revision: revision, Source: markdown, CreatorContext: creator, Title: "A title", URL: "https://example.test/board",
 			Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: testTurnID, CreatedAt: created, UpdatedAt: updated, ExpiresAt: &expires},
 			Digest:   agent.CalculateContextDigest(markdown, creator),
 		},

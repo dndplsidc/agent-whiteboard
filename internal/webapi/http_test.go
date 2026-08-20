@@ -149,6 +149,7 @@ func TestRouteConstants(t *testing.T) {
 	require.Equal(t, "/api/v1/whiteboards/markdown", httpx.APIWhiteboardMarkdown)
 	require.Equal(t, "/api/v1/whiteboards/markdown/", httpx.APIWhiteboardMarkdownResource)
 	require.Equal(t, "/api/v1/whiteboards/html", httpx.APIWhiteboardHTML)
+	require.Equal(t, "/api/v1/whiteboards/html/", httpx.APIWhiteboardHTMLResource)
 	require.Equal(t, "/api/v1/images", httpx.APIImages)
 	require.Equal(t, "/whiteboards/markdown/", httpx.PublicMarkdown)
 	require.Equal(t, "/whiteboards/html/", httpx.PublicHTML)
@@ -194,6 +195,29 @@ func TestMarkdownResponseUsesExactPublicWireShape(t *testing.T) {
 	})
 
 	require.Equal(t, "{\"resource\":{\"id\":\"resource-id\",\"type\":\"markdown\",\"path\":\"/whiteboards/markdown/resource-id\",\"created_at\":\"2026-07-16T12:00:00Z\",\"updated_at\":\"2026-07-16T12:00:00Z\",\"expires_at\":null,\"permanent\":true},\"markdown\":\"# Exact markdown\\n\",\"context\":\"## Exact context\\n\"}\n", rr.Body.String())
+	require.NotContains(t, rr.Body.String(), "source_path")
+	require.NotContains(t, rr.Body.String(), "context_path")
+	require.NotContains(t, rr.Body.String(), "generation")
+}
+
+func TestHTMLResponseUsesExactPublicWireShape(t *testing.T) {
+	createdAt := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
+	rr := httptest.NewRecorder()
+
+	httpx.WriteJSON(rr, http.StatusOK, httpx.HTMLResponse{
+		Resource: httpx.Resource{
+			ID:        "resource-id",
+			Type:      "html",
+			Path:      "/whiteboards/html/resource-id",
+			CreatedAt: createdAt,
+			UpdatedAt: createdAt,
+			Permanent: true,
+		},
+		HTML:    "<!doctype html><html></html>",
+		Context: "## Exact context\n",
+	})
+
+	require.Equal(t, "{\"resource\":{\"id\":\"resource-id\",\"type\":\"html\",\"path\":\"/whiteboards/html/resource-id\",\"created_at\":\"2026-07-16T12:00:00Z\",\"updated_at\":\"2026-07-16T12:00:00Z\",\"expires_at\":null,\"permanent\":true},\"html\":\"\\u003c!doctype html\\u003e\\u003chtml\\u003e\\u003c/html\\u003e\",\"context\":\"## Exact context\\n\"}\n", rr.Body.String())
 	require.NotContains(t, rr.Body.String(), "source_path")
 	require.NotContains(t, rr.Body.String(), "context_path")
 	require.NotContains(t, rr.Body.String(), "generation")

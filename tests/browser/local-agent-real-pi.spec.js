@@ -64,6 +64,52 @@ test("streams a consented Enter submission through the real broker and pinned Pi
   for (const requestURL of browserRequests) expect(allowedOrigins.has(new URL(requestURL).origin)).toBe(true);
 });
 
+test("streams exact HTML context through the real publishing server, broker, and pinned Pi", async ({
+  context,
+  page,
+  realAgentSidebar,
+}) => {
+  test.setTimeout(30_000);
+  realAgentSidebar.resetModelRequests();
+  const html = "<!doctype html><html><head><title>Real HTML agent path</title><style>body{font-family:system-ui;background:#f5efe3;color:#17324d}main{margin:3rem;padding:2rem;background:white;border-radius:1rem}</style></head><body><main><h1>Published dashboard</h1><p>Exact browser-to-provider HTML.</p></main></body></html>";
+  const creatorContext = "Exact HTML browser-to-provider creator context.\n";
+  const resource = await realAgentSidebar.publishHTML(html, creatorContext);
+  await context.grantPermissions(["local-network-access"], { origin: realAgentSidebar.origin });
+  await page.addInitScript(
+    ({ key, port }) => localStorage.setItem(key, String(port)),
+    { key: portKey, port: realAgentSidebar.brokerPort },
+  );
+
+  await page.goto(resource.url);
+  await expect(page.locator(".agent-live-status")).toHaveText("Pi ready");
+  await expect(page.frameLocator("#agent-whiteboard-html-content").getByText("Published dashboard")).toBeVisible();
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Add selected text|Add section|Add image/u })).toHaveCount(0);
+  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  await expect(composer).toBeEnabled({ timeout: 15_000 });
+  await composer.fill("Describe the published HTML dashboard.");
+  await composer.press("Enter");
+  await expect(page.locator(".agent-response-loading")).toHaveAccessibleName("Pi is responding", { timeout: 15_000 });
+
+  await realAgentSidebar.releaseModelFirstDelta();
+  await expect(page.locator(".agent-message-assistant")).toContainText("Real Pi fixture");
+  await realAgentSidebar.releaseModelLaterDelta();
+  await realAgentSidebar.releaseModelCompletion();
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected", { timeout: 15_000 });
+  await expect.poll(() => realAgentSidebar.modelRequests.length).toBe(1);
+
+  const modelRequest = realAgentSidebar.modelRequests[0];
+  expect(modelRequest.method).toBe("POST");
+  expect(modelRequest.url).toBe("/v1/chat/completions");
+  const providerContent = JSON.parse(modelRequest.body).messages.at(-1).content[0].text;
+  expect(providerContent).toContain(html);
+  expect(providerContent).toContain(creatorContext);
+  expect(providerContent).toContain("Describe the published HTML dashboard.");
+  expect(modelRequest.body).not.toContain("browser-placeholder-key");
+  await expect(page.frameLocator("#agent-whiteboard-html-content").getByText("Published dashboard")).toBeVisible();
+});
+
 test("automatically connects a literal loopback HTTP Markdown viewer", async ({
   page,
   realAgentSidebar,

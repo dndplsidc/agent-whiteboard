@@ -543,26 +543,87 @@ func TestFSConcurrentReadersObserveCompleteMarkdownPairs(t *testing.T) {
 	}
 }
 
-func TestFSHTMLAndImageRemainSchema1SingleArtifactRecords(t *testing.T) {
+func TestFSHTMLUsesSchema2PairAndImageRemainsSchema1(t *testing.T) {
 	root := t.TempDir()
 	fs := newTestFS(t, root)
-	html := whiteboardDomain.Whiteboard{ID: testID, Kind: whiteboardDomain.KindHTML, Source: []byte("<p>html</p>"), CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(2, 0)}
+	html := htmlRecord([]byte("<!doctype html><html><head></head><body>exact</body></html>"), []byte("creator notes\x00\n"))
 	image := imageDomain.Image{ID: testID2, Extension: ".png", MediaType: "image/png", Content: []byte("image"), CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(2, 0)}
 	require.NoError(t, fs.Whiteboards().Create(context.Background(), html))
 	require.NoError(t, fs.Images().Create(context.Background(), image))
 
-	for _, path := range []string{filepath.Join(root, "whiteboards", testID), filepath.Join(root, "images", testID2)} {
-		stored := decodeMetadata(t, filepath.Join(path, metadataFilename))
-		require.Equal(t, float64(1), stored["schema_version"])
-		require.NotEmpty(t, stored["content_filename"])
-		require.NotContains(t, stored, "context_filename")
-		require.Len(t, readDirNames(t, path), 2)
+	htmlDir := filepath.Join(root, "whiteboards", testID)
+	storedHTML := decodeMetadata(t, filepath.Join(htmlDir, metadataFilename))
+	require.Equal(t, float64(2), storedHTML["schema_version"])
+	sourceName := storedHTML["content_filename"].(string)
+	contextName := storedHTML["context_filename"].(string)
+	require.Regexp(t, `^source-[a-f0-9]{32}\.html$`, sourceName)
+	require.Regexp(t, `^context-[a-f0-9]{32}\.md$`, contextName)
+	require.Equal(t, generationToken(t, sourceName, "source-"), generationToken(t, contextName, "context-"))
+	require.Equal(t, html.Source, readFile(t, filepath.Join(htmlDir, sourceName)))
+	require.Equal(t, html.Context, readFile(t, filepath.Join(htmlDir, contextName)))
+
+	imageDir := filepath.Join(root, "images", testID2)
+	storedImage := decodeMetadata(t, filepath.Join(imageDir, metadataFilename))
+	require.Equal(t, float64(1), storedImage["schema_version"])
+	require.NotEmpty(t, storedImage["content_filename"])
+	require.NotContains(t, storedImage, "context_filename")
+	require.Len(t, readDirNames(t, imageDir), 2)
+}
+
+func TestFSLegacySchema1HTMLIsRejected(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	record := htmlRecord([]byte("<!doctype html><html><head></head><body>legacy</body></html>"), nil)
+	resourceDir := filepath.Join(root, "whiteboards", record.ID)
+	require.NoError(t, os.Mkdir(resourceDir, directoryPermissions))
+	generation := "source-00000000000000000000000000000000.html"
+	require.NoError(t, os.WriteFile(filepath.Join(resourceDir, generation), record.Source, filePermissions))
+	stored := metadata{SchemaVersion: 1, Kind: string(whiteboardDomain.KindHTML), CreatedAt: fromTime(record.CreatedAt), UpdatedAt: fromTime(record.UpdatedAt), ContentFilename: generation}
+	encoded, err := json.Marshal(stored)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(resourceDir, metadataFilename), encoded, filePermissions))
+
+	_, err = fs.Whiteboards().Get(context.Background(), record.ID)
+	assertCodeWithoutRoot(t, err, common.CodeStorageUnavailable, root)
+}
+
+func TestFSHTMLPairFailureBeforeMetadataPreservesOldPair(t *testing.T) {
+	root := t.TempDir()
+	fs := newTestFS(t, root)
+	old := htmlRecord([]byte("<!doctype html><html><head></head><body>old</body></html>"), []byte("old notes"))
+	require.NoError(t, fs.Whiteboards().Create(context.Background(), old))
+	resourceDir := filepath.Join(root, "whiteboards", testID)
+	beforeMetadata := readFile(t, filepath.Join(resourceDir, metadataFilename))
+
+	injected := errors.New("context publication failed")
+	calls := 0
+	fs.publishArtifact = func(root *os.Root, temp, final string) error {
+		calls++
+		if calls == 2 {
+			return injected
+		}
+		return publishGeneration(root, temp, final)
 	}
+	newRecord := htmlRecord([]byte("<!doctype html><html><head></head><body>new</body></html>"), []byte("new notes"))
+	err := fs.Whiteboards().Replace(context.Background(), newRecord)
+	require.ErrorIs(t, err, injected)
+	require.Equal(t, beforeMetadata, readFile(t, filepath.Join(resourceDir, metadataFilename)))
+	got, getErr := fs.Whiteboards().Get(context.Background(), testID)
+	require.NoError(t, getErr)
+	require.Equal(t, old.Source, got.Source)
+	require.Equal(t, old.Context, got.Context)
 }
 
 func markdownRecord(source, creatorContext []byte) whiteboardDomain.Whiteboard {
 	return whiteboardDomain.Whiteboard{
 		ID: testID, Kind: whiteboardDomain.KindMarkdown, Source: source, Context: creatorContext,
+		CreatedAt: time.Unix(10, 0).UTC(), UpdatedAt: time.Unix(11, 0).UTC(),
+	}
+}
+
+func htmlRecord(source, creatorContext []byte) whiteboardDomain.Whiteboard {
+	return whiteboardDomain.Whiteboard{
+		ID: testID, Kind: whiteboardDomain.KindHTML, Source: source, Context: creatorContext,
 		CreatedAt: time.Unix(10, 0).UTC(), UpdatedAt: time.Unix(11, 0).UTC(),
 	}
 }
@@ -588,7 +649,7 @@ func writeLegacyMarkdown(t *testing.T, root string, record whiteboardDomain.Whit
 
 func generationToken(t *testing.T, name, prefix string) string {
 	t.Helper()
-	require.Len(t, name, len(prefix)+32+len(".md"))
+	require.GreaterOrEqual(t, len(name), len(prefix)+32)
 	require.Equal(t, prefix, name[:len(prefix)])
 	return name[len(prefix) : len(prefix)+32]
 }

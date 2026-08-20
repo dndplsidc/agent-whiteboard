@@ -86,7 +86,7 @@ func TestCommandFingerprintDoesNotDependOnPageBufferIdentity(t *testing.T) {
 	cloned := original
 	payload := cloned.Payload.(protocol.SubmitPayload)
 	contextCopy := *payload.Context
-	contextCopy.Markdown = string(append([]byte(nil), []byte(payload.Context.Markdown)...))
+	contextCopy.Source = string(append([]byte(nil), []byte(payload.Context.Source)...))
 	contextCopy.CreatorContext = string(append([]byte(nil), []byte(payload.Context.CreatorContext)...))
 	payload.Context = &contextCopy
 	cloned.Payload = payload
@@ -99,16 +99,17 @@ func TestCommandFingerprintDoesNotDependOnPageBufferIdentity(t *testing.T) {
 }
 
 func testPageContext(resource protocol.Resource) protocol.PageContext {
-	markdown := "# Page\n"
+	source := "# Page\n"
 	creator := "creator context"
+	digest, _ := agent.CalculateContextDigestForKind(string(resource.Kind), []byte(source), []byte(creator))
 	return protocol.PageContext{
 		Revision:       protocol.ContextInitial,
-		Markdown:       markdown,
+		Source:         source,
 		CreatorContext: creator,
 		Title:          "Page",
 		URL:            "https://example.com/whiteboards/markdown/" + resource.ID,
 		Resource:       resource,
-		Digest:         agent.CalculateContextDigest([]byte(markdown), []byte(creator)),
+		Digest:         digest,
 	}
 }
 

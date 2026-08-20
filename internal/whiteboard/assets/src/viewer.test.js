@@ -88,7 +88,7 @@ describe("Markdown rendering", () => {
     const sourceElement = document.createElement("script");
     sourceElement.type = "application/json";
     sourceElement.id = "agent-whiteboard-source";
-    sourceElement.textContent = JSON.stringify({ markdown: source });
+    sourceElement.textContent = JSON.stringify({ kind: "markdown", source });
     document.body.replaceChildren(sourceElement);
 
     const viewer = await bootViewer(document);
@@ -99,6 +99,66 @@ describe("Markdown rendering", () => {
     expect(container.textContent).toContain("Rendered from the shell.");
     expect(document.title).toBe("Shell title");
     viewer.destroy();
+  });
+
+  test("boots the shared Page Agent around a preserved HTML iframe without references", async () => {
+    const payload = agentPayload({
+      kind: "html",
+      source: "<!doctype html><html><head><title>Publisher</title></head><body>exact</body></html>",
+      local_agent: { ...agentPayload().local_agent, resource: { ...agentPayload().local_agent.resource, kind: "html" } },
+    });
+    document.body.innerHTML = `
+      <header id="agent-whiteboard-app-bar">
+        <div id="agent-whiteboard-app-bar-theme"></div>
+        <span id="agent-whiteboard-app-title">Publisher</span>
+        <div id="agent-whiteboard-app-bar-agent"></div>
+      </header>
+      <main id="agent-whiteboard-html-surface"><iframe id="agent-whiteboard-html-content" sandbox="allow-scripts"></iframe></main>
+      <script type="application/json" id="agent-whiteboard-source"></script>`;
+    document.querySelector("#agent-whiteboard-source").textContent = JSON.stringify(payload);
+    const frame = document.querySelector("#agent-whiteboard-html-content");
+
+    const viewer = await bootViewer(document);
+
+    expect(document.querySelector("#agent-whiteboard-html-content")).toBe(frame);
+    expect(document.querySelector("#agent-whiteboard-app-bar-theme [data-theme-control]")).not.toBeNull();
+    expect(document.querySelector("#agent-whiteboard-app-bar-agent .agent-toggle")).not.toBeNull();
+    expect(document.querySelector("#agent-whiteboard-agent-drawer")).not.toBeNull();
+    expect(viewer.context).toBeUndefined();
+    expect(viewer.kind).toBe("html");
+    const rebooted = await bootViewer(document);
+    expect(rebooted).toBe(viewer);
+    expect(document.querySelectorAll("#agent-whiteboard-agent-drawer")).toHaveLength(1);
+    expect(document.querySelectorAll(".agent-toggle")).toHaveLength(1);
+    expect(document.querySelectorAll("#agent-whiteboard-html-content")).toHaveLength(1);
+    const cards = [...document.querySelectorAll(".agent-context-card strong")].map((element) => element.textContent);
+    expect(cards).toEqual(["HTML source", "Creator notes"]);
+    expect(document.body.textContent).not.toContain("Add selection");
+    viewer.destroy();
+    expect(document.querySelector("#agent-whiteboard-html-content")).toBe(frame);
+
+    const [concurrentA, concurrentB] = await Promise.all([bootViewer(document), bootViewer(document)]);
+    expect(concurrentA).toBe(concurrentB);
+    expect(document.querySelectorAll("#agent-whiteboard-agent-drawer")).toHaveLength(1);
+    expect(document.querySelectorAll(".agent-toggle")).toHaveLength(1);
+    expect(document.querySelectorAll("#agent-whiteboard-html-content")).toHaveLength(1);
+    concurrentA.destroy();
+    concurrentA.destroy();
+    expect(document.querySelectorAll("#agent-whiteboard-agent-drawer")).toHaveLength(0);
+    expect(document.querySelector("#agent-whiteboard-html-content")).toBe(frame);
+  });
+
+  test("leaves the server-emitted HTML iframe intact when payload validation fails", async () => {
+    document.body.innerHTML = `
+      <header id="agent-whiteboard-app-bar"><div id="agent-whiteboard-app-bar-theme"></div><div id="agent-whiteboard-app-bar-agent"></div></header>
+      <main id="agent-whiteboard-html-surface"><iframe id="agent-whiteboard-html-content"></iframe></main>
+      <script type="application/json" id="agent-whiteboard-source"></script>`;
+    document.querySelector("#agent-whiteboard-source").textContent = JSON.stringify({ ...agentPayload(), kind: "html", extra: true });
+    const frame = document.querySelector("#agent-whiteboard-html-content");
+
+    await expect(bootViewer(document)).rejects.toThrow(TypeError);
+
+    expect(document.querySelector("#agent-whiteboard-html-content")).toBe(frame);
   });
 
   test("renders supported Markdown and task lists with real markdown-it", async () => {
@@ -272,7 +332,8 @@ const agentIDs = {
 
 function agentPayload(overrides = {}) {
   return {
-    markdown: "# Agent board\n\nTrusted only as page content.",
+    kind: "markdown",
+    source: "# Agent board\n\nTrusted only as page content.",
     context: "Creator summary",
     local_agent: {
       enabled: true,
@@ -383,9 +444,12 @@ function fixedIDFactory() {
 }
 
 describe("local agent source and commands", () => {
-  test("validates the closed enabled payload and keeps legacy Markdown payloads", () => {
+  test("validates closed kind-aware enabled and disabled payloads", () => {
     expect(validateViewerPayload(agentPayload()).local_agent.enabled).toBe(true);
-    expect(validateViewerPayload({ markdown: "legacy" }).local_agent.enabled).toBe(false);
+    expect(validateViewerPayload({ kind: "markdown", source: "disabled" }).local_agent.enabled).toBe(false);
+    const html = agentPayload({ kind: "html", source: "<!doctype html><html></html>", local_agent: { ...agentPayload().local_agent, resource: { ...agentPayload().local_agent.resource, kind: "html" } } });
+    expect(validateViewerPayload(html).kind).toBe("html");
+    expect(() => validateViewerPayload({ kind: "html", source: "disabled" })).toThrow(TypeError);
     expect(() => validateViewerPayload({ ...agentPayload(), extra: true })).toThrow(TypeError);
     expect(() => validateViewerPayload({ ...agentPayload(), local_agent: { ...agentPayload().local_agent, context_digest: "A".repeat(64) } })).toThrow(TypeError);
     expect(() => validateViewerPayload({ ...agentPayload(), local_agent: { ...agentPayload().local_agent, resource: { ...agentPayload().local_agent.resource, kind: "html" } } })).toThrow(TypeError);
@@ -456,7 +520,7 @@ describe("local agent source and commands", () => {
         settings: null,
       },
     });
-    expect(JSON.stringify(command)).not.toContain(agentPayload().markdown);
+    expect(JSON.stringify(command)).not.toContain(agentPayload().source);
     expect(JSON.stringify(command)).not.toContain(agentPayload().context);
   });
 
@@ -475,11 +539,55 @@ describe("local agent source and commands", () => {
     const initial = createSubmitCommand({ ...common, revision: "initial" });
     const replacement = createSubmitCommand({ ...common, revision: "replacement" });
     const continuation = createSubmitCommand(common);
-    expect(initial.payload.context).toEqual(expect.objectContaining({ revision: "initial", markdown: agentPayload().markdown, creator_context: agentPayload().context, title: "Agent board", url: "https://board.example/m/abc", digest: "0".repeat(64) }));
+    expect(initial.payload.context).toEqual(expect.objectContaining({ revision: "initial", source: agentPayload().source, creator_context: agentPayload().context, title: "Agent board", url: "https://board.example/m/abc", digest: "0".repeat(64) }));
     expect(replacement.payload.context.revision).toBe("replacement");
     expect(continuation.payload).not.toHaveProperty("context");
     expect(initial.payload.turn_id).toHaveLength(32);
     expect(initial.payload.message_id).toHaveLength(32);
+  });
+
+  test("keeps exact HTML context pending through compact and admits skill-only first turns without references", () => {
+    const payload = agentPayload({
+      kind: "html",
+      source: "<!doctype html><html><head></head><body>exact</body></html>",
+      context: "exact HTML creator notes",
+      local_agent: { ...agentPayload().local_agent, resource: { ...agentPayload().local_agent.resource, kind: "html" } },
+    });
+    const common = { payload, clientID: agentIDs.message, conversationID: agentIDs.conversation, title: "HTML board", url: "https://board.example/whiteboards/html/abc", idFactory: fixedIDFactory };
+    const compact = createAgentCommand({ type: "compact", payload: { work_id: agentIDs.turn }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
+    expect(compact.payload).not.toHaveProperty("context");
+
+    const skillOnly = createSubmitCommand({
+      ...common,
+      content: { parts: [{ type: "skill", skill: { id: agentIDs.archive, name: "review" } }, { type: "text", text: " " }] },
+      revision: "initial",
+    });
+    expect(skillOnly.payload.content.parts).toEqual([{ type: "skill", skill: { id: agentIDs.archive, name: "review" } }]);
+    expect(skillOnly.payload.context).toEqual(expect.objectContaining({
+      revision: "initial",
+      source: payload.source,
+      creator_context: payload.context,
+      resource: expect.objectContaining({ kind: "html" }),
+    }));
+
+    const reference = {
+      id: agentIDs.archive,
+      kind: "text",
+      label: "Selection",
+      quote: "quoted",
+      source: {
+        resource_kind: "markdown",
+        resource_id: agentIDs.resource,
+        resource_updated_at: "2026-07-27T02:03:04Z",
+        context_digest: "0".repeat(64),
+        heading_path: [],
+        start: { block: 1, line: 1, offset: 0 },
+        end: { block: 1, line: 1, offset: 6 },
+      },
+    };
+    const content = { parts: [{ type: "reference", reference }] };
+    expect(() => createSubmitCommand({ ...common, content, revision: "initial" })).toThrow(TypeError);
+    expect(() => createSubmitCommand({ ...common, payload: agentPayload(), content, revision: "initial" })).not.toThrow();
   });
 
   test("builds ordered multi-image and image-only submit commands", () => {
@@ -1437,7 +1545,6 @@ describe("local agent rendering and controls", () => {
     expect(transport.send.mock.calls[0][0].payload).toMatchObject({
       content: { parts: [
         { type: "reference", reference: { id: "H".repeat(32), kind: "image", label: "Architecture", visual: { image_id: agentIDs.archive, name: "image-1.png", alt: "Architecture" } } },
-        { type: "text", text: " " },
       ] },
     });
     expect(transport.send.mock.calls[0][0].payload.images).toBeUndefined();

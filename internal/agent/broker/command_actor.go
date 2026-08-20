@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
 )
 
 func (actor *conversation) handleCommand(attachments map[*clientAttachment]struct{}, turnResults chan<- turnWorkerResult, historyResults chan<- historyWorkerResult, archiveResults chan<- archiveWorkerResult, handoffResults chan<- handoffResult, interactionResults chan<- interactionWorkerResult, request commandRequest) {
@@ -70,6 +71,10 @@ func (actor *conversation) handleCommand(attachments map[*clientAttachment]struc
 		}
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
 	case protocol.QueueEditPayload:
+		if actor.identity.Kind == statepkg.ResourceHTML && messageContentHasReferences(payload.Content) {
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)
+			return
+		}
 		content, err := messageContentToProvider(payload.Content)
 		if err != nil || !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)

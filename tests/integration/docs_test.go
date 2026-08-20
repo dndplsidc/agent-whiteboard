@@ -32,7 +32,7 @@ func TestDocumentationContracts(t *testing.T) {
 	routes := []string{
 		"GET /healthz", "GET /readyz",
 		"POST /api/v1/whiteboards/markdown", "PUT /api/v1/whiteboards/markdown/{id}", "DELETE /api/v1/whiteboards/markdown/{id}",
-		"POST /api/v1/whiteboards/html", "PUT /api/v1/whiteboards/html/{id}", "DELETE /api/v1/whiteboards/html/{id}",
+		"POST /api/v1/whiteboards/html", "GET /api/v1/whiteboards/html/{id}", "PUT /api/v1/whiteboards/html/{id}", "DELETE /api/v1/whiteboards/html/{id}",
 		"GET /whiteboards/markdown/{id}", "GET /whiteboards/html/{id}", "GET /whiteboards/html/{id}/content",
 		"POST /api/v1/images", "PUT /api/v1/images/{id}", "DELETE /api/v1/images/{id}", "GET /images/{id}",
 	}
@@ -55,7 +55,7 @@ func TestDocumentationContracts(t *testing.T) {
 	htmlPath := filepath.Join(root, examplePaths[1])
 	creatorContext := writeContextFixture(t, "# Example context\n\nThe diagram documentation fixture is published for validation.\n")
 	markdown := runCLIResource(t, server, "--json", "create", "markdown", "--context", creatorContext, "--expires-in", "0", markdownPath)
-	html := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "0", htmlPath)
+	html := runCLIResource(t, server, "--json", "create", "html", "--context", creatorContext, "--expires-in", "0", htmlPath)
 	markdownResponse, _ := fetch(t, markdown.Resource.URL)
 	require.Equal(t, 200, markdownResponse.StatusCode)
 	htmlResponse, htmlBody := fetch(t, html.Resource.URL)

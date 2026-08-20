@@ -841,7 +841,7 @@ func TestPiAdapterRealCLILifecycleThroughProviderContract(t *testing.T) {
 	turn := provider.TurnRequest{
 		TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("Answer from this exact board."),
 		Context: &provider.PageContext{
-			Revision: provider.ContextInitial, Markdown: markdown, CreatorContext: creator,
+			Revision: provider.ContextInitial, Source: markdown, CreatorContext: creator,
 			Title: "Adapter board", URL: "https://example.test/adapter", Digest: agent.CalculateContextDigest(markdown, creator),
 			Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: resourceID, CreatedAt: now, UpdatedAt: now},
 		},

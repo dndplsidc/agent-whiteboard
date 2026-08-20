@@ -22,11 +22,12 @@ import (
 )
 
 type Client interface {
-	CreateWhiteboard(context.Context, httpx.WhiteboardKind, httpx.File, *int64) (httpx.Resource, error)
 	CreateMarkdown(context.Context, httpx.File, httpx.File, *int64) (httpx.Resource, error)
-	UpdateWhiteboard(context.Context, httpx.WhiteboardKind, string, httpx.File, *int64) (httpx.Resource, error)
+	CreateHTML(context.Context, httpx.File, httpx.File, *int64) (httpx.Resource, error)
 	UpdateMarkdown(context.Context, string, httpx.File, httpx.File, *int64) (httpx.Resource, error)
+	UpdateHTML(context.Context, string, httpx.File, httpx.File, *int64) (httpx.Resource, error)
 	GetMarkdown(context.Context, string) (httpx.MarkdownResponse, error)
+	GetHTML(context.Context, string) (httpx.HTMLResponse, error)
 	DeleteWhiteboard(context.Context, httpx.WhiteboardKind, string) error
 	CreateImages(context.Context, []httpx.File, *int64) ([]httpx.Resource, error)
 	UpdateImage(context.Context, string, httpx.File, *int64) (httpx.Resource, error)

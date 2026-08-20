@@ -60,7 +60,7 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 				envelope, err := provider.Parse([]byte(params.Input[0].Text))
 				require.NoError(t, err)
 				require.Equal(t, provider.PolicyConfigured, envelope.Policy)
-				require.Equal(t, "# Whiteboard", string(envelope.Markdown))
+				require.Equal(t, "# Whiteboard", string(envelope.Source))
 				require.Equal(t, provider.TextMessage("What changed?"), envelope.ReaderContent)
 				// Exercise notifications that arrive before turn/start is acknowledged.
 				child.send(t, notification("item/agentMessage/delta", map[string]any{"threadId": "native-thread", "turnId": "native-turn", "itemId": "native-message", "delta": "Working"}))
@@ -96,7 +96,7 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 	settings := defaultTestSettings()
 	request := provider.TurnRequest{
 		TurnID: testID(91), MessageID: testID(92), Content: provider.TextMessage("What changed?"), Settings: &settings,
-		Context: &provider.PageContext{Revision: provider.ContextInitial, Markdown: markdown, CreatorContext: creator, Title: "Board", URL: "https://example.com/board", Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: resourceID, CreatedAt: now, UpdatedAt: now}, Digest: agent.CalculateContextDigest(markdown, creator)},
+		Context: &provider.PageContext{Revision: provider.ContextInitial, Source: markdown, CreatorContext: creator, Title: "Board", URL: "https://example.com/board", Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: resourceID, CreatedAt: now, UpdatedAt: now}, Digest: agent.CalculateContextDigest(markdown, creator)},
 	}
 	accepted, err := session.Submit(context.Background(), request)
 	require.NoError(t, err)

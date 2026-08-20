@@ -122,12 +122,12 @@ func TestCreateMarkdownRejectsInvalidInputBeforeDependencies(t *testing.T) {
 		{
 			name:    "empty context",
 			input:   whiteboard.CreateInput{Source: []byte("valid")},
-			message: "markdown context must not be empty",
+			message: "creator context must not be empty",
 		},
 		{
 			name:    "invalid context UTF-8",
 			input:   whiteboard.CreateInput{Source: []byte("valid"), Context: []byte{0xff}},
-			message: "markdown context must be UTF-8",
+			message: "creator context must be UTF-8",
 		},
 		{
 			name: "negative expiration",
@@ -163,32 +163,44 @@ func TestCreateMarkdownRejectsInvalidInputBeforeDependencies(t *testing.T) {
 	}
 }
 
-func TestCreateHTMLPreservesValidOriginalBytes(t *testing.T) {
+func TestCreateHTMLPreservesValidOriginalBytesAndCreatorContext(t *testing.T) {
 	service, store, clock, ids := newTestService(t, 0)
 	ctx := context.WithValue(context.Background(), contextKey{}, "html")
 	now := time.Unix(1_700_000_000, 0).UTC()
 	source := []byte(`<!DoCtYpE html><HTML><HEAD><TITLE>X</TITLE><LiNk ReL="alternate icon"><STYLE>body{color:red}</STYLE></HEAD><BODY><SCRIPT>document.body.dataset.ok="yes"</SCRIPT></BODY></HTML>`)
+	creatorContext := []byte("Goal: preserve the HTML dashboard exactly.\n")
 
 	clock.EXPECT().Now().Return(now).Once()
 	ids.EXPECT().NewID().Return(testID, nil).Once()
 	store.EXPECT().Create(sameContext(ctx), mock.MatchedBy(func(got whiteboard.Whiteboard) bool {
-		return got.Kind == whiteboard.KindHTML && bytes.Equal(got.Source, source)
+		return got.Kind == whiteboard.KindHTML && bytes.Equal(got.Source, source) && bytes.Equal(got.Context, creatorContext)
 	})).Return(nil).Once()
 
-	result, err := service.CreateHTML(ctx, whiteboard.CreateInput{Source: source})
+	result, err := service.CreateHTML(ctx, whiteboard.CreateInput{Source: source, Context: creatorContext})
 	require.NoError(t, err)
 	require.Equal(t, whiteboard.KindHTML, result.Kind)
 }
 
-func TestCreateHTMLRejectsContextBeforeDependencies(t *testing.T) {
-	service, _, _, _ := newTestService(t, 0)
-
-	result, err := service.CreateHTML(context.Background(), whiteboard.CreateInput{
-		Source:  []byte(`<!doctype html><html><head></head><body></body></html>`),
-		Context: []byte("not supported"),
-	})
-	require.Zero(t, result)
-	assertDomainError(t, err, common.CodeInvalidRequest, "html must not include context")
+func TestCreateHTMLRejectsInvalidCreatorContextBeforeDependencies(t *testing.T) {
+	tests := []struct {
+		name    string
+		context []byte
+		message string
+	}{
+		{name: "empty", message: "creator context must not be empty"},
+		{name: "invalid UTF-8", context: []byte{0xff}, message: "creator context must be UTF-8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, _, _, _ := newTestService(t, 0)
+			result, err := service.CreateHTML(context.Background(), whiteboard.CreateInput{
+				Source:  []byte(`<!doctype html><html><head></head><body></body></html>`),
+				Context: tt.context,
+			})
+			require.Zero(t, result)
+			assertDomainError(t, err, common.CodeInvalidRequest, tt.message)
+		})
+	}
 }
 
 func TestCreateHTMLRejectsUnsafeOrIncompleteDocuments(t *testing.T) {
@@ -212,7 +224,7 @@ func TestCreateHTMLRejectsUnsafeOrIncompleteDocuments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			service, _, _, _ := newTestService(t, 0)
-			result, err := service.CreateHTML(context.Background(), whiteboard.CreateInput{Source: tt.source})
+			result, err := service.CreateHTML(context.Background(), whiteboard.CreateInput{Source: tt.source, Context: []byte("valid creator context")})
 			require.Zero(t, result)
 			assertDomainError(t, err, common.CodeInvalidRequest, tt.message)
 		})
@@ -420,6 +432,26 @@ func TestUpdateReplacesLegacyMarkdownWithExactPairedContent(t *testing.T) {
 	}, result)
 }
 
+func TestUpdateHTMLReplacesExactPairedContent(t *testing.T) {
+	service, store, clock, _ := newTestService(t, 0)
+	ctx := context.WithValue(context.Background(), contextKey{}, "html update")
+	now := time.Unix(1_700_000_000, 0).UTC()
+	createdAt := now.Add(-time.Hour)
+	current := whiteboard.Whiteboard{ID: testID, Kind: whiteboard.KindHTML, Source: []byte("old"), Context: []byte("old notes"), CreatedAt: createdAt, UpdatedAt: now.Add(-time.Second)}
+	newSource := []byte(`<!doctype html><html><head><title>Updated</title></head><body>exact</body></html>`)
+	newContext := []byte("Updated creator notes.\n")
+
+	store.EXPECT().Get(sameContext(ctx), testID).Return(current, nil).Once()
+	clock.EXPECT().Now().Return(now).Once()
+	store.EXPECT().Replace(sameContext(ctx), mock.MatchedBy(func(got whiteboard.Whiteboard) bool {
+		return got.Kind == whiteboard.KindHTML && bytes.Equal(got.Source, newSource) && bytes.Equal(got.Context, newContext) && got.CreatedAt.Equal(createdAt) && got.UpdatedAt.Equal(now)
+	})).Return(nil).Once()
+
+	result, err := service.Update(ctx, whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindHTML, Source: newSource, Context: newContext})
+	require.NoError(t, err)
+	require.Equal(t, whiteboard.KindHTML, result.Kind)
+}
+
 func TestUpdateRecalculatesSuppliedExpiration(t *testing.T) {
 	service, store, clock, _ := newTestService(t, 0)
 	now := time.Unix(1_700_000_000, 987).UTC()
@@ -497,10 +529,11 @@ func TestUpdateValidatesIDKindSourceAndContextBeforeStore(t *testing.T) {
 		{name: "unknown kind", input: whiteboard.UpdateInput{ID: testID, Kind: KindUnknown, Source: []byte("valid"), Context: []byte("valid context")}, message: "invalid whiteboard kind"},
 		{name: "empty markdown", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Context: []byte("valid context")}, message: "markdown must not be empty"},
 		{name: "invalid markdown", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte{0xff}, Context: []byte("valid context")}, message: "markdown must be UTF-8"},
-		{name: "empty markdown context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte("valid")}, message: "markdown context must not be empty"},
-		{name: "invalid markdown context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte("valid"), Context: []byte{0xff}}, message: "markdown context must be UTF-8"},
-		{name: "invalid HTML", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindHTML, Source: []byte(`<html></html>`)}, message: "html must include a doctype"},
-		{name: "HTML context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindHTML, Source: []byte(`<!doctype html><html><head></head><body></body></html>`), Context: []byte("not supported")}, message: "html must not include context"},
+		{name: "empty markdown context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte("valid")}, message: "creator context must not be empty"},
+		{name: "invalid markdown context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindMarkdown, Source: []byte("valid"), Context: []byte{0xff}}, message: "creator context must be UTF-8"},
+		{name: "invalid HTML", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindHTML, Source: []byte(`<html></html>`), Context: []byte("valid context")}, message: "html must include a doctype"},
+		{name: "empty HTML context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindHTML, Source: []byte(`<!doctype html><html><head></head><body></body></html>`)}, message: "creator context must not be empty"},
+		{name: "invalid HTML context", input: whiteboard.UpdateInput{ID: testID, Kind: whiteboard.KindHTML, Source: []byte(`<!doctype html><html><head></head><body></body></html>`), Context: []byte{0xff}}, message: "creator context must be UTF-8"},
 	}
 
 	for _, tt := range tests {

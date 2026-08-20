@@ -34,7 +34,7 @@ const (
 	// Three times the logical message limit covers worst-case 2x JSON string
 	// escaping plus the complete ordinary command envelope.
 	MaxOrdinaryCommandBytes   = 3 * MaxMessageBytes
-	MaxMarkdownBytes          = 10 << 20
+	MaxSourceBytes            = 10 << 20
 	MaxCreatorContextBytes    = 1 << 20
 	MaxTitleBytes             = 512
 	MaxURLBytes               = 8 << 10
@@ -73,7 +73,10 @@ func AllProviderNames() []ProviderName { return []ProviderName{ProviderPi, Provi
 
 type ResourceKind string
 
-const ResourceMarkdown ResourceKind = "markdown"
+const (
+	ResourceMarkdown ResourceKind = "markdown"
+	ResourceHTML     ResourceKind = "html"
+)
 
 type CommandType string
 
@@ -127,7 +130,7 @@ func (resource *Resource) UnmarshalJSON(data []byte) error {
 
 type PageContext struct {
 	Revision       ContextRevision `json:"revision"`
-	Markdown       string          `json:"markdown"`
+	Source         string          `json:"source"`
 	CreatorContext string          `json:"creator_context"`
 	Title          string          `json:"title"`
 	URL            string          `json:"url"`
@@ -464,17 +467,18 @@ func validatePageContext(context PageContext) error {
 	if context.Revision != ContextInitial && context.Revision != ContextReplacement {
 		return invalid(nil)
 	}
-	if !validBoundedUTF8(context.Markdown, MaxMarkdownBytes, true) || !validBoundedUTF8(context.CreatorContext, MaxCreatorContextBytes, true) {
+	if !validBoundedUTF8(context.Source, MaxSourceBytes, true) || !validBoundedUTF8(context.CreatorContext, MaxCreatorContextBytes, true) {
 		return invalid(nil)
 	}
-	if !validBoundedText(context.Title, MaxTitleBytes, true) || !validPageURL(context.URL) || validateResource(context.Resource) != nil || context.Digest != agent.CalculateContextDigest([]byte(context.Markdown), []byte(context.CreatorContext)) {
+	digest, err := agent.CalculateContextDigestForKind(string(context.Resource.Kind), []byte(context.Source), []byte(context.CreatorContext))
+	if err != nil || !validBoundedText(context.Title, MaxTitleBytes, true) || !validPageURL(context.URL) || validateResource(context.Resource) != nil || context.Digest != digest {
 		return invalid(nil)
 	}
 	return nil
 }
 
 func validateResource(resource Resource) error {
-	if resource.Kind != ResourceMarkdown || !validID(resource.ID) || resource.CreatedAt.IsZero() || resource.UpdatedAt.IsZero() || resource.UpdatedAt.Before(resource.CreatedAt) {
+	if (resource.Kind != ResourceMarkdown && resource.Kind != ResourceHTML) || !validID(resource.ID) || resource.CreatedAt.IsZero() || resource.UpdatedAt.IsZero() || resource.UpdatedAt.Before(resource.CreatedAt) {
 		return invalid(nil)
 	}
 	if resource.ExpiresAt != nil && resource.ExpiresAt.Before(resource.CreatedAt) {

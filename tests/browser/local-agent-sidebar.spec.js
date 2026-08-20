@@ -855,7 +855,7 @@ test("sends exact initial context once and resumes without replaying it", async 
   expect(firstSubmit.payload.content).toEqual({ parts: [{ type: "text", text: "What does this page say?" }] });
   expect(firstSubmit.payload.context).toMatchObject({
     revision: "initial",
-    markdown,
+    source: markdown,
     creator_context: creatorContext,
     title: "Exact context",
     url: resource.url,

@@ -15,7 +15,7 @@ import (
 
 const (
 	MaxTurnMessageBytes     = 64 << 10
-	MaxMarkdownBytes        = 10 << 20
+	MaxSourceBytes          = 10 << 20
 	MaxCreatorContextBytes  = 1 << 20
 	MaxTitleBytes           = 512
 	MaxURLBytes             = 8 << 10
@@ -325,7 +325,10 @@ type ManagedChild = common.ManagedProcess
 
 type ResourceKind string
 
-const ResourceMarkdown ResourceKind = "markdown"
+const (
+	ResourceMarkdown ResourceKind = "markdown"
+	ResourceHTML     ResourceKind = "html"
+)
 
 type Resource struct {
 	Kind      ResourceKind
@@ -344,7 +347,7 @@ const (
 
 type PageContext struct {
 	Revision       ContextRevision
-	Markdown       []byte
+	Source         []byte
 	CreatorContext []byte
 	Title          string
 	URL            string
@@ -360,8 +363,9 @@ func (p PageContext) Validate() error {
 	if p.Revision != ContextInitial && p.Revision != ContextReplacement {
 		return errors.New("invalid context revision")
 	}
-	if !validBoundedBytes(p.Markdown, MaxMarkdownBytes, true) || !validBoundedBytes(p.CreatorContext, MaxCreatorContextBytes, true) ||
-		!validBoundedText(p.Title, MaxTitleBytes, true) || !validURL(p.URL) || !validResource(p.Resource) || p.Digest != agent.CalculateContextDigest(p.Markdown, p.CreatorContext) {
+	digest, err := agent.CalculateContextDigestForKind(string(p.Resource.Kind), p.Source, p.CreatorContext)
+	if err != nil || !validBoundedBytes(p.Source, MaxSourceBytes, true) || !validBoundedBytes(p.CreatorContext, MaxCreatorContextBytes, true) ||
+		!validBoundedText(p.Title, MaxTitleBytes, true) || !validURL(p.URL) || !validResource(p.Resource) || p.Digest != digest {
 		return errors.New("invalid page context")
 	}
 	return nil
@@ -820,7 +824,7 @@ func validURL(value string) bool {
 	return common.ValidPageURL(value)
 }
 func validResource(resource Resource) bool {
-	return resource.Kind == ResourceMarkdown && validID(resource.ID) && !resource.CreatedAt.IsZero() && !resource.UpdatedAt.IsZero() && !resource.UpdatedAt.Before(resource.CreatedAt) && (resource.ExpiresAt == nil || !resource.ExpiresAt.Before(resource.CreatedAt))
+	return (resource.Kind == ResourceMarkdown || resource.Kind == ResourceHTML) && validID(resource.ID) && !resource.CreatedAt.IsZero() && !resource.UpdatedAt.IsZero() && !resource.UpdatedAt.Before(resource.CreatedAt) && (resource.ExpiresAt == nil || !resource.ExpiresAt.Before(resource.CreatedAt))
 }
 func validActivity(value ActivityKind) bool {
 	return value == ActivityStatus || value == ActivityVisibleSummary || value == ActivityRetry || value == ActivityCompaction

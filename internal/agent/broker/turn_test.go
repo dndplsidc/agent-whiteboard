@@ -1288,8 +1288,8 @@ func TestNewRevisionAttachesToTheNextExistingQueuedMessage(t *testing.T) {
 	newResource.UpdatedAt = resource.UpdatedAt.Add(lifecycleTestTimeout)
 	newPage := testPageContext(newResource)
 	newPage.Revision = protocol.ContextReplacement
-	newPage.Markdown = "# Replacement\n"
-	newPage.Digest = agent.CalculateContextDigest([]byte(newPage.Markdown), []byte(newPage.CreatorContext))
+	newPage.Source = "# Replacement\n"
+	newPage.Digest = agent.CalculateContextDigest([]byte(newPage.Source), []byte(newPage.CreatorContext))
 	secondClientID := sequenceID(7188)
 	second, err := broker.Connect(context.Background(), identity.Origin, observationConnect(secondClientID, identity.CapabilityID, newPage.Digest, newResource, ""))
 	require.NoError(t, err)
@@ -1311,7 +1311,7 @@ func TestNewRevisionAttachesToTheNextExistingQueuedMessage(t *testing.T) {
 	require.Equal(t, "already queued", dispatched.Content.PlainText())
 	require.NotNil(t, dispatched.Context)
 	require.Equal(t, newPage.Digest, dispatched.Context.Digest)
-	require.Equal(t, []byte(newPage.Markdown), dispatched.Context.Markdown)
+	require.Equal(t, []byte(newPage.Source), dispatched.Context.Source)
 	require.Equal(t, protocol.EventContext, receiveLifecycle(t, connection.Events()).Type)
 	require.Equal(t, protocol.LifecycleResponding, receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload).State)
 	state.mu.Lock()
@@ -1425,7 +1425,7 @@ func replacementPage(previous protocol.Resource, markdown string, advance time.D
 	resource.UpdatedAt = previous.UpdatedAt.Add(advance)
 	page := testPageContext(resource)
 	page.Revision = protocol.ContextReplacement
-	page.Markdown = markdown
+	page.Source = markdown
 	page.Digest = agent.CalculateContextDigest([]byte(markdown), []byte(page.CreatorContext))
 	return page
 }

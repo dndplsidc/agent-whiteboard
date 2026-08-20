@@ -13,13 +13,13 @@ Publish through the CLI whenever shell execution is available. Use direct HTTP o
 - Choose standalone HTML only for trusted active documents. It runs as opaque-origin sandboxed active content without same-origin authority, not sanitized Markdown; trusted code can still disclose its capability through permitted child self-navigation.
 - Choose images for PNG, JPEG, GIF, or WebP binary visuals. Never upload SVG.
 
-Respect the configured limits; defaults are 10 MiB per whiteboard source, 1 MiB per Markdown creator context, 25 MiB per image, and 100 MiB for the complete image request.
+Respect the configured limits; defaults are 10 MiB per whiteboard source, 1 MiB per creator context, 25 MiB per image, and 100 MiB for the complete image request.
 
 When Markdown uses local images, publish every image first, capture each returned absolute URL, and insert those URLs into the Markdown before publishing it. The service does not bundle local dependencies.
 
-## Create the Markdown context artifact
+## Create the whiteboard context artifact
 
-Every Markdown create and update requires a separate, non-empty UTF-8 Markdown context file. Always create it in a temporary directory and pass it with `--context`; never omit it or reuse stale context accidentally.
+Every Markdown or HTML create and update requires a separate, non-empty UTF-8 Markdown context file. Always create it in a temporary directory and pass it with `--context`; never omit it or reuse stale context accidentally.
 
 ```sh
 context_dir="$(mktemp -d)"
@@ -37,7 +37,7 @@ EOF
 agent-whiteboard create markdown --context "$context_file" board.md
 ```
 
-Write concise goals, decisions, assumptions, and open questions. Context is machine-retrievable by anyone with the capability ID and is not a hidden or private channel. Never include hidden reasoning, credentials, tokens, personal or sensitive data, private source, unrelated information, or raw tool output. Update the context file whenever the Markdown changes, then replace both artifacts together:
+Write concise goals, decisions, assumptions, and open questions. Context is machine-retrievable by anyone with the capability ID and is not a hidden or private channel. Never include hidden reasoning, credentials, tokens, personal or sensitive data, private source, unrelated information, or raw tool output. Update the context file whenever the whiteboard source changes, then replace both artifacts together:
 
 ```sh
 agent-whiteboard update markdown --context "$context_file" -- CAPABILITY_ID board.md
@@ -49,20 +49,21 @@ Before creating standalone HTML, check for installed UI/UX or frontend-design sk
 
 After publishing Markdown, Mermaid, or standalone HTML, check for available headless-browser or browser-automation skills and tools. When available, use them to open the returned URL and verify that the content is readable, correctly laid out, and functioning as intended.
 
-If verification finds an issue, update the source, update the Markdown context when applicable, republish it, and verify again. Do not return the final URL until verification succeeds.
+If verification finds an issue, update the source, update the creator context, republish it, and verify again. Do not return the final URL until verification succeeds.
 
 ## Publish safely
 
-1. Inspect source and Markdown context. Remove credentials, tokens, personal or sensitive data, private source, hidden reasoning, and raw tool output. Never publish any of them.
+1. Inspect source and creator context. Remove credentials, tokens, personal or sensitive data, private source, hidden reasoning, and raw tool output. Never publish any of them.
 2. Select `--server`, `--timeout`, `--json`, `--config`, and `--expires-in` deliberately. Omit `--expires-in` for the server default; use `--expires-in 0` for a permanent resource. There is no `--permanent` flag.
-3. For Markdown, create the temporary context artifact above and pass `--context "$context_file"` on every create or update.
+3. For every Markdown or HTML whiteboard, create the temporary context artifact above and pass `--context "$context_file"` on every create or update.
 4. Publish with an approved command:
    - `agent-whiteboard serve`
    - `agent-whiteboard create markdown --context "$context_file" FILE`
-   - `agent-whiteboard create html FILE`
+   - `agent-whiteboard create html --context "$context_file" FILE`
    - `agent-whiteboard update markdown --context "$context_file" -- ID FILE`
-   - `agent-whiteboard update html -- ID FILE`
+   - `agent-whiteboard update html --context "$context_file" -- ID FILE`
    - `agent-whiteboard --json get markdown -- ID`
+   - `agent-whiteboard --json get html -- ID`
    - `agent-whiteboard delete markdown -- ID`
    - `agent-whiteboard delete html -- ID`
    - `agent-whiteboard image upload FILE...`
@@ -71,7 +72,7 @@ If verification finds an issue, update the source, update the Markdown context w
 5. Read stdout or the JSON result and capture the public URL and capability ID. Complete any available rendering verification before returning the final URL.
 6. Use the capability ID to retrieve, update, or delete. There is no separate edit token.
 
-Public URLs are bearer capabilities: anyone with one can read the resource, derive the ID used for mutation, and retrieve both Markdown and context. `noindex` limits discovery but is not authorization. Do not assume authentication, secrecy, or revocation beyond deletion.
+Public URLs are bearer capabilities: anyone with one can read the resource, derive the ID used for mutation, and retrieve both source and context. `noindex` limits discovery but is not authorization. Do not assume authentication, secrecy, or revocation beyond deletion.
 
 A failed create can still print a generated resource before returning an error when persistence is uncertain. Preserve the ID, check or delete the possibly live resource, and do not publish or log the full ID unnecessarily.
 
@@ -79,7 +80,7 @@ The CLI supports trust-list configuration and foreground `agent serve` with inde
 
 Page Agent readers can select multiple PNG, JPEG, GIF, or WebP images or paste images into the composer, preview them, remove or retry failed staging, and send an image-only turn. These private attachments travel only to the loopback broker and selected provider; they are not the public Whiteboard image resources created by `agent-whiteboard image upload`. Fixed limits are 8 images, 10 MiB each, 20 MiB per turn, and 512 MiB retained per conversation workspace. Provider capability is authoritative. Never instruct readers to publish a private Page Agent attachment merely to send it to Pi or Codex.
 
-Page Agent readers can also add rendered context directly into the message: select text for the contextual popup, use a heading action for its section, or use a rendered raster's action for a private inline image. These are ordered message parts rather than attachments, so surrounding prose and multiple references retain their positions. A section runs from its heading to just before the next heading of the same or higher level. Selected rendered images remain loopback-private and accept only embedded or same-origin raster sources. Version-4 viewers require a version-4 `agent serve` broker using `agent-whiteboard.v4`; mixed versions fail closed.
+On Markdown, Page Agent readers can also add rendered context directly into the message: select text for the contextual popup, use a heading action for its section, or use a rendered raster's action for a private inline image. These are ordered message parts rather than attachments, so surrounding prose and multiple references retain their positions. A section runs from its heading to just before the next heading of the same or higher level. Selected rendered images remain loopback-private and accept only embedded or same-origin raster sources. HTML uses the same Page Agent drawer, providers, ordinary image attachments, skills, compaction, queues/busy drafts, Stop, archives, and interactions, but has no rendered-reference or source-navigation controls and no child bridge. Version-4 viewers require a version-4 `agent serve` broker using `agent-whiteboard.v4`; mixed versions fail closed.
 
 For Codex, the composer pill selects only live-catalog models, advertised reasoning efforts, and Standard/Fast speed. Typing `$` selects enabled native skills as atomic tokens, and exact `/compact` starts native manual compaction; neither feature exposes native skill paths or bodies. While Codex is working, Enter and Send do not queue a follow-up, but the editable next draft is preserved and the primary control becomes Stop. During active Pi or Codex work, Escape performs the same interruption as Stop without closing Page Agent. Pi queue behavior is otherwise unchanged. Each accepted Codex turn retains its exact tuple. The conversation default and same-origin browser preference change only after native acceptance; stale model or skill catalog rejection preserves the draft. New conversation uses the visible pill, while existing and restored conversations retain their effective native tuple. Standard maps to native `serviceTier: null` (reported as `default`) and Fast to native `serviceTier: "priority"`. These controls do not edit Codex configuration or override tools, approval policy, or sandbox.
 

@@ -470,8 +470,8 @@ func TestNewerRevisionAttachedDuringRecoveryErasesStaleQueuedContext(t *testing.
 	resource2.UpdatedAt = resource1.UpdatedAt.Add(time.Minute)
 	page2 := testPageContext(resource2)
 	page2.Revision = protocol.ContextReplacement
-	page2.Markdown = "# replacement two\n"
-	page2.Digest = agent.CalculateContextDigest([]byte(page2.Markdown), []byte(page2.CreatorContext))
+	page2.Source = "# replacement two\n"
+	page2.Digest = agent.CalculateContextDigest([]byte(page2.Source), []byte(page2.CreatorContext))
 	secondClientID := sequenceID(1635)
 	second, err := broker.Connect(context.Background(), identity.Origin, observationConnect(secondClientID, identity.CapabilityID, page2.Digest, resource2, ""))
 	require.NoError(t, err)
@@ -494,8 +494,8 @@ func TestNewerRevisionAttachedDuringRecoveryErasesStaleQueuedContext(t *testing.
 	resource3.UpdatedAt = resource2.UpdatedAt.Add(time.Minute)
 	page3 := testPageContext(resource3)
 	page3.Revision = protocol.ContextReplacement
-	page3.Markdown = "# replacement three\n"
-	page3.Digest = agent.CalculateContextDigest([]byte(page3.Markdown), []byte(page3.CreatorContext))
+	page3.Source = "# replacement three\n"
+	page3.Digest = agent.CalculateContextDigest([]byte(page3.Source), []byte(page3.CreatorContext))
 	thirdClientID := sequenceID(1639)
 	third, err := broker.Connect(context.Background(), identity.Origin, observationConnect(thirdClientID, identity.CapabilityID, page3.Digest, resource3, ""))
 	require.NoError(t, err)

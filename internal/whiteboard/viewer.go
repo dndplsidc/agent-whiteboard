@@ -1,14 +1,26 @@
 package whiteboard
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"html"
 	"io"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/edocsss/agent-whiteboard/internal/agent"
 	"github.com/edocsss/agent-whiteboard/internal/common"
+	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
+	xhtml "golang.org/x/net/html"
+)
+
+const (
+	standaloneDisplayTitle = "Standalone whiteboard"
+	maxHTMLTitleScanBytes  = 256 << 10
+	maxHTMLTitleRunes      = 160
 )
 
 type ViewerConfig struct {
@@ -22,6 +34,7 @@ type Viewer struct {
 	js                []byte
 	localAgentEnabled bool
 	csp               string
+	htmlCSP           string
 }
 
 func NewViewer(config ViewerConfig) (*Viewer, error) {
@@ -39,21 +52,43 @@ func NewViewer(config ViewerConfig) (*Viewer, error) {
 		connectSource = "'self' http://127.0.0.1:* ws://127.0.0.1:*"
 		imageSource += " blob:"
 	}
-	return &Viewer{
+	policy := func(frameSource string) string {
+		return "default-src 'none'; base-uri 'none'; connect-src " + connectSource +
+			"; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src " + frameSource + "; img-src " + imageSource + "; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'sha256-" +
+			base64.StdEncoding.EncodeToString(jsDigest[:]) + "'; style-src 'unsafe-inline'; worker-src 'none'"
+	}
+	viewer := &Viewer{
 		css:               append([]byte(nil), config.CSS...),
 		js:                append([]byte(nil), config.JS...),
 		localAgentEnabled: config.LocalAgentEnabled,
-		csp: "default-src 'none'; base-uri 'none'; connect-src " + connectSource +
-			"; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src 'none'; img-src " + imageSource + "; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'sha256-" +
-			base64.StdEncoding.EncodeToString(jsDigest[:]) + "'; style-src 'unsafe-inline'; worker-src 'none'",
-	}, nil
+		csp:               policy("'none'"),
+		htmlCSP:           StandaloneOuterContentSecurityPolicy,
+	}
+	if config.LocalAgentEnabled {
+		viewer.htmlCSP = policy("'self'")
+	}
+	return viewer, nil
 }
 
 func (v *Viewer) ContentSecurityPolicy() string {
 	return v.csp
 }
 
+func (v *Viewer) HTMLContentSecurityPolicy() string {
+	return v.htmlCSP
+}
+
 func (v *Viewer) Render(w io.Writer, board Whiteboard) error {
+	if board.Kind == KindHTML {
+		if !v.localAgentEnabled {
+			return RenderStandaloneWrapper(w, board.ID)
+		}
+		return v.renderHTML(w, board)
+	}
+	return v.renderMarkdown(w, board)
+}
+
+func (v *Viewer) renderMarkdown(w io.Writer, board Whiteboard) error {
 	if err := writeViewerString(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>Untitled whiteboard</title><style>`); err != nil {
 		return err
 	}
@@ -63,36 +98,7 @@ func (v *Viewer) Render(w io.Writer, board Whiteboard) error {
 	if err := writeViewerString(w, `</style></head><body><noscript>This whiteboard requires JavaScript to render.</noscript><main id="agent-whiteboard-content"></main><script type="application/json" id="agent-whiteboard-source">`); err != nil {
 		return err
 	}
-	encoder := json.NewEncoder(w)
-	if v.localAgentEnabled {
-		payload := struct {
-			Markdown   string `json:"markdown"`
-			Context    string `json:"context"`
-			LocalAgent struct {
-				Enabled       bool   `json:"enabled"`
-				ContextDigest string `json:"context_digest"`
-				Resource      struct {
-					Kind      Kind       `json:"kind"`
-					ID        string     `json:"id"`
-					CreatedAt time.Time  `json:"created_at"`
-					UpdatedAt time.Time  `json:"updated_at"`
-					ExpiresAt *time.Time `json:"expires_at"`
-				} `json:"resource"`
-			} `json:"local_agent"`
-		}{Markdown: string(board.Source), Context: string(board.Context)}
-		payload.LocalAgent.Enabled = true
-		payload.LocalAgent.ContextDigest = agent.CalculateContextDigest(board.Source, board.Context)
-		payload.LocalAgent.Resource.Kind = board.Kind
-		payload.LocalAgent.Resource.ID = board.ID
-		payload.LocalAgent.Resource.CreatedAt = board.CreatedAt
-		payload.LocalAgent.Resource.UpdatedAt = board.UpdatedAt
-		payload.LocalAgent.Resource.ExpiresAt = board.ExpiresAt
-		if err := encoder.Encode(payload); err != nil {
-			return err
-		}
-	} else if err := encoder.Encode(struct {
-		Markdown string `json:"markdown"`
-	}{Markdown: string(board.Source)}); err != nil {
+	if err := v.writePayload(w, board); err != nil {
 		return err
 	}
 	if err := writeViewerString(w, `</script><script>`); err != nil {
@@ -102,6 +108,119 @@ func (v *Viewer) Render(w io.Writer, board Whiteboard) error {
 		return err
 	}
 	return writeViewerString(w, `</script></body></html>`)
+}
+
+func (v *Viewer) renderHTML(w io.Writer, board Whiteboard) error {
+	if err := common.ValidateID(board.ID); err != nil {
+		return err
+	}
+	title := standaloneTitle(board.Source)
+	escapedTitle := html.EscapeString(title)
+	if err := writeViewerString(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex, nofollow, noarchive"><title>`+escapedTitle+`</title><style>`); err != nil {
+		return err
+	}
+	if err := writeViewerBytes(w, v.css); err != nil {
+		return err
+	}
+	if err := writeViewerString(w, `</style></head><body class="agent-whiteboard-html-host"><header id="agent-whiteboard-app-bar"><div id="agent-whiteboard-app-bar-theme"></div><span id="agent-whiteboard-app-title">`+escapedTitle+`</span><div id="agent-whiteboard-app-bar-agent"></div></header><main id="agent-whiteboard-html-surface"><iframe id="agent-whiteboard-html-content" title="Published content: `+escapedTitle+`" src="`); err != nil {
+		return err
+	}
+	if err := writeViewerString(w, httpx.PublicHTML+board.ID+httpx.PublicHTMLContentSuffix); err != nil {
+		return err
+	}
+	if err := writeViewerString(w, `" sandbox="allow-scripts" referrerpolicy="no-referrer" credentialless></iframe></main><noscript>Page Agent requires JavaScript. The published content remains available above.</noscript><script type="application/json" id="agent-whiteboard-source">`); err != nil {
+		return err
+	}
+	if err := v.writePayload(w, board); err != nil {
+		return err
+	}
+	if err := writeViewerString(w, `</script><script>`); err != nil {
+		return err
+	}
+	if err := writeViewerBytes(w, v.js); err != nil {
+		return err
+	}
+	return writeViewerString(w, `</script></body></html>`)
+}
+
+func (v *Viewer) writePayload(w io.Writer, board Whiteboard) error {
+	encoder := json.NewEncoder(w)
+	if !v.localAgentEnabled {
+		return encoder.Encode(struct {
+			Kind   Kind   `json:"kind"`
+			Source string `json:"source"`
+		}{Kind: board.Kind, Source: string(board.Source)})
+	}
+
+	digest, err := agent.CalculateContextDigestForKind(string(board.Kind), board.Source, board.Context)
+	if err != nil {
+		return err
+	}
+	payload := struct {
+		Kind       Kind   `json:"kind"`
+		Source     string `json:"source"`
+		Context    string `json:"context"`
+		LocalAgent struct {
+			Enabled       bool   `json:"enabled"`
+			ContextDigest string `json:"context_digest"`
+			Resource      struct {
+				Kind      Kind       `json:"kind"`
+				ID        string     `json:"id"`
+				CreatedAt time.Time  `json:"created_at"`
+				UpdatedAt time.Time  `json:"updated_at"`
+				ExpiresAt *time.Time `json:"expires_at"`
+			} `json:"resource"`
+		} `json:"local_agent"`
+	}{Kind: board.Kind, Source: string(board.Source), Context: string(board.Context)}
+	payload.LocalAgent.Enabled = true
+	payload.LocalAgent.ContextDigest = digest
+	payload.LocalAgent.Resource.Kind = board.Kind
+	payload.LocalAgent.Resource.ID = board.ID
+	payload.LocalAgent.Resource.CreatedAt = board.CreatedAt
+	payload.LocalAgent.Resource.UpdatedAt = board.UpdatedAt
+	payload.LocalAgent.Resource.ExpiresAt = board.ExpiresAt
+	return encoder.Encode(payload)
+}
+
+func standaloneTitle(source []byte) string {
+	if len(source) > maxHTMLTitleScanBytes {
+		source = source[:maxHTMLTitleScanBytes]
+	}
+	tokenizer := xhtml.NewTokenizer(bytes.NewReader(source))
+	inTitle := false
+	var title strings.Builder
+	for {
+		switch tokenizer.Next() {
+		case xhtml.ErrorToken:
+			return standaloneDisplayTitle
+		case xhtml.StartTagToken:
+			token := tokenizer.Token()
+			if strings.EqualFold(token.Data, "title") {
+				inTitle = true
+			}
+		case xhtml.TextToken:
+			if inTitle {
+				title.Write(tokenizer.Text())
+			}
+		case xhtml.EndTagToken:
+			token := tokenizer.Token()
+			if inTitle && strings.EqualFold(token.Data, "title") {
+				normalized := strings.Join(strings.Fields(title.String()), " ")
+				if normalized == "" {
+					return standaloneDisplayTitle
+				}
+				return truncateRunes(normalized, maxHTMLTitleRunes)
+			}
+		}
+	}
+}
+
+func truncateRunes(value string, limit int) string {
+	if utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	return string(runes[:limit])
 }
 
 func writeViewerString(w io.Writer, value string) error {

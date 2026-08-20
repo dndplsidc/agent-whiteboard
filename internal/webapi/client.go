@@ -21,7 +21,7 @@ const (
 	maxClientResponseBytes int64 = 1 << 20
 	// Bound a default-size Markdown pair after worst-case JSON string escaping,
 	// with space for the public resource envelope.
-	maxMarkdownResponseBytes int64 = 6*(generalconfig.DefaultMaxWhiteboardBytes+generalconfig.DefaultMaxContextBytes) + MultipartOverheadBytes
+	maxWhiteboardResponseBytes int64 = 6*(generalconfig.DefaultMaxWhiteboardBytes+generalconfig.DefaultMaxContextBytes) + MultipartOverheadBytes
 )
 
 type ClientConfig struct {
@@ -76,14 +76,10 @@ func (c *Client) CreateWhiteboard(
 	file File,
 	expiresInSeconds *int64,
 ) (Resource, error) {
-	endpoint, err := whiteboardEndpoint(kind)
-	if err != nil {
+	if _, err := whiteboardEndpoint(kind); err != nil {
 		return Resource{}, err
 	}
-	if kind == WhiteboardMarkdown {
-		return Resource{}, clientInvalidRequest("markdown context is required")
-	}
-	return c.createWhiteboard(ctx, endpoint, []multipartFile{{fieldName: "file", file: file}}, expiresInSeconds)
+	return Resource{}, clientInvalidRequest("creator context is required")
 }
 
 func (c *Client) CreateMarkdown(
@@ -92,14 +88,28 @@ func (c *Client) CreateMarkdown(
 	creatorContext File,
 	expiresInSeconds *int64,
 ) (Resource, error) {
-	return c.createWhiteboard(ctx, APIWhiteboardMarkdown, []multipartFile{
-		{fieldName: "file", file: markdown},
+	return c.createPairedWhiteboard(ctx, WhiteboardMarkdown, APIWhiteboardMarkdown, markdown, creatorContext, expiresInSeconds)
+}
+
+func (c *Client) CreateHTML(
+	ctx context.Context,
+	html File,
+	creatorContext File,
+	expiresInSeconds *int64,
+) (Resource, error) {
+	return c.createPairedWhiteboard(ctx, WhiteboardHTML, APIWhiteboardHTML, html, creatorContext, expiresInSeconds)
+}
+
+func (c *Client) createPairedWhiteboard(ctx context.Context, kind WhiteboardKind, endpoint string, source, creatorContext File, expiresInSeconds *int64) (Resource, error) {
+	return c.createWhiteboard(ctx, kind, endpoint, []multipartFile{
+		{fieldName: "file", file: source},
 		{fieldName: "context", file: creatorContext},
 	}, expiresInSeconds)
 }
 
 func (c *Client) createWhiteboard(
 	ctx context.Context,
+	kind WhiteboardKind,
 	endpoint string,
 	files []multipartFile,
 	expiresInSeconds *int64,
@@ -109,7 +119,7 @@ func (c *Client) createWhiteboard(
 	if err != nil && response.Resource.ID == "" {
 		return Resource{}, err
 	}
-	if validationErr := c.validateResource(response.Resource, ""); validationErr != nil {
+	if validationErr := c.validateWhiteboardResource(response.Resource, kind, ""); validationErr != nil {
 		return Resource{}, validationErr
 	}
 	return response.Resource, err
@@ -122,14 +132,10 @@ func (c *Client) UpdateWhiteboard(
 	file File,
 	expiresInSeconds *int64,
 ) (Resource, error) {
-	endpoint, err := whiteboardEndpoint(kind)
-	if err != nil {
+	if _, err := whiteboardEndpoint(kind); err != nil {
 		return Resource{}, err
 	}
-	if kind == WhiteboardMarkdown {
-		return Resource{}, clientInvalidRequest("markdown context is required")
-	}
-	return c.updateWhiteboard(ctx, endpoint, id, []multipartFile{{fieldName: "file", file: file}}, expiresInSeconds)
+	return Resource{}, clientInvalidRequest("creator context is required")
 }
 
 func (c *Client) UpdateMarkdown(
@@ -139,14 +145,29 @@ func (c *Client) UpdateMarkdown(
 	creatorContext File,
 	expiresInSeconds *int64,
 ) (Resource, error) {
-	return c.updateWhiteboard(ctx, APIWhiteboardMarkdown, id, []multipartFile{
-		{fieldName: "file", file: markdown},
+	return c.updatePairedWhiteboard(ctx, WhiteboardMarkdown, APIWhiteboardMarkdown, id, markdown, creatorContext, expiresInSeconds)
+}
+
+func (c *Client) UpdateHTML(
+	ctx context.Context,
+	id string,
+	html File,
+	creatorContext File,
+	expiresInSeconds *int64,
+) (Resource, error) {
+	return c.updatePairedWhiteboard(ctx, WhiteboardHTML, APIWhiteboardHTML, id, html, creatorContext, expiresInSeconds)
+}
+
+func (c *Client) updatePairedWhiteboard(ctx context.Context, kind WhiteboardKind, endpoint, id string, source, creatorContext File, expiresInSeconds *int64) (Resource, error) {
+	return c.updateWhiteboard(ctx, kind, endpoint, id, []multipartFile{
+		{fieldName: "file", file: source},
 		{fieldName: "context", file: creatorContext},
 	}, expiresInSeconds)
 }
 
 func (c *Client) updateWhiteboard(
 	ctx context.Context,
+	kind WhiteboardKind,
 	endpoint string,
 	id string,
 	files []multipartFile,
@@ -161,7 +182,7 @@ func (c *Client) updateWhiteboard(
 	if err != nil {
 		return Resource{}, err
 	}
-	if err := c.validateResource(response.Resource, id); err != nil {
+	if err := c.validateWhiteboardResource(response.Resource, kind, id); err != nil {
 		return Resource{}, err
 	}
 	return response.Resource, nil
@@ -173,7 +194,7 @@ func (c *Client) GetMarkdown(ctx context.Context, id string) (MarkdownResponse, 
 	}
 
 	var encoded markdownResponseEnvelope
-	if err := c.doWithResponseLimit(ctx, standardhttp.MethodGet, APIWhiteboardMarkdown+"/"+url.PathEscape(id), nil, "", standardhttp.StatusOK, &encoded, maxMarkdownResponseBytes); err != nil {
+	if err := c.doWithResponseLimit(ctx, standardhttp.MethodGet, APIWhiteboardMarkdownResource+url.PathEscape(id), nil, "", standardhttp.StatusOK, &encoded, maxWhiteboardResponseBytes); err != nil {
 		return MarkdownResponse{}, err
 	}
 	if encoded.Markdown == nil || *encoded.Markdown == "" || encoded.Context == nil {
@@ -188,10 +209,56 @@ func (c *Client) GetMarkdown(ctx context.Context, id string) (MarkdownResponse, 
 	return MarkdownResponse{Resource: encoded.Resource, Markdown: *encoded.Markdown, Context: *encoded.Context}, nil
 }
 
+func (c *Client) GetHTML(ctx context.Context, id string) (HTMLResponse, error) {
+	if err := common.ValidateID(id); err != nil {
+		return HTMLResponse{}, err
+	}
+
+	var encoded htmlResponseEnvelope
+	if err := c.doWithResponseLimit(ctx, standardhttp.MethodGet, APIWhiteboardHTMLResource+url.PathEscape(id), nil, "", standardhttp.StatusOK, &encoded, maxWhiteboardResponseBytes); err != nil {
+		return HTMLResponse{}, err
+	}
+	if encoded.HTML == nil || *encoded.HTML == "" || encoded.Context == nil || *encoded.Context == "" {
+		return HTMLResponse{}, clientInvalidResponse("server returned an invalid response")
+	}
+	if err := c.validateResource(encoded.Resource, id); err != nil {
+		return HTMLResponse{}, err
+	}
+	if encoded.Resource.Type != string(WhiteboardHTML) || encoded.Resource.Path != PublicHTML+id {
+		return HTMLResponse{}, clientInvalidResponse("server returned an invalid response")
+	}
+	return HTMLResponse{Resource: encoded.Resource, HTML: *encoded.HTML, Context: *encoded.Context}, nil
+}
+
 type markdownResponseEnvelope struct {
 	Resource Resource
 	Markdown *string
 	Context  *string
+}
+
+type htmlResponseEnvelope struct {
+	Resource Resource
+	HTML     *string
+	Context  *string
+}
+
+func (response *htmlResponseEnvelope) UnmarshalJSON(encoded []byte) error {
+	type wireResponse struct {
+		Resource Resource `json:"resource"`
+		HTML     *string  `json:"html"`
+		Context  *string  `json:"context"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var wire wireResponse
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("invalid trailing JSON value")
+	}
+	*response = htmlResponseEnvelope(wire)
+	return nil
 }
 
 func (response *markdownResponseEnvelope) UnmarshalJSON(encoded []byte) error {
@@ -307,6 +374,25 @@ func (c *Client) PublicURL(publicPath string) (string, error) {
 		return "", clientInvalidRequest("invalid public path")
 	}
 	return resolved.String(), nil
+}
+
+func (c *Client) validateWhiteboardResource(resource Resource, kind WhiteboardKind, expectedID string) error {
+	if err := c.validateResource(resource, expectedID); err != nil {
+		return err
+	}
+	var publicPath string
+	switch kind {
+	case WhiteboardMarkdown:
+		publicPath = PublicMarkdown
+	case WhiteboardHTML:
+		publicPath = PublicHTML
+	default:
+		return clientInvalidRequest("unsupported whiteboard kind")
+	}
+	if resource.Type != string(kind) || resource.Path != publicPath+resource.ID {
+		return clientInvalidResponse("server returned an invalid response")
+	}
+	return nil
 }
 
 func (c *Client) validateResource(resource Resource, expectedID string) error {

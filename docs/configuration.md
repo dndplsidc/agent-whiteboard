@@ -97,7 +97,7 @@ Durations use Go duration syntax and must be positive. `server.port` accepts 0â€
 | Shutdown timeout | `10s` |
 | Log mode | `console` |
 | Whiteboard source limit | 10 MiB |
-| Markdown context limit | 1 MiB |
+| Creator context limit | 1 MiB |
 | Image limit | 25 MiB each |
 | Image request limit | 100 MiB |
 | Viewer local agent enabled | `false` |
@@ -119,7 +119,7 @@ Trusted-origin editing and listing are supported only on macOS and Linux. Other 
 
 ## Pre-production Page Agent v4 upgrade
 
-Page Agent v4 replaces v3 in place and does not migrate older broker conversation/workspace state. Before deploying the v4 viewer and broker, stop the foreground broker or managed daemon and clear the disposable Page Agent conversation/workspace state under the configured Agent Whiteboard storage. Deploy viewer and broker together, then restart `agent serve` or the daemon. Do not delete public whiteboards or provider-native Pi/Codex histories: they are outside this reset. Mixed v3/v4 viewers and brokers fail closed rather than negotiating or adapting.
+Page Agent v4 uses a format-neutral exact `source` context field for Markdown and HTML while retaining the same API and WebSocket version. It replaces v3 in place and does not migrate older broker conversation/workspace state. Before deploying the v4 viewer and broker, stop the foreground broker or managed daemon and clear the disposable Page Agent conversation/workspace state under the configured Agent Whiteboard storage. Deploy viewer and broker together, then restart `agent serve` or the daemon. Do not delete public whiteboards or provider-native Pi/Codex histories: they are outside this reset. Mixed v3/v4 viewers and brokers fail closed rather than negotiating or adapting.
 
 ## Trusted HTTPS origins
 

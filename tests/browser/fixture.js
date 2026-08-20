@@ -1017,6 +1017,10 @@ function createSidebarBroker(initialAllowedOrigin) {
     setAllowedOrigin(origin) { allowedOrigin = origin; },
     setWebSocketEnabled(value) { webSocketEnabled = value; },
     setHoldResponses(value, provider = "pi") { providerState(provider).holdResponses = value; },
+    setContextState(value, provider = "pi") {
+      if (!["pending", "accepted", "unchanged", "uncertain"].includes(value)) throw new Error(`unsupported context state: ${value}`);
+      providerState(provider).contextState = value;
+    },
     setSkills(skills, provider = "codex") {
       const state = providerState(provider);
       state.skillsState = "ready";
@@ -1425,33 +1429,39 @@ export const test = base.extend({
         brokerSockets = trackConnections(broker.server);
         const brokerPort = await listen(broker.server, "127.0.0.1");
         let sequence = 0;
-        const publishAtOrigin = async (origin, markdown, creatorContext = "Creator context for the local Pi agent.\n") => {
-          const fixturePath = path.join(server.root, `sidebar-${sequence}.md`);
+        const mutateAtOrigin = async (origin, operation, kind, source, creatorContext, id = "") => {
+          const extension = kind === "html" ? "html" : "md";
+          const fixturePath = path.join(server.root, `sidebar-${sequence}.${extension}`);
           const contextPath = path.join(server.root, `sidebar-${sequence++}-context.md`);
           await Promise.all([
-            fs.writeFile(fixturePath, markdown, { mode: 0o600 }),
+            fs.writeFile(fixturePath, source, { mode: 0o600 }),
             fs.writeFile(contextPath, creatorContext, { mode: 0o600 }),
           ]);
-          const { stdout, stderr } = await runProcess(
-            server.binary,
-            ["--server", listening.url, "--json", "create", "markdown", "--context", contextPath, "--expires-in", "0", fixturePath],
-            { env: server.env, timeout: processTimeout },
-          );
+          const command = operation === "create"
+            ? ["--server", listening.url, "--json", "create", kind, "--context", contextPath, "--expires-in", "0", fixturePath]
+            : ["--server", listening.url, "--json", "update", kind, "--context", contextPath, "--", id, fixturePath];
+          const { stdout, stderr } = await runProcess(server.binary, command, { env: server.env, timeout: processTimeout });
           if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);
           const envelope = JSON.parse(stdout);
           const pathName = new URL(envelope.resource.url).pathname;
-          return { ...envelope.resource, url: `${origin}${pathName}`, markdown, context: creatorContext };
+          return { ...envelope.resource, url: `${origin}${pathName}`, kind, source, context: creatorContext };
         };
+        const publishAtOrigin = (origin, kind, source, creatorContext = "Creator context for the local Pi agent.\n") =>
+          mutateAtOrigin(origin, "create", kind, source, creatorContext);
+        const updateAtOrigin = (origin, kind, id, source, creatorContext) =>
+          mutateAtOrigin(origin, "update", kind, source, creatorContext, id);
         await use({
           origin: sourceOrigin,
           loopbackOrigin: listening.url,
           brokerPort,
+          publishingRequests: source.requests,
           brokerRequests: broker.requests,
           webSocketCommands: broker.webSocketCommands,
           resetBrokerRequests: broker.resetRequests,
           resetBrokerState: broker.resetState,
           setWebSocketEnabled: broker.setWebSocketEnabled,
           setHoldResponses: broker.setHoldResponses,
+          setContextState: broker.setContextState,
           setSkills: broker.setSkills,
           setHoldInterruptCompletion: broker.setHoldInterruptCompletion,
           releaseInterruptCompletion: broker.releaseInterruptCompletion,
@@ -1482,8 +1492,12 @@ export const test = base.extend({
           interactionResults: broker.interactionResults,
           emitBlocked: broker.emitBlocked,
           emitActivity: broker.emitActivity,
-          publish: (markdown, creatorContext) => publishAtOrigin(sourceOrigin, markdown, creatorContext),
-          publishLoopback: (markdown, creatorContext) => publishAtOrigin(listening.url, markdown, creatorContext),
+          publish: (markdown, creatorContext) => publishAtOrigin(sourceOrigin, "markdown", markdown, creatorContext),
+          publishHTML: (html, creatorContext) => publishAtOrigin(sourceOrigin, "html", html, creatorContext),
+          updateHTML: (id, html, creatorContext) => updateAtOrigin(sourceOrigin, "html", id, html, creatorContext),
+          publishLoopback: (markdown, creatorContext) => publishAtOrigin(listening.url, "markdown", markdown, creatorContext),
+          publishHTMLLoopback: (html, creatorContext) => publishAtOrigin(listening.url, "html", html, creatorContext),
+          updateHTMLLoopback: (id, html, creatorContext) => updateAtOrigin(listening.url, "html", id, html, creatorContext),
         });
       } finally {
         await Promise.all([
@@ -1544,9 +1558,14 @@ export const test = base.extend({
           loopbackOrigin: localAgentSidebar.loopbackOrigin,
           brokerPort: agentPort,
           publish: localAgentSidebar.publish,
+          publishHTML: localAgentSidebar.publishHTML,
+          updateHTML: localAgentSidebar.updateHTML,
           publishLoopback: localAgentSidebar.publishLoopback,
+          publishHTMLLoopback: localAgentSidebar.publishHTMLLoopback,
+          updateHTMLLoopback: localAgentSidebar.updateHTMLLoopback,
           modelRequests: model.requests,
           resetModelRequests: () => model.requests.splice(0),
+          setContextState: localAgentSidebar.setContextState,
           releaseModelFirstDelta: model.releaseFirstDelta,
           releaseModelLaterDelta: model.releaseLaterDelta,
           releaseModelCompletion: model.releaseCompletion,
@@ -1587,12 +1606,17 @@ export const test = base.extend({
 
   publishHTML: async ({ server }, use) => {
     let sequence = 0;
-    await use(async (html) => {
-      const fixturePath = path.join(server.root, `standalone-${sequence++}.html`);
-      await fs.writeFile(fixturePath, html, { mode: 0o600 });
+    await use(async (html, creatorContext = "# Standalone HTML context\n\nHermetic browser fixture.\n") => {
+      const fixtureNumber = sequence++;
+      const fixturePath = path.join(server.root, `standalone-${fixtureNumber}.html`);
+      const contextPath = path.join(server.root, `standalone-${fixtureNumber}-context.md`);
+      await Promise.all([
+        fs.writeFile(fixturePath, html, { mode: 0o600 }),
+        fs.writeFile(contextPath, creatorContext, { mode: 0o600 }),
+      ]);
       const { stdout, stderr } = await runProcess(
         server.binary,
-        ["--server", server.url, "--json", "create", "html", "--expires-in", "0", fixturePath],
+        ["--server", server.url, "--json", "create", "html", "--context", contextPath, "--expires-in", "0", fixturePath],
         { env: server.env, timeout: processTimeout },
       );
       if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);

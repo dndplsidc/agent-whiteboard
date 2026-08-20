@@ -244,9 +244,9 @@ func TestApprovedClientCommands(t *testing.T) {
 		expect func(*testutil.MockClient, *os.File)
 	}{
 		{name: "create markdown", args: []string{"create", "markdown", first, "--context", creatorContext, "--expires-in", "5"}, expect: expectCreateMarkdown("first.md", "first-content", "context.md", "context-content", int64Pointer(5))},
-		{name: "create html", args: []string{"create", "html", second}, expect: expectCreateWhiteboard(httpx.WhiteboardHTML, "second.html", "second-content", nil)},
+		{name: "create html", args: []string{"create", "html", second, "--context", creatorContext}, expect: expectCreateHTML("second.html", "second-content", "context.md", "context-content", nil)},
 		{name: "update markdown", args: []string{"update", "markdown", "abc", first, "--context", creatorContext}, expect: expectUpdateMarkdown("abc", "first.md", "first-content", "context.md", "context-content")},
-		{name: "update html", args: []string{"update", "html", "abc", second}, expect: expectUpdateWhiteboard(httpx.WhiteboardHTML, "abc", "second.html", "second-content")},
+		{name: "update html", args: []string{"update", "html", "abc", second, "--context", creatorContext}, expect: expectUpdateHTML("abc", "second.html", "second-content", "context.md", "context-content")},
 		{name: "delete markdown", args: []string{"delete", "markdown", "abc"}, expect: func(client *testutil.MockClient, _ *os.File) {
 			client.EXPECT().DeleteWhiteboard(mock.Anything, httpx.WhiteboardMarkdown, "abc").Return(nil).Once()
 		}},
@@ -353,7 +353,7 @@ func TestValidationHappensBeforeClientCreation(t *testing.T) {
 	}
 }
 
-func TestMarkdownCommandsRequireReadableContextBeforeClientCreation(t *testing.T) {
+func TestWhiteboardCommandsRequireReadableContextBeforeClientCreation(t *testing.T) {
 	dir := t.TempDir()
 	source := writeFixture(t, dir, "source.md", "# source")
 	contextDirectory := filepath.Join(dir, "context-directory")
@@ -368,6 +368,8 @@ func TestMarkdownCommandsRequireReadableContextBeforeClientCreation(t *testing.T
 		{name: "create missing source file", args: []string{"create", "markdown", filepath.Join(dir, "missing-source.md"), "--context", source}},
 		{name: "create missing context file", args: []string{"create", "markdown", source, "--context", filepath.Join(dir, "missing.md")}},
 		{name: "update context is directory", args: []string{"update", "markdown", "abc", source, "--context", contextDirectory}},
+		{name: "HTML create missing flag", args: []string{"create", "html", source}},
+		{name: "HTML update missing flag", args: []string{"update", "html", "abc", source}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -389,18 +391,16 @@ func TestMarkdownCommandsRequireReadableContextBeforeClientCreation(t *testing.T
 	}
 }
 
-func TestContextFlagExistsOnlyOnMarkdownWrites(t *testing.T) {
+func TestContextFlagExistsOnAllWhiteboardWritesOnly(t *testing.T) {
 	root, err := NewRoot(validDependencies())
 	require.NoError(t, err)
 
-	require.NotNil(t, findCommand(t, findCommand(t, root, "create"), "markdown").Flags().Lookup("context"))
-	require.NotNil(t, findCommand(t, findCommand(t, root, "update"), "markdown").Flags().Lookup("context"))
-	image := findCommand(t, root, "image")
-	commandsWithoutContext := []*cobra.Command{
-		findCommand(t, findCommand(t, root, "create"), "html"),
-		findCommand(t, findCommand(t, root, "update"), "html"),
-		image,
+	for _, format := range []string{"markdown", "html"} {
+		require.NotNil(t, findCommand(t, findCommand(t, root, "create"), format).Flags().Lookup("context"))
+		require.NotNil(t, findCommand(t, findCommand(t, root, "update"), format).Flags().Lookup("context"))
 	}
+	image := findCommand(t, root, "image")
+	commandsWithoutContext := []*cobra.Command{image}
 	commandsWithoutContext = append(commandsWithoutContext, image.Commands()...)
 	for _, command := range commandsWithoutContext {
 		require.Nil(t, command.Flags().Lookup("context"), command.CommandPath())
@@ -439,6 +439,22 @@ func TestGetMarkdownWritesExactVersionedJSON(t *testing.T) {
 
 	require.NoError(t, root.ExecuteContext(context.Background()))
 	require.Equal(t, "{\"schema_version\":1,\"resource\":{\"id\":\"abc\",\"url\":\"https://example.test/whiteboards/markdown/abc\",\"expires_at\":null,\"permanent\":true},\"markdown\":\"# exact source\\n\",\"context\":\"exact creator context\\n\"}\n", stdout.String())
+}
+
+func TestGetHTMLWritesExactVersionedJSON(t *testing.T) {
+	client := testutil.NewMockClient(t)
+	client.EXPECT().GetHTML(mock.Anything, "abc").Return(httpx.HTMLResponse{
+		Resource: httpx.Resource{ID: "abc", Path: "/whiteboards/html/abc", Permanent: true},
+		HTML:     "<!doctype html><html></html>",
+		Context:  "exact creator context\n",
+	}, nil).Once()
+	client.EXPECT().PublicURL("/whiteboards/html/abc").Return("https://example.test/whiteboards/html/abc", nil).Once()
+	var stdout bytes.Buffer
+	root := mustRoot(t, client, nil, &stdout, io.Discard)
+	root.SetArgs([]string{"get", "html", "abc", "--json"})
+
+	require.NoError(t, root.ExecuteContext(context.Background()))
+	require.Equal(t, "{\"schema_version\":1,\"resource\":{\"id\":\"abc\",\"url\":\"https://example.test/whiteboards/html/abc\",\"expires_at\":null,\"permanent\":true},\"html\":\"\\u003c!doctype html\\u003e\\u003chtml\\u003e\\u003c/html\\u003e\",\"context\":\"exact creator context\\n\"}\n", stdout.String())
 }
 
 func TestGetMarkdownErrorKeepsStdoutEmptyAndDoesNotLeakContent(t *testing.T) {
@@ -567,7 +583,7 @@ func TestCommandTreeIsExact(t *testing.T) {
 	require.Equal(t, []string{"html", "markdown"}, commandNames(findCommand(t, root, "create")))
 	require.Equal(t, []string{"html", "markdown"}, commandNames(findCommand(t, root, "update")))
 	require.Equal(t, []string{"html", "markdown"}, commandNames(findCommand(t, root, "delete")))
-	require.Equal(t, []string{"markdown"}, commandNames(findCommand(t, root, "get")))
+	require.Equal(t, []string{"html", "markdown"}, commandNames(findCommand(t, root, "get")))
 	require.Equal(t, []string{"delete", "update", "upload"}, commandNames(findCommand(t, root, "image")))
 }
 
@@ -667,14 +683,13 @@ type interfaceRoot interface {
 	ExecuteContext(context.Context) error
 }
 
-func expectCreateWhiteboard(kind httpx.WhiteboardKind, name, content string, expires *int64) func(*testutil.MockClient, *os.File) {
+func expectCreateHTML(name, content, contextName, contextContent string, expires *int64) func(*testutil.MockClient, *os.File) {
 	return func(client *testutil.MockClient, _ *os.File) {
-		client.EXPECT().CreateWhiteboard(mock.Anything, kind, mock.Anything, expires).RunAndReturn(func(_ context.Context, _ httpx.WhiteboardKind, file httpx.File, _ *int64) (httpx.Resource, error) {
-			got, err := io.ReadAll(file.Reader)
-			if err != nil || file.Name != name || string(got) != content {
-				return httpx.Resource{}, errors.New("unexpected file")
+		client.EXPECT().CreateHTML(mock.Anything, mock.Anything, mock.Anything, expires).RunAndReturn(func(_ context.Context, file, creatorContext httpx.File, _ *int64) (httpx.Resource, error) {
+			if !fileMatches(file, name, content) || !fileMatches(creatorContext, contextName, contextContent) {
+				return httpx.Resource{}, errors.New("unexpected file pair")
 			}
-			return resource("abc", "/whiteboards/"+string(kind)+"/abc", nil), nil
+			return resource("abc", "/whiteboards/html/abc", nil), nil
 		}).Once()
 	}
 }
@@ -706,14 +721,13 @@ func fileMatches(file httpx.File, name, content string) bool {
 	return err == nil && file.Name == name && string(got) == content
 }
 
-func expectUpdateWhiteboard(kind httpx.WhiteboardKind, id, name, content string) func(*testutil.MockClient, *os.File) {
+func expectUpdateHTML(id, name, content, contextName, contextContent string) func(*testutil.MockClient, *os.File) {
 	return func(client *testutil.MockClient, _ *os.File) {
-		client.EXPECT().UpdateWhiteboard(mock.Anything, kind, id, mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ httpx.WhiteboardKind, _ string, file httpx.File, _ *int64) (httpx.Resource, error) {
-			got, err := io.ReadAll(file.Reader)
-			if err != nil || file.Name != name || string(got) != content {
-				return httpx.Resource{}, errors.New("unexpected file")
+		client.EXPECT().UpdateHTML(mock.Anything, id, mock.Anything, mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ string, file, creatorContext httpx.File, _ *int64) (httpx.Resource, error) {
+			if !fileMatches(file, name, content) || !fileMatches(creatorContext, contextName, contextContent) {
+				return httpx.Resource{}, errors.New("unexpected file pair")
 			}
-			return resource(id, "/whiteboards/"+string(kind)+"/"+id, nil), nil
+			return resource(id, "/whiteboards/html/"+id, nil), nil
 		}).Once()
 	}
 }

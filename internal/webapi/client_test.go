@@ -88,12 +88,12 @@ func TestClientRejectsTypedNilReadersBeforeTransport(t *testing.T) {
 		name   string
 		invoke func() error
 	}{
-		{name: "create whiteboard", invoke: func() error {
-			_, err := client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, file, nil)
+		{name: "create HTML", invoke: func() error {
+			_, err := client.CreateHTML(context.Background(), file, httpx.File{Name: "context.md", Reader: strings.NewReader("context")}, nil)
 			return err
 		}},
-		{name: "update whiteboard", invoke: func() error {
-			_, err := client.UpdateWhiteboard(context.Background(), httpx.WhiteboardHTML, clientTestID, file, nil)
+		{name: "update HTML", invoke: func() error {
+			_, err := client.UpdateHTML(context.Background(), clientTestID, file, httpx.File{Name: "context.md", Reader: strings.NewReader("context")}, nil)
 			return err
 		}},
 		{name: "create images", invoke: func() error {
@@ -116,7 +116,7 @@ func TestClientRejectsTypedNilReadersBeforeTransport(t *testing.T) {
 	require.Zero(t, transportCalls.Load())
 }
 
-func TestClientRejectsUnpairedMarkdownBeforeTransport(t *testing.T) {
+func TestClientRejectsUnpairedWhiteboardsBeforeTransport(t *testing.T) {
 	t.Parallel()
 
 	var transportCalls atomic.Int32
@@ -125,17 +125,15 @@ func TestClientRejectsUnpairedMarkdownBeforeTransport(t *testing.T) {
 		return nil, errors.New("unexpected transport call")
 	})})
 
-	_, createErr := client.CreateWhiteboard(context.Background(), httpx.WhiteboardMarkdown, httpx.File{
-		Name: "board.md", Reader: strings.NewReader("source"),
-	}, nil)
-	_, updateErr := client.UpdateWhiteboard(context.Background(), httpx.WhiteboardMarkdown, clientTestID, httpx.File{
-		Name: "board.md", Reader: strings.NewReader("source"),
-	}, nil)
-	for _, err := range []error{createErr, updateErr} {
-		var protocolErr *common.Error
-		require.ErrorAs(t, err, &protocolErr)
-		require.Equal(t, common.CodeInvalidRequest, protocolErr.Code)
-		require.Equal(t, "markdown context is required", protocolErr.Message)
+	for _, kind := range []httpx.WhiteboardKind{httpx.WhiteboardMarkdown, httpx.WhiteboardHTML} {
+		_, createErr := client.CreateWhiteboard(context.Background(), kind, httpx.File{Name: "board", Reader: strings.NewReader("source")}, nil)
+		_, updateErr := client.UpdateWhiteboard(context.Background(), kind, clientTestID, httpx.File{Name: "board", Reader: strings.NewReader("source")}, nil)
+		for _, err := range []error{createErr, updateErr} {
+			var protocolErr *common.Error
+			require.ErrorAs(t, err, &protocolErr)
+			require.Equal(t, common.CodeInvalidRequest, protocolErr.Code)
+			require.Equal(t, "creator context is required", protocolErr.Message)
+		}
 	}
 	require.Zero(t, transportCalls.Load())
 }
@@ -161,10 +159,20 @@ func TestClientRejectsInvalidMarkdownPairBeforeTransport(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := client.CreateMarkdown(context.Background(), test.source, test.context, nil)
-			var protocolErr *common.Error
-			require.ErrorAs(t, err, &protocolErr)
-			require.Equal(t, common.CodeInvalidRequest, protocolErr.Code)
+			for _, create := range []func() error{
+				func() error {
+					_, err := client.CreateMarkdown(context.Background(), test.source, test.context, nil)
+					return err
+				},
+				func() error {
+					_, err := client.CreateHTML(context.Background(), test.source, test.context, nil)
+					return err
+				},
+			} {
+				var protocolErr *common.Error
+				require.ErrorAs(t, create(), &protocolErr)
+				require.Equal(t, common.CodeInvalidRequest, protocolErr.Code)
+			}
 		})
 	}
 	require.Zero(t, transportCalls.Load())
@@ -232,9 +240,9 @@ func TestClientDoesNotFollowMutationRedirectsOrMutateCaller(t *testing.T) {
 
 				var err error
 				if operation == "multipart" {
-					_, err = client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, httpx.File{
-						Name: "board.html", Reader: strings.NewReader("body"),
-					}, nil)
+					_, err = client.CreateHTML(context.Background(),
+						httpx.File{Name: "board.html", Reader: strings.NewReader("body")},
+						httpx.File{Name: "context.md", Reader: strings.NewReader("context")}, nil)
 				} else {
 					err = client.DeleteImage(context.Background(), clientTestID)
 				}
@@ -253,72 +261,18 @@ func TestClientDoesNotFollowMutationRedirectsOrMutateCaller(t *testing.T) {
 	}
 }
 
-func TestClientWhiteboardMutationsUseExactProtocol(t *testing.T) {
+func TestClientWhiteboardDeleteUsesExactProtocol(t *testing.T) {
 	t.Parallel()
 
-	type expectation struct {
-		method     string
-		path       string
-		field      string
-		filename   string
-		content    string
-		expiration *string
-		status     int
-	}
-	expectations := make(chan expectation, 3)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		expect := <-expectations
-		require.Equal(t, expect.method, r.Method)
-		require.Equal(t, expect.path, r.URL.EscapedPath())
-		if expect.field == "" {
-			require.Empty(t, r.Header.Get("Content-Type"))
-		} else {
-			parts := readMultipartParts(t, r)
-			require.Equal(t, []multipartPart{{
-				Field: expect.field, Filename: expect.filename, Content: expect.content,
-			}}, fileParts(parts))
-			require.Equal(t, expect.expiration, expirationPart(parts))
-		}
-		if expect.status == http.StatusNoContent {
-			w.WriteHeader(expect.status)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(expect.status)
-		_ = json.NewEncoder(w).Encode(httpx.ResourceResponse{Resource: httpx.Resource{
-			ID: clientTestID, Type: "markdown", Path: httpx.PublicMarkdown + clientTestID,
-			Permanent: true,
-		}})
+		require.Equal(t, http.MethodDelete, r.Method)
+		require.Equal(t, httpx.APIWhiteboardMarkdown+"/"+clientTestID, r.URL.EscapedPath())
+		require.Empty(t, r.Header.Get("Content-Type"))
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(server.Close)
 	client := newTestClient(t, server.URL, server.Client())
 
-	expectations <- expectation{
-		method: http.MethodPost, path: httpx.APIWhiteboardHTML, field: "file",
-		filename: "board.html", content: "<!doctype html>", status: http.StatusCreated,
-	}
-	created, err := client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, httpx.File{
-		Name: "board.html", Reader: strings.NewReader("<!doctype html>"),
-	}, nil)
-	require.NoError(t, err)
-	require.Equal(t, clientTestID, created.ID)
-
-	zero := int64(0)
-	zeroText := "0"
-	expectations <- expectation{
-		method: http.MethodPut, path: httpx.APIWhiteboardHTML + "/" + clientTestID, field: "file",
-		filename: "board.html", content: "<!doctype html>", expiration: &zeroText, status: http.StatusOK,
-	}
-	updated, err := client.UpdateWhiteboard(context.Background(), httpx.WhiteboardHTML, clientTestID, httpx.File{
-		Name: "board.html", Reader: strings.NewReader("<!doctype html>"),
-	}, &zero)
-	require.NoError(t, err)
-	require.Equal(t, clientTestID, updated.ID)
-
-	expectations <- expectation{
-		method: http.MethodDelete, path: httpx.APIWhiteboardMarkdown + "/" + clientTestID,
-		status: http.StatusNoContent,
-	}
 	require.NoError(t, client.DeleteWhiteboard(context.Background(), httpx.WhiteboardMarkdown, clientTestID))
 }
 
@@ -380,15 +334,31 @@ func TestClientMarkdownMutationsSendExactFileContextPair(t *testing.T) {
 	require.Equal(t, clientTestID, updated.ID)
 }
 
-func TestClientHTMLMutationsRemainSingleFileMultipart(t *testing.T) {
+func TestClientHTMLMutationsSendExactFileContextPair(t *testing.T) {
 	t.Parallel()
 
+	type expectation struct {
+		method, path string
+		expiration   *string
+	}
+	expectations := make(chan expectation, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, httpx.APIWhiteboardHTML, r.URL.EscapedPath())
-		require.Equal(t, []multipartPart{{Field: "file", Filename: "board.html", Content: "<!doctype html>"}}, fileParts(readMultipartParts(t, r)))
+		expect := <-expectations
+		require.Equal(t, expect.method, r.Method)
+		require.Equal(t, expect.path, r.URL.EscapedPath())
+		parts := readMultipartParts(t, r)
+		require.Equal(t, expect.expiration, expirationPart(parts))
+		files := fileParts(parts)
+		require.ElementsMatch(t, []multipartPart{
+			{Field: "file", Filename: "board.html", Content: "<!doctype html><html></html>"},
+			{Field: "context", Filename: "creator.md", Content: "goals and decisions"},
+		}, files)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+		if expect.method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
 		_ = json.NewEncoder(w).Encode(httpx.ResourceResponse{Resource: httpx.Resource{
 			ID: clientTestID, Type: "html", Path: httpx.PublicHTML + clientTestID, Permanent: true,
 		}})
@@ -396,10 +366,64 @@ func TestClientHTMLMutationsRemainSingleFileMultipart(t *testing.T) {
 	t.Cleanup(server.Close)
 	client := newTestClient(t, server.URL, server.Client())
 
-	_, err := client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, httpx.File{
-		Name: "board.html", Reader: strings.NewReader("<!doctype html>"),
-	}, nil)
+	expectations <- expectation{method: http.MethodPost, path: httpx.APIWhiteboardHTML}
+	_, err := client.CreateHTML(context.Background(),
+		httpx.File{Name: "board.html", Reader: strings.NewReader("<!doctype html><html></html>")},
+		httpx.File{Name: "creator.md", Reader: strings.NewReader("goals and decisions")}, nil)
 	require.NoError(t, err)
+
+	expires := int64(30)
+	expiresText := "30"
+	expectations <- expectation{method: http.MethodPut, path: httpx.APIWhiteboardHTML + "/" + clientTestID, expiration: &expiresText}
+	_, err = client.UpdateHTML(context.Background(), clientTestID,
+		httpx.File{Name: "board.html", Reader: strings.NewReader("<!doctype html><html></html>")},
+		httpx.File{Name: "creator.md", Reader: strings.NewReader("goals and decisions")}, &expires)
+	require.NoError(t, err)
+}
+
+func TestClientHTMLMutationsRejectWrongResourceKindAndPath(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name, method, resourceType, resourcePath string
+	}{
+		{name: "create wrong kind", method: http.MethodPost, resourceType: "markdown", resourcePath: httpx.PublicHTML + clientTestID},
+		{name: "create wrong path", method: http.MethodPost, resourceType: "html", resourcePath: httpx.PublicMarkdown + clientTestID},
+		{name: "update wrong kind", method: http.MethodPut, resourceType: "markdown", resourcePath: httpx.PublicHTML + clientTestID},
+		{name: "update wrong path", method: http.MethodPut, resourceType: "html", resourcePath: httpx.PublicImages + clientTestID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				if test.method == http.MethodPost {
+					w.WriteHeader(http.StatusCreated)
+				} else {
+					w.WriteHeader(http.StatusOK)
+				}
+				_ = json.NewEncoder(w).Encode(httpx.ResourceResponse{Resource: httpx.Resource{
+					ID: clientTestID, Type: test.resourceType, Path: test.resourcePath, Permanent: true,
+				}})
+			}))
+			t.Cleanup(server.Close)
+			client := newTestClient(t, server.URL, server.Client())
+			source := httpx.File{Name: "board.html", Reader: strings.NewReader("<!doctype html><html></html>")}
+			creatorContext := httpx.File{Name: "context.md", Reader: strings.NewReader("context")}
+			var resource httpx.Resource
+			var err error
+			if test.method == http.MethodPost {
+				resource, err = client.CreateHTML(context.Background(), source, creatorContext, nil)
+			} else {
+				resource, err = client.UpdateHTML(context.Background(), clientTestID, source, creatorContext, nil)
+			}
+			require.Equal(t, httpx.Resource{}, resource)
+			var protocolErr *common.Error
+			require.ErrorAs(t, err, &protocolErr)
+			require.Equal(t, common.CodeInternal, protocolErr.Code)
+			require.Equal(t, "server returned an invalid response", protocolErr.Message)
+		})
+	}
 }
 
 func TestClientImageMutationsPreserveOrderAndExpiration(t *testing.T) {
@@ -627,6 +651,28 @@ func TestClientGetsMarkdownUsingBoundedSafeJSON(t *testing.T) {
 	}, got)
 }
 
+func TestClientGetsHTMLUsingBoundedSafeJSON(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, httpx.APIWhiteboardHTMLResource+clientTestID, r.URL.EscapedPath())
+		require.Empty(t, r.Header.Get("Content-Type"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"resource":{"id":"`+clientTestID+`","type":"html","path":"/whiteboards/html/`+clientTestID+`","expires_at":null,"permanent":true},"html":"<!doctype html><html></html>","context":"creator exact context"}`)
+	}))
+	t.Cleanup(server.Close)
+	client := newTestClient(t, server.URL, server.Client())
+
+	got, err := client.GetHTML(context.Background(), clientTestID)
+	require.NoError(t, err)
+	require.Equal(t, httpx.HTMLResponse{
+		Resource: httpx.Resource{ID: clientTestID, Type: "html", Path: httpx.PublicHTML + clientTestID, Permanent: true},
+		HTML:     "<!doctype html><html></html>",
+		Context:  "creator exact context",
+	}, got)
+}
+
 func TestClientGetsMarkdownAcrossDefaultWriteLimits(t *testing.T) {
 	t.Parallel()
 
@@ -783,9 +829,9 @@ func TestClientRejectsMalformedAndOversizedResponses(t *testing.T) {
 			t.Cleanup(server.Close)
 			client := newTestClient(t, server.URL, server.Client())
 
-			_, err := client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, httpx.File{
-				Name: "board.html", Reader: strings.NewReader("body"),
-			}, nil)
+			_, err := client.CreateHTML(context.Background(),
+				httpx.File{Name: "board.html", Reader: strings.NewReader("body")},
+				httpx.File{Name: "context.md", Reader: strings.NewReader("context")}, nil)
 			require.Error(t, err)
 			require.NotContains(t, err.Error(), test.body)
 		})
@@ -800,7 +846,7 @@ func TestClientReturnsCapabilityWithUncertainCreateError(t *testing.T) {
 		httpx.WriteJSON(w, http.StatusServiceUnavailable, httpx.ErrorResponse{
 			Error: httpx.ErrorBody{Code: common.CodeStorageUnavailable, Message: "storage unavailable"},
 			Resource: &httpx.Resource{
-				ID: clientTestID, Path: httpx.PublicMarkdown + clientTestID, Permanent: true,
+				ID: clientTestID, Type: "markdown", Path: httpx.PublicMarkdown + clientTestID, Permanent: true,
 			},
 		})
 	}))
@@ -823,7 +869,7 @@ func TestClientReturnsCapabilityWithUncertainCreateError(t *testing.T) {
 func TestClientAcceptsResponseAtOneMiBLimit(t *testing.T) {
 	t.Parallel()
 
-	body := `{"resource":{"id":"` + clientTestID + `","path":"/whiteboards/html/` + clientTestID + `","permanent":true}}`
+	body := `{"resource":{"id":"` + clientTestID + `","type":"html","path":"/whiteboards/html/` + clientTestID + `","permanent":true}}`
 	body += strings.Repeat(" ", (1<<20)-len(body))
 	require.Len(t, body, 1<<20)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -834,9 +880,9 @@ func TestClientAcceptsResponseAtOneMiBLimit(t *testing.T) {
 	t.Cleanup(server.Close)
 	client := newTestClient(t, server.URL, server.Client())
 
-	resource, err := client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, httpx.File{
-		Name: "board.html", Reader: strings.NewReader("body"),
-	}, nil)
+	resource, err := client.CreateHTML(context.Background(),
+		httpx.File{Name: "board.html", Reader: strings.NewReader("body")},
+		httpx.File{Name: "context.md", Reader: strings.NewReader("context")}, nil)
 	require.NoError(t, err)
 	require.Equal(t, clientTestID, resource.ID)
 }
@@ -892,9 +938,9 @@ func TestClientRejectsInvalidSuccessEnvelopesPrivately(t *testing.T) {
 			)
 			switch test.operation {
 			case "create":
-				resource, err = client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, httpx.File{
-					Name: "board.html", Reader: strings.NewReader("body"),
-				}, nil)
+				resource, err = client.CreateHTML(context.Background(),
+					httpx.File{Name: "board.html", Reader: strings.NewReader("body")},
+					httpx.File{Name: "context.md", Reader: strings.NewReader("context")}, nil)
 			case "update":
 				resource, err = client.UpdateImage(context.Background(), clientTestID, httpx.File{
 					Name: "image.png", Reader: strings.NewReader("body"),
@@ -960,16 +1006,16 @@ func TestClientStreamsMultipartWithoutReadingFileBeforeTransport(t *testing.T) {
 			StatusCode: http.StatusCreated,
 			Header:     make(http.Header),
 			Body: io.NopCloser(strings.NewReader(
-				`{"resource":{"id":"` + clientTestID + `","path":"/whiteboards/markdown/` + clientTestID + `","permanent":true}}`,
+				`{"resource":{"id":"` + clientTestID + `","type":"html","path":"/whiteboards/html/` + clientTestID + `","permanent":true}}`,
 			)),
 			Request: request,
 		}, nil
 	})
 	client := newTestClient(t, "http://example.test", &http.Client{Transport: roundTripper})
 
-	_, err := client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, httpx.File{
-		Name: "stream.html", Reader: reader,
-	}, nil)
+	_, err := client.CreateHTML(context.Background(),
+		httpx.File{Name: "stream.html", Reader: reader},
+		httpx.File{Name: "context.md", Reader: strings.NewReader("context")}, nil)
 	require.NoError(t, err)
 }
 
@@ -992,9 +1038,9 @@ func TestClientClosesMultipartPipeAfterEarlyResponse(t *testing.T) {
 	client := newTestClient(t, "http://example.test", &http.Client{Transport: transport})
 	result := make(chan error, 1)
 	go func() {
-		_, err := client.CreateWhiteboard(context.Background(), httpx.WhiteboardHTML, httpx.File{
-			Name: "large.html", Reader: io.LimitReader(zeroReader{}, 1<<30),
-		}, nil)
+		_, err := client.CreateHTML(context.Background(),
+			httpx.File{Name: "large.html", Reader: io.LimitReader(zeroReader{}, 1<<30)},
+			httpx.File{Name: "context.md", Reader: strings.NewReader("context")}, nil)
 		result <- err
 	}()
 
