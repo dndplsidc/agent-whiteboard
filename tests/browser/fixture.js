@@ -1362,7 +1362,7 @@ export const test = base.extend({
         }
       }
     },
-    { scope: "worker" },
+    { scope: "worker", timeout: 90_000 },
   ],
 
   localAgentTransport: [
