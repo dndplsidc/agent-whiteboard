@@ -19,6 +19,9 @@ type nativeEvent struct {
 	RequestID             string          `json:"requestId"`
 	ID                    string          `json:"id"`
 	Status                string          `json:"status"`
+	Aborted               *bool           `json:"aborted"`
+	ErrorMessage          string          `json:"errorMessage"`
+	Result                json.RawMessage `json:"result"`
 }
 type nativeMessage struct {
 	Role       string          `json:"role"`
@@ -42,7 +45,7 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 	if event.Type == "compaction_start" && s.compactStarted() {
 		return
 	}
-	if event.Type == "compaction_end" && s.compactEnded() {
+	if event.Type == "compaction_end" && s.compactEnded(event) {
 		return
 	}
 	s.mu.Lock()

@@ -10,6 +10,14 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
 )
 
+type compactAbortState uint8
+
+const (
+	compactAbortNone compactAbortState = iota
+	compactAbortInFlightOrUnknown
+	compactAbortConfirmed
+)
+
 type activeCompact struct {
 	request    provider.CompactRequest
 	started    chan struct{}
@@ -17,7 +25,7 @@ type activeCompact struct {
 	callDone   chan struct{}
 	callResult compactCallResult
 	terminal   bool
-	interrupt  bool
+	abortState compactAbortState
 	acceptedAt time.Time
 }
 
@@ -132,31 +140,42 @@ func (s *Session) InterruptCompact(ctx context.Context, accepted provider.Accept
 		s.mu.Unlock()
 		return provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	if work.interrupt {
+	switch work.abortState {
+	case compactAbortInFlightOrUnknown:
+		s.mu.Unlock()
+		return provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+	case compactAbortConfirmed:
 		s.mu.Unlock()
 		return nil
 	}
-	work.interrupt = true
+	work.abortState = compactAbortInFlightOrUnknown
 	s.mu.Unlock()
+
 	response, wrote, err := s.rpc.call(ctx, "abort", nil)
 	if err != nil {
 		if !wrote {
 			s.mu.Lock()
-			if s.compact == work {
-				work.interrupt = false
+			if s.compact == work && !work.terminal {
+				work.abortState = compactAbortNone
 			}
 			s.mu.Unlock()
+			return err
 		}
-		return err
+		return provider.NewProviderError(provider.ErrorAcceptanceUnknown)
 	}
 	if requireSuccessfulResponse(response, "abort") != nil {
 		s.mu.Lock()
-		if s.compact == work {
-			work.interrupt = false
+		if s.compact == work && !work.terminal {
+			work.abortState = compactAbortNone
 		}
 		s.mu.Unlock()
 		return provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
+	s.mu.Lock()
+	if s.compact == work && !work.terminal {
+		work.abortState = compactAbortConfirmed
+	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -175,7 +194,7 @@ func (s *Session) compactStarted() bool {
 	return true
 }
 
-func (s *Session) compactEnded() bool {
+func (s *Session) compactEnded(event nativeEvent) bool {
 	s.mu.Lock()
 	work := s.compact
 	if work == nil || work.terminal {
@@ -190,10 +209,21 @@ func (s *Session) compactEnded() bool {
 		s.mu.Unlock()
 		return true
 	}
-	interrupted := work.interrupt
+	abortState := work.abortState
 	s.mu.Unlock()
+
 	status := provider.CompactCompleted
-	if interrupted {
+	if event.Aborted != nil {
+		if *event.Aborted {
+			status = provider.CompactInterrupted
+		} else if event.ErrorMessage != "" {
+			status = provider.CompactFailed
+		}
+	} else if event.ErrorMessage != "" {
+		status = provider.CompactFailed
+	} else if abortState == compactAbortConfirmed {
+		// Legacy records omitted the authoritative outcome fields. Only a correlated
+		// successful abort response can classify those records as interrupted.
 		status = provider.CompactInterrupted
 	}
 	s.finishCompact(work, status)

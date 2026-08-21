@@ -534,6 +534,112 @@ func TestPiCompactWriteThenCancelRetainsOwnershipUntilLateTerminal(t *testing.T)
 	}
 }
 
+func TestPiCompactEndUsesAuthoritativeOutcome(t *testing.T) {
+	tests := []struct {
+		name   string
+		end    map[string]any
+		status provider.CompactStatus
+	}{
+		{name: "completed", end: map[string]any{"type": "compaction_end", "aborted": false, "result": map[string]any{"summary": "done"}}, status: provider.CompactCompleted},
+		{name: "interrupted", end: map[string]any{"type": "compaction_end", "aborted": true}, status: provider.CompactInterrupted},
+		{name: "failed", end: map[string]any{"type": "compaction_end", "aborted": false, "errorMessage": "private compaction failure"}, status: provider.CompactFailed},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session, child := newBehaviorSession(t)
+			request := provider.CompactRequest{WorkID: behaviorID(byte(120 + index))}
+			answer := make(chan error, 1)
+			go func() { _, err := session.Compact(context.Background(), request); answer <- err }()
+			command := child.readCommand(t)
+			child.writeRecord(t, map[string]any{"type": "compaction_start"})
+			require.NoError(t, <-answer)
+			child.writeRecord(t, test.end)
+			event := receiveProviderEvents(t, session.Events(), 1)[0]
+			require.Equal(t, test.status, event.Compact.Status)
+			child.writeRecord(t, responseRecord(command, nil))
+		})
+	}
+}
+
+func TestPiCompactAbortUnknownRemainsFailClosedUntilNaturalEnd(t *testing.T) {
+	ends := []struct {
+		name string
+		end  map[string]any
+	}{
+		{name: "authoritative", end: map[string]any{"type": "compaction_end", "aborted": false, "result": map[string]any{"summary": "done"}}},
+		{name: "legacy", end: map[string]any{"type": "compaction_end"}},
+	}
+	for _, test := range ends {
+		t.Run(test.name, func(t *testing.T) {
+			session, child := newBlockingAbortBehaviorSession(t)
+			request := provider.CompactRequest{WorkID: behaviorID(124)}
+			acceptedResult := make(chan struct {
+				accepted provider.AcceptedCompact
+				err      error
+			}, 1)
+			go func() {
+				accepted, err := session.Compact(context.Background(), request)
+				acceptedResult <- struct {
+					accepted provider.AcceptedCompact
+					err      error
+				}{accepted: accepted, err: err}
+			}()
+			require.Equal(t, "compact", child.readCommand(t)["type"])
+			child.writeRecord(t, map[string]any{"type": "compaction_start"})
+			resolved := <-acceptedResult
+			require.NoError(t, resolved.err)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			interrupted := make(chan error, 1)
+			go func() { interrupted <- session.InterruptCompact(ctx, resolved.accepted) }()
+			<-child.abortWriteEntered
+			cancel()
+			assertProviderCode(t, <-interrupted, provider.ErrorAcceptanceUnknown)
+			assertProviderCode(t, session.InterruptCompact(context.Background(), resolved.accepted), provider.ErrorAcceptanceUnknown)
+			require.Equal(t, 1, child.abortWrites())
+
+			close(child.releaseAbortWrite)
+			child.writeRecord(t, test.end)
+			event := receiveProviderEvents(t, session.Events(), 1)[0]
+			require.Equal(t, provider.CompactCompleted, event.Compact.Status)
+		})
+	}
+}
+
+func TestPiCompactAbortDefinitePreWriteFailurePermitsRetry(t *testing.T) {
+	session, child := newBehaviorSession(t)
+	request := provider.CompactRequest{WorkID: behaviorID(125)}
+	acceptedResult := make(chan struct {
+		accepted provider.AcceptedCompact
+		err      error
+	}, 1)
+	go func() {
+		accepted, err := session.Compact(context.Background(), request)
+		acceptedResult <- struct {
+			accepted provider.AcceptedCompact
+			err      error
+		}{accepted: accepted, err: err}
+	}()
+	child.readCommand(t)
+	child.writeRecord(t, map[string]any{"type": "compaction_start"})
+	resolved := <-acceptedResult
+	require.NoError(t, resolved.err)
+	accepted := resolved.accepted
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, session.InterruptCompact(ctx, accepted), context.Canceled)
+	answer := make(chan error, 1)
+	go func() { answer <- session.InterruptCompact(context.Background(), accepted) }()
+	abort := child.readCommand(t)
+	require.Equal(t, "abort", abort["type"])
+	child.writeRecord(t, responseRecord(abort, nil))
+	require.NoError(t, <-answer)
+	child.writeRecord(t, map[string]any{"type": "compaction_end", "aborted": true})
+	event := receiveProviderEvents(t, session.Events(), 1)[0]
+	require.Equal(t, provider.CompactInterrupted, event.Compact.Status)
+}
+
 func TestPiCompactNegativeResponseAfterAcceptedStartFailsExactlyOnce(t *testing.T) {
 	session, child := newBehaviorSession(t)
 	request := provider.CompactRequest{WorkID: behaviorID(100)}
@@ -596,6 +702,113 @@ func TestPiCompactRPCFailureAfterAcceptedStartFailsExactlyOnce(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, terminals)
+}
+
+type blockingAbortChild struct {
+	outputReader      *io.PipeReader
+	outputWriter      *io.PipeWriter
+	commands          chan map[string]any
+	abortWriteEntered chan struct{}
+	releaseAbortWrite chan struct{}
+	wait              chan struct{}
+	closeOnce         sync.Once
+	mu                sync.Mutex
+	writes            int
+}
+
+func newBlockingAbortChild() *blockingAbortChild {
+	outputReader, outputWriter := io.Pipe()
+	return &blockingAbortChild{
+		outputReader: outputReader, outputWriter: outputWriter,
+		commands: make(chan map[string]any, 2), abortWriteEntered: make(chan struct{}),
+		releaseAbortWrite: make(chan struct{}), wait: make(chan struct{}),
+	}
+}
+
+func (child *blockingAbortChild) Input() io.WriteCloser { return child }
+func (child *blockingAbortChild) Output() io.Reader     { return child.outputReader }
+func (*blockingAbortChild) Errors() io.Reader           { return strings.NewReader("") }
+func (child *blockingAbortChild) Wait() error           { <-child.wait; return nil }
+func (child *blockingAbortChild) Terminate() error      { child.closeOutput(); return nil }
+func (child *blockingAbortChild) Kill() error           { child.closeOutput(); return nil }
+func (child *blockingAbortChild) Close() error {
+	child.closeOutput()
+	return nil
+}
+func (child *blockingAbortChild) Write(encoded []byte) (int, error) {
+	var command map[string]any
+	if err := json.Unmarshal(encoded, &command); err != nil {
+		return 0, err
+	}
+	child.mu.Lock()
+	child.writes++
+	writeNumber := child.writes
+	child.mu.Unlock()
+	if writeNumber == 2 {
+		close(child.abortWriteEntered)
+		<-child.releaseAbortWrite
+	}
+	child.commands <- command
+	return len(encoded), nil
+}
+func (child *blockingAbortChild) abortWrites() int {
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	return child.writes - 1
+}
+func (child *blockingAbortChild) readCommand(t *testing.T) map[string]any {
+	t.Helper()
+	select {
+	case command := <-child.commands:
+		return command
+	case <-time.After(time.Second):
+		t.Fatal("missing Pi command")
+		return nil
+	}
+}
+func (child *blockingAbortChild) writeRecord(t *testing.T, record map[string]any) {
+	t.Helper()
+	encoded, err := json.Marshal(record)
+	require.NoError(t, err)
+	encoded = append(encoded, '\n')
+	_, err = child.outputWriter.Write(encoded)
+	require.NoError(t, err)
+}
+func (child *blockingAbortChild) closeOutput() {
+	child.closeOnce.Do(func() {
+		_ = child.outputWriter.Close()
+		close(child.wait)
+	})
+}
+
+func newBlockingAbortBehaviorSession(t *testing.T) (*Session, *blockingAbortChild) {
+	t.Helper()
+	child := newBlockingAbortChild()
+	client, err := newRPCClient(child)
+	require.NoError(t, err)
+	ref, err := provider.NewNativeSessionRef(behaviorID(126))
+	require.NoError(t, err)
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	driver := &Driver{config: Config{Clock: fixedClock{value: now}}, active: make(map[string]provider.Session), unfinalized: make(map[string]nativeAllocation)}
+	state := startupState{SessionID: "session", SessionFile: "/tmp/session", Workspace: "/tmp/workspace", ModelProvider: "model-provider", ModelID: "model-id", Model: "model-provider/model-id", ContextWindow: 32768, MaxTokens: 1024}
+	native := provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: state.Model, CreatedAt: now, UpdatedAt: now}
+	session := newSession(driver, native, state, child, client)
+	driver.active[ref.Value()] = session
+	session.start()
+	t.Cleanup(func() {
+		select {
+		case <-child.releaseAbortWrite:
+		default:
+			close(child.releaseAbortWrite)
+		}
+		child.closeOutput()
+		select {
+		case <-session.loopsDone:
+		case <-time.After(time.Second):
+			t.Errorf("session loops did not stop")
+		}
+	})
+	return session, child
 }
 
 func assertPiCompactAdmissionBlocked(t *testing.T, session *Session) {
