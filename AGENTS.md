@@ -58,6 +58,10 @@ pnpm run check:assets
 pnpm run test:browser
 ```
 
+## Pull requests and CI
+
+After creating a pull request or pushing commits to a branch with an open pull request, start monitoring the pull request's CI checks asynchronously and continue other useful work while they run. CI monitoring must not block the agent from making progress on independent work. Before reporting the work as complete, confirm that all required checks have finished successfully. If a check fails, inspect its logs, identify and correct the root cause, push the fix, and asynchronously monitor the replacement pull request checks through completion.
+
 ## Documentation
 
 Keep documentation synchronized with behavior in the same change.
