@@ -166,7 +166,7 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 	got := getHTMLAPI(t, server.URL+"/api/v1/whiteboards/html/"+created.Resource.ID, http.StatusOK)
 	require.Equal(t, string(firstSource), got.HTML)
 	require.Equal(t, string(firstContext), got.Context)
-	stdout, stderr, err := server.RunCLI(context.Background(), "--json", "get", "html", created.Resource.ID)
+	stdout, stderr, err := server.RunCLI(context.Background(), "--json", "get", "html", "--", created.Resource.ID)
 	require.NoError(t, err, stderr)
 	var cliGot apiHTMLEnvelope
 	require.NoError(t, json.Unmarshal([]byte(stdout), &cliGot), stdout)
@@ -196,7 +196,7 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 	secondFile := writeFixture(t, "second.html", secondSource)
 	secondContext := []byte("replacement HTML creator context")
 	secondContextFile := writeFixture(t, "second-context.md", secondContext)
-	updated := runCLIResource(t, server, "--json", "update", "html", created.Resource.ID, secondFile, "--context", secondContextFile)
+	updated := runCLIResource(t, server, "--json", "update", "html", "--context", secondContextFile, "--", created.Resource.ID, secondFile)
 	require.Equal(t, created.Resource.URL, updated.Resource.URL)
 	_, outer = fetch(t, created.Resource.URL)
 	require.Equal(t, stableOuter, outer)
