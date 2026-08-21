@@ -55,11 +55,22 @@ func (skill SkillDescriptor) validate() error {
 }
 
 func ValidateSkillCatalog(state SkillsState, skills []SkillDescriptor) error {
-	return validateSkillCatalog(state, skills)
+	var limit *int
+	if state == SkillsReady {
+		value := MaxMessageSkills
+		limit = &value
+	}
+	return validateSkillCatalog(state, skills, limit)
 }
 
-func validateSkillCatalog(state SkillsState, skills []SkillDescriptor) error {
-	if !state.Valid() || skills == nil || len(skills) > MaxSkills || state == SkillsUnavailable && len(skills) != 0 {
+func ValidateSkillCatalogWithLimit(state SkillsState, skills []SkillDescriptor, maxSelectedSkills *int) error {
+	return validateSkillCatalog(state, skills, maxSelectedSkills)
+}
+
+func validateSkillCatalog(state SkillsState, skills []SkillDescriptor, maxSelectedSkills *int) error {
+	validLimit := state == SkillsReady && maxSelectedSkills != nil && *maxSelectedSkills > 0 && *maxSelectedSkills <= MaxMessageSkills ||
+		state == SkillsUnavailable && maxSelectedSkills == nil
+	if !state.Valid() || !validLimit || skills == nil || len(skills) > MaxSkills || state == SkillsUnavailable && len(skills) != 0 {
 		return invalid(nil)
 	}
 	seenIDs := make(map[string]struct{}, len(skills))
@@ -85,6 +96,44 @@ func validateSkillCatalog(state SkillsState, skills []SkillDescriptor) error {
 		return ErrMessageTooLarge
 	}
 	return nil
+}
+
+type BusyTurnPolicy string
+
+const (
+	BusyTurnQueue         BusyTurnPolicy = "queue"
+	BusyTurnPreserveDraft BusyTurnPolicy = "preserve_draft"
+)
+
+func (policy BusyTurnPolicy) Valid() bool {
+	return policy == BusyTurnQueue || policy == BusyTurnPreserveDraft
+}
+
+type ComposerAdmission string
+
+const (
+	ComposerSubmit        ComposerAdmission = "submit"
+	ComposerQueue         ComposerAdmission = "queue"
+	ComposerPreserveDraft ComposerAdmission = "preserve_draft"
+	ComposerBlocked       ComposerAdmission = "blocked"
+)
+
+func (admission ComposerAdmission) Valid() bool {
+	switch admission {
+	case ComposerSubmit, ComposerQueue, ComposerPreserveDraft, ComposerBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
+func validComposerAdmission(policy BusyTurnPolicy, admission ComposerAdmission) bool {
+	if !policy.Valid() || !admission.Valid() {
+		return false
+	}
+	return admission == ComposerSubmit || admission == ComposerBlocked ||
+		admission == ComposerQueue && policy == BusyTurnQueue ||
+		admission == ComposerPreserveDraft && policy == BusyTurnPreserveDraft
 }
 
 type ActiveWorkKind string

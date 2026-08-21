@@ -321,7 +321,9 @@ func TestNativeSessionReferencesAndMetadataAreValidated(t *testing.T) {
 	_, err = json.Marshal(ref)
 	require.Error(t, err)
 
-	metadata := provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: "resolved-model", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	settings := provider.ExecutionSettings{Model: "resolved-model", Effort: "medium", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Resolved model", Selectable: true}
+	metadata := provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: settings.Model, Settings: &settings, Presentation: &presentation, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	require.NoError(t, metadata.Validate())
 	metadata.Ref = provider.NativeSessionRef{}
 	require.Error(t, metadata.Validate())
@@ -619,5 +621,7 @@ func validNativeSession() provider.NativeSession {
 		panic(err)
 	}
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
-	return provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: "resolved-model", CreatedAt: now, UpdatedAt: now}
+	settings := provider.ExecutionSettings{Model: "resolved-model", Effort: "medium", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Resolved model", Selectable: true}
+	return provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: settings.Model, Settings: &settings, Presentation: &presentation, CreatedAt: now, UpdatedAt: now}
 }

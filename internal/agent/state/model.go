@@ -137,9 +137,7 @@ func (session Session) validateForProvider(name provider.Name) error {
 	}
 	switch name {
 	case provider.NamePi:
-		if session.Settings != nil || session.Presentation != nil {
-			return errors.New("Pi session contains execution settings")
-		}
+		// Nil settings are retained solely for legacy durable Pi mappings.
 	case provider.NameCodex:
 		if session.Settings == nil || session.Presentation == nil {
 			return errors.New("Codex session lacks execution settings")

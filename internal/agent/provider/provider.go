@@ -203,14 +203,8 @@ func (s NativeSession) Validate() error {
 	if !s.Ref.Valid() || !s.Provider.Valid() || !validBoundedText(s.Model, MaxTitleBytes, true) || s.CreatedAt.IsZero() || s.UpdatedAt.IsZero() || s.UpdatedAt.Before(s.CreatedAt) {
 		return errors.New("invalid native session metadata")
 	}
-	if s.Provider == NamePi {
-		if s.Settings != nil || s.Presentation != nil {
-			return errors.New("Pi native session contains execution settings")
-		}
-		return nil
-	}
 	if s.Settings == nil || s.Settings.Validate() != nil || s.Presentation == nil || s.Presentation.Validate() != nil || s.Model != s.Settings.Model {
-		return errors.New("Codex native session lacks complete execution settings")
+		return errors.New("native session lacks complete execution settings")
 	}
 	return nil
 }
@@ -227,7 +221,7 @@ type CreateRequest struct {
 
 func (r CreateRequest) Validate() error {
 	if validateProviderAccess(r.Provider, r.Access) != nil || !validAbsoluteCleanPath(r.Workspace) ||
-		(r.Provider == NamePi && r.Settings != nil) || (r.Settings != nil && r.Settings.Validate() != nil) {
+		(r.Settings != nil && r.Settings.Validate() != nil) {
 		return errors.New("invalid provider create request")
 	}
 	return nil

@@ -415,4 +415,3 @@ func validAbsolutePath(value string) bool {
 }
 
 var _ provider.Driver = (*Driver)(nil)
-var _ provider.SelectableDriver = (*Driver)(nil)

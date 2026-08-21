@@ -4,6 +4,7 @@ package pi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"time"
@@ -38,9 +39,15 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 		s.rpc.finish(provider.NewProviderError(provider.ErrorMalformedStream))
 		return
 	}
+	if event.Type == "compaction_start" && s.compactStarted() {
+		return
+	}
+	if event.Type == "compaction_end" && s.compactEnded() {
+		return
+	}
 	s.mu.Lock()
 	turn := s.active
-	if turn != nil {
+	if turn != nil && event.Type != "thinking_level_changed" && event.Type != "session_info_changed" {
 		turn.nativeSeen = true
 	}
 	s.mu.Unlock()
@@ -60,14 +67,23 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 				s.failMalformed(turn)
 				return
 			}
-			envelope, err := ParseEnvelope([]byte(text))
-			if err != nil || envelope.TurnID != turn.request.TurnID || envelope.MessageID != turn.request.MessageID || !bytes.Equal([]byte(text), turn.envelope) {
+			canonical := []byte(text)
+			if turn.skill != nil {
+				if !validatePiSkillExpansion(text, *turn.skill, turn.envelope) {
+					s.failMalformed(turn)
+					return
+				}
+				canonical = turn.envelope
+			}
+			envelope, err := ParseEnvelope(canonical)
+			if err != nil || envelope.TurnID != turn.request.TurnID || envelope.MessageID != turn.request.MessageID || !bytes.Equal(canonical, turn.envelope) {
 				s.failMalformed(turn)
 				return
 			}
 			s.mu.Lock()
 			first := !turn.userEmitted
 			turn.userEmitted = true
+			turn.skillValidateOnce.Do(func() { close(turn.skillValidated) })
 			s.mu.Unlock()
 			if first {
 				message := provider.NewUserMessageEvent(turn.request.TurnID, turn.request.MessageID, envelope.ReaderContent, eventTime(msg.Timestamp, s.driver.config.Clock.Now()))
@@ -210,7 +226,11 @@ func (s *Session) handleNativeEvent(raw json.RawMessage) {
 			}
 			s.emit(provider.NewActivityEvent(turn.request.TurnID, kind, summary))
 		}
-	case "extension_ui_request", "permission_request", "approval_request":
+	case "extension_ui_request":
+		if turn != nil && s.turnHasValidatedUser(turn) {
+			s.handleExtensionUI(raw, turn)
+		}
+	case "permission_request", "approval_request":
 		if turn != nil && s.turnHasValidatedUser(turn) {
 			s.emitConfiguredActivity(turn, event.Type)
 		}
@@ -310,6 +330,12 @@ func (s *Session) failMalformed(turn *activeTurn) {
 	}
 	turn.terminalEmitted = true
 	s.mu.Unlock()
+	s.resolveInteractions()
 	s.emit(provider.NewTerminalFailureEvent(turn.request.TurnID, provider.NewProviderError(provider.ErrorMalformedStream)))
-	s.rpc.finish(provider.NewProviderError(provider.ErrorMalformedStream))
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, _, _ = s.rpc.call(ctx, "abort", nil)
+		s.rpc.finish(provider.NewProviderError(provider.ErrorMalformedStream))
+	}()
 }

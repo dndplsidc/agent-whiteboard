@@ -8,10 +8,19 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 )
+
+type OneShotTimer interface {
+	Stop() bool
+}
+
+type TimerFactory interface {
+	AfterFunc(time.Duration, func()) OneShotTimer
+}
 
 // Config contains every dependency and environment value used by the Pi adapter.
 // Environment is passed verbatim; the ambient process environment is never read.
@@ -22,6 +31,7 @@ type Config struct {
 	Launcher     provider.Launcher
 	IDs          common.IDGenerator
 	Clock        common.Clock
+	Timers       TimerFactory
 }
 
 type Driver struct {
@@ -31,6 +41,7 @@ type Driver struct {
 	active      map[string]provider.Session
 	unfinalized map[string]nativeAllocation
 	lastModel   string
+	idMu        sync.Mutex
 }
 
 func NewDriver(config Config) (*Driver, error) {
@@ -46,6 +57,9 @@ func NewDriver(config Config) (*Driver, error) {
 		return nil, err
 	}
 	config.Environment = slices.Clone(config.Environment)
+	if common.IsNil(config.Timers) {
+		config.Timers = realTimerFactory{}
+	}
 	return &Driver{config: config, native: native, active: make(map[string]provider.Session), unfinalized: make(map[string]nativeAllocation)}, nil
 }
 
@@ -114,6 +128,11 @@ func (d *Driver) Create(ctx context.Context, request provider.CreateRequest) (pr
 		client.finish(err)
 		return d.retainFailedNative(native, child, client), err
 	}
+	if request.Settings != nil {
+		if _, _, applyErr := session.ApplySettings(ctx, *request.Settings); applyErr != nil {
+			return session, applyErr
+		}
+	}
 	return session, nil
 }
 
@@ -170,7 +189,13 @@ func (d *Driver) Resume(ctx context.Context, request provider.ResumeRequest) (pr
 		reserved = false
 		return session, failure
 	}
-	native := metadata.native(request.NativeSession)
+	native := metadata.nativeForState(request.NativeSession, state)
+	if err := d.native.updateSettings(native); err != nil {
+		client.finish(err)
+		session := d.retainFailedNative(native, child, client)
+		reserved = false
+		return session, provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
 	session := newSession(d, native, state, child, client)
 	d.mu.Lock()
 	d.active[key] = session
@@ -241,8 +266,16 @@ func (d *Driver) release(key string, expected provider.Session) {
 	}
 }
 
+func (d *Driver) newID() (string, error) {
+	d.idMu.Lock()
+	defer d.idMu.Unlock()
+	return d.config.IDs.NewID()
+}
+
 func (d *Driver) retainFailedAllocation(allocation nativeAllocation, child provider.ManagedChild, client *rpcClient) provider.Session {
-	native := provider.NativeSession{Ref: allocation.Ref, Provider: provider.NamePi, Model: "Pi unavailable", CreatedAt: allocation.createdAt, UpdatedAt: allocation.createdAt}
+	settings := provider.ExecutionSettings{Model: "Pi unavailable", Effort: "off", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Pi unavailable", Selectable: false}
+	native := provider.NativeSession{Ref: allocation.Ref, Provider: provider.NamePi, Model: settings.Model, Settings: &settings, Presentation: &presentation, CreatedAt: allocation.createdAt, UpdatedAt: allocation.createdAt}
 	d.mu.Lock()
 	d.unfinalized[allocation.Ref.Value()] = allocation
 	d.mu.Unlock()

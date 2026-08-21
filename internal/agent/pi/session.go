@@ -26,6 +26,9 @@ type activeTurn struct {
 	interruptRequested bool
 	assistantEmitted   bool
 	terminalEmitted    bool
+	skill              *piSkill
+	skillValidated     chan struct{}
+	skillValidateOnce  sync.Once
 	settled            chan struct{}
 	settleOnce         sync.Once
 }
@@ -39,7 +42,15 @@ type Session struct {
 	events chan provider.Event
 
 	mu               sync.Mutex
+	admission        sync.Mutex
+	catalog          provider.ModelCatalog
+	models           map[string]piModel
+	skills           piSkillCatalog
+	skillsCatalog    provider.SkillCatalog
+	interactions     map[string]piInteraction
+	lastNotification string
 	active           *activeTurn
+	compact          *activeCompact
 	lastInterrupted  string
 	shutdownStarted  bool
 	shutdownComplete bool
@@ -49,7 +60,7 @@ type Session struct {
 }
 
 func newSession(driver *Driver, native provider.NativeSession, state startupState, child provider.ManagedChild, client *rpcClient) *Session {
-	return &Session{driver: driver, native: native, state: state, child: child, rpc: client, events: make(chan provider.Event, 256), childDone: make(chan struct{}), loopsDone: make(chan struct{})}
+	return &Session{driver: driver, native: native, state: state, child: child, rpc: client, events: make(chan provider.Event, 256), models: make(map[string]piModel), skills: piSkillCatalog{byID: make(map[string]piSkill), order: []string{}}, skillsCatalog: unavailablePiSkills(), interactions: make(map[string]piInteraction), childDone: make(chan struct{}), loopsDone: make(chan struct{})}
 }
 
 func (s *Session) start() {
@@ -60,41 +71,121 @@ func (s *Session) start() {
 	go s.eventLoop()
 }
 
-func (s *Session) NativeSession() provider.NativeSession { return s.native }
-func (s *Session) Model() string                         { return s.state.Model }
+func (s *Session) NativeSession() provider.NativeSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	native := s.native
+	if native.Settings != nil {
+		copyOf := *native.Settings
+		native.Settings = &copyOf
+	}
+	if native.Presentation != nil {
+		copyOf := *native.Presentation
+		native.Presentation = &copyOf
+	}
+	return native
+}
+func (s *Session) Model() string { s.mu.Lock(); defer s.mu.Unlock(); return s.state.Model }
 func (s *Session) Capabilities() provider.Capabilities {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return provider.Capabilities{Images: s.state.SupportsImages}
 }
 func (s *Session) Events() <-chan provider.Event { return s.events }
 func (s *Session) Child() provider.ManagedChild  { return s.child }
 
 func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (provider.AcceptedTurn, error) {
+	s.admission.Lock()
+	defer s.admission.Unlock()
 	if request.Validate() != nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	if len(request.Images) != 0 && !s.state.SupportsImages {
-		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
+	s.mu.Lock()
+	unavailable := s.active != nil || s.compact != nil || s.shutdownStarted
+	s.mu.Unlock()
+	if unavailable {
+		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	hasSkillPart := false
+	for _, part := range request.Content.Parts {
+		hasSkillPart = hasSkillPart || part.Kind == provider.MessagePartSkill
+	}
+	if hasSkillPart {
+		if _, err := s.refreshSkills(ctx); err != nil {
+			return provider.AcceptedTurn{}, err
+		}
+	}
+	skill, hasSkill, err := s.selectedSkill(request.Content)
+	if err != nil {
+		return provider.AcceptedTurn{}, err
 	}
 	envelope, err := BuildEnvelope(request)
 	if err != nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	turn := &activeTurn{request: request, envelope: envelope, assistantID: assistantMessageID(request.TurnID), rpcEventsAtStart: s.rpc.eventCount(), settled: make(chan struct{})}
-	s.mu.Lock()
-	if s.active != nil {
+	var prepared *preparedPiSettings
+	if request.Settings != nil {
+		value, prepareErr := s.prepareSettings(ctx, *request.Settings)
+		if prepareErr != nil {
+			wipe(envelope)
+			return provider.AcceptedTurn{}, prepareErr
+		}
+		prepared = &value
+		if len(request.Images) != 0 && !value.model.images {
+			wipe(envelope)
+			return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
+		}
+	} else {
+		s.mu.Lock()
+		supportsImages := s.state.SupportsImages
 		s.mu.Unlock()
+		if len(request.Images) != 0 && !supportsImages {
+			wipe(envelope)
+			return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
+		}
+	}
+	fields, err := buildPromptFields(envelope, request.Images)
+	if err != nil {
+		wipe(envelope)
+		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageStorageFailure)
+	}
+	s.mu.Lock()
+	before, _ := s.state.settings()
+	s.mu.Unlock()
+	var acceptedSettings *provider.ExecutionSettings
+	var acceptedPresentation *provider.ModelPresentation
+	settingsChanged := false
+	if prepared != nil {
+		effective, presentation, applyErr := s.applySettingsAdmitted(ctx, *prepared)
+		if applyErr != nil {
+			wipe(envelope)
+			return provider.AcceptedTurn{}, applyErr
+		}
+		acceptedSettings, acceptedPresentation = &effective, &presentation
+		settingsChanged = effective != before
+	}
+	publishSettings := func() {
+		if settingsChanged {
+			s.emit(provider.NewVerifiedSettingsEvent("", *acceptedSettings, *acceptedPresentation))
+		}
+	}
+	turn := &activeTurn{request: request, envelope: envelope, assistantID: assistantMessageID(request.TurnID), rpcEventsAtStart: s.rpc.eventCount(), skillValidated: make(chan struct{}), settled: make(chan struct{})}
+	s.mu.Lock()
+	if s.active != nil || s.compact != nil || s.shutdownStarted {
+		s.mu.Unlock()
+		publishSettings()
 		wipe(envelope)
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	s.active = turn
 	s.mu.Unlock()
-	fields, err := buildPromptFields(envelope, request.Images)
-	if err != nil {
-		s.clearTurn(turn)
-		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageStorageFailure)
+	if hasSkill {
+		fields["message"] = piSkillPrompt(skill, envelope)
+		turn.skill = &skill
 	}
 	response, wrote, err := s.rpc.call(ctx, "prompt", fields)
 	if err != nil {
+		publishSettings()
 		if wrote {
 			return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
 		}
@@ -102,6 +193,7 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 		return provider.AcceptedTurn{}, err
 	}
 	if requireSuccessfulResponse(response, "prompt") != nil {
+		publishSettings()
 		s.mu.Lock()
 		nativeEvents := turn.nativeSeen || s.rpc.eventCount() > turn.rpcEventsAtStart
 		s.mu.Unlock()
@@ -113,6 +205,7 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 	}
 	acceptedAt := s.driver.config.Clock.Now().UTC()
 	if acceptedAt.IsZero() {
+		publishSettings()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
 	}
 	s.mu.Lock()
@@ -121,7 +214,18 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 		turn.acceptedAt = acceptedAt
 	}
 	s.mu.Unlock()
-	return provider.AcceptedTurn{TurnID: request.TurnID, AcceptedAt: acceptedAt}, nil
+	if hasSkill {
+		select {
+		case <-turn.skillValidated:
+		case <-ctx.Done():
+			publishSettings()
+			return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+		case <-s.rpc.done:
+			publishSettings()
+			return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+		}
+	}
+	return provider.AcceptedTurn{TurnID: request.TurnID, AcceptedAt: acceptedAt, Settings: acceptedSettings, Presentation: acceptedPresentation}, nil
 }
 
 func (s *Session) Interrupt(ctx context.Context, accepted provider.AcceptedTurn) error {
@@ -193,12 +297,26 @@ func (s *Session) Shutdown(ctx context.Context) error {
 		s.mu.Unlock()
 		return err
 	}
+	initiated := false
+	var compact *activeCompact
+	var interactions []piInteraction
 	if !s.shutdownStarted {
 		s.shutdownStarted = true
-		s.rpc.inputOnce.Do(func() { _ = s.rpc.input.Close() })
+		initiated = true
+		compact = s.compact
+		interactions = s.claimShutdownInteractionsLocked()
 	}
 	done := s.loopsDone
 	s.mu.Unlock()
+	if initiated {
+		for _, interaction := range interactions {
+			_ = s.rpc.notify(ctx, map[string]any{"type": "extension_ui_response", "id": interaction.nativeID, "cancelled": true})
+		}
+		s.rpc.inputOnce.Do(func() { _ = s.rpc.input.Close() })
+		if compact != nil {
+			s.finishCompact(compact, provider.CompactInterrupted)
+		}
+	}
 	select {
 	case <-done:
 		s.mu.Lock()
@@ -231,6 +349,7 @@ func (s *Session) finishTurn(turn *activeTurn, interrupted bool) {
 		wipe(turn.envelope)
 	}
 	s.mu.Unlock()
+	s.resolveInteractions()
 }
 
 func classifyPromptRejection(response rpcResponse) error {
@@ -261,6 +380,7 @@ func (s *Session) eventLoop() {
 	defer func() {
 		s.mu.Lock()
 		turn := s.active
+		compact := s.compact
 		shutdown := s.shutdownStarted
 		terminalEmitted := false
 		if turn != nil {
@@ -268,6 +388,10 @@ func (s *Session) eventLoop() {
 			turn.settleOnce.Do(func() { close(turn.settled) })
 		}
 		s.mu.Unlock()
+		if compact != nil {
+			s.finishCompact(compact, provider.CompactFailed)
+		}
+		s.resolveInteractions()
 		if turn != nil && !terminalEmitted {
 			if shutdown {
 				s.emit(provider.NewInterruptionEvent(turn.request.TurnID, provider.InterruptionShutdown))
@@ -304,3 +428,8 @@ func (s *Session) emit(event provider.Event) {
 }
 
 var _ provider.Session = (*Session)(nil)
+var _ provider.SettingsSession = (*Session)(nil)
+var _ provider.SkillCatalogSession = (*Session)(nil)
+var _ provider.BusyTurnSession = (*Session)(nil)
+var _ provider.ManualCompactSession = (*Session)(nil)
+var _ provider.InteractiveSession = (*Session)(nil)

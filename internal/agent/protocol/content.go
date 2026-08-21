@@ -144,17 +144,7 @@ func (content MessageContent) ValidateForProvider(provider ProviderName, event b
 	if !provider.Valid() {
 		return invalid(nil)
 	}
-	if err := content.validate(event); err != nil {
-		return err
-	}
-	if provider == ProviderPi {
-		for _, part := range content.Parts {
-			if part.Type == MessagePartSkill {
-				return invalid(nil)
-			}
-		}
-	}
-	return nil
+	return content.validate(event)
 }
 
 func (content MessageContent) validate(event bool) error {

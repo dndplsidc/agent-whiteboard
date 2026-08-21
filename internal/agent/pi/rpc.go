@@ -49,14 +49,15 @@ type rpcClient struct {
 	child provider.ManagedChild
 	input io.WriteCloser
 
-	mu          sync.Mutex
-	inputOnce   sync.Once
-	nextID      uint64
-	pending     map[string]rpcPending
-	canceled    map[string]string
-	cancelOrder []string
-	terminal    error
-	eventsSeen  atomic.Uint64
+	mu               sync.Mutex
+	inputOnce        sync.Once
+	nextID           uint64
+	pending          map[string]rpcPending
+	canceled         map[string]string
+	cancelOrder      []string
+	terminal         error
+	acceptanceEvents atomic.Uint64
+	compactionStarts atomic.Uint64
 
 	writes chan rpcWrite
 	events chan json.RawMessage
@@ -309,7 +310,12 @@ func (client *rpcClient) readLoop(reader *jsonlReader) {
 			wipe(record)
 			continue
 		}
-		client.eventsSeen.Add(1)
+		if header.Type == "compaction_start" {
+			client.compactionStarts.Add(1)
+		}
+		if header.Type != "thinking_level_changed" && header.Type != "session_info_changed" {
+			client.acceptanceEvents.Add(1)
+		}
 		select {
 		case client.events <- record:
 		default:
@@ -367,7 +373,10 @@ func (client *rpcClient) finish(err error) {
 	}
 }
 
-func (client *rpcClient) eventCount() uint64 { return client.eventsSeen.Load() }
+func (client *rpcClient) eventCount() uint64 { return client.acceptanceEvents.Load() }
+func (client *rpcClient) compactionStartCount() uint64 {
+	return client.compactionStarts.Load()
+}
 
 func (client *rpcClient) terminalError() error {
 	client.mu.Lock()

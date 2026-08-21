@@ -163,6 +163,33 @@ func TestNativeConcurrentExactFinalizationAndAmbiguousSyncAreRecovered(t *testin
 	})
 }
 
+func TestNativeSettingsReplacementRecoversPostRenameSyncUncertainty(t *testing.T) {
+	manager, workspace := newTestNativeManager(t)
+	allocation, err := manager.allocate(workspace)
+	require.NoError(t, err)
+	writeNativeHeader(t, allocation, "pi-session")
+	state := startupState{SessionID: "pi-session", SessionFile: allocation.path, Workspace: workspace, ModelProvider: "p", ModelID: "m", Model: "p/m", ModelName: "M", ThinkingLevel: "off", ContextWindow: 10, MaxTokens: 5}
+	native, err := manager.finalizeAllocation(allocation, state)
+	require.NoError(t, err)
+	next := provider.ExecutionSettings{Model: "p/next", Effort: "high", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Next", Selectable: true}
+	native.Model, native.Settings, native.Presentation = next.Model, &next, &presentation
+	calls := 0
+	manager.syncDir = func(path string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("injected post-rename sync uncertainty")
+		}
+		return syncDirectory(path)
+	}
+	require.NoError(t, manager.updateSettings(native))
+	require.GreaterOrEqual(t, calls, 2)
+	inspected, err := manager.inspect(allocation.Ref)
+	require.NoError(t, err)
+	require.Equal(t, allocation.Ref, inspected.Ref)
+	require.Equal(t, next, *inspected.Settings)
+}
+
 func TestNativeAllocationCollisionRollbackAndReplacementFailClosed(t *testing.T) {
 	manager, workspace := newTestNativeManager(t)
 	allocation, err := manager.allocate(workspace)

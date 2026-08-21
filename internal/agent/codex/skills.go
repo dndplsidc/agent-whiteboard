@@ -39,19 +39,19 @@ func (catalog nativeSkillCatalog) clone() nativeSkillCatalog {
 
 func (catalog nativeSkillCatalog) safeCatalog() provider.SkillCatalog {
 	if catalog.state != provider.SkillsReady {
-		return provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}}
+		return provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}, MaxSelectedSkills: 0}
 	}
 	skills := make([]provider.SkillDescriptor, 0, len(catalog.order))
 	for _, id := range catalog.order {
 		skill, ok := catalog.byID[id]
 		if !ok {
-			return provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}}
+			return provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}, MaxSelectedSkills: 0}
 		}
 		skills = append(skills, provider.SkillDescriptor{ID: skill.id, Name: skill.name, DisplayName: skill.displayName, Description: skill.description, Scope: skill.scope})
 	}
-	result := provider.SkillCatalog{State: provider.SkillsReady, Skills: skills}
+	result := provider.SkillCatalog{State: provider.SkillsReady, Skills: skills, MaxSelectedSkills: provider.MaxMessageSkills}
 	if result.Validate() != nil {
-		return provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}}
+		return provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}, MaxSelectedSkills: 0}
 	}
 	return result
 }
@@ -207,7 +207,7 @@ func (session *Session) Skills(ctx context.Context) provider.SkillCatalog {
 	loaded := session.skillsLoaded
 	session.mu.Unlock()
 	if closed {
-		return provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}}
+		return provider.SkillCatalog{State: provider.SkillsUnavailable, Skills: []provider.SkillDescriptor{}, MaxSelectedSkills: 0}
 	}
 	if loaded {
 		return previous.safeCatalog()

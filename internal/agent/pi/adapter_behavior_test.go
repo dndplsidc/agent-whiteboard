@@ -342,8 +342,9 @@ func respondPreflightState(t *testing.T, child *rpcFakeChild, messageCount, cont
 	command := child.readCommand(t)
 	require.Equal(t, "get_state", command["type"])
 	child.writeRecord(t, responseRecord(command, map[string]any{
-		"model":       map[string]any{"provider": "model-provider", "id": "model-id", "contextWindow": contextWindow, "maxTokens": maxTokens},
+		"model":       map[string]any{"provider": "model-provider", "id": "model-id", "contextWindow": contextWindow, "maxTokens": maxTokens, "input": []string{"text"}},
 		"isStreaming": false, "isCompacting": false, "pendingMessageCount": 0, "messageCount": messageCount,
+		"sessionFile": "/tmp/session", "sessionId": "session",
 	}))
 }
 

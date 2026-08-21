@@ -72,7 +72,7 @@ func TestCanonicalEnvelopeAndHistoryPreserveSafeSkillIdentity(t *testing.T) {
 }
 
 func TestSkillCatalogValidationCloningAndBounds(t *testing.T) {
-	catalog := provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{{
+	catalog := provider.SkillCatalog{State: provider.SkillsReady, MaxSelectedSkills: provider.MaxMessageSkills, Skills: []provider.SkillDescriptor{{
 		ID: skillIDOne, Name: "review-helper", DisplayName: "Review helper", Description: "Review the current page.", Scope: provider.SkillScopeRepo,
 	}}}
 	require.NoError(t, catalog.Validate())
@@ -103,7 +103,7 @@ func TestSkillAndCompactProviderContractsAreClosedAndMemoryOnly(t *testing.T) {
 	accepted := provider.AcceptedCompact{WorkID: workID, AcceptedAt: time.Now().UTC()}
 	require.NoError(t, accepted.Validate())
 
-	catalog := provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{}}
+	catalog := provider.SkillCatalog{State: provider.SkillsReady, MaxSelectedSkills: provider.MaxMessageSkills, Skills: []provider.SkillDescriptor{}}
 	catalogEvent := provider.NewSkillCatalogEvent(catalog)
 	require.NoError(t, catalogEvent.Validate())
 	cloneCatalog := catalogEvent.SkillCatalog.Clone()

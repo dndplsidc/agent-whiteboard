@@ -88,7 +88,7 @@ func TestV4QueueSnapshotAndSettingsEventsCarryBoundedPresentationAndCatalog(t *t
 		protocol.QueuePayload{Items: []protocol.QueueItem{queue}},
 		protocol.SnapshotPayload{
 			Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{queue}, ContextState: protocol.ContextAccepted, SupportsImages: true,
-			SettingsState: &state, EffectiveSettings: &settings, Catalog: catalog, Skills: []protocol.SkillDescriptor{},
+			SettingsState: &state, EffectiveSettings: &settings, Catalog: catalog, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit,
 		},
 		protocol.SettingsPayload{SettingsState: protocol.SettingsVerified, EffectiveSettings: &settings, Catalog: catalog, AcceptedTurnID: &acceptedTurnID},
 		protocol.SettingsPayload{SettingsState: protocol.SettingsUnverified, Catalog: catalog},
@@ -102,7 +102,7 @@ func TestV4QueueSnapshotAndSettingsEventsCarryBoundedPresentationAndCatalog(t *t
 		require.Equal(t, event, decoded)
 	}
 
-	piSnapshot := protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}}
+	piSnapshot := protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, Catalog: []protocol.CatalogModel{}, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit}
 	encoded, err := protocol.EncodeEvent(validEvent(piSnapshot))
 	require.NoError(t, err)
 	require.Contains(t, string(encoded), `"settings_state":null`)
@@ -132,8 +132,8 @@ func TestV4SettingsEventsRejectContradictoryAndMalformedState(t *testing.T) {
 		protocol.SettingsPayload{SettingsState: protocol.SettingsVerified, EffectiveSettings: &settings, Catalog: nil},
 		protocol.SettingsPayload{SettingsState: protocol.SettingsVerified, EffectiveSettings: &incompatibleEffort, Catalog: catalog},
 		protocol.SettingsPayload{SettingsState: protocol.SettingsVerified, EffectiveSettings: &incompatibleFast, Catalog: catalogWithLuna},
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, SettingsState: &state, Catalog: catalog, Skills: []protocol.SkillDescriptor{}},
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, SettingsState: &state, EffectiveSettings: &settings, Catalog: catalog, Skills: []protocol.SkillDescriptor{}},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, SettingsState: &state, Catalog: catalog, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, SettingsState: &state, EffectiveSettings: &settings, Catalog: catalog, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit},
 	}
 	for _, payload := range invalid {
 		_, err := protocol.EncodeEvent(validEvent(payload))
@@ -193,7 +193,7 @@ func TestV4CatalogWorstCaseFitsMeasuredEventBound(t *testing.T) {
 	require.NoError(t, protocol.ValidateQueue(queue))
 	settings := protocol.PresentedExecutionSettings{ExecutionSettings: protocol.ExecutionSettings{Model: catalog[0].Model, Effort: catalog[0].DefaultEffort, Speed: protocol.SpeedFast}, ModelDisplayName: catalog[0].ModelDisplayName, Selectable: true}
 	state := protocol.SettingsVerified
-	payload := protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: queue, ContextState: protocol.ContextAccepted, SettingsState: &state, EffectiveSettings: &settings, Catalog: catalog, Skills: []protocol.SkillDescriptor{}}
+	payload := protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: queue, ContextState: protocol.ContextAccepted, SettingsState: &state, EffectiveSettings: &settings, Catalog: catalog, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit}
 	encoded, err := protocol.EncodeEvent(validEvent(payload))
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(encoded), protocol.MaxEventBytes)

@@ -238,10 +238,10 @@ type settingsTransition struct {
 }
 
 // UpdateCurrentSettings atomically changes the complete effective tuple and
-// presentation only when the intended Codex conversation and native session
-// are still current.
+// presentation only when the intended conversation and native session are
+// still current. This is also the sole upgrade path for legacy Pi mappings.
 func (store *Store) UpdateCurrentSettings(identity Identity, conversationID string, nativeSession provider.NativeSessionRef, settings provider.ExecutionSettings, presentation provider.ModelPresentation, at time.Time) (CommitOutcome, error) {
-	if identity.Validate() != nil || identity.Provider != provider.NameCodex || common.ValidateID(conversationID) != nil || !nativeSession.Valid() || settings.Validate() != nil || presentation.Validate() != nil || !validStoredTime(at) {
+	if identity.Validate() != nil || common.ValidateID(conversationID) != nil || !nativeSession.Valid() || settings.Validate() != nil || presentation.Validate() != nil || !validStoredTime(at) {
 		return CommitNotApplied, errors.New("invalid current settings transition")
 	}
 	if _, err := validateNativeSessionRef(nativeSession.Value()); err != nil {

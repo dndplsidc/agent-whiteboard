@@ -21,6 +21,11 @@ const (
 	digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 
+var (
+	readySkillsState  = protocol.SkillsReady
+	maxSelectedSkills = protocol.MaxMessageSkills
+)
+
 func TestDecodeConnectCommandContract(t *testing.T) {
 	input := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"pi","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","replay_after":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD","settings":null}}`
 
@@ -277,7 +282,7 @@ func TestAcceptedExactBoundMessagesAndQueuesAlwaysFitWireFrames(t *testing.T) {
 	require.NoError(t, protocol.ValidateQueue(queue))
 	for _, payload := range []protocol.EventPayload{
 		protocol.QueuePayload{Items: queue},
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: queue, ContextState: protocol.ContextPending, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: queue, ContextState: protocol.ContextPending, Catalog: []protocol.CatalogModel{}, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit},
 	} {
 		encoded, err := protocol.EncodeEvent(validEvent(payload))
 		require.NoError(t, err, "%T", payload)
@@ -391,7 +396,7 @@ func TestEventEnvelopeAndEveryPayloadTypeRoundTrip(t *testing.T) {
 	turnID := idC
 	activeTurn := &protocol.ActiveWork{WorkID: turnID, Kind: protocol.ActiveWorkTurn, State: protocol.ActiveWorkRunning}
 	payloads := []protocol.EventPayload{
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, ActiveWork: nil, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, ActiveWork: nil, Catalog: []protocol.CatalogModel{}, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit},
 		protocol.CommandResultPayload{CommandID: idA, Status: protocol.CommandSucceeded},
 		protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{}, NextCursor: nil},
 		protocol.HistoryPayload{CommandID: idA, Items: []protocol.ArchiveItem{}, NextCursor: nil},
@@ -495,7 +500,7 @@ func TestActiveTurnIdentityIsExplicitAcrossSubmissionQueueAndEvents(t *testing.T
 
 	active := &protocol.ActiveWork{WorkID: idC, Kind: protocol.ActiveWorkTurn, State: protocol.ActiveWorkRunning}
 	event := validEvent(protocol.SnapshotPayload{
-		Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: idA, MessageID: idB, Content: protocol.TextContent("next")}}, ContextState: protocol.ContextAccepted, ActiveWork: active, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{},
+		Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: idA, MessageID: idB, Content: protocol.TextContent("next")}}, ContextState: protocol.ContextAccepted, ActiveWork: active, Catalog: []protocol.CatalogModel{}, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit,
 	})
 	encoded, err := protocol.EncodeEvent(event)
 	require.NoError(t, err)
@@ -581,7 +586,7 @@ func TestNewEventContractFieldsAreRequired(t *testing.T) {
 		payload protocol.EventPayload
 		field   string
 	}{
-		{"snapshot active work", protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, ActiveWork: active, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}}, `,"active_work":{"work_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","kind":"turn","state":"running"}`},
+		{"snapshot active work", protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, ActiveWork: active, Catalog: []protocol.CatalogModel{}, SkillsState: &readySkillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &maxSelectedSkills, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit}, `,"active_work":{"work_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","kind":"turn","state":"running"}`},
 		{"queue item turn", protocol.QueuePayload{Items: []protocol.QueueItem{{TurnID: idC, MessageID: idA, Content: protocol.TextContent("queued")}}}, `"turn_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",`},
 		{"timeline command", protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{{ItemID: idB, Kind: protocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `"command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",`},
 		{"timeline item", protocol.TimelinePayload{CommandID: idA, Items: []protocol.TimelineItem{{ItemID: idB, Kind: protocol.TimelineActivity, Text: "status", CreatedAt: now}}, NextCursor: &next}, `"item_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",`},

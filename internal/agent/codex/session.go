@@ -122,6 +122,41 @@ func (session *Session) Capabilities() provider.Capabilities {
 func (session *Session) Events() <-chan provider.Event { return session.events }
 func (session *Session) Child() provider.ManagedChild  { return session.view }
 
+func (session *Session) SettingsCatalog(_ context.Context) (provider.ModelCatalog, error) {
+	catalog := session.currentCatalog().visibleCatalog()
+	if catalog.Validate() != nil {
+		return provider.ModelCatalog{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	return catalog, nil
+}
+
+func (session *Session) EffectiveSettings(_ context.Context) (provider.ExecutionSettings, provider.ModelPresentation, error) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed || session.settingsUnverified || session.native.Settings == nil || session.native.Presentation == nil {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	return *session.native.Settings, *session.native.Presentation, nil
+}
+
+// ApplySettings validates the exact tuple for the next turn/start. Codex keeps
+// the last natively accepted tuple effective until Submit succeeds.
+func (session *Session) ApplySettings(_ context.Context, requested provider.ExecutionSettings) (provider.ExecutionSettings, provider.ModelPresentation, error) {
+	catalog := session.currentCatalog()
+	settings, _, presentation, _, err := catalog.resolveSubmitted(requested)
+	if err != nil {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, err
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.closed || session.settingsUnverified || session.active != nil || session.compact != nil {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	return settings, presentation, nil
+}
+
+func (*Session) BusyTurnPolicy() provider.BusyTurnPolicy { return provider.BusyTurnPreserveDraft }
+
 func (session *Session) currentCatalog() nativeCatalog {
 	if session.runtime != nil {
 		catalog := session.runtime.modelCatalog()
@@ -838,6 +873,8 @@ func wipe(value []byte) {
 }
 
 var _ provider.Session = (*Session)(nil)
+var _ provider.SettingsSession = (*Session)(nil)
+var _ provider.BusyTurnSession = (*Session)(nil)
 var _ provider.InteractiveSession = (*Session)(nil)
 var _ provider.SkillCatalogSession = (*Session)(nil)
 var _ provider.ManualCompactSession = (*Session)(nil)
