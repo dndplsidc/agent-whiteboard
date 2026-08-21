@@ -27,6 +27,7 @@ func (actor *conversation) startRecovery(attachments map[*clientAttachment]struc
 	if actor.stopping || actor.recoveryActive || actor.recoveryAttempted == actor.generation || results == nil {
 		return
 	}
+	actor.expireTerminatedSessionInteractions(attachments)
 	if actor.workerSettled != nil && actor.workerKind == providerWorkerArchive {
 		if !actor.recoveryPending {
 			actor.recoveryPending = true

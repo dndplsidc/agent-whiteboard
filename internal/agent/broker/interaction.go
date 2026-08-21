@@ -15,11 +15,17 @@ const maxPendingInteractions = provider.MaxInteractionAnswers
 type pendingInteraction struct {
 	request      provider.InteractionRequest
 	requestBytes int
+	token        uint64
 	resolving    bool
+	response     *provider.InteractionResponse
+	commandID    string
+	clientID     string
+	cancel       context.CancelFunc
 }
 
 type interactionWorkerResult struct {
 	requestID string
+	token     uint64
 	commandID string
 	clientID  string
 	response  provider.InteractionResponse
@@ -27,7 +33,21 @@ type interactionWorkerResult struct {
 	automatic bool
 }
 
-func (actor *conversation) commandInteractionRespond(results chan<- interactionWorkerResult, command protocol.Command, payload protocol.InteractionResponsePayload) protocol.BrowserErrorCode {
+func (actor *conversation) acquireInteractionCall() bool {
+	if actor.interactionCallBudget == nil {
+		actor.interactionCallBudget = make(chan struct{}, maxPendingInteractions)
+	}
+	select {
+	case actor.interactionCallBudget <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (actor *conversation) releaseInteractionCall() { <-actor.interactionCallBudget }
+
+func (actor *conversation) commandInteractionRespond(attachments map[*clientAttachment]struct{}, results chan<- interactionWorkerResult, command protocol.Command, payload protocol.InteractionResponsePayload) protocol.BrowserErrorCode {
 	pending := actor.pendingInteractions[payload.RequestID]
 	interactive, ok := actor.session.session.(provider.InteractiveSession)
 	if pending == nil || pending.resolving || !ok || protocol.InteractionKind(pending.request.Kind) != payload.Kind || !validInteractionResponseForRequest(pending.request, payload) {
@@ -37,10 +57,23 @@ func (actor *conversation) commandInteractionRespond(results chan<- interactionW
 	if response.Validate() != nil {
 		return protocol.ErrorInvalidCommand
 	}
+	if !actor.acquireInteractionCall() {
+		actor.retireInteraction(attachments, payload.RequestID, pending.token, response.OptionID, true, "")
+		return protocol.ErrorInvalidState
+	}
 	pending.resolving = true
+	token := pending.token
+	copyOfResponse := response
+	pending.response = &copyOfResponse
+	pending.commandID = command.CommandID
+	pending.clientID = command.ClientID
+	responseCtx, cancel := context.WithCancel(actor.lifecycleCtx)
+	pending.cancel = cancel
 	go func() {
-		err := interactive.Respond(actor.lifecycleCtx, response)
-		result := interactionWorkerResult{requestID: payload.RequestID, commandID: command.CommandID, clientID: command.ClientID, response: response, err: err}
+		defer cancel()
+		defer actor.releaseInteractionCall()
+		err := interactive.Respond(responseCtx, response)
+		result := interactionWorkerResult{requestID: payload.RequestID, token: token, commandID: command.CommandID, clientID: command.ClientID, response: response, err: err}
 		select {
 		case results <- result:
 		case <-actor.done:
@@ -51,10 +84,7 @@ func (actor *conversation) commandInteractionRespond(results chan<- interactionW
 
 func (actor *conversation) handleInteractionResult(attachments map[*clientAttachment]struct{}, result interactionWorkerResult) {
 	pending := actor.pendingInteractions[result.requestID]
-	if pending == nil || !pending.resolving {
-		if !result.automatic && result.commandID != "" {
-			actor.completePendingCommand(attachments, result.commandID, result.clientID, protocol.ErrorInvalidState)
-		}
+	if pending == nil || pending.token != result.token || !pending.resolving {
 		return
 	}
 	if result.err != nil {
@@ -80,7 +110,7 @@ func (actor *conversation) handleInteractionResult(attachments map[*clientAttach
 	}
 }
 
-func (actor *conversation) cancelPendingInteractions(results chan<- interactionWorkerResult) {
+func (actor *conversation) cancelPendingInteractions(attachments map[*clientAttachment]struct{}, results chan<- interactionWorkerResult) {
 	interactive, ok := actor.session.session.(provider.InteractiveSession)
 	if !ok {
 		return
@@ -89,33 +119,68 @@ func (actor *conversation) cancelPendingInteractions(results chan<- interactionW
 		if pending.resolving {
 			continue
 		}
+		if !actor.acquireInteractionCall() {
+			actor.retireInteraction(attachments, requestID, pending.token, "", true, "")
+			continue
+		}
 		pending.resolving = true
-		go func(id string) {
-			ctx, cancel := context.WithTimeout(actor.lifecycleCtx, actor.shutdownTimeout)
+		token := pending.token
+		ctx, cancel := context.WithTimeout(actor.lifecycleCtx, actor.shutdownTimeout)
+		pending.cancel = cancel
+		go func(id string, token uint64, ctx context.Context, cancel context.CancelFunc) {
 			defer cancel()
+			defer actor.releaseInteractionCall()
 			err := interactive.CancelInteraction(ctx, id)
 			select {
-			case results <- interactionWorkerResult{requestID: id, automatic: true, err: err}:
+			case results <- interactionWorkerResult{requestID: id, token: token, automatic: true, err: err}:
 			case <-actor.done:
 			}
-		}(requestID)
+		}(requestID, token, ctx, cancel)
 	}
 }
 
-// expirePendingInteractions closes browser response surfaces when a provider
-// terminates the turn without first resolving them. Requests already being
-// delivered to the provider retain their worker result so the selected option
-// can still be published exactly once.
-func (actor *conversation) expirePendingInteractions(attachments map[*clientAttachment]struct{}) {
-	for requestID, pending := range actor.pendingInteractions {
-		if pending.resolving {
-			continue
-		}
+func (actor *conversation) retireInteraction(attachments map[*clientAttachment]struct{}, requestID string, token uint64, optionID string, publishResolution bool, commandCode protocol.BrowserErrorCode) bool {
+	pending := actor.pendingInteractions[requestID]
+	if pending == nil || pending.token != token {
+		return false
+	}
+	if pending.cancel != nil {
+		pending.cancel()
+	}
+	if publishResolution {
 		actor.publishShared(attachments, protocol.InteractionResolvedPayload{
 			RequestID: requestID,
 			Kind:      protocol.InteractionKind(pending.request.Kind),
+			OptionID:  optionID,
 		})
-		actor.forgetInteraction(requestID)
+	}
+	if pending.commandID != "" {
+		actor.completePendingCommand(attachments, pending.commandID, pending.clientID, commandCode)
+	}
+	actor.forgetInteraction(requestID)
+	return true
+}
+
+// expireTerminatedSessionInteractions closes every response surface owned by
+// the terminated session and retires in-flight workers without waiting for
+// provider code that may ignore cancellation.
+func (actor *conversation) expireTerminatedSessionInteractions(attachments map[*clientAttachment]struct{}) {
+	for requestID, pending := range actor.pendingInteractions {
+		optionID := ""
+		if pending.response != nil {
+			optionID = pending.response.OptionID
+		}
+		actor.retireInteraction(attachments, requestID, pending.token, optionID, true, protocol.ErrorProviderCrashed)
+	}
+}
+
+func (actor *conversation) expirePendingInteractions(attachments map[*clientAttachment]struct{}) {
+	for requestID, pending := range actor.pendingInteractions {
+		optionID := ""
+		if pending.response != nil {
+			optionID = pending.response.OptionID
+		}
+		actor.retireInteraction(attachments, requestID, pending.token, optionID, true, protocol.ErrorInvalidState)
 	}
 }
 
@@ -286,8 +351,12 @@ func (actor *conversation) rememberInteraction(request provider.InteractionReque
 	if len(actor.pendingInteractions) >= maxPendingInteractions || requestBytes > MaxReplayBytes-actor.pendingInteractionBytes {
 		return errors.New("pending interactions exceed replay limit")
 	}
+	if actor.nextInteractionToken == ^uint64(0) {
+		return errors.New("interaction ownership exhausted")
+	}
+	actor.nextInteractionToken++
 	copyOfRequest := cloneInteractionRequest(request)
-	actor.pendingInteractions[request.ID] = &pendingInteraction{request: copyOfRequest, requestBytes: requestBytes}
+	actor.pendingInteractions[request.ID] = &pendingInteraction{request: copyOfRequest, requestBytes: requestBytes, token: actor.nextInteractionToken}
 	actor.pendingInteractionBytes += requestBytes
 	return nil
 }
@@ -299,6 +368,10 @@ func (actor *conversation) forgetInteraction(requestID string) *pendingInteracti
 	}
 	delete(actor.pendingInteractions, requestID)
 	actor.pendingInteractionBytes -= pending.requestBytes
+	if pending.cancel != nil {
+		pending.cancel()
+		pending.cancel = nil
+	}
 	return pending
 }
 

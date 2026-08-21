@@ -65,9 +65,19 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 		return false, protocol.ErrorInvalidCommand
 	}
 	if code := actor.validateSelectedSkills(payload.Content); code != "" {
-		return false, code
+		if skills, ok := actor.session.session.(provider.SkillCatalogSession); ok {
+			if !actor.applySkillCatalog(skills.Skills(actor.lifecycleCtx)) {
+				actor.makeSkillsUnavailable()
+			}
+			actor.publishShared(attachments, protocol.SkillCatalogPayload{State: *actor.skillsState, Skills: append([]protocol.SkillDescriptor{}, actor.skills...), MaxSelectedSkills: cloneInt(actor.maxSelectedSkills)})
+			code = actor.validateSelectedSkills(payload.Content)
+		}
+		if code != "" {
+			return false, code
+		}
 	}
-	if actor.identity.Provider == provider.NameCodex && (actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil) {
+	busy := actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil
+	if busy && actor.busyPolicy != protocol.BusyTurnQueue {
 		return false, protocol.ErrorActiveTurnConflict
 	}
 	if actor.compact != nil {
@@ -79,10 +89,10 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 	if actor.queue.ContainsTurnID(payload.TurnID) || actor.queue.ContainsMessageID(payload.MessageID) {
 		return false, protocol.ErrorInvalidState
 	}
-	if (actor.workerSettled != nil && actor.active == nil) || actor.lifecycle == protocol.LifecycleUnavailable || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil || actor.identity.Provider == provider.NameCodex && actor.settingsState != protocol.SettingsVerified {
+	if (actor.workerSettled != nil && actor.active == nil) || actor.lifecycle == protocol.LifecycleUnavailable || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil || actor.settingsCapable && actor.settingsState != protocol.SettingsVerified {
 		return false, protocol.ErrorInvalidState
 	}
-	settings, code := validateCommandSettings(actor.identity.Provider, actor.domainCatalog, payload.Settings)
+	settings, code := validateCommandSettings(actor.settingsCapable, actor.domainCatalog, payload.Settings)
 	if code != "" {
 		return false, code
 	}
@@ -371,8 +381,8 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 	}
 
 	accepted := result.accepted
-	if actor.identity.Provider == provider.NameCodex {
-		if accepted.Settings == nil || accepted.Presentation == nil || !actor.persistEffectiveSettings(*accepted.Settings, *accepted.Presentation) {
+	if actor.settingsCapable {
+		if accepted.Settings == nil || accepted.Presentation == nil || !actor.domainCatalog.Compatibility(*accepted.Settings).Compatible || !actor.persistEffectiveSettings(*accepted.Settings, *accepted.Presentation) {
 			actor.contextState = protocol.ContextUnavailable
 			actor.lifecycle = protocol.LifecycleUnavailable
 			actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
@@ -406,7 +416,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 	actor.lifecycle = protocol.LifecycleResponding
 	turnID := active.request.TurnID
 	actor.publishShared(attachments, actor.lifecyclePayload())
-	if actor.identity.Provider == provider.NameCodex {
+	if actor.settingsCapable {
 		actor.publishShared(attachments, protocol.SettingsPayload{
 			SettingsState: protocol.SettingsVerified, EffectiveSettings: actor.presentedEffectiveSettings(accepted.Settings, accepted.Presentation),
 			Catalog: append([]protocol.CatalogModel{}, actor.catalog...), AcceptedTurnID: &turnID,

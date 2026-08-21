@@ -62,31 +62,28 @@ func protocolCatalog(catalog provider.ModelCatalog) ([]protocol.CatalogModel, er
 	return result, nil
 }
 
-func loadModelCatalog(ctx context.Context, name provider.Name, driver provider.Driver) (provider.ModelCatalog, error) {
-	if name == provider.NamePi {
+func loadModelCatalog(ctx context.Context, session provider.Session) (provider.ModelCatalog, error) {
+	settings, ok := session.(provider.SettingsSession)
+	if !ok {
 		return provider.ModelCatalog{}, nil
 	}
-	selectable, ok := driver.(provider.SelectableDriver)
-	if !ok {
-		return provider.ModelCatalog{}, errors.New("selectable provider lacks model catalog")
-	}
-	catalog, err := selectable.ModelCatalog(ctx)
+	catalog, err := settings.SettingsCatalog(ctx)
 	if err != nil || catalog.Validate() != nil {
 		return provider.ModelCatalog{}, errors.New("model catalog unavailable")
 	}
 	return catalog.Clone(), nil
 }
 
-func compatibleInitialSettings(catalog provider.ModelCatalog, settings *protocol.ExecutionSettings) *provider.ExecutionSettings {
+func compatibleInitialSettings(settings *protocol.ExecutionSettings) *provider.ExecutionSettings {
 	converted := providerSettings(settings)
-	if converted == nil || !catalog.Compatibility(*converted).Compatible {
+	if converted == nil || converted.Validate() != nil {
 		return nil
 	}
 	return converted
 }
 
-func validateCommandSettings(name provider.Name, catalog provider.ModelCatalog, settings *protocol.ExecutionSettings) (*provider.ExecutionSettings, protocol.BrowserErrorCode) {
-	if name == provider.NamePi {
+func validateCommandSettings(capable bool, catalog provider.ModelCatalog, settings *protocol.ExecutionSettings) (*provider.ExecutionSettings, protocol.BrowserErrorCode) {
+	if !capable {
 		if settings != nil {
 			return nil, protocol.ErrorInvalidCommand
 		}
@@ -139,7 +136,7 @@ func (actor *conversation) presentedEffectiveSettings(settings *provider.Executi
 
 func (actor *conversation) settingsSnapshot() (*protocol.SettingsState, *protocol.PresentedExecutionSettings, []protocol.CatalogModel) {
 	catalog := append([]protocol.CatalogModel{}, actor.catalog...)
-	if actor.identity.Provider == provider.NamePi {
+	if !actor.settingsCapable {
 		return nil, nil, catalog
 	}
 	state := actor.settingsState
@@ -180,8 +177,38 @@ func (actor *conversation) persistEffectiveSettings(settings provider.ExecutionS
 	return true
 }
 
+func (actor *conversation) reloadSessionSettings() bool {
+	session, capable := actor.session.session.(provider.SettingsSession)
+	actor.settingsCapable = capable
+	if !capable {
+		actor.domainCatalog = provider.ModelCatalog{}
+		actor.catalog = []protocol.CatalogModel{}
+		actor.settingsState = ""
+		actor.effectiveSettings = nil
+		actor.effectivePresentation = nil
+		return true
+	}
+	catalog, err := loadModelCatalog(actor.lifecycleCtx, actor.session.session)
+	if err != nil {
+		return false
+	}
+	wire, err := protocolCatalog(catalog)
+	if err != nil {
+		return false
+	}
+	settings, presentation, err := session.EffectiveSettings(actor.lifecycleCtx)
+	if err != nil || settings.Validate() != nil || presentation.Validate() != nil || !catalog.Compatibility(settings).Compatible {
+		return false
+	}
+	actor.domainCatalog = catalog
+	actor.catalog = wire
+	actor.applyEffectiveSettings(settings, presentation)
+	current := actor.mapping.Current
+	return current != nil && current.Settings != nil && current.Presentation != nil && *current.Settings == settings && *current.Presentation == presentation || actor.persistEffectiveSettings(settings, presentation)
+}
+
 func (actor *conversation) refreshCatalog(attachments map[*clientAttachment]struct{}) bool {
-	catalog, err := loadModelCatalog(actor.lifecycleCtx, actor.identity.Provider, actor.driver)
+	catalog, err := loadModelCatalog(actor.lifecycleCtx, actor.session.session)
 	if err != nil {
 		actor.settingsState = protocol.SettingsUnverified
 		actor.dispatchBlocked = true
@@ -205,14 +232,48 @@ func (actor *conversation) refreshCatalog(attachments map[*clientAttachment]stru
 	return true
 }
 
+func (actor *conversation) failMalformedSettingsEvent(attachments map[*clientAttachment]struct{}) {
+	actor.settingsState = protocol.SettingsUnverified
+	actor.dispatchBlocked = true
+	actor.lifecycle = protocol.LifecycleUnavailable
+	actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
+	actor.publishShared(attachments, protocol.SettingsPayload{SettingsState: protocol.SettingsUnverified, Catalog: append([]protocol.CatalogModel{}, actor.catalog...)})
+	actor.publishShared(attachments, actor.lifecyclePayload())
+}
+
+func (actor *conversation) failSettingsPublication(attachments map[*clientAttachment]struct{}) {
+	actor.settingsState = protocol.SettingsUnverified
+	actor.dispatchBlocked = true
+	actor.lifecycle = protocol.LifecycleUnavailable
+	actor.publishBrowserError(attachments, protocol.ErrorBrokerUnavailable)
+	actor.publishShared(attachments, actor.lifecyclePayload())
+}
+
 func (actor *conversation) publishSettingsEvent(attachments map[*clientAttachment]struct{}, source provider.Event) {
+	if !actor.settingsCapable {
+		actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
+		return
+	}
 	if source.SettingsState == provider.SettingsUnverified {
 		actor.settingsState = protocol.SettingsUnverified
 		actor.dispatchBlocked = true
 		actor.publishShared(attachments, protocol.SettingsPayload{SettingsState: protocol.SettingsUnverified, Catalog: append([]protocol.CatalogModel{}, actor.catalog...)})
 		return
 	}
-	if source.Settings == nil || source.Presentation == nil || !actor.persistEffectiveSettings(*source.Settings, *source.Presentation) {
+	if source.Settings == nil || source.Presentation == nil || source.Settings.Validate() != nil || source.Presentation.Validate() != nil || !actor.domainCatalog.Compatibility(*source.Settings).Compatible {
+		actor.failMalformedSettingsEvent(attachments)
+		return
+	}
+	payload := protocol.SettingsPayload{
+		SettingsState: protocol.SettingsVerified, EffectiveSettings: actor.presentedEffectiveSettings(source.Settings, source.Presentation),
+		Catalog: append([]protocol.CatalogModel{}, actor.catalog...),
+	}
+	event, prepared, err := actor.prepareShared(payload)
+	if err != nil {
+		actor.failSettingsPublication(attachments)
+		return
+	}
+	if !actor.persistEffectiveSettings(*source.Settings, *source.Presentation) {
 		actor.dispatchBlocked = true
 		actor.lifecycle = protocol.LifecycleUnavailable
 		actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
@@ -220,11 +281,11 @@ func (actor *conversation) publishSettingsEvent(attachments map[*clientAttachmen
 		return
 	}
 	actor.applyEffectiveSettings(*source.Settings, *source.Presentation)
+	if !actor.publishPreparedShared(attachments, event, prepared) {
+		actor.failSettingsPublication(attachments)
+		return
+	}
 	actor.dispatchBlocked = false
-	actor.publishShared(attachments, protocol.SettingsPayload{
-		SettingsState: protocol.SettingsVerified, EffectiveSettings: actor.presentedEffectiveSettings(source.Settings, source.Presentation),
-		Catalog: append([]protocol.CatalogModel{}, actor.catalog...),
-	})
 }
 
 func (actor *conversation) modelPresentation(settings provider.ExecutionSettings) (provider.ModelPresentation, bool) {

@@ -334,12 +334,7 @@ func (broker *Broker) createConversation(ctx context.Context, identity statepkg.
 	if err != nil {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 	}
-	catalog, err := loadModelCatalog(ctx, identity.Provider, driver)
-	if err != nil {
-		broker.cleanupWorkspace(identity, conversationID)
-		return nil, NewBrokerError(protocol.ErrorProviderProtocolFailure)
-	}
-	request := provider.CreateRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), Workspace: workspace, Settings: compatibleInitialSettings(catalog, initialSettings)}
+	request := provider.CreateRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), Workspace: workspace, Settings: compatibleInitialSettings(initialSettings)}
 	if request.Validate() != nil {
 		broker.cleanupWorkspace(identity, conversationID)
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)

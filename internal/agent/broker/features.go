@@ -24,17 +24,37 @@ type activeCompact struct {
 	pendingTerminal *provider.Event
 }
 
+func cloneInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copyOfValue := *value
+	return &copyOfValue
+}
+
 func (actor *conversation) loadSessionFeatures(ctx context.Context) {
-	unavailable := protocol.SkillsUnavailable
-	actor.skillsState = &unavailable
-	actor.skills = []protocol.SkillDescriptor{}
+	actor.makeSkillsUnavailable()
 	actor.supportsCompact = false
+	actor.busyPolicy = protocol.BusyTurnPreserveDraft
 	if session, ok := actor.session.session.(provider.SkillCatalogSession); ok {
 		actor.applySkillCatalog(session.Skills(ctx))
 	}
 	if session, ok := actor.session.session.(provider.ManualCompactSession); ok {
 		actor.supportsCompact = session.SupportsCompact()
 	}
+	if session, ok := actor.session.session.(provider.BusyTurnSession); ok {
+		policy := session.BusyTurnPolicy()
+		if policy.Valid() {
+			actor.busyPolicy = protocol.BusyTurnPolicy(policy)
+		}
+	}
+}
+
+func (actor *conversation) makeSkillsUnavailable() {
+	state := protocol.SkillsUnavailable
+	actor.skillsState = &state
+	actor.skills = []protocol.SkillDescriptor{}
+	actor.maxSelectedSkills = nil
 }
 
 func (actor *conversation) applySkillCatalog(catalog provider.SkillCatalog) bool {
@@ -46,11 +66,22 @@ func (actor *conversation) applySkillCatalog(catalog provider.SkillCatalog) bool
 	for index, skill := range catalog.Skills {
 		skills[index] = protocol.SkillDescriptor{ID: skill.ID, Name: skill.Name, DisplayName: skill.DisplayName, Description: skill.Description, Scope: protocol.SkillScope(skill.Scope)}
 	}
-	if err := protocol.ValidateSkillCatalog(state, skills); err != nil {
+	var limit *int
+	if catalog.State == provider.SkillsReady {
+		value := catalog.MaxSelectedSkills
+		limit = &value
+	}
+	if err := protocol.ValidateSkillCatalogWithLimit(state, skills, limit); err != nil {
 		return false
 	}
 	actor.skillsState = &state
 	actor.skills = skills
+	if catalog.State == provider.SkillsReady {
+		limit := catalog.MaxSelectedSkills
+		actor.maxSelectedSkills = &limit
+	} else {
+		actor.maxSelectedSkills = nil
+	}
 	return true
 }
 
@@ -64,7 +95,7 @@ func (actor *conversation) validateSelectedSkills(content protocol.MessageConten
 	if selected == 0 {
 		return ""
 	}
-	if actor.identity.Provider != provider.NameCodex || actor.skillsState == nil || *actor.skillsState != protocol.SkillsReady {
+	if actor.skillsState == nil || *actor.skillsState != protocol.SkillsReady || actor.maxSelectedSkills == nil || selected > *actor.maxSelectedSkills {
 		return protocol.ErrorSkillUnavailable
 	}
 	byID := make(map[string]protocol.SkillDescriptor, len(actor.skills))
@@ -81,6 +112,24 @@ func (actor *conversation) validateSelectedSkills(content protocol.MessageConten
 		}
 	}
 	return ""
+}
+
+func (actor *conversation) composerAdmission() protocol.ComposerAdmission {
+	idleLifecycle := actor.lifecycle == protocol.LifecycleReady || actor.lifecycle == protocol.LifecycleInterrupted
+	unsafe := !idleLifecycle || actor.compact != nil || actor.workerSettled != nil && actor.active == nil || actor.dispatchBlocked || actor.stopping || actor.recoveryActive || actor.handoffActive || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil
+	if unsafe {
+		return protocol.ComposerBlocked
+	}
+	if actor.active == nil && actor.queue.Empty() {
+		return protocol.ComposerSubmit
+	}
+	if actor.busyPolicy == protocol.BusyTurnQueue && actor.queue.Len() < MaxQueueItems && actor.queue.Bytes() < MaxQueueBytes {
+		return protocol.ComposerQueue
+	}
+	if actor.busyPolicy == protocol.BusyTurnPreserveDraft {
+		return protocol.ComposerPreserveDraft
+	}
+	return protocol.ComposerBlocked
 }
 
 func (actor *conversation) activeWork() *protocol.ActiveWork {

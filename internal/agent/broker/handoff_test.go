@@ -27,6 +27,46 @@ func restoreCommand(commandID, clientID, conversationID, archiveID string) proto
 	}
 }
 
+func TestCommandNewDefersOptionalSettingsCompatibilityToCandidateSession(t *testing.T) {
+	stale := &protocol.ExecutionSettings{Model: "candidate-only", Effort: "high", Speed: protocol.SpeedStandard}
+	for _, test := range []struct {
+		name     string
+		settings *protocol.ExecutionSettings
+	}{
+		{name: "nil settings", settings: nil},
+		{name: "old catalog stale", settings: stale},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			current := &statepkg.Session{ConversationID: sequenceID(2050), NativeSession: mustStateRef(t, "sessions/current")}
+			actor := &conversation{
+				mapping: statepkg.Mapping{Current: current}, queue: NewQueue(), settingsCapable: true,
+				domainCatalog: settingsCatalog(), session: captureSession(newTurnSession("sessions/current")),
+			}
+			var captured handoffRequest
+			actor.startHandoff = func(request handoffRequest, _ chan<- handoffResult) bool {
+				captured = request
+				return true
+			}
+			conversationID := current.ConversationID
+			command := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(2051), ClientID: sequenceID(2052), ConversationID: &conversationID, Type: protocol.CommandNew, Payload: protocol.NewPayload{Settings: test.settings}}
+			code := actor.commandHandoff(make(chan handoffResult, 1), command, "")
+			require.Empty(t, code)
+			if test.settings == nil {
+				require.Nil(t, captured.settings)
+			} else {
+				require.Equal(t, provider.ExecutionSettings{Model: test.settings.Model, Effort: test.settings.Effort, Speed: provider.ExecutionSpeed(test.settings.Speed)}, *captured.settings)
+			}
+		})
+	}
+}
+
+func mustStateRef(t *testing.T, value string) provider.NativeSessionRef {
+	t.Helper()
+	ref, err := statepkg.NativeSessionRef(value)
+	require.NoError(t, err)
+	return ref
+}
+
 func TestCommandNewHandsOffTwoTabsAndPublishesExactDurableCurrent(t *testing.T) {
 	broker, state, driver, first, identity := archiveFixture(t, 2100)
 	defer broker.Close(context.Background())

@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func codexHTMLPendingFixture(t *testing.T, base uint64) (*Broker, *repairState, *turnSession, *Connection, protocol.PageContext) {
+func codexHTMLPendingFixture(t *testing.T, base uint64) (*Broker, *repairState, *settingsTurnSession, *Connection, protocol.PageContext) {
 	t.Helper()
 	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(base))
 	identity.Provider = provider.NameCodex
@@ -32,7 +32,7 @@ func codexHTMLPendingFixture(t *testing.T, base uint64) (*Broker, *repairState, 
 	mapping.Current.Observed = &observed
 	state := &repairState{mapping: &mapping, promotions: []repairMutation{{outcome: statepkg.CommitApplied, apply: true}}}
 	session := codexSettingsSession(mapping.Current.NativeSession.Value(), initial)
-	driver := &settingsDriver{hardeningDriver: &hardeningDriver{resumeSession: session}, catalog: settingsCatalog()}
+	driver := &settingsDriver{hardeningDriver: &hardeningDriver{resumeSession: session}}
 	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCodex: driver})
 	require.NoError(t, err)
 	config := validLifecycleConfig(state, nil, &lockedIDs{next: base + 100})
@@ -70,7 +70,7 @@ func TestHTMLCompactLeavesPendingContextForSkillOnlyTurn(t *testing.T) {
 	drainEvents(t, connection.Events(), 2)
 
 	skill := provider.SkillDescriptor{ID: sequenceID(8184), Name: "review-helper", Scope: provider.SkillScopeRepo}
-	session.skillCatalog = provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}}
+	session.skillCatalog = provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}, MaxSelectedSkills: provider.MaxMessageSkills}
 	session.events <- provider.NewSkillCatalogEvent(session.skillCatalog)
 	require.Equal(t, protocol.EventSkillCatalog, receiveLifecycle(t, connection.Events()).Type)
 	settings := &protocol.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: protocol.SpeedFast}
@@ -91,7 +91,7 @@ func TestCodexSnapshotPublishesSafeSkillsAndCompactCapability(t *testing.T) {
 	defer connection.Close(context.Background())
 
 	skill := provider.SkillDescriptor{ID: sequenceID(8202), Name: "review-helper", DisplayName: "Review helper", Description: "Review the current work", Scope: provider.SkillScopeRepo}
-	session.events <- provider.NewSkillCatalogEvent(provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}})
+	session.events <- provider.NewSkillCatalogEvent(provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}, MaxSelectedSkills: provider.MaxMessageSkills})
 	catalogEvent := receiveLifecycle(t, connection.Events())
 	require.Equal(t, protocol.EventSkillCatalog, catalogEvent.Type)
 	catalog := catalogEvent.Payload.(protocol.SkillCatalogPayload)
@@ -120,7 +120,7 @@ func TestCodexSkillValidationRejectsStaleSelectionBeforeProviderWork(t *testing.
 	conversationID := connection.ConversationID()
 	clientID := sequenceID(8211)
 	skill := provider.SkillDescriptor{ID: sequenceID(8212), Name: "review-helper", Scope: provider.SkillScopeRepo}
-	session.skillCatalog = provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}}
+	session.skillCatalog = provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}, MaxSelectedSkills: provider.MaxMessageSkills}
 	session.events <- provider.NewSkillCatalogEvent(session.skillCatalog)
 	require.Equal(t, protocol.EventSkillCatalog, receiveLifecycle(t, connection.Events()).Type)
 

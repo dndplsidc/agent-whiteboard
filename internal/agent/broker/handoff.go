@@ -65,11 +65,10 @@ func (actor *conversation) commandHandoff(results chan<- handoffResult, command 
 		clientID: command.ClientID, old: actor.session,
 	}
 	if payload, ok := command.Payload.(protocol.NewPayload); ok {
-		settings, code := validateCommandSettings(actor.identity.Provider, actor.domainCatalog, payload.Settings)
-		if code != "" {
-			return code
+		request.settings = compatibleInitialSettings(payload.Settings)
+		if payload.Settings != nil && request.settings == nil {
+			return protocol.ErrorInvalidCommand
 		}
-		request.settings = settings
 	}
 	if archiveID != "" {
 		request.kind = handoffRestore
