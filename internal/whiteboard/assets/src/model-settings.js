@@ -1,4 +1,11 @@
 export const CODEX_SETTINGS_STORAGE_KEY = "agent-whiteboard-codex-settings-v1";
+export const PI_SETTINGS_STORAGE_KEY = "agent-whiteboard-pi-settings-v1";
+
+export function settingsStorageKey(provider) {
+  if (provider === "codex") return CODEX_SETTINGS_STORAGE_KEY;
+  if (provider === "pi") return PI_SETTINGS_STORAGE_KEY;
+  throw new TypeError("invalid settings provider");
+}
 
 const encoder = new TextEncoder();
 const MAX_MODELS = 64;
@@ -129,9 +136,9 @@ export function formatExecutionSettings(settings) {
   };
 }
 
-export function readCodexSettingsPreference(storage) {
+export function readSettingsPreference(storage, provider) {
   try {
-    const raw = storage?.getItem(CODEX_SETTINGS_STORAGE_KEY);
+    const raw = storage?.getItem(settingsStorageKey(provider));
     if (raw === null || raw === undefined || encoder.encode(raw).length > 1024) return null;
     const decoded = JSON.parse(raw);
     return validExecutionSettings(decoded) ? cloneExecutionSettings(decoded) : null;
@@ -140,17 +147,17 @@ export function readCodexSettingsPreference(storage) {
   }
 }
 
-export function writeCodexSettingsPreference(storage, settings) {
-  if (!validExecutionSettings(settings)) throw new TypeError("invalid Codex settings preference");
+export function writeSettingsPreference(storage, provider, settings) {
+  if (!validExecutionSettings(settings)) throw new TypeError("invalid settings preference");
   try {
-    storage?.setItem(CODEX_SETTINGS_STORAGE_KEY, JSON.stringify(cloneExecutionSettings(settings)));
+    storage?.setItem(settingsStorageKey(provider), JSON.stringify(cloneExecutionSettings(settings)));
   } catch {
     // Model controls remain usable when browser storage is disabled.
   }
 }
 
-export function createCodexDraftState(initialSettings = null) {
-  if (initialSettings !== null && !validExecutionSettings(initialSettings)) throw new TypeError("invalid initial Codex settings");
+export function createSettingsDraftState(initialSettings = null) {
+  if (initialSettings !== null && !validExecutionSettings(initialSettings)) throw new TypeError("invalid initial settings");
   return {
     identity: null,
     settingsState: null,
@@ -164,26 +171,26 @@ export function createCodexDraftState(initialSettings = null) {
   };
 }
 
-export function editCodexDraft(state, patch) {
-  if (!isRecord(patch) || !state?.draft) throw new TypeError("Codex settings are unavailable");
+export function editSettingsDraft(state, patch) {
+  if (!isRecord(patch) || !state?.draft) throw new TypeError("settings are unavailable");
   const next = { ...state.draft, ...patch };
-  if (!validExecutionSettings(next) || !settingsCompatibility(state.catalog, next).compatible) throw new TypeError("incompatible Codex settings");
+  if (!validExecutionSettings(next) || !settingsCompatibility(state.catalog, next).compatible) throw new TypeError("incompatible settings");
   state.draft = next;
   state.revision += 1;
   state.dirty = !executionSettingsEqual(state.draft, state.baseline);
   return cloneExecutionSettings(next);
 }
 
-export function recordCodexSubmission(state, turnID) {
-  if (typeof turnID !== "string" || turnID.length === 0 || !validExecutionSettings(state?.draft)) throw new TypeError("invalid Codex submission settings");
+export function recordSettingsSubmission(state, turnID) {
+  if (typeof turnID !== "string" || turnID.length === 0 || !validExecutionSettings(state?.draft)) throw new TypeError("invalid submission settings");
   state.submissions.set(turnID, state.revision);
   while (state.submissions.size > 128) state.submissions.delete(state.submissions.keys().next().value);
   return state.revision;
 }
 
-export function reconcileCodexDraft(state, { identity, settingsState, effectiveSettings, catalog, acceptedTurnID = null }) {
-  if (typeof identity !== "string" || identity.length === 0 || !["verified", "unverified"].includes(settingsState) || !validModelCatalog(catalog)) throw new TypeError("invalid Codex settings state");
-  if (settingsState === "verified" && !validPresentedExecutionSettings(effectiveSettings) || settingsState === "unverified" && effectiveSettings !== null) throw new TypeError("invalid Codex effective settings");
+export function reconcileSettingsDraft(state, { identity, settingsState, effectiveSettings, catalog, acceptedTurnID = null }) {
+  if (typeof identity !== "string" || identity.length === 0 || !["verified", "unverified"].includes(settingsState) || !validModelCatalog(catalog)) throw new TypeError("invalid settings state");
+  if (settingsState === "verified" && !validPresentedExecutionSettings(effectiveSettings) || settingsState === "unverified" && effectiveSettings !== null) throw new TypeError("invalid effective settings");
   const identityChanged = state.identity !== null && state.identity !== identity;
   const firstIdentity = state.identity === null;
   const wasClean = executionSettingsEqual(state.draft, state.baseline);
@@ -271,7 +278,8 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
       effort: formatEffort(current.settings.effort),
       speed: current.settings.speed === "fast" ? "Fast" : "Standard",
     };
-    for (const section of ["model", "effort", "speed"]) {
+    const sections = current.catalog.some(({ supports_fast: supportsFast }) => supportsFast) ? ["model", "effort", "speed"] : ["model", "effort"];
+    for (const section of sections) {
       const row = menuButton(doc, { label: `${section[0].toUpperCase()}${section.slice(1)}`, description: values[section] });
       row.dataset.settingsSection = section;
       row.setAttribute("aria-haspopup", "menu");

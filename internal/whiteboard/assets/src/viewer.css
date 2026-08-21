@@ -1692,6 +1692,7 @@ body.agent-drawer-modal-open .agent-toast {
 
 .agent-interaction-field > input:not([type="checkbox"]),
 .agent-interaction-field > select,
+.agent-interaction-field > textarea,
 .agent-interaction-form fieldset input[type="text"],
 .agent-interaction-form fieldset input[type="password"] {
   background: var(--awb-background);
@@ -1702,6 +1703,10 @@ body.agent-drawer-modal-open .agent-toast {
   min-width: 0;
   padding: 0.48rem;
   width: 100%;
+}
+
+.agent-interaction-secret {
+  -webkit-text-security: disc;
 }
 
 .agent-interaction-actions {

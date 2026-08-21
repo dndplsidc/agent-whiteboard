@@ -372,10 +372,14 @@ function agentEvent(type, payload, overrides = {}) {
     return { ...rest, content: textContent(text) };
   }) };
   const versionedPayload = type === "snapshot"
-    ? { supports_images: true, settings_state: null, effective_settings: null, catalog: [], skills_state: null, skills: [], supports_compact: false, ...payload }
+    ? { supports_images: true, settings_state: null, effective_settings: null, catalog: [], skills_state: "unavailable", skills: [], max_selected_skills: null, supports_compact: false, busy_policy: "queue", composer_admission: "submit", ...payload }
     : type === "provider"
       ? { supports_images: true, ...payload }
-      : payload;
+      : type === "skill_catalog"
+        ? { ...payload, max_selected_skills: payload.state === "ready" ? 16 : null }
+        : type === "interaction_request"
+          ? { ...payload, fields: (payload.fields ?? []).map((field) => ({ multiline: false, ...field })), local_deadline: payload.local_deadline ?? null }
+          : payload;
   return {
     api_version: "4",
     event_id: agentIDs.event,
@@ -420,6 +424,17 @@ const codexCatalog = [{
   supports_fast: false,
 }];
 const codexSolSettings = { model: "gpt-5.6-sol", effort: "high", speed: "fast", model_display_name: "5.6 Sol", selectable: true };
+const piCatalog = codexCatalog.map((model, index) => ({ ...model, model: `pi-provider:${model.model}`, supports_fast: false, default: index === 0 }));
+const piSettings = { model: piCatalog[0].model, effort: "high", speed: "standard", model_display_name: piCatalog[0].model_display_name, selectable: true };
+
+function piSnapshotEvent({ event = {}, payload = {} } = {}) {
+  return agentEvent("snapshot", {
+    lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true,
+    settings_state: "verified", effective_settings: piSettings, catalog: piCatalog,
+    skills_state: "ready", skills: [], max_selected_skills: 1, supports_compact: true,
+    busy_policy: "queue", composer_admission: "submit", ...payload,
+  }, event);
+}
 
 function codexSnapshotEvent({ settings = codexSolSettings, event = {}, payload = {} } = {}) {
   const model = codexCatalog.find(({ model: value }) => value === settings.model);
@@ -434,7 +449,10 @@ function codexSnapshotEvent({ settings = codexSolSettings, event = {}, payload =
     catalog: codexCatalog,
     skills_state: "ready",
     skills: [],
+    max_selected_skills: 16,
     supports_compact: true,
+    busy_policy: "preserve_draft",
+    composer_admission: "submit",
     ...payload,
   }, event);
 }
@@ -740,7 +758,30 @@ describe("local agent transport and event state", () => {
     expect(() => decodeAgentEvent(JSON.stringify(agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "hello", reasoning: "secret" })))).toThrow(TypeError);
   });
 
-  test("strictly validates Codex tool activity and interaction wire payloads", () => {
+  test("strictly validates capability, admission, deadline, and multiline fields", () => {
+    const snapshot = snapshotEvent();
+    for (const field of ["max_selected_skills", "busy_policy", "composer_admission"]) {
+      const malformed = structuredClone(snapshot);
+      delete malformed.payload[field];
+      expect(() => decodeAgentEvent(JSON.stringify(malformed))).toThrow(TypeError);
+    }
+    expect(() => decodeAgentEvent(JSON.stringify({ ...snapshot, payload: { ...snapshot.payload, busy_policy: "queue", composer_admission: "preserve_draft" } }))).toThrow(TypeError);
+
+    const request = agentEvent("interaction_request", {
+      request_id: agentIDs.archive, kind: "mcp_elicitation", title: "Edit text", summary: "", command: "", working_directory: "",
+      options: [{ id: "accept", label: "Accept", description: "" }, { id: "decline", label: "Decline", description: "" }, { id: "cancel", label: "Cancel", description: "" }],
+      questions: null, fields: [{ id: "body", label: "Body", description: "", type: "text", required: true, secret: false, multiline: true, options: null }],
+      local_deadline: "2026-07-27T03:05:05Z",
+    });
+    expect(decodeAgentEvent(JSON.stringify(request))).toEqual(request);
+    const missingDeadline = structuredClone(request);
+    delete missingDeadline.payload.local_deadline;
+    expect(() => decodeAgentEvent(JSON.stringify(missingDeadline))).toThrow(TypeError);
+    expect(() => decodeAgentEvent(JSON.stringify({ ...request, payload: { ...request.payload, local_deadline: "soon" } }))).toThrow(TypeError);
+    expect(() => decodeAgentEvent(JSON.stringify({ ...request, payload: { ...request.payload, fields: [{ ...request.payload.fields[0], type: "number" }] } }))).toThrow(TypeError);
+  });
+
+  test("strictly validates shared tool activity and interaction wire payloads", () => {
     const tool = agentEvent("tool_activity", {
       activity_id: agentIDs.archive,
       turn_id: agentIDs.turn,
@@ -819,6 +860,29 @@ describe("local agent transport and event state", () => {
     expect(state.timeline).toContainEqual(expect.objectContaining({ kind: "tool", status: "completed", summary: "Passed" }));
     expect(state.timeline.filter((item) => item.kind === "tool")).toHaveLength(1);
     expect(state.interactions).toEqual([expect.objectContaining({ title: "Approve command", resolved: true, option_id: "accept" })]);
+  });
+
+  test.each(["pi", "codex"])("coalesces only consecutive identical same-turn passive notifications for %s", (provider) => {
+    const state = createAgentState(provider);
+    applyAgentEvent(state, agentEvent("snapshot", {
+      lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" },
+    }));
+    const activity = (eventID, kind, summary) => agentEvent("activity", { kind, summary }, { event_id: eventID });
+    applyAgentEvent(state, activity("HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", "visible_summary", "Reading files"));
+    applyAgentEvent(state, activity("IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", "visible_summary", "Reading files"));
+    expect(state.timeline.filter(({ activity: kind }) => kind === "visible_summary")).toHaveLength(1);
+    expect(state.lastEventID).toBe("IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII");
+
+    applyAgentEvent(state, activity("JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ", "status", "Working"));
+    applyAgentEvent(state, activity("KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK", "visible_summary", "Reading files"));
+    applyAgentEvent(state, activity("LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", "retry", "Retrying"));
+    applyAgentEvent(state, activity("MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM", "retry", "Retrying"));
+    applyAgentEvent(state, agentEvent("lifecycle", { state: "responding", active_work: { work_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN", kind: "turn", state: "running" } }, { event_id: "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO" }));
+    applyAgentEvent(state, activity("PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP", "visible_summary", "Reading files"));
+
+    expect(state.timeline.filter(({ activity: kind }) => kind === "visible_summary")).toHaveLength(3);
+    expect(state.timeline.filter(({ activity: kind }) => kind === "retry")).toHaveLength(2);
+    expect(state.timeline.filter(({ text }) => text === "Reading files").map(({ turn_id: turnID }) => turnID)).toEqual([agentIDs.turn, agentIDs.turn, "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"]);
   });
 
   test("replaces safe skills and updates keyed compaction state", () => {
@@ -1048,7 +1112,7 @@ describe("local agent rendering and controls", () => {
     expect(instances[0].close).not.toHaveBeenCalled();
     expect(instances.every((item) => item.send.mock.calls.length === 0 && item.connect.mock.calls.length === 0)).toBe(true);
     expect(drawer.elements.drawer.querySelector(".agent-drawer-header")?.textContent).toContain("Codex ready");
-    expect(drawer.elements.setup.textContent).toContain("current Codex tools, approvals, sandbox, and configuration");
+    expect(drawer.elements.setup.textContent).toContain("effective Codex native tools, extensions, approvals, sandbox, project trust, and configuration");
     expect(localStorage.getItem(AGENT_PROVIDER_STORAGE_KEY)).toBe("codex");
 
     instances[0].options.onEvent(agentEvent("assistant_message", {
@@ -1119,7 +1183,7 @@ describe("local agent rendering and controls", () => {
       ["KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK", "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL", "file_change_approval", "Approve file changes", "", [{ id: "accept", label: "Allow", description: "Apply changes." }, { id: "decline", label: "Decline", description: "Keep files unchanged." }], [], []],
       ["MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM", "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN", "permission_approval", "Grant permissions", "", [{ id: "grantTurn", label: "Allow for turn", description: "Use this permission for the turn." }, { id: "grantSession", label: "Allow for session", description: "Use this permission for the session." }, { id: "decline", label: "Decline", description: "Decline the request." }], [], [{ id: "permissions", label: "Permissions to grant", description: "Select only the permissions Codex may use.", type: "multi_select", required: false, secret: false, options: [{ id: "permission0", label: "Network access", description: "Allow network access." }, { id: "permission1", label: "Filesystem write", description: "Allow the requested write path." }] }]],
       ["OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO", "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP", "user_input", "Choose a target", "", [], [{ id: "target", header: "Target", prompt: "Where should this run?", options: [{ id: "local", label: "Local", description: "This device." }], allow_other: true, secret: false, multiple: false }, { id: "profile", header: "Profile", prompt: "Which profile?", options: [], allow_other: true, secret: false, multiple: false }], []],
-      ["QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ", "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", "mcp_elicitation", "MCP details", "", [{ id: "accept", label: "Accept", description: "Provide the requested input." }, { id: "decline", label: "Decline", description: "Decline the request." }, { id: "cancel", label: "Cancel", description: "Cancel the request." }], [], [{ id: "project", label: "Project", description: "Project slug", type: "text", required: true, secret: false, options: [] }, { id: "private", label: "Private", description: "Limit visibility", type: "boolean", required: true, secret: false, options: [] }]],
+      ["QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ", "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", "mcp_elicitation", "MCP details", "", [{ id: "accept", label: "Accept", description: "Provide the requested input." }, { id: "decline", label: "Decline", description: "Decline the request." }, { id: "cancel", label: "Cancel", description: "Cancel the request." }], [], [{ id: "project", label: "Project", description: "Project slug", type: "text", required: true, secret: false, options: [] }, { id: "notes", label: "Notes", description: "Multiline details", type: "text", required: false, secret: true, multiline: true, options: [] }, { id: "private", label: "Private", description: "Limit visibility", type: "boolean", required: true, secret: false, options: [] }]],
     ];
     for (const [eventID, requestID, kind, title, command, requestOptions, questions, fields] of requests) {
       options.onEvent(agentEvent("interaction_request", {
@@ -1182,12 +1246,113 @@ describe("local agent rendering and controls", () => {
     mcp.querySelector("button").click();
     expect(transport.send).toHaveBeenCalledTimes(3);
     mcp.querySelector('input[type="text"]').value = "agent-whiteboard";
+    const editor = mcp.querySelector("textarea");
+    expect(editor.getAttribute("aria-describedby")).toBeTruthy();
+    expect(editor.classList.contains("agent-interaction-secret")).toBe(true);
+    editor.value = "line one\nline two";
     mcp.querySelector("button").click();
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(4));
     expect(transport.send.mock.calls[3][0]).toMatchObject({
       type: "interaction_respond",
-      payload: { request_id: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", kind: "mcp_elicitation", option_id: "accept", answers: { project: ["agent-whiteboard"], private: ["false"] } },
+      payload: { request_id: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", kind: "mcp_elicitation", option_id: "accept", answers: { project: ["agent-whiteboard"], notes: ["line one\nline two"], private: ["false"] } },
     });
+    drawer.destroy();
+  });
+
+  test.each([
+    ["pi", piSnapshotEvent],
+    ["codex", codexSnapshotEvent],
+  ])("preserves pending shared interaction values and focus across %s renders", async (provider, snapshotFactory) => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(snapshotFactory());
+    options.onEvent(agentEvent("interaction_request", {
+      request_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", kind: "user_input", title: "Choose mode", summary: "", command: "", working_directory: "", options: [],
+      questions: [
+        { id: "mode", header: "Mode", prompt: "Choose", options: [{ id: "safe", label: "Safe", description: "" }, { id: "fast", label: "Fast", description: "" }], allow_other: false, secret: false, multiple: false },
+        { id: "capabilities", header: "Capabilities", prompt: "Choose several", options: [{ id: "files", label: "Files", description: "" }, { id: "network", label: "Network", description: "" }], allow_other: false, secret: false, multiple: true },
+        { id: "passphrase", header: "Passphrase", prompt: "Enter secret", options: [], allow_other: true, secret: true, multiple: false }
+      ], fields: [],
+    }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    options.onEvent(agentEvent("interaction_request", {
+      request_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ", kind: "mcp_elicitation", title: "Provider input", summary: "", command: "", working_directory: "",
+      options: [{ id: "accept", label: "Submit", description: "" }, { id: "decline", label: "Decline", description: "" }, { id: "cancel", label: "Cancel", description: "" }], questions: [],
+      fields: [
+        { id: "name", label: "Name", description: "", type: "text", required: true, secret: false, options: [] },
+        { id: "token", label: "Token", description: "", type: "text", required: true, secret: true, options: [] },
+        { id: "notes", label: "Notes", description: "", type: "text", required: true, secret: true, multiline: true, options: [] },
+        { id: "count", label: "Count", description: "", type: "number", required: true, secret: false, options: [] },
+        { id: "target", label: "Target", description: "", type: "select", required: true, secret: false, options: [{ id: "local", label: "Local", description: "" }, { id: "remote", label: "Remote", description: "" }] },
+        { id: "features", label: "Features", description: "", type: "multi_select", required: false, secret: false, options: [{ id: "one", label: "One", description: "" }, { id: "two", label: "Two", description: "" }] },
+        { id: "confirmed", label: "Confirmed", description: "", type: "boolean", required: false, secret: false, options: [] }
+      ],
+    }, { event_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK" }));
+
+    let cards = [...drawer.elements.timeline.querySelectorAll(".agent-interaction")];
+    cards[0].querySelector('input[value="fast"]').checked = true;
+    cards[0].querySelector('input[value="fast"]').dispatchEvent(new Event("change", { bubbles: true }));
+    for (const value of ["files", "network"]) {
+      cards[0].querySelector(`input[value="${value}"]`).checked = true;
+      cards[0].querySelector(`input[value="${value}"]`).dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    const secretQuestion = [...cards[0].querySelectorAll('input[type="password"]')].at(-1);
+    secretQuestion.value = "question-secret";
+    secretQuestion.dispatchEvent(new Event("input", { bubbles: true }));
+    const mcp = cards[1];
+    const setInput = (selector, value) => { const input = mcp.querySelector(selector); input.value = value; input.dispatchEvent(new Event("input", { bubbles: true })); return input; };
+    setInput('[id$="-name"]', "Ada");
+    setInput('[id$="-token"]', "secret-token");
+    const notes = setInput("textarea", "first line\nsecond line");
+    setInput('input[type="number"]', "42");
+    mcp.querySelector('select:not([multiple])').value = "remote";
+    mcp.querySelector('select:not([multiple])').dispatchEvent(new Event("change", { bubbles: true }));
+    mcp.querySelector('select[multiple] option[value="two"]').selected = true;
+    mcp.querySelector('select[multiple]').dispatchEvent(new Event("change", { bubbles: true }));
+    mcp.querySelector('input[type="checkbox"]').checked = true;
+    mcp.querySelector('input[type="checkbox"]').dispatchEvent(new Event("change", { bubbles: true }));
+    notes.focus();
+    notes.setSelectionRange(6, 10);
+    notes.dispatchEvent(new Event("select", { bubbles: true }));
+
+    options.onEvent(agentEvent("activity", { kind: "status", summary: "Unrelated update" }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
+    cards = [...drawer.elements.timeline.querySelectorAll(".agent-interaction")];
+    expect(cards[0].querySelector('input[value="fast"]').checked).toBe(true);
+    expect(cards[0].querySelector('input[value="files"]').checked).toBe(true);
+    expect(cards[0].querySelector('input[value="network"]').checked).toBe(true);
+    expect(cards[0].querySelector('input[type="password"]').value).toBe("question-secret");
+    const restored = cards[1];
+    expect(restored.querySelector('input[type="text"]').value).toBe("Ada");
+    expect(restored.querySelector('input[type="password"]').value).toBe("secret-token");
+    expect(restored.querySelector("textarea").value).toBe("first line\nsecond line");
+    expect(restored.querySelector('input[type="number"]').value).toBe("42");
+    expect(restored.querySelector('select:not([multiple])').value).toBe("remote");
+    expect([...restored.querySelector('select[multiple]').selectedOptions].map(({ value }) => value)).toEqual(["two"]);
+    expect(restored.querySelector('input[type="checkbox"]').checked).toBe(true);
+    expect(document.activeElement).toBe(restored.querySelector("textarea"));
+    expect(document.activeElement.selectionStart).toBe(6);
+    expect(document.activeElement.selectionEnd).toBe(10);
+
+    cards[0].querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    expect(transport.send.mock.calls[0][0]).toMatchObject({ type: "interaction_respond", payload: { request_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", answers: { mode: ["fast"], capabilities: ["files", "network"], passphrase: ["question-secret"] } } });
+    drawer.elements.timeline.querySelectorAll(".agent-interaction")[0].querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    expect(transport.send).toHaveBeenCalledOnce();
+
+    drawer.elements.timeline.querySelectorAll(".agent-interaction")[1].querySelector("button").click();
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
+    expect(transport.send.mock.calls[1][0]).toMatchObject({ type: "interaction_respond", payload: { request_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ", answers: { name: ["Ada"], token: ["secret-token"], notes: ["first line\nsecond line"], count: ["42"], target: ["remote"], features: ["two"], confirmed: ["true"] } } });
+    drawer.elements.timeline.querySelectorAll(".agent-interaction")[1].querySelector("button").click();
+    expect(transport.send).toHaveBeenCalledTimes(2);
+
+    options.onEvent(agentEvent("interaction_resolved", { request_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ", kind: "mcp_elicitation", option_id: "accept" }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
+    const resolved = [...drawer.elements.timeline.querySelectorAll(".agent-interaction")][1];
+    expect(resolved.querySelector('input[type="password"]').value).toBe("");
+    expect(resolved.querySelector("textarea").value).toBe("");
     drawer.destroy();
   });
 
@@ -1286,6 +1451,77 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
+  test.each([
+    ["pi", piSnapshotEvent, ["model", "effort"], "effective Pi native tools"],
+    ["codex", codexSnapshotEvent, ["model", "effort", "speed"], "effective Codex native tools"],
+  ])("renders shared capability controls for %s", (provider, snapshotFactory, sections, accessCopy) => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(snapshotFactory());
+    expect(drawer.elements.modelControl.element.hidden).toBe(false);
+    drawer.elements.modelControl.button.click();
+    expect([...drawer.elements.modelControl.menu.querySelectorAll("[data-settings-section]")].map(({ dataset }) => dataset.settingsSection)).toEqual(sections);
+    expect(drawer.elements.setup.textContent).toContain(accessCopy);
+    drawer.elements.message.value = "/co";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(drawer.elements.completionMenu.textContent).toContain("/compact");
+    drawer.destroy();
+  });
+
+  test.each([
+    ["pi", piSnapshotEvent, "queue", 1],
+    ["codex", codexSnapshotEvent, "preserve_draft", 0],
+  ])("uses advertised composer admission for %s", async (provider, snapshotFactory, admission, expectedSubmits) => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
+    let options;
+    const sent = [];
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(),
+      send: vi.fn(async (command) => sent.push(command)),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(snapshotFactory({ payload: {
+      lifecycle: "responding", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" },
+      composer_admission: admission,
+    } }));
+    drawer.elements.message.value = "busy follow-up";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(sent.filter(({ type }) => type === "submit")).toHaveLength(expectedSubmits));
+    expect(drawer.elements.message.value).toBe("busy follow-up");
+    expect(drawer.elements.sendButton.hidden).toBe(admission !== "queue");
+    drawer.destroy();
+  });
+
+  test("enforces Pi's advertised one-skill limit in the shared completion flow", () => {
+    let options;
+    const skills = [
+      { id: agentIDs.archive, name: "review", display_name: "Review", description: "Review", scope: "repo" },
+      { id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH", name: "test", display_name: "Test", description: "Test", scope: "repo" },
+    ];
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(piSnapshotEvent({ payload: { skills } }));
+    drawer.elements.message.value = "$rev";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    const accepted = drawer.elements.message.value;
+    drawer.elements.message.lastChild.textContent += "$test";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(drawer.elements.completionMenu.hidden).toBe(true);
+    expect(drawer.elements.message.querySelectorAll(".agent-message-skill")).toHaveLength(1);
+    expect(accepted).toContain("$review");
+    drawer.destroy();
+  });
+
   test("selects native skills, runs compact, blocks busy submission, and exposes Stop", async () => {
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
     let options;
@@ -1337,7 +1573,7 @@ describe("local agent rendering and controls", () => {
     await vi.waitFor(() => expect(sent.some(({ type }) => type === "compact")).toBe(true));
     expect(sent.find(({ type }) => type === "compact").payload.work_id).toHaveLength(32);
 
-    options.onEvent(agentEvent("lifecycle", { state: "compacting", active_work: { work_id: agentIDs.turn, kind: "compact", state: "running" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    options.onEvent(codexSnapshotEvent({ event: { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }, payload: { lifecycle: "compacting", active_work: { work_id: agentIDs.turn, kind: "compact", state: "running" }, composer_admission: "preserve_draft" } }));
     options.onEvent(agentEvent("compaction", { work_id: agentIDs.turn, status: "running" }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
     expect(drawer.elements.sendButton.hidden).toBe(true);
     expect(drawer.elements.stopButton.hidden).toBe(false);
@@ -1468,6 +1704,321 @@ describe("local agent rendering and controls", () => {
     expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Fast. Model options unavailable");
     expect(drawer.elements.message.value).toBe("do not lose me");
     drawer.destroy();
+  });
+
+  test("isolates complete composer drafts and pending command ownership across Pi and Codex", async () => {
+    const instances = new Map();
+    const uploads = [agentIDs.archive, "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH"];
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(window.URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => "blob:pi-draft") },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    const drawer = createAgentDrawer({
+      payload: agentPayload(), doc: document, storage: localStorage, pageURL: "https://board.example/m/abc",
+      transportFactory: (options) => {
+        const transport = {
+          provider: options.provider, options, clientID: (options.provider === "pi" ? "P" : "C").repeat(32), conversationID: agentIDs.conversation, consented: true,
+          probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+          uploadImage: vi.fn(async (file) => ({ image_id: uploads[transport.uploadImage.mock.calls.length - 1], media_type: file.type, bytes: file.size })),
+          deleteImage: vi.fn(async () => {}),
+        };
+        instances.set(options.provider, transport);
+        return transport;
+      },
+    });
+    const skill = { id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII", name: "review", display_name: "Review", description: "Review", scope: "repo" };
+    const pi = instances.get("pi");
+    pi.options.onEvent(piSnapshotEvent({ payload: { skills: [skill] } }));
+    drawer.elements.message.value = "Pi text $rev";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "pi.png", { type: "image/png" });
+    Object.defineProperty(drawer.elements.imagePicker, "files", { configurable: true, value: [file] });
+    drawer.elements.imagePicker.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(drawer.elements.attachmentList.children).toHaveLength(1));
+    const image = document.createElement("img");
+    image.src = "data:image/png;base64,iVBORw0KGgo=";
+    await drawer.addImageReference({ id: "2", ordinal: 1, alt: "Pi inline", block: "2", startLine: 4, endLine: 5, headingPath: [], element: image, referenceID: "J".repeat(32) });
+    expect(drawer.elements.message.querySelectorAll(".agent-message-skill")).toHaveLength(1);
+    expect(drawer.elements.message.querySelectorAll('[data-reference-kind="image"]')).toHaveLength(1);
+
+    drawer.elements.providerSelect.value = "codex";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    const codex = instances.get("codex");
+    codex.options.onEvent(codexSnapshotEvent());
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.attachmentList.children).toHaveLength(0);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    drawer.elements.message.value = "Codex only";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(codex.send).toHaveBeenCalledOnce());
+    expect(codex.send.mock.calls[0][0].payload.content).toEqual({ parts: [{ type: "text", text: "Codex only" }] });
+
+    drawer.elements.providerSelect.value = "pi";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(drawer.elements.message.value).toContain("Pi text");
+    expect(drawer.elements.message.querySelectorAll(".agent-message-skill")).toHaveLength(1);
+    expect(drawer.elements.message.querySelectorAll('[data-reference-kind="image"]')).toHaveLength(1);
+    expect(drawer.elements.attachmentList.children).toHaveLength(1);
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(pi.send.mock.calls.some(([command]) => command.type === "submit")).toBe(true));
+    const piSubmit = pi.send.mock.calls.find(([command]) => command.type === "submit")[0];
+    expect(piSubmit.payload.content.parts.some(({ type }) => type === "skill")).toBe(true);
+    expect(piSubmit.payload.content.parts.some(({ type }) => type === "reference")).toBe(true);
+
+    drawer.elements.providerSelect.value = "codex";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(drawer.elements.message.value).toBe("Codex only");
+    pi.options.onEvent(agentEvent("command_result", { command_id: piSubmit.command_id, status: "succeeded" }, { event_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK" }));
+    expect(drawer.elements.message.value).toBe("Codex only");
+    expect(revokeObjectURL).toHaveBeenCalledOnce();
+
+    drawer.elements.providerSelect.value = "pi";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.attachmentList.children).toHaveLength(0);
+    drawer.elements.message.value = "/compact";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(pi.send.mock.calls.some(([command]) => command.type === "compact")).toBe(true));
+    const compact = pi.send.mock.calls.find(([command]) => command.type === "compact")[0];
+    drawer.elements.providerSelect.value = "codex";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(drawer.elements.message.value).toBe("Codex only");
+    pi.options.onEvent(agentEvent("command_result", { command_id: compact.command_id, status: "succeeded" }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
+    expect(drawer.elements.message.value).toBe("Codex only");
+    drawer.elements.providerSelect.value = "pi";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(drawer.elements.message.value).toBe("");
+    drawer.destroy();
+  });
+
+  test.each([
+    ["queue", false], ["queue", true],
+    ["active", false], ["active", true],
+    ["timeline", false], ["timeline", true],
+    ["absent", false], ["absent", true],
+  ])("reconciles fresh recovery via %s with inactive=%s", async (recoveryKind, inactive) => {
+    vi.useFakeTimers();
+    const instances = new Map();
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(window.URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => `blob:fresh-${recoveryKind}-${inactive}`) },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    const drawer = createAgentDrawer({
+      payload: agentPayload(), doc: document, storage: localStorage,
+      transportFactory: (options) => {
+        const transport = {
+          options, clientID: (options.provider === "pi" ? "P" : "C").repeat(32), conversationID: agentIDs.conversation, consented: true,
+          probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(async () => { const error = new Error("replay unavailable"); error.code = "replay_window_unavailable"; throw error; }), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+          uploadImage: vi.fn(async (file) => ({ image_id: "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", media_type: file.type, bytes: file.size })), deleteImage: vi.fn(async () => {}),
+        };
+        instances.set(options.provider, transport);
+        return transport;
+      },
+    });
+    const pi = instances.get("pi");
+    pi.options.onEvent(piSnapshotEvent());
+    drawer.elements.message.value = `fresh ${recoveryKind}`;
+    const file = new File([new Uint8Array([137, 80, 78, 71])], `fresh-${recoveryKind}.png`, { type: "image/png" });
+    Object.defineProperty(drawer.elements.imagePicker, "files", { configurable: true, value: [file] });
+    drawer.elements.imagePicker.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(drawer.elements.attachmentList.children).toHaveLength(1));
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(pi.send).toHaveBeenCalledOnce());
+    const submitted = pi.send.mock.calls[0][0];
+    if (inactive) {
+      drawer.elements.providerSelect.value = "codex";
+      drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      instances.get("codex").options.onEvent(codexSnapshotEvent());
+      drawer.elements.message.value = "Codex untouched";
+    }
+    pi.options.onDisconnect(new Error("socket closed"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pi.reconnect).toHaveBeenCalledOnce();
+
+    const payload = recoveryKind === "queue"
+      ? { queue: [{ turn_id: submitted.payload.turn_id, message_id: submitted.payload.message_id, message: `fresh ${recoveryKind}` }] }
+      : recoveryKind === "active"
+        ? { lifecycle: "responding", active_work: { work_id: submitted.payload.turn_id, kind: "turn", state: "running" }, composer_admission: "queue" }
+        : {};
+    pi.options.onEvent(piSnapshotEvent({ event: { event_id: "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO" }, payload }));
+
+    if (["timeline", "absent"].includes(recoveryKind)) {
+      if (inactive) {
+        drawer.elements.providerSelect.value = "pi";
+        drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      const history = createAgentCommand({ type: "history_page", payload: { limit: 50 }, clientID: pi.clientID, conversationID: pi.conversationID, idFactory: () => "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ" });
+      registerAgentCommand(drawer.state, history);
+      if (inactive) {
+        drawer.elements.providerSelect.value = "codex";
+        drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      const item = recoveryKind === "timeline"
+        ? { item_id: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", kind: "user", turn_id: submitted.payload.turn_id, message_id: submitted.payload.message_id, text: `fresh ${recoveryKind}`, created_at: "2026-07-27T03:03:00Z" }
+        : { item_id: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR", kind: "assistant", turn_id: agentIDs.turn, message_id: agentIDs.message, text: "other", created_at: "2026-07-27T03:03:00Z" };
+      pi.options.onEvent(agentEvent("timeline", { command_id: history.command_id, items: [item], next_cursor: null }, { event_id: "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS" }));
+    }
+
+    if (inactive) expect(drawer.elements.message.value).toBe("Codex untouched");
+    if (inactive) {
+      drawer.elements.providerSelect.value = "pi";
+      drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    if (recoveryKind === "absent") {
+      expect(drawer.elements.message.value).toBe(`fresh ${recoveryKind}`);
+      expect(drawer.elements.attachmentList.children).toHaveLength(1);
+      expect(drawer.elements.sendButton.disabled).toBe(false);
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+    } else {
+      expect(drawer.elements.message.value).toBe("");
+      expect(drawer.elements.attachmentList.children).toHaveLength(0);
+      expect(revokeObjectURL).toHaveBeenCalledWith(`blob:fresh-${recoveryKind}-${inactive}`);
+      expect(pi.deleteImage).not.toHaveBeenCalled();
+    }
+    expect(pi.send).toHaveBeenCalledOnce();
+    drawer.destroy();
+    vi.useRealTimers();
+  });
+
+  test.each(["succeeded", "rejected"])("settles an inactive Pi submission from replayed %s after disconnect", async (status) => {
+    const instances = new Map();
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(window.URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => `blob:replay-${status}`) },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    const drawer = createAgentDrawer({
+      payload: agentPayload(), doc: document, storage: localStorage,
+      transportFactory: (options) => {
+        const transport = {
+          options, clientID: (options.provider === "pi" ? "P" : "C").repeat(32), conversationID: agentIDs.conversation, consented: false,
+          probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+          uploadImage: vi.fn(async (file) => ({ image_id: agentIDs.archive, media_type: file.type, bytes: file.size })), deleteImage: vi.fn(async () => {}),
+        };
+        instances.set(options.provider, transport);
+        return transport;
+      },
+    });
+    const pi = instances.get("pi");
+    pi.options.onEvent(piSnapshotEvent());
+    drawer.elements.message.value = `Pi replay ${status}`;
+    const file = new File([new Uint8Array([137, 80, 78, 71])], `${status}.png`, { type: "image/png" });
+    Object.defineProperty(drawer.elements.imagePicker, "files", { configurable: true, value: [file] });
+    drawer.elements.imagePicker.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(drawer.elements.attachmentList.children).toHaveLength(1));
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(pi.send).toHaveBeenCalledOnce());
+    const submitted = pi.send.mock.calls[0][0];
+
+    drawer.elements.providerSelect.value = "codex";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    const codex = instances.get("codex");
+    codex.options.onEvent(codexSnapshotEvent());
+    drawer.elements.message.value = "Codex remains active";
+    pi.options.onDisconnect(new Error("socket closed"));
+    await pi.reconnect();
+    const result = status === "succeeded"
+      ? { command_id: submitted.command_id, status }
+      : { command_id: submitted.command_id, status, error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" } };
+    pi.options.onEvent(agentEvent("command_result", result, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }));
+    expect(drawer.elements.message.value).toBe("Codex remains active");
+    expect(codex.send).not.toHaveBeenCalled();
+
+    drawer.elements.providerSelect.value = "pi";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    if (status === "succeeded") {
+      expect(drawer.elements.message.value).toBe("");
+      expect(drawer.elements.attachmentList.children).toHaveLength(0);
+      expect(revokeObjectURL).toHaveBeenCalledWith(`blob:replay-${status}`);
+      expect(pi.deleteImage).not.toHaveBeenCalled();
+    } else {
+      expect(drawer.elements.message.value).toBe(`Pi replay ${status}`);
+      expect(drawer.elements.attachmentList.children).toHaveLength(1);
+      expect(drawer.elements.sendButton.disabled).toBe(false);
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+      expect(pi.deleteImage).not.toHaveBeenCalled();
+    }
+    drawer.destroy();
+  });
+
+  test.each([
+    ["pi", "remove"], ["codex", "remove"],
+    ["pi", "new"], ["codex", "new"],
+    ["pi", "destroy"], ["codex", "destroy"],
+  ])("deletes a deferred %s attachment result after %s discard", async (provider, action) => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
+    let options;
+    let resolveUpload;
+    const upload = new Promise((resolve) => { resolveUpload = resolve; });
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+      uploadImage: vi.fn(() => upload), deleteImage: vi.fn(async () => {}),
+    };
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(window.URL, {
+      createObjectURL: { configurable: true, value: vi.fn(() => `blob:${provider}-${action}`) },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(provider === "pi" ? piSnapshotEvent() : codexSnapshotEvent());
+    const file = new File([new Uint8Array([137, 80, 78, 71])], `${action}.png`, { type: "image/png" });
+    Object.defineProperty(drawer.elements.imagePicker, "files", { configurable: true, value: [file] });
+    drawer.elements.imagePicker.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(transport.uploadImage).toHaveBeenCalledOnce());
+    if (action === "remove") drawer.elements.attachmentList.querySelector('button[aria-label^="Remove"]')?.click();
+    else if (action === "new") {
+      drawer.elements.overflowButton.click();
+      [...drawer.elements.overflowMenu.querySelectorAll("button")].find(({ textContent }) => textContent === "New conversation").click();
+      drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
+      await vi.waitFor(() => expect(transport.send.mock.calls.some(([command]) => command.type === "new")).toBe(true));
+    } else drawer.destroy();
+    resolveUpload({ image_id: "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", media_type: "image/png", bytes: file.size });
+    await vi.waitFor(() => expect(transport.deleteImage).toHaveBeenCalledWith("TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT", agentIDs.conversation));
+    expect(transport.deleteImage).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith(`blob:${provider}-${action}`);
+    if (action !== "destroy") {
+      expect(drawer.elements.attachmentList.children).toHaveLength(0);
+      drawer.destroy();
+    }
+  });
+
+  test.each([
+    ["pi", "new"], ["codex", "new"],
+    ["pi", "destroy"], ["codex", "destroy"],
+  ])("deletes a deferred %s inline result after %s discard", async (provider, action) => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
+    let options;
+    let resolveUpload;
+    const upload = new Promise((resolve) => { resolveUpload = resolve; });
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+      uploadImage: vi.fn(() => upload), deleteImage: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, pageURL: "https://board.example/m/abc", transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(provider === "pi" ? piSnapshotEvent() : codexSnapshotEvent());
+    const image = document.createElement("img");
+    image.src = "data:image/png;base64,iVBORw0KGgo=";
+    const pending = drawer.addImageReference({ id: "2", ordinal: 1, alt: "Deferred", block: "2", startLine: 4, endLine: 5, headingPath: [], element: image, referenceID: "U".repeat(32) });
+    await vi.waitFor(() => expect(transport.uploadImage).toHaveBeenCalledOnce());
+    if (action === "new") {
+      drawer.elements.overflowButton.click();
+      [...drawer.elements.overflowMenu.querySelectorAll("button")].find(({ textContent }) => textContent === "New conversation").click();
+      drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
+      await vi.waitFor(() => expect(transport.send.mock.calls.some(([command]) => command.type === "new")).toBe(true));
+    } else drawer.destroy();
+    resolveUpload({ image_id: "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV", media_type: "image/png", bytes: 4 });
+    await expect(pending).rejects.toThrow("draft changed");
+    await vi.waitFor(() => expect(transport.deleteImage).toHaveBeenCalledWith("VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV", agentIDs.conversation));
+    expect(transport.deleteImage).toHaveBeenCalledTimes(1);
+    if (action !== "destroy") {
+      expect(drawer.elements.message.querySelector('[data-reference-kind="image"]')).toBeNull();
+      drawer.destroy();
+    }
   });
 
   test("stages multiple picked and pasted images, previews them, and sends ready references in order", async () => {
@@ -1666,6 +2217,12 @@ describe("local agent rendering and controls", () => {
     expect(document.querySelector(".agent-context")?.textContent).not.toMatch(/digest|delivery outcome|initial or replacement/iu);
     options.onEvent(snapshotEvent({ event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
     expect(drawer.elements.message.value).toBe("second");
+    expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(true);
+    options.onEvent(agentEvent("command_result", {
+      command_id: sent[1].command_id,
+      status: "rejected",
+      error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" },
+    }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
     expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(false);
     drawer.destroy();
   });

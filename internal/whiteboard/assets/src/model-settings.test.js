@@ -2,17 +2,18 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   CODEX_SETTINGS_STORAGE_KEY,
-  createCodexDraftState,
+  PI_SETTINGS_STORAGE_KEY,
+  createSettingsDraftState,
   createModelSettingsControl,
-  editCodexDraft,
+  editSettingsDraft,
   executionSettingsEqual,
   formatExecutionSettings,
   modelCompatibility,
-  readCodexSettingsPreference,
-  reconcileCodexDraft,
-  recordCodexSubmission,
+  readSettingsPreference,
+  reconcileSettingsDraft,
+  recordSettingsSubmission,
   settingsCompatibility,
-  writeCodexSettingsPreference,
+  writeSettingsPreference,
 } from "./model-settings.js";
 
 const sol = {
@@ -49,7 +50,7 @@ beforeEach(() => {
   localStorage.clear();
 });
 
-describe("Codex settings helpers", () => {
+describe("provider settings helpers", () => {
   test("validates compatibility without silently changing effort or speed", () => {
     expect(settingsCompatibility(catalog, fastSol)).toEqual({ compatible: true, reason: null });
     expect(settingsCompatibility(catalog, { ...fastSol, effort: "minimal" })).toEqual({ compatible: false, reason: "effort_unsupported" });
@@ -62,52 +63,64 @@ describe("Codex settings helpers", () => {
     expect(formatExecutionSettings(presentedSol)).toEqual({ visible: "5.6 Sol · High", accessible: "Model 5.6 Sol, effort High, speed Fast", fast: true });
   });
 
+  test("uses isolated provider keys while retaining the exact Codex key and value", () => {
+    writeSettingsPreference(localStorage, "codex", fastSol);
+    writeSettingsPreference(localStorage, "pi", standardLuna);
+    expect(CODEX_SETTINGS_STORAGE_KEY).toBe("agent-whiteboard-codex-settings-v1");
+    expect(PI_SETTINGS_STORAGE_KEY).toBe("agent-whiteboard-pi-settings-v1");
+    expect(readSettingsPreference(localStorage, "codex")).toEqual(fastSol);
+    expect(readSettingsPreference(localStorage, "pi")).toEqual(standardLuna);
+    expect(Object.keys(localStorage).sort()).toEqual([CODEX_SETTINGS_STORAGE_KEY, PI_SETTINGS_STORAGE_KEY].sort());
+    expect(() => readSettingsPreference(localStorage, "other")).not.toThrow();
+    expect(readSettingsPreference(localStorage, "other")).toBeNull();
+  });
+
   test("reads and writes only a complete bounded semantic preference", () => {
-    writeCodexSettingsPreference(localStorage, fastSol);
+    writeSettingsPreference(localStorage, "codex", fastSol);
     expect(localStorage.getItem(CODEX_SETTINGS_STORAGE_KEY)).toBe(JSON.stringify(fastSol));
-    expect(readCodexSettingsPreference(localStorage)).toEqual(fastSol);
+    expect(readSettingsPreference(localStorage, "codex")).toEqual(fastSol);
 
     localStorage.setItem(CODEX_SETTINGS_STORAGE_KEY, JSON.stringify({ ...fastSol, native_tier: "priority" }));
-    expect(readCodexSettingsPreference(localStorage)).toBeNull();
+    expect(readSettingsPreference(localStorage, "codex")).toBeNull();
     localStorage.setItem(CODEX_SETTINGS_STORAGE_KEY, "{bad json");
-    expect(readCodexSettingsPreference(localStorage)).toBeNull();
+    expect(readSettingsPreference(localStorage, "codex")).toBeNull();
     localStorage.setItem(CODEX_SETTINGS_STORAGE_KEY, "x".repeat(1025));
-    expect(readCodexSettingsPreference(localStorage)).toBeNull();
+    expect(readSettingsPreference(localStorage, "codex")).toBeNull();
 
     const disabled = { getItem: vi.fn(() => { throw new Error("disabled"); }), setItem: vi.fn(() => { throw new Error("disabled"); }) };
-    expect(readCodexSettingsPreference(disabled)).toBeNull();
-    expect(() => writeCodexSettingsPreference(disabled, fastSol)).not.toThrow();
-    expect(() => writeCodexSettingsPreference(localStorage, { ...fastSol, speed: "priority" })).toThrow(TypeError);
+    expect(readSettingsPreference(disabled, "codex")).toBeNull();
+    expect(() => writeSettingsPreference(disabled, "codex", fastSol)).not.toThrow();
+    expect(() => writeSettingsPreference(localStorage, "codex", { ...fastSol, speed: "priority" })).toThrow(TypeError);
   });
 
   test("preserves later local intent while advancing accepted effective state", () => {
-    const draft = createCodexDraftState(fastSol);
-    reconcileCodexDraft(draft, { identity: "conversation-a", settingsState: "verified", effectiveSettings: presentedSol, catalog });
+    const draft = createSettingsDraftState(fastSol);
+    reconcileSettingsDraft(draft, { identity: "conversation-a", settingsState: "verified", effectiveSettings: presentedSol, catalog });
     expect(draft.draft).toEqual(fastSol);
     expect(draft.dirty).toBe(false);
 
-    editCodexDraft(draft, { effort: "xhigh" });
-    recordCodexSubmission(draft, "turn-a");
-    editCodexDraft(draft, { speed: "standard" });
+    editSettingsDraft(draft, { effort: "xhigh" });
+    recordSettingsSubmission(draft, "turn-a");
+    editSettingsDraft(draft, { speed: "standard" });
     const accepted = { ...presentedSol, effort: "xhigh" };
-    reconcileCodexDraft(draft, { identity: "conversation-a", settingsState: "verified", effectiveSettings: accepted, catalog, acceptedTurnID: "turn-a" });
+    reconcileSettingsDraft(draft, { identity: "conversation-a", settingsState: "verified", effectiveSettings: accepted, catalog, acceptedTurnID: "turn-a" });
     expect(draft.baseline).toEqual({ model: sol.model, effort: "xhigh", speed: "fast" });
     expect(draft.draft).toEqual({ model: sol.model, effort: "xhigh", speed: "standard" });
     expect(draft.dirty).toBe(true);
 
-    reconcileCodexDraft(draft, { identity: "conversation-a", settingsState: "verified", effectiveSettings: { ...accepted, speed: "standard" }, catalog });
+    reconcileSettingsDraft(draft, { identity: "conversation-a", settingsState: "verified", effectiveSettings: { ...accepted, speed: "standard" }, catalog });
     expect(draft.draft).toEqual({ model: sol.model, effort: "xhigh", speed: "standard" });
     expect(draft.dirty).toBe(false);
   });
 
   test("resets only on a real conversation identity transition and retains dirty state while unverified", () => {
-    const draft = createCodexDraftState(null);
-    reconcileCodexDraft(draft, { identity: "conversation-a", settingsState: "verified", effectiveSettings: presentedSol, catalog });
-    editCodexDraft(draft, { effort: "xhigh" });
-    reconcileCodexDraft(draft, { identity: "conversation-a", settingsState: "unverified", effectiveSettings: null, catalog });
+    const draft = createSettingsDraftState(null);
+    reconcileSettingsDraft(draft, { identity: "conversation-a", settingsState: "verified", effectiveSettings: presentedSol, catalog });
+    editSettingsDraft(draft, { effort: "xhigh" });
+    reconcileSettingsDraft(draft, { identity: "conversation-a", settingsState: "unverified", effectiveSettings: null, catalog });
     expect(draft.draft.effort).toBe("xhigh");
 
-    reconcileCodexDraft(draft, {
+    reconcileSettingsDraft(draft, {
       identity: "conversation-b",
       settingsState: "verified",
       effectiveSettings: { ...standardLuna, model_display_name: luna.model_display_name, selectable: true },
@@ -120,7 +133,7 @@ describe("Codex settings helpers", () => {
   });
 });
 
-describe("Codex settings menu", () => {
+describe("provider settings menu", () => {
   test("renders one accessible pill and nested keyboard menus with disabled compatibility reasons", () => {
     let selected = fastSol;
     let control;
@@ -151,6 +164,17 @@ describe("Codex settings menu", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(control.menu.hidden).toBe(true);
     expect(document.activeElement).toBe(control.button);
+    control.destroy();
+  });
+
+  test("omits Speed when the catalog advertises no fast choice", () => {
+    const piCatalog = catalog.map((model) => ({ ...model, supports_fast: false }));
+    const settings = { ...fastSol, speed: "standard" };
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings, presentation: { ...presentedSol, speed: "standard" }, catalog: piCatalog });
+    control.button.click();
+    expect([...control.menu.querySelectorAll('[data-settings-section]')].map(({ dataset }) => dataset.settingsSection)).toEqual(["model", "effort"]);
     control.destroy();
   });
 

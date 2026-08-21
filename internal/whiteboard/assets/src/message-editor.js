@@ -156,7 +156,7 @@ export function renderMessageContent(doc, content, { interactive = true, onRefer
   return fragment;
 }
 
-export function createMessageEditor({ doc = document, content = { parts: [] }, placeholder = "Ask about this page…", ariaLabel = "Message Page Agent about this whiteboard", onChange = () => {}, onSubmit = () => {} } = {}) {
+export function createMessageEditor({ doc = document, content = { parts: [] }, placeholder = "Ask about this page…", ariaLabel = "Message Page Agent about this whiteboard", maxSelectedSkills = MESSAGE_LIMITS.skills, onChange = () => {}, onSubmit = () => {} } = {}) {
   const root = doc.createElement("div");
   root.className = "agent-message-editor";
   root.contentEditable = "true";
@@ -168,6 +168,7 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
   let model = normalizeMessageContent(content);
   let savedCaret = { part: model.parts.length, offset: 0 };
   let composing = false;
+  let skillLimit = Number.isInteger(maxSelectedSkills) && maxSelectedSkills >= 0 && maxSelectedSkills <= MESSAGE_LIMITS.skills ? maxSelectedSkills : MESSAGE_LIMITS.skills;
   const references = new Map();
   const skills = new Map();
   const skillDisplayNames = new Map();
@@ -336,7 +337,8 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
       return cloneMessageContent(model);
     },
     insertSkill(skill) {
-      if (!skill || typeof skill.id !== "string" || typeof skill.name !== "string" || model.parts.some((part) => part.type === "skill" && (part.skill.id === skill.id || part.skill.name === skill.name))) return cloneMessageContent(model);
+      const selectedSkills = model.parts.filter((part) => part.type === "skill");
+      if (!skill || typeof skill.id !== "string" || typeof skill.name !== "string" || selectedSkills.length >= skillLimit || selectedSkills.some((part) => part.skill.id === skill.id || part.skill.name === skill.name)) return cloneMessageContent(model);
       skillDisplayNames.set(skill.id, skillDisplayLabel(skill));
       const result = insertAtomicPart(model, { type: "skill", skill: { id: skill.id, name: skill.name } }, savedCaret);
       model = result.content;
@@ -345,6 +347,10 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
       restoreCaret();
       onChange(cloneMessageContent(model));
       return cloneMessageContent(model);
+    },
+    setMaxSelectedSkills(limit) {
+      if (!Number.isInteger(limit) || limit < 0 || limit > MESSAGE_LIMITS.skills) throw new TypeError("invalid skill selection limit");
+      skillLimit = limit;
     },
     markUnavailableSkills(availableIDs) {
       const available = new Set(availableIDs);
