@@ -220,6 +220,31 @@ func TestCodexCompactLifecycleAndStopAreSharedAcrossTabs(t *testing.T) {
 	require.Equal(t, nextWorkID, receiveLifecycle(t, session.compacted).WorkID)
 }
 
+func TestCompactAcceptanceUnknownRetainsOwnershipUntilCorrelatedTerminal(t *testing.T) {
+	broker, _, session, connection, _ := codexSettingsFixture(t, 8240)
+	defer broker.Close(context.Background())
+	defer connection.Close(context.Background())
+	conversationID := connection.ConversationID()
+	clientID := sequenceID(8241)
+	workID := sequenceID(8242)
+	session.compactErr = provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+
+	result, err := connection.Command(context.Background(), codexCompact(sequenceID(8243), clientID, conversationID, workID))
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandRejected, protocol.ErrorAcceptanceOutcomeUnknown)
+	require.Equal(t, workID, receiveLifecycle(t, session.compacted).WorkID)
+	unavailable := receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload)
+	require.Equal(t, protocol.LifecycleUnavailable, unavailable.State)
+	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
+
+	session.events <- provider.NewCompactEvent(workID, provider.CompactCompleted)
+	terminal := receiveLifecycle(t, connection.Events())
+	require.Equal(t, protocol.CompactionPayload{WorkID: workID, Status: protocol.CompactionCompleted}, terminal.Payload)
+	lifecycle := receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload)
+	require.Equal(t, protocol.LifecycleReady, lifecycle.State)
+	require.Nil(t, lifecycle.ActiveWork)
+}
+
 func TestCodexCompactUnsupportedDowngradesRuntimeCapability(t *testing.T) {
 	broker, _, session, connection, _ := codexSettingsFixture(t, 8240)
 	defer broker.Close(context.Background())

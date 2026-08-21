@@ -13,6 +13,7 @@ const (
 	compactStarting compactPhase = iota
 	compactRunning
 	compactStopping
+	compactAcceptanceUnknown
 )
 
 type activeCompact struct {

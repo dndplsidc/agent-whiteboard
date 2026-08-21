@@ -72,6 +72,20 @@ func (actor *conversation) handleCompactWorkerResult(attachments map[*clientAtta
 		if code == protocol.ErrorCompactUnsupported {
 			actor.supportsCompact = false
 		}
+		if code == protocol.ErrorAcceptanceOutcomeUnknown {
+			pendingTerminal := actor.compact.pendingTerminal
+			actor.compact.pendingTerminal = nil
+			actor.compact.phase = compactAcceptanceUnknown
+			actor.compact.originCommandID = ""
+			actor.compact.originClientID = ""
+			actor.lifecycle = protocol.LifecycleUnavailable
+			actor.publishShared(attachments, actor.lifecyclePayload())
+			actor.completePendingCommand(attachments, result.commandID, result.clientID, code)
+			if pendingTerminal != nil {
+				actor.publishCompactTerminal(attachments, *pendingTerminal)
+			}
+			return
+		}
 		actor.compact = nil
 		actor.lifecycle = protocol.LifecycleReady
 		actor.completePendingCommand(attachments, result.commandID, result.clientID, code)
@@ -107,7 +121,7 @@ func (actor *conversation) publishSkillCatalog(attachments map[*clientAttachment
 }
 
 func (actor *conversation) publishCompactTerminal(attachments map[*clientAttachment]struct{}, source provider.Event) {
-	if source.Compact == nil || actor.compact == nil || actor.compact.accepted == nil || source.Compact.WorkID != actor.compact.request.WorkID {
+	if source.Compact == nil || actor.compact == nil || (actor.compact.accepted == nil && actor.compact.phase != compactAcceptanceUnknown) || source.Compact.WorkID != actor.compact.request.WorkID {
 		actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
 		return
 	}

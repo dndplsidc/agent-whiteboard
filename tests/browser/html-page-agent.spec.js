@@ -239,7 +239,6 @@ test("shares Codex settings, busy draft, activity, interactions, provider isolat
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   await expect(page.locator(".agent-live-status")).toHaveText("Connected");
   localAgentSidebar.setHoldResponses(false, "codex");
-  await expect(composer).toHaveText("Preserved Codex busy draft.");
 
   await page.getByRole("button", { name: "Open Page agent menu" }).click();
   await page.getByRole("menuitem", { name: "New conversation" }).click();

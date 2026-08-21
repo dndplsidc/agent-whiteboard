@@ -472,6 +472,28 @@ function createSidebarBroker(initialAllowedOrigin) {
   const fixtureImages = new Map();
   let imageSequence = 300;
   let nextImageFailure = null;
+  const piCatalog = [{
+    model: "fixture-provider/fixture-model",
+    model_display_name: "fixture-model",
+    description: "Hermetic Pi reasoning model.",
+    default_effort: "off",
+    supported_reasoning_efforts: [
+      { effort: "off", description: "Reasoning disabled." },
+      { effort: "high", description: "Deeper reasoning." },
+    ],
+    supports_images: true,
+    default: true,
+    supports_fast: false,
+  }, {
+    model: "fixture-provider/text-model",
+    model_display_name: "fixture-text",
+    description: "Hermetic Pi text-only model.",
+    default_effort: "off",
+    supported_reasoning_efforts: [{ effort: "off", description: "Reasoning disabled." }],
+    supports_images: false,
+    default: false,
+    supports_fast: false,
+  }];
   const codexCatalog = [{
     model: "gpt-5.6-sol",
     model_display_name: "5.6 Sol",
@@ -495,15 +517,32 @@ function createSidebarBroker(initialAllowedOrigin) {
     default: false,
     supports_fast: false,
   }];
-  const presentedSettings = (settings) => {
-    const model = codexCatalog.find(({ model: value }) => value === settings.model);
+  const providerDefinitions = {
+    pi: {
+      conversationID: protocolID(201), sequence: 1, identitySequence: 40, archiveID: protocolID(220),
+      catalog: piCatalog, defaultSettings: { model: "fixture-provider/fixture-model", effort: "off", speed: "standard" },
+      skills: [{ id: protocolID(229), name: "pi-review", display_name: "Pi review", description: "Review with the isolated Pi skill", scope: "user" }],
+      maxSelectedSkills: 1, supportsCompact: true, busyPolicy: "queue",
+    },
+    codex: {
+      conversationID: protocolID(202), sequence: 101, identitySequence: 80, archiveID: protocolID(221),
+      catalog: codexCatalog, defaultSettings: { model: "gpt-5.6-sol", effort: "high", speed: "fast" },
+      skills: [
+        { id: protocolID(230), name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" },
+        { id: protocolID(231), name: "personal-helper-with-an-intentionally-long-name-for-narrow-layout", display_name: "Personal helper with an intentionally long name for narrow layout", description: "Use a personally installed skill with a long description that must remain contained in the compact row", scope: "user" },
+      ],
+      maxSelectedSkills: 16, supportsCompact: true, busyPolicy: "preserve_draft",
+    },
+  };
+  for (const definition of Object.values(providerDefinitions)) {
+    const selected = definition.catalog.find(({ model }) => model === definition.defaultSettings.model);
+    definition.effectiveSettings = { ...definition.defaultSettings, model_display_name: selected.model_display_name, selectable: true };
+    definition.model = selected.model_display_name;
+  }
+  const presentedSettings = (state, settings) => {
+    const model = state.catalog.find(({ model: value }) => value === settings.model);
     if (!model) throw new Error(`unknown fixture model: ${settings.model}`);
     return { ...settings, model_display_name: model.model_display_name, selectable: true };
-  };
-  const defaultCodexSettings = presentedSettings({ model: "gpt-5.6-sol", effort: "high", speed: "fast" });
-  const providerDefinitions = {
-    pi: { conversationID: protocolID(201), model: "fixture-model", sequence: 1, identitySequence: 40, archiveID: protocolID(220) },
-    codex: { conversationID: protocolID(202), model: defaultCodexSettings.model_display_name, sequence: 101, identitySequence: 80, archiveID: protocolID(221) },
   };
   const createProviderState = (provider) => {
     const definition = providerDefinitions[provider];
@@ -511,10 +550,10 @@ function createSidebarBroker(initialAllowedOrigin) {
       provider,
       ...definition,
       available: true,
-      supportsImages: provider === "codex" ? codexCatalog[0].supports_images : true,
-      settingsState: provider === "codex" ? "verified" : null,
-      effectiveSettings: provider === "codex" ? { ...defaultCodexSettings } : null,
-      catalog: provider === "codex" ? structuredClone(codexCatalog) : [],
+      supportsImages: definition.catalog.find(({ model }) => model === definition.defaultSettings.model).supports_images,
+      settingsState: "verified",
+      effectiveSettings: { ...definition.effectiveSettings },
+      catalog: structuredClone(definition.catalog),
       rejectNextSettings: false,
       rejectionCatalog: null,
       applyConnectSettings: false,
@@ -529,12 +568,11 @@ function createSidebarBroker(initialAllowedOrigin) {
       activeCompact: null,
       holdInterruptCompletion: false,
       pendingInterruptCompletion: null,
-      skillsState: provider === "codex" ? "ready" : null,
-      skills: provider === "codex" ? [
-        { id: protocolID(230), name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" },
-        { id: protocolID(231), name: "personal-helper-with-an-intentionally-long-name-for-narrow-layout", display_name: "Personal helper with an intentionally long name for narrow layout", description: "Use a personally installed skill with a long description that must remain contained in the compact row", scope: "user" },
-      ] : [],
-      supportsCompact: provider === "codex",
+      skillsState: "ready",
+      skills: structuredClone(definition.skills),
+      maxSelectedSkills: definition.maxSelectedSkills,
+      supportsCompact: definition.supportsCompact,
+      busyPolicy: definition.busyPolicy,
       pendingResponse: null,
       queue: [],
       history: [],
@@ -588,7 +626,10 @@ function createSidebarBroker(initialAllowedOrigin) {
     catalog: structuredClone(state.catalog),
     skills_state: state.skillsState,
     skills: structuredClone(state.skills),
+    max_selected_skills: state.maxSelectedSkills,
     supports_compact: state.supportsCompact,
+    busy_policy: state.busyPolicy,
+    composer_admission: state.activeTurn !== null || state.activeCompact !== null ? state.busyPolicy : "submit",
   });
   const archivePayload = (state, { id = state.archiveID, createdAt = "2026-07-26T01:02:03Z", updatedAt = "2026-07-26T02:03:04Z", preview = "" } = {}) => ({
     archive_id: id,
@@ -628,6 +669,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     broadcast(state, event, clientID);
     return event;
   };
+  const emitSnapshot = (state) => emit(state, "snapshot", snapshotPayload(state));
   const bootstrapEvents = (state, replayAfter) => {
     if (replayAfter) {
       const position = state.eventPositions.get(replayAfter);
@@ -670,7 +712,7 @@ function createSidebarBroker(initialAllowedOrigin) {
       if (state.queue.length > 0) {
         const next = state.queue.shift();
         emit(state, "queue", { items: state.queue.map((item) => structuredClone(item)) });
-        if (state.provider === "codex") acceptCodexSettings(state, {
+        acceptSettings(state, {
           model: next.settings.model,
           effort: next.settings.effort,
           speed: next.settings.speed,
@@ -686,12 +728,13 @@ function createSidebarBroker(initialAllowedOrigin) {
         emit(state, "lifecycle", { state: "responding", active_work: { work_id: next.turn_id, kind: "turn", state: "running" } });
         state.pendingResponse = { turnID: next.turn_id, assistantID: protocolID(state.identitySequence++), createdAt: response.createdAt, phase: "responding" };
       }
+      emitSnapshot(state);
       return;
     }
     throw new Error(`sidebar response cannot release ${phase} from ${response.phase}`);
   };
-  const acceptCodexSettings = (state, settings, turnID) => {
-    state.effectiveSettings = presentedSettings(settings);
+  const acceptSettings = (state, settings, turnID) => {
+    state.effectiveSettings = presentedSettings(state, settings);
     state.model = state.effectiveSettings.model_display_name;
     state.supportsImages = state.catalog.find(({ model }) => model === settings.model).supports_images;
     state.acceptedSettings.push({ turn_id: turnID, settings: structuredClone(settings) });
@@ -708,7 +751,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     if (command.type === "history_page") {
       targetedEvent(state, "timeline", { command_id: command.command_id, items: [...state.history].reverse(), next_cursor: null }, command.client_id);
     } else if (command.type === "submit") {
-      if (state.provider === "codex" && state.rejectNextSettings) {
+      if (state.rejectNextSettings) {
         state.rejectNextSettings = false;
         state.catalog = state.rejectionCatalog ?? state.catalog;
         state.rejectionCatalog = null;
@@ -736,12 +779,12 @@ function createSidebarBroker(initialAllowedOrigin) {
           turn_id: command.payload.turn_id,
           message_id: command.payload.message_id,
           content,
-          settings: state.provider === "codex" ? presentedSettings(command.payload.settings) : null,
+          settings: presentedSettings(state, command.payload.settings),
           ...(imageDescriptors.length ? { images: imageDescriptors } : {}),
         });
         emit(state, "queue", { items: state.queue.map((item) => structuredClone(item)) });
       } else {
-        if (state.provider === "codex") acceptCodexSettings(state, command.payload.settings, command.payload.turn_id);
+        acceptSettings(state, command.payload.settings, command.payload.turn_id);
         if (command.payload.context) {
           state.contextState = "accepted";
           state.contextDigest = command.payload.context.digest;
@@ -754,17 +797,18 @@ function createSidebarBroker(initialAllowedOrigin) {
         emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, content: user.content, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt });
         emit(state, "lifecycle", { state: "responding", active_work: { work_id: command.payload.turn_id, kind: "turn", state: "running" } });
         const assistantID = protocolID(150 + state.history.length + (state.provider === "codex" ? 25 : 0));
-        if (state.phaseResponses) {
+        if (state.phaseResponses || !state.holdResponses) {
           state.pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
-        } else if (!state.holdResponses) {
-          state.pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
+        }
+        emitSnapshot(state);
+        if (!state.phaseResponses && !state.holdResponses) {
           emitResponsePhase("first_delta", state.provider);
           emitResponsePhase("later_delta", state.provider);
           emitResponsePhase("completion", state.provider);
         }
       }
     } else if (command.type === "new") {
-      if (state.provider === "codex" && state.rejectNextSettings) {
+      if (state.rejectNextSettings) {
         state.rejectNextSettings = false;
         return commandResult(state, command, { code: "invalid_model_configuration", message: "The selected model settings are no longer available.", action: "configure_model" });
       }
@@ -776,11 +820,9 @@ function createSidebarBroker(initialAllowedOrigin) {
       state.pendingResponse = null;
       state.queue = [];
       state.history = [];
-      if (state.provider === "codex") {
-        state.effectiveSettings = presentedSettings(command.payload.settings);
-        state.model = state.effectiveSettings.model_display_name;
-        state.supportsImages = state.catalog.find(({ model }) => model === command.payload.settings.model).supports_images;
-      }
+      state.effectiveSettings = presentedSettings(state, command.payload.settings);
+      state.model = state.effectiveSettings.model_display_name;
+      state.supportsImages = state.catalog.find(({ model }) => model === command.payload.settings.model).supports_images;
       setImmediate(() => {
         for (const stream of [...streams]) {
           if (stream.provider === state.provider) stream.response.end();
@@ -801,10 +843,11 @@ function createSidebarBroker(initialAllowedOrigin) {
         state.queue.splice(index, 1);
       }
       emit(state, "queue", { items: state.queue.map((candidate) => ({ ...candidate })) });
-    } else if (command.type === "compact" && state.provider === "codex" && state.activeTurn === null && state.activeCompact === null) {
+    } else if (command.type === "compact" && state.supportsCompact && state.activeTurn === null && state.activeCompact === null) {
       state.activeCompact = command.payload.work_id;
       emit(state, "lifecycle", { state: "compacting", active_work: { work_id: state.activeCompact, kind: "compact", state: "running" } });
       emit(state, "compaction", { work_id: state.activeCompact, status: "running" });
+      emitSnapshot(state);
     } else if (command.type === "interrupt" && state.activeTurn === command.payload.work_id) {
       emit(state, "lifecycle", { state: "responding", active_work: { work_id: state.activeTurn, kind: "turn", state: "stopping" } });
       const complete = () => {
@@ -821,6 +864,7 @@ function createSidebarBroker(initialAllowedOrigin) {
         emit(state, "compaction", { work_id: state.activeCompact, status: "interrupted" });
         state.activeCompact = null;
         emit(state, "lifecycle", { state: "interrupted", active_work: null });
+        emitSnapshot(state);
       };
       if (state.holdInterruptCompletion) state.pendingInterruptCompletion = complete;
       else complete();
@@ -931,8 +975,8 @@ function createSidebarBroker(initialAllowedOrigin) {
           sendJSON(response, record, 503, { error: { code: "provider_missing", message: "The selected provider executable is not available.", action: "install_provider" } });
           return;
         }
-        if (state.provider === "codex" && state.applyConnectSettings && command.payload.settings !== null) {
-          state.effectiveSettings = presentedSettings(command.payload.settings);
+        if (state.applyConnectSettings && command.payload.settings !== null) {
+          state.effectiveSettings = presentedSettings(state, command.payload.settings);
           state.model = state.effectiveSettings.model_display_name;
           state.supportsImages = state.catalog.find(({ model }) => model === command.payload.settings.model).supports_images;
           state.applyConnectSettings = false;
@@ -1043,7 +1087,12 @@ function createSidebarBroker(initialAllowedOrigin) {
     setResponseText(value, provider = "pi") { providerState(provider).responseText = value; },
     releaseResponsePhase: emitResponsePhase,
     setProviderAvailable(provider, value) { providerState(provider).available = value; },
-    setSupportsImages(provider, value) { providerState(provider).supportsImages = value; },
+    setSupportsImages(provider, value) {
+      const state = providerState(provider);
+      state.supportsImages = value;
+      const selected = state.catalog.find(({ model }) => model === state.effectiveSettings?.model);
+      if (selected) selected.supports_images = value;
+    },
     setArchiveMode(value, provider = "pi") { providerState(provider).archiveMode = value; },
     setArchiveDelay(value, provider = "pi") { providerState(provider).archiveDelay = value; },
     releaseArchiveList(provider = "pi") {
@@ -1057,7 +1106,7 @@ function createSidebarBroker(initialAllowedOrigin) {
       const state = providerState(provider);
       state.skills = structuredClone(skills);
       state.skillsState = "ready";
-      emit(state, "skill_catalog", { state: state.skillsState, skills: structuredClone(state.skills) });
+      emit(state, "skill_catalog", { state: state.skillsState, skills: structuredClone(state.skills), max_selected_skills: state.maxSelectedSkills });
     },
     completeCompact(status = "completed", provider = "codex") {
       const state = providerState(provider);
@@ -1065,6 +1114,7 @@ function createSidebarBroker(initialAllowedOrigin) {
       emit(state, "compaction", { work_id: state.activeCompact, status });
       state.activeCompact = null;
       emit(state, "lifecycle", { state: status === "interrupted" ? "interrupted" : "ready", active_work: null });
+      emitSnapshot(state);
     },
     rejectNextSettings(provider = "codex") {
       const state = providerState(provider);
@@ -1088,7 +1138,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     },
     restoreSettings(settings, provider = "codex") {
       const state = providerState(provider);
-      state.effectiveSettings = presentedSettings(settings);
+      state.effectiveSettings = presentedSettings(state, settings);
       state.model = state.effectiveSettings.model_display_name;
       state.supportsImages = state.catalog.find(({ model }) => model === settings.model).supports_images;
       emit(state, "archive", { action: "restored", archive_id: state.archiveID });
@@ -1155,7 +1205,8 @@ function createSidebarBroker(initialAllowedOrigin) {
         working_directory: payload.working_directory ?? "",
         options: payload.options ?? [],
         questions: payload.questions ?? [],
-        fields: payload.fields ?? [],
+        fields: (payload.fields ?? []).map((field) => ({ multiline: false, ...field })),
+        local_deadline: payload.local_deadline ?? null,
       };
       if (request.turn_id === undefined) delete request.turn_id;
       state.interactions.set(requestID, { requestID, kind: request.kind, resolved: false, response: null });
@@ -1241,6 +1292,11 @@ function createPiModelServer() {
     releaseFirstDelta: () => releasePhase("first_delta"),
     releaseLaterDelta: () => releasePhase("later_delta"),
     releaseCompletion: () => releasePhase("completion"),
+    async releaseCompactionSummary() {
+      await releasePhase("first_delta");
+      await releasePhase("later_delta");
+      await releasePhase("completion");
+    },
     closePending() {
       if (pendingStream && !pendingStream.response.writableEnded) pendingStream.response.end();
       pendingStream = null;
@@ -1515,9 +1571,12 @@ export const test = base.extend({
       const root = path.join(server.root, "real-agent-sidebar");
       const home = path.join(root, "home");
       const piConfig = path.join(home, ".pi", "agent");
+      const skillDirectory = path.join(root, "test-skill", "whiteboard-review");
+      const extensionDirectory = path.join(piConfig, "extensions");
       const temporary = path.join(root, "tmp");
       await Promise.all([
-        fs.mkdir(piConfig, { recursive: true, mode: 0o700 }),
+        fs.mkdir(skillDirectory, { recursive: true, mode: 0o700 }),
+        fs.mkdir(extensionDirectory, { recursive: true, mode: 0o700 }),
         fs.mkdir(temporary, { recursive: true, mode: 0o700 }),
       ]);
       const model = createPiModelServer();
@@ -1528,18 +1587,26 @@ export const test = base.extend({
         fs.writeFile(path.join(piConfig, "models.json"), `${JSON.stringify({ providers: {
           [providerName]: {
             baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: "openai-completions", apiKey: "browser-placeholder-key",
-            models: [{ id: providerName, name: "Agent Whiteboard Browser", reasoning: false, input: ["text"], contextWindow: 32768, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+            models: [
+              { id: providerName, name: "Agent Whiteboard Browser", reasoning: true, thinkingLevelMap: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null }, input: ["text"], contextWindow: 32768, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+              { id: `${providerName}-alternate`, name: "Agent Whiteboard Alternate", reasoning: false, input: ["text"], contextWindow: 32768, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+            ],
           },
         } }, null, 2)}\n`, { mode: 0o600 }),
         fs.writeFile(path.join(piConfig, "settings.json"), `${JSON.stringify({
-          defaultProvider: providerName, defaultModel: providerName, defaultThinkingLevel: "off", defaultProjectTrust: "never",
-          enableInstallTelemetry: false, compaction: { enabled: false }, retry: { enabled: false, provider: { timeoutMs: 5000, maxRetries: 0 } },
+          defaultProvider: providerName, defaultModel: providerName, defaultThinkingLevel: "off", defaultProjectTrust: "never", enableSkillCommands: true,
+          extensions: [path.join(extensionDirectory, "whiteboard-m3.ts")],
+          enableInstallTelemetry: false, compaction: { enabled: false, reserveTokens: 512, keepRecentTokens: 1 }, retry: { enabled: false, provider: { timeoutMs: 5000, maxRetries: 0 } },
         }, null, 2)}\n`, { mode: 0o600 }),
+        fs.writeFile(path.join(skillDirectory, "SKILL.md"), `---\nname: whiteboard-review\ndescription: Verify the exact Page Agent provider envelope.\n---\n\nREAL_PI_SKILL_FRAME\n`, { mode: 0o600 }),
+        fs.writeFile(path.join(extensionDirectory, "whiteboard-m3.ts"), `export default function (pi) {\n  pi.on("before_provider_request", async (event, ctx) => {\n    if (!JSON.stringify(event.payload).includes("M3_REAL_PI_INTERACTION")) return;\n    ctx.ui.setStatus("m3", "private status must stay hidden");\n    ctx.ui.notify("Real Pi passive notice", "info");\n    ctx.ui.notify("Real Pi passive notice", "info");\n    const value = await ctx.ui.editor("Real Pi multiline response", "Initial line");\n    ctx.ui.notify(value === "First line\\nSecond line" ? "Real Pi multiline exact" : "Real Pi multiline mismatch", "info");\n  });\n}\n`, { mode: 0o600 }),
       ]);
       const configPath = path.join(root, "config.yaml");
       await fs.writeFile(configPath, `version: 1\nagent:\n  trusted_origins:\n    - "${localAgentSidebar.origin}"\n  provider_idle_timeout: 10m\n  shutdown_timeout: 10s\n  default_access: configured\n`, { mode: 0o600 });
       const agentPort = await reserveLoopbackPort();
-      const piExecutable = path.join(projectRoot, "node_modules", ".bin", "pi");
+      const realPiExecutable = path.join(projectRoot, "node_modules", ".bin", "pi");
+      const piExecutable = path.join(root, "pi-with-test-skill");
+      await fs.writeFile(piExecutable, `#!/bin/sh\nexec ${JSON.stringify(realPiExecutable)} --skill ${JSON.stringify(path.join(skillDirectory, "SKILL.md"))} "$@"\n`, { mode: 0o700 });
       const env = { ...isolatedEnvironment(home), TMPDIR: temporary };
       const child = spawn(server.binary, ["--config", configPath, "agent", "serve", "--port", String(agentPort), "--pi-executable", piExecutable], {
         cwd: root, env, stdio: ["ignore", "pipe", "pipe"],
@@ -1569,6 +1636,7 @@ export const test = base.extend({
           releaseModelFirstDelta: model.releaseFirstDelta,
           releaseModelLaterDelta: model.releaseLaterDelta,
           releaseModelCompletion: model.releaseCompletion,
+          releaseCompactionSummary: model.releaseCompactionSummary,
           agentOutput: output,
         });
       } finally {

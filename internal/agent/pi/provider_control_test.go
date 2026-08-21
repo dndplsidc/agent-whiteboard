@@ -534,27 +534,68 @@ func TestPiCompactWriteThenCancelRetainsOwnershipUntilLateTerminal(t *testing.T)
 	}
 }
 
-func TestPiCompactStartBeforeNegativeResponseRetainsOwnershipUntilTerminal(t *testing.T) {
+func TestPiCompactNegativeResponseAfterAcceptedStartFailsExactlyOnce(t *testing.T) {
 	session, child := newBehaviorSession(t)
 	request := provider.CompactRequest{WorkID: behaviorID(100)}
-	answer := make(chan error, 1)
-	go func() { _, err := session.Compact(context.Background(), request); answer <- err }()
+	answer := make(chan struct {
+		accepted provider.AcceptedCompact
+		err      error
+	}, 1)
+	go func() {
+		accepted, err := session.Compact(context.Background(), request)
+		answer <- struct {
+			accepted provider.AcceptedCompact
+			err      error
+		}{accepted, err}
+	}()
 	command := child.readCommand(t)
 	require.Equal(t, "compact", command["type"])
 	child.writeRecord(t, map[string]any{"type": "compaction_start"})
+	resolved := <-answer
+	require.NoError(t, resolved.err)
+	require.Equal(t, request.WorkID, resolved.accepted.WorkID)
 	child.writeRecord(t, map[string]any{"id": command["id"], "type": "response", "command": "compact", "success": false, "error": "contradictory rejection"})
-	assertProviderCode(t, <-answer, provider.ErrorAcceptanceUnknown)
-	assertPiCompactAdmissionBlocked(t, session)
-	child.writeRecord(t, map[string]any{"type": "compaction_end"})
 	event := receiveProviderEvents(t, session.Events(), 1)[0]
 	require.Equal(t, provider.EventCompact, event.Kind)
-	require.Equal(t, provider.CompactCompleted, event.Compact.Status)
+	require.Equal(t, provider.CompactFailed, event.Compact.Status)
 	require.Equal(t, request.WorkID, event.Compact.WorkID)
+	child.writeRecord(t, map[string]any{"type": "compaction_end"})
 	select {
 	case duplicate := <-session.Events():
 		t.Fatalf("duplicate compact terminal: %#v", duplicate)
 	case <-time.After(20 * time.Millisecond):
 	}
+}
+
+func TestPiCompactRPCFailureAfterAcceptedStartFailsExactlyOnce(t *testing.T) {
+	session, child := newBehaviorSession(t)
+	request := provider.CompactRequest{WorkID: behaviorID(103)}
+	answer := make(chan struct {
+		accepted provider.AcceptedCompact
+		err      error
+	}, 1)
+	go func() {
+		accepted, err := session.Compact(context.Background(), request)
+		answer <- struct {
+			accepted provider.AcceptedCompact
+			err      error
+		}{accepted, err}
+	}()
+	command := child.readCommand(t)
+	require.Equal(t, "compact", command["type"])
+	child.writeRecord(t, map[string]any{"type": "compaction_start"})
+	resolved := <-answer
+	require.NoError(t, resolved.err)
+	require.Equal(t, request.WorkID, resolved.accepted.WorkID)
+
+	child.closeOutput()
+	terminals := 0
+	for event := range session.Events() {
+		if event.Kind == provider.EventCompact && event.Compact.WorkID == request.WorkID && event.Compact.Status == provider.CompactFailed {
+			terminals++
+		}
+	}
+	require.Equal(t, 1, terminals)
 }
 
 func assertPiCompactAdmissionBlocked(t *testing.T, session *Session) {
@@ -587,13 +628,13 @@ func TestPiCompactCorrelatesStartResponseAndOneTerminal(t *testing.T) {
 	command := child.readCommand(t)
 	require.Equal(t, "compact", command["type"])
 	child.writeRecord(t, map[string]any{"type": "compaction_start"})
-	child.writeRecord(t, responseRecord(command, nil))
 	resolved := <-answer
 	require.NoError(t, resolved.err)
 	require.Equal(t, request.WorkID, resolved.accepted.WorkID)
 	child.writeRecord(t, map[string]any{"type": "compaction_end"})
 	event := receiveProviderEvents(t, session.Events(), 1)[0]
 	require.Equal(t, provider.CompactCompleted, event.Compact.Status)
+	child.writeRecord(t, responseRecord(command, nil))
 	child.writeRecord(t, map[string]any{"type": "compaction_end"})
 	select {
 	case duplicate := <-session.Events():

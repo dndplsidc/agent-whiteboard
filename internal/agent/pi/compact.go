@@ -11,13 +11,20 @@ import (
 )
 
 type activeCompact struct {
-	request           provider.CompactRequest
-	started           chan struct{}
-	startOnce         sync.Once
-	terminal          bool
-	interrupt         bool
-	acceptedAt        time.Time
-	startsAtAdmission uint64
+	request    provider.CompactRequest
+	started    chan struct{}
+	startOnce  sync.Once
+	callDone   chan struct{}
+	callResult compactCallResult
+	terminal   bool
+	interrupt  bool
+	acceptedAt time.Time
+}
+
+type compactCallResult struct {
+	response rpcResponse
+	wrote    bool
+	err      error
 }
 
 func (*Session) SupportsCompact() bool { return true }
@@ -28,7 +35,7 @@ func (s *Session) Compact(ctx context.Context, request provider.CompactRequest) 
 	if request.Validate() != nil {
 		return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	work := &activeCompact{request: request, started: make(chan struct{}), startsAtAdmission: s.rpc.compactionStartCount()}
+	work := &activeCompact{request: request, started: make(chan struct{}), callDone: make(chan struct{})}
 	s.mu.Lock()
 	if s.active != nil || s.compact != nil || s.shutdownStarted {
 		s.mu.Unlock()
@@ -36,39 +43,79 @@ func (s *Session) Compact(ctx context.Context, request provider.CompactRequest) 
 	}
 	s.compact = work
 	s.mu.Unlock()
-	response, wrote, err := s.rpc.call(ctx, "compact", nil)
-	if err != nil {
-		if wrote {
+
+	// Pi resolves the compact RPC only after its compaction stream has ended.
+	// Keep that call session-owned so caller cancellation cannot abandon its
+	// response, while compaction_start can establish acceptance immediately.
+	go s.runCompactCall(work)
+
+	callDone := work.callDone
+	for {
+		select {
+		case <-work.started:
+			return s.acceptCompact(work)
+		case <-callDone:
+			callDone = nil
+			s.mu.Lock()
+			result := work.callResult
+			accepted := !work.acceptedAt.IsZero()
+			s.mu.Unlock()
+			if accepted {
+				return s.acceptCompact(work)
+			}
+			if result.err != nil {
+				if result.wrote {
+					return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+				}
+				return provider.AcceptedCompact{}, result.err
+			}
+			if requireSuccessfulResponse(result.response, "compact") != nil {
+				return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorProtocolFailure)
+			}
+		case <-ctx.Done():
+			return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+		case <-s.rpc.done:
+			s.mu.Lock()
+			accepted := !work.acceptedAt.IsZero()
+			s.mu.Unlock()
+			if accepted {
+				return s.acceptCompact(work)
+			}
 			return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
 		}
-		s.clearCompact(work)
-		return provider.AcceptedCompact{}, err
 	}
-	if requireSuccessfulResponse(response, "compact") != nil {
-		s.mu.Lock()
-		started := !work.acceptedAt.IsZero() || s.rpc.compactionStartCount() > work.startsAtAdmission
-		s.mu.Unlock()
-		if started {
-			return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+}
+
+func (s *Session) runCompactCall(work *activeCompact) {
+	response, wrote, err := s.rpc.call(context.Background(), "compact", nil)
+	result := compactCallResult{response: response, wrote: wrote, err: err}
+	failed := err != nil || requireSuccessfulResponse(response, "compact") != nil
+
+	s.mu.Lock()
+	work.callResult = result
+	accepted := !work.acceptedAt.IsZero()
+	terminal := work.terminal
+	owned := s.compact == work
+	s.mu.Unlock()
+
+	if failed && owned && !terminal {
+		if accepted || err == nil {
+			s.finishCompact(work, provider.CompactFailed)
+		} else if !wrote {
+			s.clearCompact(work)
 		}
-		s.finishCompact(work, provider.CompactFailed)
-		return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	select {
-	case <-work.started:
-	case <-ctx.Done():
-		return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
-	case <-s.rpc.done:
-		return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
-	}
+	close(work.callDone)
+}
+
+func (s *Session) acceptCompact(work *activeCompact) (provider.AcceptedCompact, error) {
 	s.mu.Lock()
 	acceptedAt := work.acceptedAt
-	terminal := work.terminal
 	s.mu.Unlock()
-	if terminal || acceptedAt.IsZero() {
+	if acceptedAt.IsZero() {
 		return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	accepted := provider.AcceptedCompact{WorkID: request.WorkID, AcceptedAt: acceptedAt}
+	accepted := provider.AcceptedCompact{WorkID: work.request.WorkID, AcceptedAt: acceptedAt}
 	if accepted.Validate() != nil {
 		return provider.AcceptedCompact{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
 	}
@@ -139,8 +186,8 @@ func (s *Session) compactEnded() bool {
 		work.terminal = true
 		s.compact = nil
 		work.startOnce.Do(func() { close(work.started) })
-		s.mu.Unlock()
 		s.emit(provider.NewCompactEvent(work.request.WorkID, provider.CompactFailed))
+		s.mu.Unlock()
 		return true
 	}
 	interrupted := work.interrupt
@@ -161,8 +208,8 @@ func (s *Session) finishCompact(work *activeCompact, status provider.CompactStat
 	}
 	work.terminal = true
 	s.compact = nil
-	s.mu.Unlock()
 	s.emit(provider.NewCompactEvent(work.request.WorkID, status))
+	s.mu.Unlock()
 }
 func (s *Session) clearCompact(work *activeCompact) {
 	s.mu.Lock()

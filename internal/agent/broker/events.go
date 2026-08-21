@@ -112,7 +112,12 @@ func (factory *EventFactory) FromProvider(event provider.Event) (protocol.Event,
 		for index, skill := range catalog.Skills {
 			skills[index] = protocol.SkillDescriptor{ID: skill.ID, Name: skill.Name, DisplayName: skill.DisplayName, Description: skill.Description, Scope: protocol.SkillScope(skill.Scope)}
 		}
-		payload = protocol.SkillCatalogPayload{State: protocol.SkillsState(catalog.State), Skills: skills}
+		var maxSelectedSkills *int
+		if catalog.State == provider.SkillsReady {
+			limit := catalog.MaxSelectedSkills
+			maxSelectedSkills = &limit
+		}
+		payload = protocol.SkillCatalogPayload{State: protocol.SkillsState(catalog.State), Skills: skills, MaxSelectedSkills: maxSelectedSkills}
 	case provider.EventCompact:
 		payload = protocol.CompactionPayload{WorkID: event.Compact.WorkID, Status: protocol.CompactionStatus(event.Compact.Status)}
 	case provider.EventBlocked:
@@ -152,7 +157,7 @@ func interactionRequestFromProvider(request provider.InteractionRequest) (protoc
 	}
 	for index, field := range request.Fields {
 		converted.Fields[index] = protocol.InteractionField{
-			ID: field.ID, Label: field.Label, Description: field.Description, Type: protocol.InteractionFieldType(field.Type), Required: field.Required, Secret: field.Secret,
+			ID: field.ID, Label: field.Label, Description: field.Description, Type: protocol.InteractionFieldType(field.Type), Required: field.Required, Secret: field.Secret, Multiline: field.Multiline,
 			Options: make([]protocol.InteractionOption, len(field.Options)),
 		}
 		for optionIndex, option := range field.Options {
