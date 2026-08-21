@@ -9,13 +9,13 @@ import (
 
 func (factory commandFactory) newCreateCommand() *cobra.Command {
 	command := &cobra.Command{Use: "create", Args: usageArgs(cobra.NoArgs)}
-	command.AddCommand(factory.newCreateMarkdownCommand())
+	command.AddCommand(factory.newCreateWhiteboardCommand("markdown", webapi.WhiteboardMarkdown))
 	command.AddCommand(factory.newCreateWhiteboardCommand("html", webapi.WhiteboardHTML))
 	return command
 }
 
-func (factory commandFactory) newCreateMarkdownCommand() *cobra.Command {
-	command := &cobra.Command{Use: "markdown <file>", Args: usageArgs(cobra.ExactArgs(1))}
+func (factory commandFactory) newCreateWhiteboardCommand(name string, kind webapi.WhiteboardKind) *cobra.Command {
+	command := &cobra.Command{Use: name + " <file>", Args: usageArgs(cobra.ExactArgs(1))}
 	expires := expirationFlag(command)
 	contextPath := contextFlag(command)
 	command.RunE = func(cmd *cobra.Command, args []string) error {
@@ -26,7 +26,7 @@ func (factory commandFactory) newCreateMarkdownCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		openedSource, source, openedContext, creatorContext, err := openMarkdownPair(args[0], *contextPath)
+		openedSource, source, openedContext, creatorContext, err := openWhiteboardPair(args[0], *contextPath)
 		if err != nil {
 			return err
 		}
@@ -38,32 +38,12 @@ func (factory commandFactory) newCreateMarkdownCommand() *cobra.Command {
 			return err
 		}
 		defer cancel()
-		created, err := client.CreateMarkdown(ctx, source, creatorContext, expiration)
-		return factory.finishCreate(client, created, err)
-	}
-	return command
-}
-
-func (factory commandFactory) newCreateWhiteboardCommand(name string, kind webapi.WhiteboardKind) *cobra.Command {
-	command := &cobra.Command{Use: name + " <file>", Args: usageArgs(cobra.ExactArgs(1))}
-	expires := expirationFlag(command)
-	command.RunE = func(cmd *cobra.Command, args []string) error {
-		expiration, err := resolveExpiration(cmd, *expires)
-		if err != nil {
-			return err
+		var created webapi.Resource
+		if kind == webapi.WhiteboardMarkdown {
+			created, err = client.CreateMarkdown(ctx, source, creatorContext, expiration)
+		} else {
+			created, err = client.CreateHTML(ctx, source, creatorContext, expiration)
 		}
-		opened, file, err := openRegularFile(args[0])
-		if err != nil {
-			return err
-		}
-		defer opened.Close()
-
-		client, ctx, cancel, err := factory.newClient(cmd)
-		if err != nil {
-			return err
-		}
-		defer cancel()
-		created, err := client.CreateWhiteboard(ctx, kind, file, expiration)
 		return factory.finishCreate(client, created, err)
 	}
 	return command
@@ -71,13 +51,13 @@ func (factory commandFactory) newCreateWhiteboardCommand(name string, kind webap
 
 func (factory commandFactory) newUpdateCommand() *cobra.Command {
 	command := &cobra.Command{Use: "update", Args: usageArgs(cobra.NoArgs)}
-	command.AddCommand(factory.newUpdateMarkdownCommand())
+	command.AddCommand(factory.newUpdateWhiteboardCommand("markdown", webapi.WhiteboardMarkdown))
 	command.AddCommand(factory.newUpdateWhiteboardCommand("html", webapi.WhiteboardHTML))
 	return command
 }
 
-func (factory commandFactory) newUpdateMarkdownCommand() *cobra.Command {
-	command := &cobra.Command{Use: "markdown <id> <file>", Args: usageArgs(cobra.ExactArgs(2))}
+func (factory commandFactory) newUpdateWhiteboardCommand(name string, kind webapi.WhiteboardKind) *cobra.Command {
+	command := &cobra.Command{Use: name + " <id> <file>", Args: usageArgs(cobra.ExactArgs(2))}
 	expires := expirationFlag(command)
 	contextPath := contextFlag(command)
 	command.RunE = func(cmd *cobra.Command, args []string) error {
@@ -88,7 +68,7 @@ func (factory commandFactory) newUpdateMarkdownCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		openedSource, source, openedContext, creatorContext, err := openMarkdownPair(args[1], *contextPath)
+		openedSource, source, openedContext, creatorContext, err := openWhiteboardPair(args[1], *contextPath)
 		if err != nil {
 			return err
 		}
@@ -100,35 +80,12 @@ func (factory commandFactory) newUpdateMarkdownCommand() *cobra.Command {
 			return err
 		}
 		defer cancel()
-		updated, err := client.UpdateMarkdown(ctx, args[0], source, creatorContext, expiration)
-		if err != nil {
-			return stableCommandError(err)
+		var updated webapi.Resource
+		if kind == webapi.WhiteboardMarkdown {
+			updated, err = client.UpdateMarkdown(ctx, args[0], source, creatorContext, expiration)
+		} else {
+			updated, err = client.UpdateHTML(ctx, args[0], source, creatorContext, expiration)
 		}
-		return stableCommandError(writeResource(factory.deps.Stdout, factory.root.json, client, updated))
-	}
-	return command
-}
-
-func (factory commandFactory) newUpdateWhiteboardCommand(name string, kind webapi.WhiteboardKind) *cobra.Command {
-	command := &cobra.Command{Use: name + " <id> <file>", Args: usageArgs(cobra.ExactArgs(2))}
-	expires := expirationFlag(command)
-	command.RunE = func(cmd *cobra.Command, args []string) error {
-		expiration, err := resolveExpiration(cmd, *expires)
-		if err != nil {
-			return err
-		}
-		opened, file, err := openRegularFile(args[1])
-		if err != nil {
-			return err
-		}
-		defer opened.Close()
-
-		client, ctx, cancel, err := factory.newClient(cmd)
-		if err != nil {
-			return err
-		}
-		defer cancel()
-		updated, err := client.UpdateWhiteboard(ctx, kind, args[0], file, expiration)
 		if err != nil {
 			return stableCommandError(err)
 		}
@@ -139,26 +96,38 @@ func (factory commandFactory) newUpdateWhiteboardCommand(name string, kind webap
 
 func (factory commandFactory) newGetCommand() *cobra.Command {
 	command := &cobra.Command{Use: "get", Args: usageArgs(cobra.NoArgs)}
-	command.AddCommand(&cobra.Command{
-		Use:  "markdown <id>",
+	command.AddCommand(factory.newGetWhiteboardCommand("markdown", webapi.WhiteboardMarkdown))
+	command.AddCommand(factory.newGetWhiteboardCommand("html", webapi.WhiteboardHTML))
+	return command
+}
+
+func (factory commandFactory) newGetWhiteboardCommand(name string, kind webapi.WhiteboardKind) *cobra.Command {
+	return &cobra.Command{
+		Use:  name + " <id>",
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !factory.root.json {
-				return invalidCommand("get markdown requires --json")
+				return invalidCommand("get " + name + " requires --json")
 			}
 			client, ctx, cancel, err := factory.newClient(cmd)
 			if err != nil {
 				return err
 			}
 			defer cancel()
-			response, err := client.GetMarkdown(ctx, args[0])
+			if kind == webapi.WhiteboardMarkdown {
+				response, err := client.GetMarkdown(ctx, args[0])
+				if err != nil {
+					return stableCommandError(err)
+				}
+				return stableCommandError(writeMarkdown(factory.deps.Stdout, client, response))
+			}
+			response, err := client.GetHTML(ctx, args[0])
 			if err != nil {
 				return stableCommandError(err)
 			}
-			return stableCommandError(writeMarkdown(factory.deps.Stdout, client, response))
+			return stableCommandError(writeHTML(factory.deps.Stdout, client, response))
 		},
-	})
-	return command
+	}
 }
 
 func (factory commandFactory) newDeleteCommand() *cobra.Command {
@@ -208,7 +177,7 @@ func requireContextFlag(command *cobra.Command, path string) error {
 	return nil
 }
 
-func openMarkdownPair(sourcePath, contextPath string) (*os.File, webapi.File, *os.File, webapi.File, error) {
+func openWhiteboardPair(sourcePath, contextPath string) (*os.File, webapi.File, *os.File, webapi.File, error) {
 	openedSource, source, err := openRegularFile(sourcePath)
 	if err != nil {
 		return nil, webapi.File{}, nil, webapi.File{}, err

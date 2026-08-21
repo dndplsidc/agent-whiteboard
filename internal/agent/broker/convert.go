@@ -48,9 +48,13 @@ func ConnectIdentityToState(identity ConnectIdentity, authorizedOrigin string) (
 	if err != nil {
 		return statepkg.Identity{}, err
 	}
+	kind, err := resourceKindToState(identity.Resource.Kind)
+	if err != nil {
+		return statepkg.Identity{}, err
+	}
 	return statepkg.Identity{
 		Origin:       identity.Origin,
-		Kind:         statepkg.ResourceMarkdown,
+		Kind:         kind,
 		CapabilityID: identity.Resource.ID,
 		Provider:     name,
 	}, nil
@@ -94,8 +98,12 @@ func ResourceToProvider(resource protocol.Resource) (provider.Resource, error) {
 	if err := validateProtocolResource(resource); err != nil {
 		return provider.Resource{}, err
 	}
+	kind, err := resourceKindToProvider(resource.Kind)
+	if err != nil {
+		return provider.Resource{}, err
+	}
 	return provider.Resource{
-		Kind:      provider.ResourceMarkdown,
+		Kind:      kind,
 		ID:        resource.ID,
 		CreatedAt: resource.CreatedAt,
 		UpdatedAt: resource.UpdatedAt,
@@ -104,8 +112,12 @@ func ResourceToProvider(resource protocol.Resource) (provider.Resource, error) {
 }
 
 func ResourceFromProvider(resource provider.Resource) (protocol.Resource, error) {
+	kind, err := resourceKindFromProvider(resource.Kind)
+	if err != nil {
+		return protocol.Resource{}, err
+	}
 	converted := protocol.Resource{
-		Kind:      protocol.ResourceMarkdown,
+		Kind:      kind,
 		ID:        resource.ID,
 		CreatedAt: resource.CreatedAt,
 		UpdatedAt: resource.UpdatedAt,
@@ -114,10 +126,40 @@ func ResourceFromProvider(resource provider.Resource) (protocol.Resource, error)
 	if err := validateProtocolResource(converted); err != nil {
 		return protocol.Resource{}, err
 	}
-	if resource.Kind != provider.ResourceMarkdown {
-		return protocol.Resource{}, errors.New("invalid provider resource kind")
-	}
 	return converted, nil
+}
+
+func resourceKindToProvider(kind protocol.ResourceKind) (provider.ResourceKind, error) {
+	switch kind {
+	case protocol.ResourceMarkdown:
+		return provider.ResourceMarkdown, nil
+	case protocol.ResourceHTML:
+		return provider.ResourceHTML, nil
+	default:
+		return "", errors.New("invalid protocol resource kind")
+	}
+}
+
+func resourceKindFromProvider(kind provider.ResourceKind) (protocol.ResourceKind, error) {
+	switch kind {
+	case provider.ResourceMarkdown:
+		return protocol.ResourceMarkdown, nil
+	case provider.ResourceHTML:
+		return protocol.ResourceHTML, nil
+	default:
+		return "", errors.New("invalid provider resource kind")
+	}
+}
+
+func resourceKindToState(kind protocol.ResourceKind) (statepkg.ResourceKind, error) {
+	switch kind {
+	case protocol.ResourceMarkdown:
+		return statepkg.ResourceMarkdown, nil
+	case protocol.ResourceHTML:
+		return statepkg.ResourceHTML, nil
+	default:
+		return "", errors.New("invalid state resource kind")
+	}
 }
 
 func PageContextToProvider(context protocol.PageContext, identity ConnectIdentity, authorizedOrigin string) (provider.PageContext, error) {
@@ -139,7 +181,7 @@ func PageContextToProvider(context protocol.PageContext, identity ConnectIdentit
 	}
 	converted := provider.PageContext{
 		Revision:       provider.ContextRevision(context.Revision),
-		Markdown:       []byte(context.Markdown),
+		Source:         []byte(context.Source),
 		CreatorContext: []byte(context.CreatorContext),
 		Title:          context.Title,
 		URL:            context.URL,
@@ -171,7 +213,7 @@ func PageContextFromProvider(context provider.PageContext, identity ConnectIdent
 	}
 	converted := protocol.PageContext{
 		Revision:       protocol.ContextRevision(context.Revision),
-		Markdown:       string(context.Markdown),
+		Source:         string(context.Source),
 		CreatorContext: string(context.CreatorContext),
 		Title:          context.Title,
 		URL:            context.URL,

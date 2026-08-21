@@ -258,8 +258,10 @@ type hardeningSession struct {
 
 func newHardeningSession(refValue string) *hardeningSession {
 	ref, _ := provider.NewNativeSessionRef(refValue)
+	settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: false}
 	return &hardeningSession{
-		native: provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: "model", CreatedAt: testTime(), UpdatedAt: testTime()},
+		native: provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: "model", Settings: &settings, Presentation: &presentation, CreatedAt: testTime(), UpdatedAt: testTime()},
 		events: make(chan provider.Event, 4096), child: &hardeningChild{},
 	}
 }

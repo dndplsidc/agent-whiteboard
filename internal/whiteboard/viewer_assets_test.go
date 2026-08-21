@@ -48,12 +48,17 @@ func TestViewerRendersEmbeddedAssetsWithoutTerminatingInlineElements(t *testing.
 
 	var envelope map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal([]byte(textContent(sourceScripts[0])), &envelope))
-	require.Len(t, envelope, 1)
-	markdownJSON, ok := envelope["markdown"]
+	require.Len(t, envelope, 2)
+	kindJSON, ok := envelope["kind"]
 	require.True(t, ok)
-	var markdown string
-	require.NoError(t, json.Unmarshal(markdownJSON, &markdown))
-	require.Equal(t, source, markdown)
+	var kind string
+	require.NoError(t, json.Unmarshal(kindJSON, &kind))
+	require.Equal(t, "markdown", kind)
+	sourceJSON, ok := envelope["source"]
+	require.True(t, ok)
+	var exactSource string
+	require.NoError(t, json.Unmarshal(sourceJSON, &exactSource))
+	require.Equal(t, source, exactSource)
 
 	executableScripts := findElements(document, "script", func(node *html.Node) bool {
 		return attribute(node, "id") != "agent-whiteboard-source"

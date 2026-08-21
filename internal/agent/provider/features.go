@@ -60,12 +60,15 @@ func (skill SkillDescriptor) Validate() error {
 }
 
 type SkillCatalog struct {
-	State  SkillsState
-	Skills []SkillDescriptor
+	State             SkillsState
+	Skills            []SkillDescriptor
+	MaxSelectedSkills int
 }
 
 func (catalog SkillCatalog) Validate() error {
-	if !catalog.State.Valid() || catalog.Skills == nil || len(catalog.Skills) > MaxSkills || catalog.State == SkillsUnavailable && len(catalog.Skills) != 0 {
+	validLimit := catalog.State == SkillsReady && catalog.MaxSelectedSkills > 0 && catalog.MaxSelectedSkills <= MaxMessageSkills ||
+		catalog.State == SkillsUnavailable && catalog.MaxSelectedSkills == 0
+	if !catalog.State.Valid() || !validLimit || catalog.Skills == nil || len(catalog.Skills) > MaxSkills || catalog.State == SkillsUnavailable && len(catalog.Skills) != 0 {
 		return errors.New("invalid skill catalog")
 	}
 	seenIDs := make(map[string]struct{}, len(catalog.Skills))
@@ -93,13 +96,29 @@ func (catalog SkillCatalog) Validate() error {
 func (catalog SkillCatalog) Clone() SkillCatalog {
 	skills := make([]SkillDescriptor, len(catalog.Skills))
 	copy(skills, catalog.Skills)
-	return SkillCatalog{State: catalog.State, Skills: skills}
+	return SkillCatalog{State: catalog.State, Skills: skills, MaxSelectedSkills: catalog.MaxSelectedSkills}
 }
 
 // SkillCatalogSession is implemented only by sessions that can expose a safe,
 // memory-only catalog. Native paths and load details remain adapter-private.
 type SkillCatalogSession interface {
 	Skills(context.Context) SkillCatalog
+}
+
+type BusyTurnPolicy string
+
+const (
+	BusyTurnQueue         BusyTurnPolicy = "queue"
+	BusyTurnPreserveDraft BusyTurnPolicy = "preserve_draft"
+)
+
+func (policy BusyTurnPolicy) Valid() bool {
+	return policy == BusyTurnQueue || policy == BusyTurnPreserveDraft
+}
+
+// BusyTurnSession exposes the provider's bounded static busy-turn policy.
+type BusyTurnSession interface {
+	BusyTurnPolicy() BusyTurnPolicy
 }
 
 type CompactRequest struct{ WorkID string }

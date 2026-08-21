@@ -170,19 +170,16 @@ type SnapshotPayload struct {
 	Catalog           []CatalogModel              `json:"catalog"`
 	SkillsState       *SkillsState                `json:"skills_state"`
 	Skills            []SkillDescriptor           `json:"skills"`
+	MaxSelectedSkills *int                        `json:"max_selected_skills"`
 	SupportsCompact   bool                        `json:"supports_compact"`
+	BusyPolicy        BusyTurnPolicy              `json:"busy_policy"`
+	ComposerAdmission ComposerAdmission           `json:"composer_admission"`
 }
 
 func (SnapshotPayload) EventType() EventType { return EventSnapshot }
 func (p SnapshotPayload) validate() error {
-	if p.Queue == nil || p.Skills == nil || !validLifecycle(p.Lifecycle) || !validContextState(p.ContextState) || !validActiveWork(p.Lifecycle, p.ActiveWork) || validateSettingsSnapshot(p.SettingsState, p.EffectiveSettings, p.Catalog) != nil {
-		return invalid(nil)
-	}
-	if p.SkillsState == nil {
-		if len(p.Skills) != 0 {
-			return invalid(nil)
-		}
-	} else if validateSkillCatalog(*p.SkillsState, p.Skills) != nil {
+	if p.Queue == nil || p.Skills == nil || !validLifecycle(p.Lifecycle) || !validContextState(p.ContextState) || !validActiveWork(p.Lifecycle, p.ActiveWork) || validateSettingsSnapshot(p.SettingsState, p.EffectiveSettings, p.Catalog) != nil ||
+		p.SkillsState == nil || validateSkillCatalog(*p.SkillsState, p.Skills, p.MaxSelectedSkills) != nil || !validComposerAdmission(p.BusyPolicy, p.ComposerAdmission) {
 		return invalid(nil)
 	}
 	if p.EffectiveSettings != nil {
@@ -195,15 +192,6 @@ func (p SnapshotPayload) validate() error {
 
 func (p SnapshotPayload) ValidateForProvider(provider ProviderName) error {
 	if !provider.Valid() || p.validate() != nil {
-		return invalid(nil)
-	}
-	if provider == ProviderPi {
-		if p.SkillsState != nil || len(p.Skills) != 0 || p.SupportsCompact || p.ActiveWork != nil && p.ActiveWork.Kind == ActiveWorkCompact || p.Lifecycle == LifecycleCompacting {
-			return invalid(nil)
-		}
-		return nil
-	}
-	if p.SkillsState == nil {
 		return invalid(nil)
 	}
 	return nil
@@ -396,13 +384,14 @@ func (p SettingsPayload) validate() error {
 }
 
 type SkillCatalogPayload struct {
-	State  SkillsState       `json:"state"`
-	Skills []SkillDescriptor `json:"skills"`
+	State             SkillsState       `json:"state"`
+	Skills            []SkillDescriptor `json:"skills"`
+	MaxSelectedSkills *int              `json:"max_selected_skills"`
 }
 
 func (SkillCatalogPayload) EventType() EventType { return EventSkillCatalog }
 func (p SkillCatalogPayload) validate() error {
-	return validateSkillCatalog(p.State, p.Skills)
+	return validateSkillCatalog(p.State, p.Skills, p.MaxSelectedSkills)
 }
 
 type CompactionPayload struct {
@@ -596,6 +585,8 @@ func DecodeEvent(data []byte) (Event, error) {
 	}
 	nullable := map[string]bool{
 		"payload.active_work":         true,
+		"payload.max_selected_skills": true,
+		"payload.local_deadline":      true,
 		"payload.skills_state":        true,
 		"payload.settings_state":      true,
 		"payload.effective_settings":  true,
@@ -636,7 +627,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	var required []string
 	switch kind {
 	case EventSnapshot:
-		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_work", "supports_images", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "supports_compact"}
+		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_work", "supports_images", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "max_selected_skills", "supports_compact", "busy_policy", "composer_admission"}
 	case EventCommandResult:
 		target, required = &CommandResultPayload{}, []string{"command_id", "status"}
 	case EventTimeline:
@@ -658,7 +649,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	case EventSettings:
 		target, required = &SettingsPayload{}, []string{"settings_state", "effective_settings", "catalog", "accepted_turn_id"}
 	case EventSkillCatalog:
-		target, required = &SkillCatalogPayload{}, []string{"state", "skills"}
+		target, required = &SkillCatalogPayload{}, []string{"state", "skills", "max_selected_skills"}
 	case EventCompaction:
 		target, required = &CompactionPayload{}, []string{"work_id", "status"}
 	case EventContext:
@@ -678,7 +669,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	case EventToolActivity:
 		target, required = &ToolActivityPayload{}, []string{"activity_id", "kind", "status", "title", "summary", "detail"}
 	case EventInteractionRequest:
-		target, required = &InteractionRequestPayload{}, []string{"request_id", "kind", "title", "summary", "command", "working_directory", "options", "questions", "fields"}
+		target, required = &InteractionRequestPayload{}, []string{"request_id", "kind", "title", "summary", "command", "working_directory", "options", "questions", "fields", "local_deadline"}
 	case EventInteractionResolved:
 		target, required = &InteractionResolvedPayload{}, []string{"request_id", "kind", "option_id"}
 	default:
@@ -689,6 +680,19 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	}
 	if err := requireFields(raw, required...); err != nil {
 		return nil, invalid(err)
+	}
+	if kind == EventInteractionRequest {
+		var nested struct {
+			Fields []json.RawMessage `json:"fields"`
+		}
+		if json.Unmarshal(raw, &nested) != nil {
+			return nil, invalid(nil)
+		}
+		for _, field := range nested.Fields {
+			if err := requireFields(field, "id", "label", "description", "type", "required", "secret", "multiline", "options"); err != nil {
+				return nil, invalid(err)
+			}
+		}
 	}
 	switch value := target.(type) {
 	case *SnapshotPayload:

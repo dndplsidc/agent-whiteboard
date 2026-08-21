@@ -213,8 +213,11 @@ func (catalog ModelCatalog) Canonicalize(settings ExecutionSettings) (ExecutionS
 	return settings, nil
 }
 
-// SelectableDriver is an optional capability implemented only by providers
-// with a runtime-selectable execution catalog.
-type SelectableDriver interface {
-	ModelCatalog(context.Context) (ModelCatalog, error)
+// SettingsSession is implemented by active sessions that expose a safe,
+// runtime-selectable execution catalog. ApplySettings returns the authoritative
+// effective tuple and its bounded presentation after native application.
+type SettingsSession interface {
+	SettingsCatalog(context.Context) (ModelCatalog, error)
+	EffectiveSettings(context.Context) (ExecutionSettings, ModelPresentation, error)
+	ApplySettings(context.Context, ExecutionSettings) (ExecutionSettings, ModelPresentation, error)
 }

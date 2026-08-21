@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
 )
 
 func (actor *conversation) handleCommand(attachments map[*clientAttachment]struct{}, turnResults chan<- turnWorkerResult, historyResults chan<- historyWorkerResult, archiveResults chan<- archiveWorkerResult, handoffResults chan<- handoffResult, interactionResults chan<- interactionWorkerResult, request commandRequest) {
@@ -70,6 +71,10 @@ func (actor *conversation) handleCommand(attachments map[*clientAttachment]struc
 		}
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
 	case protocol.QueueEditPayload:
+		if actor.identity.Kind == statepkg.ResourceHTML && messageContentHasReferences(payload.Content) {
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)
+			return
+		}
 		content, err := messageContentToProvider(payload.Content)
 		if err != nil || !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)
@@ -162,7 +167,7 @@ func (actor *conversation) handleCommand(attachments map[*clientAttachment]struc
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)
 			return
 		}
-		if code := actor.commandInteractionRespond(interactionResults, request.command, payload); code != "" {
+		if code := actor.commandInteractionRespond(attachments, interactionResults, request.command, payload); code != "" {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, code)
 		}
 	default:
@@ -229,6 +234,28 @@ func (actor *conversation) failWaiters(waiters []commandWaiter, err error) {
 func (actor *conversation) publishShared(attachments map[*clientAttachment]struct{}, payload protocol.EventPayload) bool {
 	event, err := actor.factory.New(payload)
 	if err != nil || actor.replay.Append(event) != nil {
+		return false
+	}
+	for item := range attachments {
+		actor.send(attachments, item, event)
+	}
+	return true
+}
+
+func (actor *conversation) prepareShared(payload protocol.EventPayload) (protocol.Event, preparedReplayEntry, error) {
+	event, err := actor.factory.New(payload)
+	if err != nil {
+		return protocol.Event{}, preparedReplayEntry{}, err
+	}
+	prepared, err := actor.replay.prepareAppend(event, "")
+	if err != nil {
+		return protocol.Event{}, preparedReplayEntry{}, err
+	}
+	return event, prepared, nil
+}
+
+func (actor *conversation) publishPreparedShared(attachments map[*clientAttachment]struct{}, event protocol.Event, prepared preparedReplayEntry) bool {
+	if actor.replay.appendPrepared(prepared) != nil {
 		return false
 	}
 	for item := range attachments {

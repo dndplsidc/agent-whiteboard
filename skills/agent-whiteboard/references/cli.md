@@ -5,10 +5,11 @@ Put global flags before the command. Use `--` before an ID because valid capabil
 ```text
 agent-whiteboard [--config PATH] [--server URL] [--timeout DURATION] [--json] serve [flags]
 agent-whiteboard [global flags] create markdown --context CONTEXT_FILE [--expires-in SECONDS] FILE
-agent-whiteboard [global flags] create html [--expires-in SECONDS] FILE
+agent-whiteboard [global flags] create html --context CONTEXT_FILE [--expires-in SECONDS] FILE
 agent-whiteboard [global flags] update markdown --context CONTEXT_FILE [--expires-in SECONDS] -- ID FILE
-agent-whiteboard [global flags] update html [--expires-in SECONDS] -- ID FILE
+agent-whiteboard [global flags] update html --context CONTEXT_FILE [--expires-in SECONDS] -- ID FILE
 agent-whiteboard [global flags] --json get markdown -- ID
+agent-whiteboard [global flags] --json get html -- ID
 agent-whiteboard [global flags] delete markdown -- ID
 agent-whiteboard [global flags] delete html -- ID
 agent-whiteboard [global flags] image upload [--expires-in SECONDS] FILE...
@@ -21,9 +22,9 @@ agent-whiteboard [global flags] agent trust remove ORIGIN
 agent-whiteboard [global flags] agent trust list
 ```
 
-## Markdown pair workflow
+## Whiteboard pair workflow
 
-Every Markdown create and update requires non-empty UTF-8 source and context files. Create a fresh temporary context artifact, write concise goals, decisions, assumptions, and open questions, and pass `--context`:
+Every Markdown or HTML create and update requires non-empty UTF-8 source and context files. Create a fresh temporary context artifact, write concise goals, decisions, assumptions, and open questions, and pass `--context`:
 
 ```sh
 context_dir="$(mktemp -d)"
@@ -41,9 +42,12 @@ EOF
 agent-whiteboard --json create markdown --context "$context_file" board.md
 agent-whiteboard --json update markdown --context "$context_file" -- CAPABILITY_ID board.md
 agent-whiteboard --json get markdown -- CAPABILITY_ID
+agent-whiteboard --json create html --context "$context_file" board.html
+agent-whiteboard --json update html --context "$context_file" -- CAPABILITY_ID board.html
+agent-whiteboard --json get html -- CAPABILITY_ID
 ```
 
-Markdown source and context are replaced together. `get markdown` requires `--json` and returns exact `markdown` and `context` strings. Legacy Markdown returns an empty context until its first update, which must provide both artifacts.
+Whiteboard source and context are replaced together. `get markdown` and `get html` require `--json`; they return exact `markdown` or `html` plus `context` strings. Legacy Markdown returns an empty context until its first update, which must provide both artifacts.
 
 Do not put hidden reasoning, credentials, tokens, personal or sensitive information, private source, unrelated data, or raw tool output in context. Anyone with the capability ID can retrieve it.
 
@@ -61,7 +65,7 @@ JSON mode uses schema version 1:
 {"schema_version":1,"resource":{"id":"CAPABILITY_ID","url":"https://board.example/whiteboards/markdown/CAPABILITY_ID","expires_at":1780000000,"permanent":false}}
 ```
 
-Markdown retrieval adds exact `markdown` and `context` fields to the single-resource envelope. Multiple uploads use `resources`; permanent resources have `"expires_at":null` and `"permanent":true`; delete success is `{"schema_version":1}`. Errors go to stderr as `{"schema_version":1,"error":{"code":"...","message":"..."}}`. Human errors also use stderr. Exit codes are 0 success, 1 internal, 2 usage, 3 remote/domain, and 4 timeout/cancellation.
+Whiteboard retrieval adds exact `markdown` or `html` and `context` fields to the single-resource envelope. Multiple uploads use `resources`; permanent resources have `"expires_at":null` and `"permanent":true`; delete success is `{"schema_version":1}`. Errors go to stderr as `{"schema_version":1,"error":{"code":"...","message":"..."}}`. Human errors also use stderr. Exit codes are 0 success, 1 internal, 2 usage, 3 remote/domain, and 4 timeout/cancellation.
 
 If a create error leaves persistence uncertain, the CLI prints the generated resource envelope to stdout before the error on stderr and exits nonzero. Retain that ID and check or delete it. Do not assume every failed create leaves stdout empty.
 

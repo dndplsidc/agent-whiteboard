@@ -39,13 +39,16 @@ type nativeAllocation struct {
 }
 
 type nativeMetadata struct {
-	Schema    int       `json:"schema"`
-	Ref       string    `json:"ref"`
-	SessionID string    `json:"sessionId"`
-	Model     string    `json:"model"`
-	Workspace string    `json:"workspace"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Schema      int       `json:"schema"`
+	Ref         string    `json:"ref"`
+	SessionID   string    `json:"sessionId"`
+	Model       string    `json:"model"`
+	Effort      string    `json:"effort,omitempty"`
+	DisplayName string    `json:"displayName,omitempty"`
+	Selectable  *bool     `json:"selectable,omitempty"`
+	Workspace   string    `json:"workspace"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type piSessionHeader struct {
@@ -128,7 +131,9 @@ func (manager *nativeManager) finalizeAllocation(allocation nativeAllocation, st
 	if updated.Before(allocation.createdAt) {
 		updated = allocation.createdAt
 	}
-	metadata := nativeMetadata{Schema: 1, Ref: allocation.Ref.Value(), SessionID: state.SessionID, Model: state.Model, Workspace: allocation.Workspace, CreatedAt: allocation.createdAt, UpdatedAt: updated}
+	settings, presentation := state.settings()
+	selectable := presentation.Selectable
+	metadata := nativeMetadata{Schema: 2, Ref: allocation.Ref.Value(), SessionID: state.SessionID, Model: state.Model, Effort: settings.Effort, DisplayName: presentation.ModelDisplayName, Selectable: &selectable, Workspace: allocation.Workspace, CreatedAt: allocation.createdAt, UpdatedAt: updated}
 	if _, err := os.Lstat(metadataPath); err == nil {
 		existing, readErr := manager.readMetadata(allocation.Ref)
 		if readErr != nil || !metadataMatchesFinalization(existing, metadata) {
@@ -137,7 +142,7 @@ func (manager *nativeManager) finalizeAllocation(allocation nativeAllocation, st
 		if manager.syncDir(manager.sessions) != nil {
 			return provider.NativeSession{}, errors.New("sync Pi native metadata")
 		}
-		return existing.native(allocation.Ref), nil
+		return existing.nativeForState(allocation.Ref, state), nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return provider.NativeSession{}, errors.New("inspect Pi native metadata")
 	}
@@ -149,9 +154,61 @@ func (manager *nativeManager) finalizeAllocation(allocation nativeAllocation, st
 		if readErr != nil || !metadataMatchesFinalization(existing, metadata) || manager.syncDir(manager.sessions) != nil {
 			return provider.NativeSession{}, err
 		}
-		return existing.native(allocation.Ref), nil
+		return existing.nativeForState(allocation.Ref, state), nil
 	}
-	return metadata.native(allocation.Ref), nil
+	return metadata.nativeForState(allocation.Ref, state), nil
+}
+
+func (manager *nativeManager) updateSettings(native provider.NativeSession) error {
+	if manager == nil || native.Validate() != nil || native.Provider != provider.NamePi || !validNativeRef(native.Ref) {
+		return errors.New("invalid Pi native settings update")
+	}
+	metadata, err := manager.readMetadata(native.Ref)
+	if err != nil {
+		return errors.New("invalid Pi native settings update")
+	}
+	selectable := native.Presentation.Selectable
+	metadata.Schema = 2
+	metadata.Model = native.Settings.Model
+	metadata.Effort = native.Settings.Effort
+	metadata.DisplayName = native.Presentation.ModelDisplayName
+	metadata.Selectable = &selectable
+	metadata.UpdatedAt = native.UpdatedAt
+	if !validMetadata(metadata, native.Ref) {
+		return errors.New("invalid Pi native settings update")
+	}
+	if err := manager.replaceMetadata(manager.metadataPath(native.Ref), metadata); err != nil {
+		persisted, readErr := manager.readMetadata(native.Ref)
+		if readErr != nil || !metadataMatchesSettings(persisted, metadata) || manager.syncDir(manager.sessions) != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func metadataMatchesSettings(existing, expected nativeMetadata) bool {
+	return existing.Schema == expected.Schema && existing.Ref == expected.Ref && existing.SessionID == expected.SessionID && existing.Model == expected.Model && existing.Effort == expected.Effort && existing.DisplayName == expected.DisplayName && existing.Selectable != nil && expected.Selectable != nil && *existing.Selectable == *expected.Selectable && existing.Workspace == expected.Workspace && existing.CreatedAt.Equal(expected.CreatedAt) && existing.UpdatedAt.Equal(expected.UpdatedAt)
+}
+
+func (manager *nativeManager) replaceMetadata(path string, metadata nativeMetadata) error {
+	encoded, err := json.Marshal(metadata)
+	if err != nil || len(encoded) > maxNativeRecordBytes {
+		return errors.New("encode Pi native metadata")
+	}
+	temporary, err := os.CreateTemp(manager.sessions, ".metadata-update-*")
+	if err != nil {
+		return errors.New("create Pi native metadata update")
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if temporary.Chmod(0o600) != nil || writeFull(temporary, encoded) != nil || temporary.Sync() != nil || temporary.Close() != nil {
+		_ = temporary.Close()
+		return errors.New("write Pi native metadata update")
+	}
+	if os.Rename(temporaryPath, path) != nil || manager.syncDir(manager.sessions) != nil {
+		return errors.New("commit Pi native metadata update")
+	}
+	return nil
 }
 
 func (manager *nativeManager) rollbackAllocation(allocation nativeAllocation) error {
@@ -316,7 +373,7 @@ func (manager *nativeManager) writeMetadata(path string, metadata nativeMetadata
 }
 
 func metadataMatchesFinalization(existing, expected nativeMetadata) bool {
-	return existing.Schema == expected.Schema && existing.Ref == expected.Ref && existing.SessionID == expected.SessionID && existing.Model == expected.Model && existing.Workspace == expected.Workspace && existing.CreatedAt.Equal(expected.CreatedAt)
+	return existing.Schema == expected.Schema && existing.Ref == expected.Ref && existing.SessionID == expected.SessionID && existing.Model == expected.Model && existing.Effort == expected.Effort && existing.DisplayName == expected.DisplayName && existing.Selectable != nil && expected.Selectable != nil && *existing.Selectable == *expected.Selectable && existing.Workspace == expected.Workspace && existing.CreatedAt.Equal(expected.CreatedAt)
 }
 
 func (manager *nativeManager) readMetadata(ref provider.NativeSessionRef) (nativeMetadata, error) {
@@ -344,14 +401,33 @@ func (manager *nativeManager) readMetadata(ref provider.NativeSessionRef) (nativ
 }
 
 func validMetadata(metadata nativeMetadata, ref provider.NativeSessionRef) bool {
-	if metadata.Schema != 1 || metadata.Ref != ref.Value() || !validStartupText(metadata.SessionID, provider.MaxNativeReferenceBytes) || metadata.Model == "" || len(metadata.Model) > provider.MaxTitleBytes || !validCanonicalPath(metadata.Workspace) || metadata.CreatedAt.IsZero() || metadata.UpdatedAt.IsZero() || metadata.CreatedAt.Location() != time.UTC || metadata.UpdatedAt.Location() != time.UTC || metadata.UpdatedAt.Before(metadata.CreatedAt) {
+	if (metadata.Schema != 1 && metadata.Schema != 2) || metadata.Ref != ref.Value() || !validStartupText(metadata.SessionID, provider.MaxNativeReferenceBytes) || metadata.Model == "" || len(metadata.Model) > provider.MaxModelValueBytes || !validCanonicalPath(metadata.Workspace) || metadata.CreatedAt.IsZero() || metadata.UpdatedAt.IsZero() || metadata.CreatedAt.Location() != time.UTC || metadata.UpdatedAt.Location() != time.UTC || metadata.UpdatedAt.Before(metadata.CreatedAt) {
+		return false
+	}
+	if metadata.Schema == 2 && (metadata.Selectable == nil || (provider.ExecutionSettings{Model: metadata.Model, Effort: metadata.Effort, Speed: provider.SpeedStandard}).Validate() != nil || (provider.ModelPresentation{ModelDisplayName: metadata.DisplayName, Selectable: *metadata.Selectable}).Validate() != nil) {
+		return false
+	}
+	if metadata.Schema == 1 && (metadata.Effort != "" || metadata.DisplayName != "" || metadata.Selectable != nil) {
 		return false
 	}
 	return metadata.native(ref).Validate() == nil
 }
 
 func (metadata nativeMetadata) native(ref provider.NativeSessionRef) provider.NativeSession {
-	return provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: metadata.Model, CreatedAt: metadata.CreatedAt, UpdatedAt: metadata.UpdatedAt}
+	effort, displayName, selectable := metadata.Effort, metadata.DisplayName, false
+	if metadata.Schema == 1 {
+		effort, displayName = "off", metadata.Model
+	} else {
+		selectable = *metadata.Selectable
+	}
+	settings := provider.ExecutionSettings{Model: metadata.Model, Effort: effort, Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: displayName, Selectable: selectable}
+	return provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: metadata.Model, Settings: &settings, Presentation: &presentation, CreatedAt: metadata.CreatedAt, UpdatedAt: metadata.UpdatedAt}
+}
+
+func (metadata nativeMetadata) nativeForState(ref provider.NativeSessionRef, state startupState) provider.NativeSession {
+	settings, presentation := state.settings()
+	return provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: settings.Model, Settings: &settings, Presentation: &presentation, CreatedAt: metadata.CreatedAt, UpdatedAt: metadata.UpdatedAt}
 }
 
 func validateSessionFile(path, sessionID, workspace string) error {

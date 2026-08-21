@@ -17,8 +17,10 @@ type startupState struct {
 	SessionFile    string
 	Workspace      string
 	Model          string
+	ModelName      string
 	ModelProvider  string
 	ModelID        string
+	ThinkingLevel  string
 	ContextWindow  int
 	MaxTokens      int
 	SupportsImages bool
@@ -27,12 +29,26 @@ type startupState struct {
 func (state startupState) valid() bool {
 	return validStartupText(state.SessionID, provider.MaxNativeReferenceBytes) && validLaunchPath(state.SessionFile) && validLaunchPath(state.Workspace) &&
 		validStartupText(state.ModelProvider, provider.MaxTitleBytes) && validStartupText(state.ModelID, provider.MaxTitleBytes) &&
-		state.Model == state.ModelProvider+"/"+state.ModelID && len(state.Model) <= provider.MaxTitleBytes && state.ContextWindow > 0 && state.MaxTokens > 0
+		(state.ModelName == "" || validStartupText(state.ModelName, provider.MaxTitleBytes)) && (state.ThinkingLevel == "" || validStartupText(state.ThinkingLevel, provider.MaxEffortValueBytes)) &&
+		state.Model == state.ModelProvider+"/"+state.ModelID && len(state.Model) <= provider.MaxModelValueBytes && state.ContextWindow > 0 && state.MaxTokens > 0
+}
+
+func (state startupState) settings() (provider.ExecutionSettings, provider.ModelPresentation) {
+	effort := state.ThinkingLevel
+	if effort == "" {
+		effort = "off"
+	}
+	name := state.ModelName
+	if name == "" {
+		name = state.ModelID
+	}
+	return provider.ExecutionSettings{Model: state.Model, Effort: effort, Speed: provider.SpeedStandard}, provider.ModelPresentation{ModelDisplayName: name, Selectable: true}
 }
 
 type startupModel struct {
 	Provider      string   `json:"provider"`
 	ID            string   `json:"id"`
+	Name          string   `json:"name"`
 	ContextWindow int      `json:"contextWindow"`
 	MaxTokens     int      `json:"maxTokens"`
 	Input         []string `json:"input"`
@@ -40,6 +56,7 @@ type startupModel struct {
 
 type startupRPCState struct {
 	Model               json.RawMessage `json:"model"`
+	ThinkingLevel       *string         `json:"thinkingLevel"`
 	IsStreaming         *bool           `json:"isStreaming"`
 	IsCompacting        *bool           `json:"isCompacting"`
 	PendingMessageCount *int            `json:"pendingMessageCount"`
@@ -70,10 +87,18 @@ func startup(ctx context.Context, client *rpcClient, expectedSessionFile, worksp
 	if decodeStartupData(native.Model, &model) != nil || !validStartupText(model.Provider, provider.MaxTitleBytes) || !validStartupText(model.ID, provider.MaxTitleBytes) || model.ContextWindow <= 0 || model.MaxTokens <= 0 {
 		return startupState{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
+	thinkingLevel := "off"
+	if native.ThinkingLevel != nil {
+		thinkingLevel = *native.ThinkingLevel
+	}
+	modelName := model.Name
+	if modelName == "" {
+		modelName = model.ID
+	}
 	state := startupState{
 		SessionID: *native.SessionID, SessionFile: *native.SessionFile, Workspace: workspace,
-		ModelProvider: model.Provider, ModelID: model.ID, Model: model.Provider + "/" + model.ID,
-		ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens,
+		ModelProvider: model.Provider, ModelID: model.ID, Model: model.Provider + "/" + model.ID, ModelName: modelName,
+		ThinkingLevel: thinkingLevel, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens,
 		SupportsImages: modelSupportsImages(model.Input),
 	}
 	if !state.valid() || state.SessionFile != expectedSessionFile {

@@ -21,18 +21,18 @@ import (
 )
 
 const (
-	legacyMetadataSchemaVersion   = 1
-	markdownMetadataSchemaVersion = 2
-	metadataFilename              = "metadata.json"
-	directoryPermissions          = 0o700
-	filePermissions               = 0o600
-	randomNameAttempts            = 10
+	legacyMetadataSchemaVersion = 1
+	pairedMetadataSchemaVersion = 2
+	metadataFilename            = "metadata.json"
+	directoryPermissions        = 0o700
+	filePermissions             = 0o600
+	randomNameAttempts          = 10
 )
 
 var (
 	whiteboardGenerationPattern = regexp.MustCompile(`^source-[a-f0-9]{32}\.(md|html)$`)
-	markdownSourcePattern       = regexp.MustCompile(`^source-([a-f0-9]{32})\.md$`)
-	markdownContextPattern      = regexp.MustCompile(`^context-([a-f0-9]{32})\.md$`)
+	pairedSourcePattern         = regexp.MustCompile(`^source-([a-f0-9]{32})\.(md|html)$`)
+	creatorContextPattern       = regexp.MustCompile(`^context-([a-f0-9]{32})\.md$`)
 	imageGenerationPattern      = regexp.MustCompile(`^content-[a-f0-9]{32}$`)
 	temporaryArtifactPattern    = regexp.MustCompile(`^\.(content|context|metadata)-temp-[a-f0-9]{32}$`)
 )
@@ -587,8 +587,8 @@ func (fs *FS) Close() error {
 }
 
 func (fs *FS) commit(ctx context.Context, resource *os.Root, content, creatorContext []byte, stored *metadata, oldArtifacts []string) (bool, error) {
-	if stored.SchemaVersion == markdownMetadataSchemaVersion {
-		return fs.commitMarkdown(ctx, resource, content, creatorContext, stored, oldArtifacts)
+	if stored.SchemaVersion == pairedMetadataSchemaVersion {
+		return fs.commitWhiteboardPair(ctx, resource, content, creatorContext, stored, oldArtifacts)
 	}
 	return fs.commitSingle(ctx, resource, content, stored, oldArtifacts)
 }
@@ -732,7 +732,7 @@ func (fs *FS) commitSingle(ctx context.Context, resource *os.Root, content []byt
 	return true, nil
 }
 
-func (fs *FS) commitMarkdown(ctx context.Context, resource *os.Root, source, creatorContext []byte, stored *metadata, oldArtifacts []string) (bool, error) {
+func (fs *FS) commitWhiteboardPair(ctx context.Context, resource *os.Root, source, creatorContext []byte, stored *metadata, oldArtifacts []string) (bool, error) {
 	if err := ctxErr(ctx, fs.ctx); err != nil {
 		return false, err
 	}
@@ -796,7 +796,11 @@ func (fs *FS) commitMarkdown(ctx context.Context, resource *os.Root, source, cre
 	if err != nil {
 		return false, storageUnavailable(err)
 	}
-	publishedSource = "source-" + generation + ".md"
+	sourceExtension := ".md"
+	if stored.Kind == string(whiteboardDomain.KindHTML) {
+		sourceExtension = ".html"
+	}
+	publishedSource = "source-" + generation + sourceExtension
 	publishedContext = "context-" + generation + ".md"
 	if err := ctxErr(ctx, fs.ctx); err != nil {
 		return false, err
@@ -1477,7 +1481,7 @@ func cleanupArtifact(namespace, name string) bool {
 		return true
 	}
 	if namespace == "whiteboards" {
-		return whiteboardGenerationPattern.MatchString(name) || markdownContextPattern.MatchString(name)
+		return whiteboardGenerationPattern.MatchString(name) || creatorContextPattern.MatchString(name)
 	}
 	if namespace == "images" {
 		return imageGenerationPattern.MatchString(name)
@@ -1651,15 +1655,15 @@ func validateMetadata(stored metadata, expectedKind string) error {
 		}
 		switch stored.SchemaVersion {
 		case legacyMetadataSchemaVersion:
-			if stored.ContextFilename != "" || (stored.Kind != string(whiteboardDomain.KindMarkdown) && stored.Kind != string(whiteboardDomain.KindHTML)) {
+			if stored.ContextFilename != "" || stored.Kind != string(whiteboardDomain.KindMarkdown) {
 				return errors.New("invalid legacy whiteboard metadata")
 			}
-			if !whiteboardGenerationPattern.MatchString(stored.ContentFilename) || strings.HasSuffix(stored.ContentFilename, ".md") != (stored.Kind == string(whiteboardDomain.KindMarkdown)) {
+			if !whiteboardGenerationPattern.MatchString(stored.ContentFilename) || !strings.HasSuffix(stored.ContentFilename, ".md") {
 				return errors.New("invalid legacy whiteboard generation")
 			}
-		case markdownMetadataSchemaVersion:
-			if stored.Kind != string(whiteboardDomain.KindMarkdown) || !matchingMarkdownGeneration(stored.ContentFilename, stored.ContextFilename) {
-				return errors.New("invalid paired Markdown metadata")
+		case pairedMetadataSchemaVersion:
+			if !matchingWhiteboardGeneration(stored.Kind, stored.ContentFilename, stored.ContextFilename) {
+				return errors.New("invalid paired whiteboard metadata")
 			}
 		default:
 			return errors.New("invalid whiteboard metadata schema")
@@ -1674,10 +1678,13 @@ func validateMetadata(stored metadata, expectedKind string) error {
 	return nil
 }
 
-func matchingMarkdownGeneration(sourceName, contextName string) bool {
-	source := markdownSourcePattern.FindStringSubmatch(sourceName)
-	creatorContext := markdownContextPattern.FindStringSubmatch(contextName)
-	return len(source) == 2 && len(creatorContext) == 2 && source[1] == creatorContext[1]
+func matchingWhiteboardGeneration(kind, sourceName, contextName string) bool {
+	source := pairedSourcePattern.FindStringSubmatch(sourceName)
+	creatorContext := creatorContextPattern.FindStringSubmatch(contextName)
+	if len(source) != 3 || len(creatorContext) != 2 || source[1] != creatorContext[1] {
+		return false
+	}
+	return kind == string(whiteboardDomain.KindMarkdown) && source[2] == "md" || kind == string(whiteboardDomain.KindHTML) && source[2] == "html"
 }
 
 func referencedArtifacts(stored metadata) []string {
@@ -1688,12 +1695,8 @@ func referencedArtifacts(stored metadata) []string {
 }
 
 func whiteboardMetadata(record whiteboardDomain.Whiteboard) metadata {
-	schemaVersion := legacyMetadataSchemaVersion
-	if record.Kind == whiteboardDomain.KindMarkdown {
-		schemaVersion = markdownMetadataSchemaVersion
-	}
 	return metadata{
-		SchemaVersion: schemaVersion, Kind: string(record.Kind),
+		SchemaVersion: pairedMetadataSchemaVersion, Kind: string(record.Kind),
 		CreatedAt: fromTime(record.CreatedAt), UpdatedAt: fromTime(record.UpdatedAt), ExpiresAt: fromTimePtr(record.ExpiresAt),
 	}
 }

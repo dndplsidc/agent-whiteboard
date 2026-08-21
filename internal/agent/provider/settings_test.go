@@ -1,7 +1,6 @@
 package provider_test
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -81,13 +80,13 @@ func TestExecutionSettingsCatalogRejectsInvalidAndIncompatibleValues(t *testing.
 	require.Error(t, (provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: "priority"}).Validate())
 }
 
-func TestSettingsPresenceIsProviderSpecificAcrossLifecycleContracts(t *testing.T) {
+func TestCompleteSettingsAreProviderNeutralAcrossLifecycleContracts(t *testing.T) {
 	workspace := t.TempDir()
 	settings := provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: provider.SpeedFast}
 	presentation := provider.ModelPresentation{ModelDisplayName: "5.6 Sol", Selectable: true}
 
 	require.NoError(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
-	require.Error(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace, Settings: &settings}).Validate())
+	require.NoError(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace, Settings: &settings}).Validate())
 	require.NoError(t, (provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
 	require.NoError(t, (provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: workspace, Settings: &settings}).Validate())
 
@@ -108,9 +107,12 @@ func TestSettingsPresenceIsProviderSpecificAcrossLifecycleContracts(t *testing.T
 	require.Error(t, codex.Validate())
 
 	pi := validNativeSession()
+	pi.Model = settings.Model
 	pi.Settings = &settings
 	pi.Presentation = &presentation
-	require.Error(t, pi.Validate())
+	require.NoError(t, pi.Validate())
+	pi.Settings = nil
+	require.Error(t, pi.Validate(), "legacy nil settings are accepted only by durable state validation")
 
 	accepted := provider.AcceptedTurn{TurnID: idA, AcceptedAt: now, Settings: &settings, Presentation: &presentation}
 	require.NoError(t, accepted.Validate())
@@ -118,17 +120,7 @@ func TestSettingsPresenceIsProviderSpecificAcrossLifecycleContracts(t *testing.T
 	require.Error(t, accepted.Validate())
 }
 
-func TestSelectableDriverAndSettingsEventsRemainOptionalAndComplete(t *testing.T) {
-	var base provider.Driver = &fakeDriver{}
-	_, selectable := base.(provider.SelectableDriver)
-	require.False(t, selectable, "base and Pi-style drivers must not be forced to expose model selection")
-
-	driver := fakeSelectableDriver{fakeDriver: &fakeDriver{name: provider.NameCodex}}
-	var capability provider.SelectableDriver = driver
-	catalog, err := capability.ModelCatalog(context.Background())
-	require.NoError(t, err)
-	require.NoError(t, catalog.Validate())
-
+func TestSettingsEventsRemainOptionalAndComplete(t *testing.T) {
 	settings := provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: provider.SpeedFast}
 	presentation := provider.ModelPresentation{ModelDisplayName: "5.6 Sol", Selectable: true}
 	verified := provider.NewVerifiedSettingsEvent(idA, settings, presentation)
@@ -153,12 +145,6 @@ func TestInvalidModelConfigurationErrorIsClosedAndRedacted(t *testing.T) {
 	require.Equal(t, provider.ErrorInvalidModelConfiguration, err.Code())
 	require.NotContains(t, err.Error(), "/")
 	require.Contains(t, provider.AllProviderErrorCodes(), provider.ErrorInvalidModelConfiguration)
-}
-
-type fakeSelectableDriver struct{ *fakeDriver }
-
-func (fakeSelectableDriver) ModelCatalog(context.Context) (provider.ModelCatalog, error) {
-	return validModelCatalog(), nil
 }
 
 func validModelCatalog() provider.ModelCatalog {

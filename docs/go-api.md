@@ -16,9 +16,9 @@ return service.ListenAndServe(ctx)
 
 The public Go configuration is programmatic and does not load CLI YAML or environment variables. Zero-valued fields use library defaults except where an option records an explicit value, such as `WithPort(0)` or `WithDefaultExpiration(0)`.
 
-## Paired Markdown contract
+## Paired whiteboard contract
 
-`Whiteboard` carries `ID`, `Kind`, `Source`, `Context`, `CreatedAt`, `UpdatedAt`, and `ExpiresAt`. `CreateWhiteboardInput` and `UpdateWhiteboardInput` likewise expose `Source`, `Context`, and expiration metadata. New Markdown creates and every Markdown update require non-empty UTF-8 `Source` and `Context`; HTML requires non-empty UTF-8 `Source` and an empty `Context`.
+`Whiteboard` carries `ID`, `Kind`, `Source`, `Context`, `CreatedAt`, `UpdatedAt`, and `ExpiresAt`. `CreateWhiteboardInput` and `UpdateWhiteboardInput` likewise expose `Source`, `Context`, and expiration metadata. Every Markdown or HTML create and update requires non-empty UTF-8 `Source` and `Context`. Markdown retains its source validation; HTML also retains standalone-document structural validation.
 
 ```go
 result, err := service.CreateMarkdown(ctx, agentwb.CreateWhiteboardInput{
@@ -30,6 +30,13 @@ if err != nil { return err }
 board, err := service.GetWhiteboard(ctx, result.ID)
 if err != nil { return err }
 fmt.Printf("%s\n%s", board.Source, board.Context)
+
+htmlResult, err := service.CreateHTML(ctx, agentwb.CreateWhiteboardInput{
+    Source:  []byte("<!doctype html><html><head></head><body>status</body></html>"),
+    Context: []byte("# Creator context\n\nGoal: present release status as HTML.\n"),
+})
+if err != nil { return err }
+_ = htmlResult
 ```
 
 Context should summarize goals, decisions, assumptions, and open questions. It is stored and returned as part of the capability resource, not treated as hidden or confidential. Do not include hidden reasoning, credentials, personal or sensitive data, private source, or raw tool output.
@@ -53,7 +60,7 @@ type WhiteboardStore interface {
 }
 ```
 
-`ImageStore` has the same method shape with `agentwb.Image`. Implementations must honor context cancellation, distinguish invalid/not-found/storage errors, preserve all model metadata including Markdown `Context`, make paired replacements atomic, report readiness, and make `Close` safe to call more than once. Inject them through `Config`; tests can inject testify/mock implementations.
+`ImageStore` has the same method shape with `agentwb.Image`. Implementations must honor context cancellation, distinguish invalid/not-found/storage errors, preserve all model metadata including whiteboard `Context`, make paired replacements atomic, report readiness, and make `Close` safe to call more than once. Inject them through `Config`; tests can inject testify/mock implementations.
 
 ```go
 service, err := agentwb.New(agentwb.Config{

@@ -36,14 +36,19 @@ type conversation struct {
 	catalog                 []protocol.CatalogModel
 	domainCatalog           provider.ModelCatalog
 	settingsState           protocol.SettingsState
+	settingsCapable         bool
 	effectiveSettings       *provider.ExecutionSettings
 	effectivePresentation   *provider.ModelPresentation
 	skillsState             *protocol.SkillsState
 	skills                  []protocol.SkillDescriptor
+	maxSelectedSkills       *int
 	supportsCompact         bool
+	busyPolicy              protocol.BusyTurnPolicy
 	queue                   *Queue
 	commands                commandLedger
 	pendingInteractions     map[string]*pendingInteraction
+	nextInteractionToken    uint64
+	interactionCallBudget   chan struct{}
 	pendingInteractionBytes int
 	active                  *activeTurn
 	compact                 *activeCompact
@@ -275,7 +280,7 @@ func newConversation(identity statepkg.Identity, mapping statepkg.Mapping, sessi
 	if err != nil {
 		return nil, err
 	}
-	domainCatalog, err := loadModelCatalog(lifecycleCtx, identity.Provider, driver)
+	domainCatalog, err := loadModelCatalog(lifecycleCtx, session.session)
 	if err != nil {
 		return nil, err
 	}
@@ -290,15 +295,24 @@ func newConversation(identity statepkg.Identity, mapping statepkg.Mapping, sessi
 		done: make(chan struct{}), start: make(chan struct{}), clock: clock, timers: timers, idleTimeout: idleTimeout,
 		contextState: protocol.ContextPending, catalog: catalog, domainCatalog: domainCatalog,
 		lifecycle: protocol.LifecycleReady, queue: NewQueue(), commands: newCommandLedger(), skills: []protocol.SkillDescriptor{},
-		pendingInteractions: make(map[string]*pendingInteraction),
-		lifecycleCtx:        lifecycleCtx, shutdownTimeout: shutdownTimeout,
+		pendingInteractions:   make(map[string]*pendingInteraction),
+		interactionCallBudget: make(chan struct{}, maxPendingInteractions),
+		lifecycleCtx:          lifecycleCtx, shutdownTimeout: shutdownTimeout,
 	}
-	if identity.Provider == provider.NameCodex {
-		if session.native.Settings == nil || session.native.Presentation == nil {
-			return nil, errors.New("Codex session lacks effective settings")
+	actor.loadSessionFeatures(lifecycleCtx)
+	if settingsSession, ok := session.session.(provider.SettingsSession); ok {
+		settings, presentation, discoveryErr := settingsSession.EffectiveSettings(lifecycleCtx)
+		if discoveryErr != nil || settings.Validate() != nil || presentation.Validate() != nil || !domainCatalog.Compatibility(settings).Compatible {
+			return nil, errors.New("settings-capable session lacks authoritative effective settings")
 		}
-		actor.applyEffectiveSettings(*session.native.Settings, *session.native.Presentation)
-		actor.loadSessionFeatures(lifecycleCtx)
+		actor.settingsCapable = true
+		actor.applyEffectiveSettings(settings, presentation)
+		current := actor.mapping.Current
+		if current.Settings == nil || current.Presentation == nil || *current.Settings != settings || *current.Presentation != presentation {
+			if !actor.persistEffectiveSettings(settings, presentation) {
+				return nil, errors.New("authoritative effective settings could not be persisted")
+			}
+		}
 	}
 	if actor.mapping.Current.Observed != nil {
 		actor.contextDigest = actor.mapping.Current.Observed.Digest
@@ -365,7 +379,7 @@ func (actor *conversation) run() {
 	}()
 	for {
 		if len(attachments) == 0 && len(actor.pendingInteractions) != 0 {
-			actor.cancelPendingInteractions(interactionResults)
+			actor.cancelPendingInteractions(attachments, interactionResults)
 		}
 		idle := len(attachments) == 0 && actor.active == nil && actor.compact == nil && actor.queue.Empty() && actor.workerSettled == nil && actor.deferredInterrupt == nil && !actor.dispatchBlocked && !actor.recoveryActive && !actor.handoffActive && !shutdownActive && !actor.stopping
 		if idle && idleTimer == nil {
@@ -498,8 +512,9 @@ func (actor *conversation) run() {
 				actor.shutdownAttempt = nil
 				providerEvents = result.handle.events
 				actor.refreshContextFromMapping()
-				if actor.identity.Provider == provider.NameCodex {
-					actor.loadSessionFeatures(actor.lifecycleCtx)
+				actor.loadSessionFeatures(actor.lifecycleCtx)
+				if !actor.reloadSessionSettings() {
+					result.err = errors.New("recovered provider settings unavailable")
 				}
 				if !actor.stopping {
 					deferredObservationErr = actor.applyDeferredObservation(attachments)
@@ -780,10 +795,14 @@ func (actor *conversation) snapshot(contextState protocol.ContextState) (protoco
 		Lifecycle: actor.lifecycle, Queue: actor.queue.Items(),
 		ContextState: contextState, ActiveWork: actor.activeWork(), SupportsImages: actor.session.capabilities.Images,
 		SettingsState: settingsState, EffectiveSettings: effectiveSettings, Catalog: catalog,
-		SkillsState: skillsState, Skills: append([]protocol.SkillDescriptor{}, actor.skills...), SupportsCompact: actor.supportsCompact,
+		SkillsState: skillsState, Skills: append([]protocol.SkillDescriptor{}, actor.skills...), MaxSelectedSkills: cloneInt(actor.maxSelectedSkills), SupportsCompact: actor.supportsCompact,
+		BusyPolicy: actor.busyPolicy, ComposerAdmission: actor.composerAdmission(),
 	}
 	wireProvider, err := providerNameFromDomain(actor.identity.Provider)
-	if err != nil || actor.identity.Provider == provider.NameCodex && !actor.queue.Empty() || payload.ValidateForProvider(wireProvider) != nil {
+	if err != nil {
+		return protocol.Event{}, errors.New("invalid provider snapshot identity")
+	}
+	if validationErr := payload.ValidateForProvider(wireProvider); validationErr != nil {
 		return protocol.Event{}, errors.New("invalid provider snapshot state")
 	}
 	return actor.factory.New(payload)
@@ -838,6 +857,10 @@ func (actor *conversation) publishProviderEvent(attachments map[*clientAttachmen
 		return
 	}
 	if source.Kind == provider.EventInteractionRequest {
+		if _, capable := actor.session.session.(provider.InteractiveSession); !capable {
+			actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
+			return
+		}
 		if actor.rememberInteraction(*source.Interaction) != nil {
 			actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
 			return
@@ -852,7 +875,7 @@ func (actor *conversation) publishProviderEvent(attachments map[*clientAttachmen
 			actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
 			return
 		}
-		actor.forgetInteraction(source.Resolution.RequestID)
+		actor.retireInteraction(attachments, source.Resolution.RequestID, pending.token, "", false, protocol.ErrorInvalidState)
 	}
 	if providerEventTerminal(source) {
 		actor.expirePendingInteractions(attachments)

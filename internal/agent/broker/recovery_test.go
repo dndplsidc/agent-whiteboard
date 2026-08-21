@@ -79,6 +79,250 @@ func (session *recoveryCountingSession) Child() provider.ManagedChild {
 	return session.Session.Child()
 }
 
+func TestRecoveryExpiresIdleSessionInteractionBeforeReplacement(t *testing.T) {
+	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1250))
+	state := &hardeningState{mapping: &mapping}
+	old := newTurnSession(mapping.Current.NativeSession.Value())
+	replacement := newTurnSession(mapping.Current.NativeSession.Value())
+	driver := &recoverySequenceDriver{sessions: []provider.Session{old, replacement}}
+	broker, err := New(validLifecycleConfig(state, driver, &lockedIDs{next: 1260}))
+	require.NoError(t, err)
+	defer broker.Close(context.Background())
+	connected, err := broker.Connect(context.Background(), identity.Origin, lifecycleConnect(sequenceID(1261), identity.CapabilityID))
+	require.NoError(t, err)
+	connection := connected.(*Connection)
+	receiveLifecycle(t, connection.Events())
+	requestID := sequenceID(1262)
+	old.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{ID: requestID, Kind: provider.InteractionCommandApproval, Title: "Approve", Options: []provider.InteractionOption{{ID: "accept", Label: "Accept"}}})
+	require.Equal(t, protocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+	close(old.events)
+	resolved := receiveLifecycle(t, connection.Events())
+	require.Equal(t, protocol.EventInteractionResolved, resolved.Type)
+	require.Empty(t, resolved.Payload.(protocol.InteractionResolvedPayload).OptionID)
+	requireRecoveryCycle(t, connection.Events())
+	require.Equal(t, 1, replayInteractionResolutionCount(t, connection.actor.replay, requestID))
+}
+
+func TestRecoveryPreservesConcurrentInteractionResponseOwnership(t *testing.T) {
+	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1270))
+	resource := testResource(identity.CapabilityID)
+	page := testPageContext(resource)
+	mapping.Current.Observed = &statepkg.Revision{Digest: page.Digest, Revision: statepkg.RevisionInitial, SourceUpdatedAt: resource.UpdatedAt}
+	state := &repairState{mapping: &mapping, promotions: []repairMutation{{outcome: statepkg.CommitApplied, apply: true}}}
+	old := newTurnSession(mapping.Current.NativeSession.Value())
+	replacement := newTurnSession(mapping.Current.NativeSession.Value())
+	driver := &recoverySequenceDriver{sessions: []provider.Session{old, replacement}}
+	broker, err := New(validLifecycleConfig(state, driver, &lockedIDs{next: 1280}))
+	require.NoError(t, err)
+	defer broker.Close(context.Background())
+	clientID := sequenceID(1281)
+	connected, err := broker.Connect(context.Background(), identity.Origin, observationConnect(clientID, identity.CapabilityID, page.Digest, resource, ""))
+	require.NoError(t, err)
+	connection := connected.(*Connection)
+	receiveLifecycle(t, connection.Events())
+	turnID := sequenceID(1282)
+	_, err = connection.Command(context.Background(), submitCommand(sequenceID(1283), clientID, connection.ConversationID(), turnID, sequenceID(1284), "active", &page))
+	require.NoError(t, err)
+	receiveLifecycle(t, old.submitted)
+	drainEvents(t, connection.Events(), 3)
+	requestID := sequenceID(1285)
+	options := []provider.InteractionOption{{ID: "accept", Label: "Accept"}, {ID: "decline", Label: "Decline"}}
+	old.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval, Title: "Approve", Options: options})
+	require.Equal(t, protocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+	old.respondGate = make(chan struct{})
+	old.respondIgnoreContext = true
+	oldAnswer := make(chan commandResponse, 1)
+	oldCommandID := sequenceID(1286)
+	go func() {
+		event, commandErr := connection.Command(context.Background(), interactionResponseCommand(oldCommandID, clientID, connection.ConversationID(), requestID, protocol.InteractionCommandApproval, "accept"))
+		oldAnswer <- commandResponse{event: event, err: commandErr}
+	}()
+	receiveLifecycle(t, old.responded)
+	close(old.events)
+	resolved := receiveLifecycle(t, connection.Events())
+	require.Equal(t, protocol.EventInteractionResolved, resolved.Type)
+	require.Equal(t, "accept", resolved.Payload.(protocol.InteractionResolvedPayload).OptionID)
+	for ready := false; !ready; {
+		event := receiveLifecycle(t, connection.Events())
+		if payload, ok := event.Payload.(protocol.LifecyclePayload); ok && payload.State == protocol.LifecycleReady {
+			ready = true
+		}
+	}
+	replacement.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{ID: requestID, Kind: provider.InteractionCommandApproval, Title: "Approve again", Options: options})
+	require.Equal(t, protocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+	replacement.respondGate = make(chan struct{})
+	replacementAnswer := make(chan commandResponse, 1)
+	replacementCommandID := sequenceID(1287)
+	go func() {
+		event, commandErr := connection.Command(context.Background(), interactionResponseCommand(replacementCommandID, clientID, connection.ConversationID(), requestID, protocol.InteractionCommandApproval, "decline"))
+		replacementAnswer <- commandResponse{event: event, err: commandErr}
+	}()
+	receiveLifecycle(t, replacement.responded)
+	oldResponse := receiveLifecycle(t, oldAnswer)
+	require.NoError(t, oldResponse.err)
+	requireCommandResult(t, oldResponse.event, protocol.CommandRejected, protocol.ErrorProviderCrashed)
+	close(replacement.respondGate)
+	replacementResponse := receiveLifecycle(t, replacementAnswer)
+	require.NoError(t, replacementResponse.err)
+	requireCommandResult(t, replacementResponse.event, protocol.CommandSucceeded, "")
+	var newResolved protocol.Event
+	for newResolved.Type != protocol.EventInteractionResolved {
+		newResolved = receiveLifecycle(t, connection.Events())
+	}
+	require.Equal(t, "decline", newResolved.Payload.(protocol.InteractionResolvedPayload).OptionID)
+	require.Equal(t, 2, replayInteractionResolutionCount(t, connection.actor.replay, requestID))
+	replayed, err := connection.actor.replay.Replay(clientID, "")
+	require.NoError(t, err)
+	commandCounts := map[string]int{}
+	for _, event := range replayed {
+		if payload, ok := event.Payload.(protocol.CommandResultPayload); ok {
+			commandCounts[payload.CommandID]++
+		}
+	}
+	require.Equal(t, 1, commandCounts[oldCommandID])
+	require.Equal(t, 1, commandCounts[replacementCommandID])
+	require.Empty(t, connection.actor.pendingInteractions)
+	require.EqualValues(t, 2, connection.actor.nextInteractionToken)
+	close(old.respondGate)
+}
+
+func TestRecoveryInteractionCallBudgetCapsNonCooperativeCallsAcrossGenerations(t *testing.T) {
+	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1292))
+	state := &hardeningState{mapping: &mapping}
+	sessions := []*turnSession{
+		newTurnSession(mapping.Current.NativeSession.Value()),
+		newTurnSession(mapping.Current.NativeSession.Value()),
+		newTurnSession(mapping.Current.NativeSession.Value()),
+	}
+	driver := &recoverySequenceDriver{sessions: []provider.Session{sessions[0], sessions[1], sessions[2]}}
+	broker, err := New(validLifecycleConfig(state, driver, &lockedIDs{next: 70000}))
+	require.NoError(t, err)
+	defer broker.Close(context.Background())
+	clientID := sequenceID(70001)
+	connected, err := broker.Connect(context.Background(), identity.Origin, lifecycleConnect(clientID, identity.CapabilityID))
+	require.NoError(t, err)
+	connection := connected.(*Connection)
+	receiveLifecycle(t, connection.Events())
+	connection.actor.interactionCallBudget = make(chan struct{}, 2)
+	gates := make([]chan struct{}, 0, 2)
+	for generation := 0; generation < 2; generation++ {
+		session := sessions[generation]
+		requestID := sequenceID(uint64(70010 + generation))
+		session.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{ID: requestID, Kind: provider.InteractionCommandApproval, Title: "Approve", Options: []provider.InteractionOption{{ID: "accept", Label: "Accept"}}})
+		require.Equal(t, protocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+		gate := make(chan struct{})
+		gates = append(gates, gate)
+		session.mu.Lock()
+		session.respondGate = gate
+		session.respondIgnoreContext = true
+		session.mu.Unlock()
+		answer := make(chan commandResponse, 1)
+		commandID := sequenceID(uint64(70020 + generation))
+		go func() {
+			event, commandErr := connection.Command(context.Background(), interactionResponseCommand(commandID, clientID, connection.ConversationID(), requestID, protocol.InteractionCommandApproval, "accept"))
+			answer <- commandResponse{event: event, err: commandErr}
+		}()
+		receiveLifecycle(t, session.responded)
+		close(session.events)
+		settled := receiveLifecycle(t, answer)
+		require.NoError(t, settled.err)
+		requireCommandResult(t, settled.event, protocol.CommandRejected, protocol.ErrorProviderCrashed)
+		ready := false
+		resolved := 0
+		for !ready {
+			event := receiveLifecycle(t, connection.Events())
+			if event.Type == protocol.EventInteractionResolved {
+				resolved++
+			}
+			if payload, ok := event.Payload.(protocol.LifecyclePayload); ok && payload.State == protocol.LifecycleReady {
+				ready = true
+			}
+		}
+		require.Equal(t, 1, resolved)
+		require.Equal(t, generation+1, len(connection.actor.interactionCallBudget))
+		require.Empty(t, connection.actor.pendingInteractions)
+	}
+
+	requestID := sequenceID(70030)
+	third := sessions[2]
+	third.events <- provider.NewInteractionRequestEvent(provider.InteractionRequest{ID: requestID, Kind: provider.InteractionCommandApproval, Title: "Approve", Options: []provider.InteractionOption{{ID: "accept", Label: "Accept"}}})
+	require.Equal(t, protocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+	commandID := sequenceID(70031)
+	result, err := connection.Command(context.Background(), interactionResponseCommand(commandID, clientID, connection.ConversationID(), requestID, protocol.InteractionCommandApproval, "accept"))
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandRejected, protocol.ErrorInvalidState)
+	var resolved protocol.Event
+	for resolved.Type != protocol.EventInteractionResolved {
+		resolved = receiveLifecycle(t, connection.Events())
+	}
+	require.Equal(t, "accept", resolved.Payload.(protocol.InteractionResolvedPayload).OptionID)
+	select {
+	case unexpected := <-third.responded:
+		t.Fatalf("budget-exhausted response spawned provider call: %#v", unexpected)
+	default:
+	}
+	require.Empty(t, connection.actor.pendingInteractions)
+	require.EqualValues(t, 3, connection.actor.nextInteractionToken)
+	require.Equal(t, 2, len(connection.actor.interactionCallBudget))
+	require.LessOrEqual(t, len(connection.actor.commands.entries), maxCommandLedgerEntries)
+	for _, gate := range gates {
+		close(gate)
+	}
+	require.Eventually(t, func() bool { return len(connection.actor.interactionCallBudget) == 0 }, lifecycleTestTimeout, time.Millisecond)
+}
+
+func TestRecoveryRetiresNeverReturningInteractionOwnershipBoundedly(t *testing.T) {
+	conversationID := sequenceID(1291)
+	factory, err := NewEventFactory(conversationID, &lockedIDs{next: 60000}, testClock{now: testTime()})
+	require.NoError(t, err)
+	actor := &conversation{
+		factory: factory, replay: NewReplayLog(), commands: newCommandLedger(),
+		pendingInteractions: make(map[string]*pendingInteraction),
+	}
+	for index := 0; index < maxCommandLedgerEntries+8; index++ {
+		requestID := sequenceID(uint64(61000 + index))
+		clientID := sequenceID(uint64(63000 + index))
+		commandID := sequenceID(uint64(65000 + index))
+		request := provider.InteractionRequest{ID: requestID, Kind: provider.InteractionCommandApproval, Title: "Approve", Options: []provider.InteractionOption{{ID: "accept", Label: "Accept"}}}
+		require.NoError(t, actor.rememberInteraction(request))
+		pending := actor.pendingInteractions[requestID]
+		response := provider.InteractionResponse{RequestID: requestID, Kind: request.Kind, OptionID: "accept"}
+		pending.resolving = true
+		pending.response = &response
+		pending.commandID = commandID
+		pending.clientID = clientID
+		_, cancel := context.WithCancel(context.Background())
+		pending.cancel = cancel
+		command := interactionResponseCommand(commandID, clientID, conversationID, requestID, protocol.InteractionCommandApproval, "accept")
+		disposition, _, beginErr := actor.commands.begin(command)
+		require.NoError(t, beginErr)
+		require.Equal(t, commandNew, disposition)
+		waiter := make(chan commandResponse, 1)
+		require.NoError(t, actor.commands.wait(commandID, commandWaiter{response: waiter}))
+		actor.expireTerminatedSessionInteractions(map[*clientAttachment]struct{}{})
+		settled := receiveLifecycle(t, waiter)
+		require.NoError(t, settled.err)
+		requireCommandResult(t, settled.event, protocol.CommandRejected, protocol.ErrorProviderCrashed)
+		require.Empty(t, actor.pendingInteractions)
+		require.Zero(t, actor.pendingInteractionBytes)
+	}
+	require.EqualValues(t, maxCommandLedgerEntries+8, actor.nextInteractionToken)
+	require.LessOrEqual(t, len(actor.commands.entries), maxCommandLedgerEntries)
+}
+
+func replayInteractionResolutionCount(t *testing.T, replay *ReplayLog, requestID string) int {
+	t.Helper()
+	events, err := replay.Replay(sequenceID(1290), "")
+	require.NoError(t, err)
+	count := 0
+	for _, event := range events {
+		if payload, ok := event.Payload.(protocol.InteractionResolvedPayload); ok && payload.RequestID == requestID {
+			count++
+		}
+	}
+	return count
+}
+
 func TestServingGenerationRecoveryDeduplicatesFailureAndRecoversLaterGeneration(t *testing.T) {
 	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1300))
 	state := &hardeningState{mapping: &mapping}
@@ -470,8 +714,8 @@ func TestNewerRevisionAttachedDuringRecoveryErasesStaleQueuedContext(t *testing.
 	resource2.UpdatedAt = resource1.UpdatedAt.Add(time.Minute)
 	page2 := testPageContext(resource2)
 	page2.Revision = protocol.ContextReplacement
-	page2.Markdown = "# replacement two\n"
-	page2.Digest = agent.CalculateContextDigest([]byte(page2.Markdown), []byte(page2.CreatorContext))
+	page2.Source = "# replacement two\n"
+	page2.Digest = agent.CalculateContextDigest([]byte(page2.Source), []byte(page2.CreatorContext))
 	secondClientID := sequenceID(1635)
 	second, err := broker.Connect(context.Background(), identity.Origin, observationConnect(secondClientID, identity.CapabilityID, page2.Digest, resource2, ""))
 	require.NoError(t, err)
@@ -494,8 +738,8 @@ func TestNewerRevisionAttachedDuringRecoveryErasesStaleQueuedContext(t *testing.
 	resource3.UpdatedAt = resource2.UpdatedAt.Add(time.Minute)
 	page3 := testPageContext(resource3)
 	page3.Revision = protocol.ContextReplacement
-	page3.Markdown = "# replacement three\n"
-	page3.Digest = agent.CalculateContextDigest([]byte(page3.Markdown), []byte(page3.CreatorContext))
+	page3.Source = "# replacement three\n"
+	page3.Digest = agent.CalculateContextDigest([]byte(page3.Source), []byte(page3.CreatorContext))
 	thirdClientID := sequenceID(1639)
 	third, err := broker.Connect(context.Background(), identity.Origin, observationConnect(thirdClientID, identity.CapabilityID, page3.Digest, resource3, ""))
 	require.NoError(t, err)

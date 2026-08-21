@@ -15,7 +15,7 @@ import (
 
 const (
 	MaxTurnMessageBytes     = 64 << 10
-	MaxMarkdownBytes        = 10 << 20
+	MaxSourceBytes          = 10 << 20
 	MaxCreatorContextBytes  = 1 << 20
 	MaxTitleBytes           = 512
 	MaxURLBytes             = 8 << 10
@@ -203,14 +203,8 @@ func (s NativeSession) Validate() error {
 	if !s.Ref.Valid() || !s.Provider.Valid() || !validBoundedText(s.Model, MaxTitleBytes, true) || s.CreatedAt.IsZero() || s.UpdatedAt.IsZero() || s.UpdatedAt.Before(s.CreatedAt) {
 		return errors.New("invalid native session metadata")
 	}
-	if s.Provider == NamePi {
-		if s.Settings != nil || s.Presentation != nil {
-			return errors.New("Pi native session contains execution settings")
-		}
-		return nil
-	}
 	if s.Settings == nil || s.Settings.Validate() != nil || s.Presentation == nil || s.Presentation.Validate() != nil || s.Model != s.Settings.Model {
-		return errors.New("Codex native session lacks complete execution settings")
+		return errors.New("native session lacks complete execution settings")
 	}
 	return nil
 }
@@ -227,7 +221,7 @@ type CreateRequest struct {
 
 func (r CreateRequest) Validate() error {
 	if validateProviderAccess(r.Provider, r.Access) != nil || !validAbsoluteCleanPath(r.Workspace) ||
-		(r.Provider == NamePi && r.Settings != nil) || (r.Settings != nil && r.Settings.Validate() != nil) {
+		(r.Settings != nil && r.Settings.Validate() != nil) {
 		return errors.New("invalid provider create request")
 	}
 	return nil
@@ -325,7 +319,10 @@ type ManagedChild = common.ManagedProcess
 
 type ResourceKind string
 
-const ResourceMarkdown ResourceKind = "markdown"
+const (
+	ResourceMarkdown ResourceKind = "markdown"
+	ResourceHTML     ResourceKind = "html"
+)
 
 type Resource struct {
 	Kind      ResourceKind
@@ -344,7 +341,7 @@ const (
 
 type PageContext struct {
 	Revision       ContextRevision
-	Markdown       []byte
+	Source         []byte
 	CreatorContext []byte
 	Title          string
 	URL            string
@@ -360,8 +357,9 @@ func (p PageContext) Validate() error {
 	if p.Revision != ContextInitial && p.Revision != ContextReplacement {
 		return errors.New("invalid context revision")
 	}
-	if !validBoundedBytes(p.Markdown, MaxMarkdownBytes, true) || !validBoundedBytes(p.CreatorContext, MaxCreatorContextBytes, true) ||
-		!validBoundedText(p.Title, MaxTitleBytes, true) || !validURL(p.URL) || !validResource(p.Resource) || p.Digest != agent.CalculateContextDigest(p.Markdown, p.CreatorContext) {
+	digest, err := agent.CalculateContextDigestForKind(string(p.Resource.Kind), p.Source, p.CreatorContext)
+	if err != nil || !validBoundedBytes(p.Source, MaxSourceBytes, true) || !validBoundedBytes(p.CreatorContext, MaxCreatorContextBytes, true) ||
+		!validBoundedText(p.Title, MaxTitleBytes, true) || !validURL(p.URL) || !validResource(p.Resource) || p.Digest != digest {
 		return errors.New("invalid page context")
 	}
 	return nil
@@ -820,7 +818,7 @@ func validURL(value string) bool {
 	return common.ValidPageURL(value)
 }
 func validResource(resource Resource) bool {
-	return resource.Kind == ResourceMarkdown && validID(resource.ID) && !resource.CreatedAt.IsZero() && !resource.UpdatedAt.IsZero() && !resource.UpdatedAt.Before(resource.CreatedAt) && (resource.ExpiresAt == nil || !resource.ExpiresAt.Before(resource.CreatedAt))
+	return (resource.Kind == ResourceMarkdown || resource.Kind == ResourceHTML) && validID(resource.ID) && !resource.CreatedAt.IsZero() && !resource.UpdatedAt.IsZero() && !resource.UpdatedAt.Before(resource.CreatedAt) && (resource.ExpiresAt == nil || !resource.ExpiresAt.Before(resource.CreatedAt))
 }
 func validActivity(value ActivityKind) bool {
 	return value == ActivityStatus || value == ActivityVisibleSummary || value == ActivityRetry || value == ActivityCompaction

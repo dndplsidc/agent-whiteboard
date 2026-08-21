@@ -57,6 +57,11 @@ type evictedReplayEntry struct {
 	targetClientID string
 }
 
+type preparedReplayEntry struct {
+	log   *ReplayLog
+	entry ReplayEntry
+}
+
 type ReplayLog struct {
 	entries      []ReplayEntry
 	total        int
@@ -100,27 +105,49 @@ func (log *ReplayLog) AppendForClient(clientID string, event protocol.Event) err
 }
 
 func (log *ReplayLog) append(event protocol.Event, target string) error {
-	if log == nil {
-		return errors.New("nil replay log")
-	}
-	if target != "" && common.ValidateID(target) != nil {
-		return errors.New("invalid replay target")
-	}
-	encoded, err := protocol.EncodeEvent(event)
+	prepared, err := log.prepareAppend(event, target)
 	if err != nil {
 		return err
 	}
+	return log.appendPrepared(prepared)
+}
+
+func (log *ReplayLog) containsEventID(eventID string) bool {
 	for _, entry := range log.entries {
-		if entry.Event.EventID == event.EventID {
-			return ErrReplayDuplicateID
+		if entry.Event.EventID == eventID {
+			return true
 		}
 	}
-	if _, exists := log.evicted[event.EventID]; exists {
+	_, evicted := log.evicted[eventID]
+	return evicted
+}
+
+func (log *ReplayLog) prepareAppend(event protocol.Event, target string) (preparedReplayEntry, error) {
+	if log == nil {
+		return preparedReplayEntry{}, errors.New("nil replay log")
+	}
+	if target != "" && common.ValidateID(target) != nil {
+		return preparedReplayEntry{}, errors.New("invalid replay target")
+	}
+	encoded, err := protocol.EncodeEvent(event)
+	if err != nil {
+		return preparedReplayEntry{}, err
+	}
+	if log.containsEventID(event.EventID) {
+		return preparedReplayEntry{}, ErrReplayDuplicateID
+	}
+	return preparedReplayEntry{log: log, entry: ReplayEntry{Event: cloneEvent(event), TargetClientID: target, encodedBytes: len(encoded)}}, nil
+}
+
+func (log *ReplayLog) appendPrepared(prepared preparedReplayEntry) error {
+	if log == nil || prepared.log != log || prepared.entry.encodedBytes <= 0 {
+		return errors.New("invalid prepared replay entry")
+	}
+	if log.containsEventID(prepared.entry.Event.EventID) {
 		return ErrReplayDuplicateID
 	}
-	entry := ReplayEntry{Event: cloneEvent(event), TargetClientID: target, encodedBytes: len(encoded)}
-	log.entries = append(log.entries, entry)
-	log.total += entry.encodedBytes
+	log.entries = append(log.entries, prepared.entry)
+	log.total += prepared.entry.encodedBytes
 	for len(log.entries) > MaxReplayEvents || log.total > MaxReplayBytes {
 		log.evictOldest()
 	}
@@ -216,6 +243,7 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 			state := *value.SkillsState
 			value.SkillsState = &state
 		}
+		value.MaxSelectedSkills = cloneInt(value.MaxSelectedSkills)
 		if value.ActiveWork != nil {
 			active := *value.ActiveWork
 			value.ActiveWork = &active
@@ -238,6 +266,7 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 			state := *value.SkillsState
 			copyOfValue.SkillsState = &state
 		}
+		copyOfValue.MaxSelectedSkills = cloneInt(value.MaxSelectedSkills)
 		if value.ActiveWork != nil {
 			active := *value.ActiveWork
 			copyOfValue.ActiveWork = &active
@@ -281,6 +310,7 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 		return &copyOfValue
 	case protocol.SkillCatalogPayload:
 		value.Skills = append([]protocol.SkillDescriptor{}, value.Skills...)
+		value.MaxSelectedSkills = cloneInt(value.MaxSelectedSkills)
 		return value
 	case *protocol.SkillCatalogPayload:
 		if value == nil {
@@ -288,6 +318,7 @@ func clonePayload(payload protocol.EventPayload) protocol.EventPayload {
 		}
 		copyOfValue := *value
 		copyOfValue.Skills = append([]protocol.SkillDescriptor{}, value.Skills...)
+		copyOfValue.MaxSelectedSkills = cloneInt(value.MaxSelectedSkills)
 		return &copyOfValue
 	case protocol.QueuePayload:
 		value.Items = cloneQueueItems(value.Items)

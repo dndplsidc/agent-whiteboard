@@ -160,15 +160,12 @@ func validateWrite(kind Kind, source, creatorContext []byte) error {
 		if err := validateMarkdown(source); err != nil {
 			return err
 		}
-		return validateMarkdownContext(creatorContext)
+		return validateCreatorContext(creatorContext)
 	case KindHTML:
 		if err := validateHTML(source); err != nil {
 			return err
 		}
-		if len(creatorContext) != 0 {
-			return common.NewError(common.CodeInvalidRequest, "html must not include context", nil)
-		}
-		return nil
+		return validateCreatorContext(creatorContext)
 	default:
 		return common.NewError(common.CodeInvalidRequest, "invalid whiteboard kind", nil)
 	}

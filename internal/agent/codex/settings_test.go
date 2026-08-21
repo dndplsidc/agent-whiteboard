@@ -10,6 +10,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSessionProviderControlCapabilitiesPreserveCodexSemantics(t *testing.T) {
+	catalog := testNativeCatalog(t)
+	initial, presentation, capabilities, err := catalog.resolveEffective("gpt-5.6-sol", "high", "priority")
+	require.NoError(t, err)
+	session := &Session{driver: &Driver{config: Config{Clock: fixedClock{time.Unix(100, 0).UTC()}}}, native: testCodexNativeSession(t, "native-thread", initial, presentation), capabilities: capabilities, catalog: catalog, skills: unavailableSkillCatalog()}
+	exposed, err := session.SettingsCatalog(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, catalog.visibleCatalog(), exposed)
+	effective, effectivePresentation, err := session.EffectiveSettings(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, initial, effective)
+	require.Equal(t, presentation, effectivePresentation)
+	next := provider.ExecutionSettings{Model: "gpt-5.6-luna", Effort: "medium", Speed: provider.SpeedStandard}
+	applied, appliedPresentation, err := session.ApplySettings(context.Background(), next)
+	require.NoError(t, err)
+	require.Equal(t, next, applied)
+	require.Equal(t, "5.6 Luna", appliedPresentation.ModelDisplayName)
+	stillEffective, stillPresentation, err := session.EffectiveSettings(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, initial, stillEffective)
+	require.Equal(t, presentation, stillPresentation)
+	require.Equal(t, initial, *session.NativeSession().Settings)
+	require.Equal(t, provider.BusyTurnPreserveDraft, session.BusyTurnPolicy())
+	session.skills = nativeSkillCatalog{state: provider.SkillsReady, byID: map[string]nativeSkill{}, order: []string{}}
+	session.skillsLoaded = true
+	require.Equal(t, provider.MaxMessageSkills, session.Skills(context.Background()).MaxSelectedSkills)
+}
+
 func TestNativeCatalogPreservesVisibleModelsEffortsCapabilitiesAndFastSupport(t *testing.T) {
 	page, cursor, err := parseModelCatalogPage([]byte(`{
 		"data":[

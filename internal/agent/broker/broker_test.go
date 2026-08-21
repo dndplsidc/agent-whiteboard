@@ -11,6 +11,7 @@ import (
 	"github.com/edocsss/agent-whiteboard/internal/agent"
 	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
 	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
+	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
 	"github.com/edocsss/agent-whiteboard/internal/common"
 	"github.com/stretchr/testify/require"
 )
@@ -33,30 +34,32 @@ func testResource(id string) protocol.Resource {
 }
 
 func testContext(resource protocol.Resource) protocol.PageContext {
-	markdown := "# café\n"
+	source := "# café\n"
 	creator := "creator\xE2\x9C\x93"
+	digest, _ := agent.CalculateContextDigestForKind(string(resource.Kind), []byte(source), []byte(creator))
 	return protocol.PageContext{
 		Revision:       protocol.ContextInitial,
-		Markdown:       markdown,
+		Source:         source,
 		CreatorContext: creator,
 		Title:          "A title",
 		URL:            "https://example.com/board/readme",
 		Resource:       resource,
-		Digest:         agent.CalculateContextDigest([]byte(markdown), []byte(creator)),
+		Digest:         digest,
 	}
 }
 
 func testProviderContext(resource provider.Resource) provider.PageContext {
-	markdown := []byte("# café\n")
+	source := []byte("# café\n")
 	creator := []byte("creator✓")
+	digest, _ := agent.CalculateContextDigestForKind(string(resource.Kind), source, creator)
 	return provider.PageContext{
 		Revision:       provider.ContextInitial,
-		Markdown:       markdown,
+		Source:         source,
 		CreatorContext: creator,
 		Title:          "A title",
 		URL:            "https://example.com/board/readme",
 		Resource:       resource,
-		Digest:         agent.CalculateContextDigest(markdown, creator),
+		Digest:         digest,
 	}
 }
 
@@ -169,9 +172,9 @@ func TestConversionsRequireCanonicalAuthorizedOriginAndCopyContextBytes(t *testi
 	back, err := PageContextFromProvider(converted, identity, identity.Origin)
 	require.NoError(t, err)
 	require.Equal(t, page, back)
-	converted.Markdown[0] = 'X'
+	converted.Source[0] = 'X'
 	converted.CreatorContext[0] = 'X'
-	require.Equal(t, byte('#'), page.Markdown[0])
+	require.Equal(t, byte('#'), page.Source[0])
 	require.Equal(t, byte('c'), page.CreatorContext[0])
 
 	_, err = PageContextToProvider(page, identity, "https://other.example.com")
@@ -181,8 +184,8 @@ func TestConversionsRequireCanonicalAuthorizedOriginAndCopyContextBytes(t *testi
 	_, err = PageContextToProvider(mismatch, identity, identity.Origin)
 	require.Error(t, err)
 	mismatch = page
-	mismatch.Digest = agent.CalculateContextDigest([]byte(mismatch.Markdown+"changed"), []byte(mismatch.CreatorContext))
-	mismatch.Markdown += "changed"
+	mismatch.Digest = agent.CalculateContextDigest([]byte(mismatch.Source+"changed"), []byte(mismatch.CreatorContext))
+	mismatch.Source += "changed"
 	_, err = PageContextToProvider(mismatch, identity, identity.Origin)
 	require.Error(t, err)
 	page.URL = "http://example.com/board/readme"
@@ -191,6 +194,27 @@ func TestConversionsRequireCanonicalAuthorizedOriginAndCopyContextBytes(t *testi
 	page.URL = "https://other.example.com/board/readme"
 	_, err = PageContextToProvider(page, identity, identity.Origin)
 	require.Error(t, err)
+}
+
+func TestHTMLConversionsPreserveKindSourceAndStateIdentity(t *testing.T) {
+	resource := testResource(testID('H'))
+	resource.Kind = protocol.ResourceHTML
+	page := testContext(resource)
+	page.Source = "<!doctype html><title>Exact</title>\x00"
+	page.Digest, _ = agent.CalculateContextDigestForKind(agent.ResourceKindHTML, []byte(page.Source), []byte(page.CreatorContext))
+	identity := ConnectIdentity{Origin: "https://example.com", Provider: protocol.ProviderCodex, Resource: resource, ContextDigest: page.Digest}
+
+	stateIdentity, err := ConnectIdentityToState(identity, identity.Origin)
+	require.NoError(t, err)
+	require.Equal(t, statepkg.ResourceHTML, stateIdentity.Kind)
+
+	converted, err := PageContextToProvider(page, identity, identity.Origin)
+	require.NoError(t, err)
+	require.Equal(t, provider.ResourceHTML, converted.Resource.Kind)
+	require.Equal(t, []byte(page.Source), converted.Source)
+	back, err := PageContextFromProvider(converted, identity, identity.Origin)
+	require.NoError(t, err)
+	require.Equal(t, page, back)
 }
 
 func TestConnectIdentityPreservesEachProvider(t *testing.T) {
@@ -272,7 +296,8 @@ func TestReplayLogUsesWireBytesEvictsExactlyAndFiltersTargets(t *testing.T) {
 func TestReplayLogReturnsStablePayloadCopies(t *testing.T) {
 	log := NewReplayLog()
 	active := &protocol.ActiveWork{WorkID: testID('D'), Kind: protocol.ActiveWorkTurn, State: protocol.ActiveWorkRunning}
-	event := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: protocol.EventSnapshot, Timestamp: testTime(), Payload: protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Content: protocol.TextContent("original"), Settings: nil}}, ContextState: protocol.ContextPending, ActiveWork: active, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}}}
+	skillsUnavailable := protocol.SkillsUnavailable
+	event := protocol.Event{APIVersion: protocol.APIVersion, EventID: sequenceID(100), ConversationID: testID('A'), Type: protocol.EventSnapshot, Timestamp: testTime(), Payload: protocol.SnapshotPayload{Lifecycle: protocol.LifecycleResponding, Queue: []protocol.QueueItem{{TurnID: testID('B'), MessageID: testID('C'), Content: protocol.TextContent("original"), Settings: nil}}, ContextState: protocol.ContextPending, ActiveWork: active, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}, SkillsState: &skillsUnavailable, Skills: []protocol.SkillDescriptor{}, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerQueue}}
 	require.NoError(t, log.Append(event))
 	payload := event.Payload.(protocol.SnapshotPayload)
 	payload.Queue[0].Content.Parts[0].Text = "changed"
@@ -298,12 +323,39 @@ func TestReplayLogReturnsStablePayloadCopies(t *testing.T) {
 	require.NotContains(t, string(mustEncodeEvent(t, got[0])), "creator_context")
 }
 
+func TestReplayDeepClonesSkillLimitsForValueAndPointerPayloads(t *testing.T) {
+	log := NewReplayLog()
+	limit := 2
+	ready := protocol.SkillsReady
+	valueSnapshot := protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, Catalog: []protocol.CatalogModel{}, SkillsState: &ready, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &limit, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit}
+	pointerCatalog := &protocol.SkillCatalogPayload{State: protocol.SkillsReady, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &limit}
+	events := []protocol.Event{
+		{APIVersion: protocol.APIVersion, EventID: sequenceID(180), ConversationID: testID('A'), Type: protocol.EventSnapshot, Timestamp: testTime(), Payload: valueSnapshot},
+		{APIVersion: protocol.APIVersion, EventID: sequenceID(181), ConversationID: testID('A'), Type: protocol.EventSkillCatalog, Timestamp: testTime(), Payload: pointerCatalog},
+	}
+	for _, event := range events {
+		require.NoError(t, log.Append(event))
+	}
+	limit = 9
+	first, err := log.Replay(testID('G'), "")
+	require.NoError(t, err)
+	require.Equal(t, 2, *first[0].Payload.(protocol.SnapshotPayload).MaxSelectedSkills)
+	require.Equal(t, 2, *first[1].Payload.(*protocol.SkillCatalogPayload).MaxSelectedSkills)
+	*first[0].Payload.(protocol.SnapshotPayload).MaxSelectedSkills = 7
+	*first[1].Payload.(*protocol.SkillCatalogPayload).MaxSelectedSkills = 8
+	second, err := log.Replay(testID('G'), "")
+	require.NoError(t, err)
+	require.Equal(t, 2, *second[0].Payload.(protocol.SnapshotPayload).MaxSelectedSkills)
+	require.Equal(t, 2, *second[1].Payload.(*protocol.SkillCatalogPayload).MaxSelectedSkills)
+}
+
 func TestReplayClonesPreserveRequiredEmptySlices(t *testing.T) {
 	log := NewReplayLog()
 	conversation := testID('K')
 	client := testID('L')
+	skillsUnavailable := protocol.SkillsUnavailable
 	payloads := []protocol.EventPayload{
-		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}},
+		protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}, SkillsState: &skillsUnavailable, Skills: []protocol.SkillDescriptor{}, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit},
 		protocol.QueuePayload{Items: []protocol.QueueItem{}},
 		protocol.TimelinePayload{CommandID: testID('M'), Items: []protocol.TimelineItem{}, NextCursor: nil},
 		protocol.HistoryPayload{CommandID: testID('N'), Items: []protocol.ArchiveItem{}, NextCursor: nil},
@@ -367,9 +419,9 @@ func TestQueueFIFOBoundsDuplicatesEditRemoveAndContextErasure(t *testing.T) {
 
 	owned := queue.items[0].context
 	require.NotNil(t, owned)
-	require.NotEmpty(t, owned.Markdown)
+	require.NotEmpty(t, owned.Source)
 	require.NoError(t, queue.Remove(turnA.MessageID))
-	require.Nil(t, owned.Markdown)
+	require.Nil(t, owned.Source)
 	require.Nil(t, owned.CreatorContext)
 	dequeued, ok := queue.Dequeue()
 	require.True(t, ok)
@@ -380,7 +432,7 @@ func TestQueueFIFOBoundsDuplicatesEditRemoveAndContextErasure(t *testing.T) {
 	secondOwned := queue.items[0].context
 	queue.Clear()
 	require.True(t, queue.Empty())
-	require.Nil(t, secondOwned.Markdown)
+	require.Nil(t, secondOwned.Source)
 	require.Nil(t, secondOwned.CreatorContext)
 }
 

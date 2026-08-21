@@ -8,7 +8,7 @@ import (
 )
 
 func (actor *conversation) commandCompact(attachments map[*clientAttachment]struct{}, results chan<- turnWorkerResult, command protocol.Command, payload protocol.CompactPayload) (bool, protocol.BrowserErrorCode) {
-	if actor.identity.Provider != provider.NameCodex || !actor.supportsCompact {
+	if !actor.supportsCompact {
 		return false, protocol.ErrorCompactUnsupported
 	}
 	idleLifecycle := actor.lifecycle == protocol.LifecycleReady || actor.lifecycle == protocol.LifecycleInterrupted
@@ -72,6 +72,20 @@ func (actor *conversation) handleCompactWorkerResult(attachments map[*clientAtta
 		if code == protocol.ErrorCompactUnsupported {
 			actor.supportsCompact = false
 		}
+		if code == protocol.ErrorAcceptanceOutcomeUnknown {
+			pendingTerminal := actor.compact.pendingTerminal
+			actor.compact.pendingTerminal = nil
+			actor.compact.phase = compactAcceptanceUnknown
+			actor.compact.originCommandID = ""
+			actor.compact.originClientID = ""
+			actor.lifecycle = protocol.LifecycleUnavailable
+			actor.publishShared(attachments, actor.lifecyclePayload())
+			actor.completePendingCommand(attachments, result.commandID, result.clientID, code)
+			if pendingTerminal != nil {
+				actor.publishCompactTerminal(attachments, *pendingTerminal)
+			}
+			return
+		}
 		actor.compact = nil
 		actor.lifecycle = protocol.LifecycleReady
 		actor.completePendingCommand(attachments, result.commandID, result.clientID, code)
@@ -96,16 +110,18 @@ func (actor *conversation) handleCompactWorkerResult(attachments map[*clientAtta
 }
 
 func (actor *conversation) publishSkillCatalog(attachments map[*clientAttachment]struct{}, source provider.Event) {
-	if actor.identity.Provider != provider.NameCodex || source.SkillCatalog == nil || !actor.applySkillCatalog(*source.SkillCatalog) {
-		actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
+	_, capable := actor.session.session.(provider.SkillCatalogSession)
+	if !capable || source.SkillCatalog == nil || !actor.applySkillCatalog(*source.SkillCatalog) {
+		actor.makeSkillsUnavailable()
+		actor.publishShared(attachments, protocol.SkillCatalogPayload{State: protocol.SkillsUnavailable, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: nil})
 		return
 	}
 	state := *actor.skillsState
-	actor.publishShared(attachments, protocol.SkillCatalogPayload{State: state, Skills: append([]protocol.SkillDescriptor{}, actor.skills...)})
+	actor.publishShared(attachments, protocol.SkillCatalogPayload{State: state, Skills: append([]protocol.SkillDescriptor{}, actor.skills...), MaxSelectedSkills: cloneInt(actor.maxSelectedSkills)})
 }
 
 func (actor *conversation) publishCompactTerminal(attachments map[*clientAttachment]struct{}, source provider.Event) {
-	if actor.identity.Provider != provider.NameCodex || source.Compact == nil || actor.compact == nil || actor.compact.accepted == nil || source.Compact.WorkID != actor.compact.request.WorkID {
+	if source.Compact == nil || actor.compact == nil || (actor.compact.accepted == nil && actor.compact.phase != compactAcceptanceUnknown) || source.Compact.WorkID != actor.compact.request.WorkID {
 		actor.publishBrowserError(attachments, protocol.ErrorProviderMalformedStream)
 		return
 	}

@@ -58,6 +58,12 @@ pnpm run check:assets
 pnpm run test:browser
 ```
 
+## Pull requests and CI
+
+After creating a pull request or pushing commits to a branch with an open pull request, monitor the pull request's CI checks asynchronously and continue other useful work while they run. Use an asynchronous tool from the agent's active tool list that reports completion back into the current session, such as an async subagent task with a completion event or an equivalent callback-capable tool. Do not rely on detached shell processes, `nohup`, background polling, or status files alone, because they do not notify the agent when CI finishes. If no notification-capable asynchronous tool is available, state that limitation explicitly and arrange an explicit follow-up check instead of claiming autonomous monitoring.
+
+Before reporting the work as complete, receive or retrieve the asynchronous result and confirm that all required pull request checks finished successfully. If a check fails, inspect its logs, identify and correct the root cause, push the fix, and start a new notification-capable asynchronous monitor for the replacement checks.
+
 ## Documentation
 
 Keep documentation synchronized with behavior in the same change.

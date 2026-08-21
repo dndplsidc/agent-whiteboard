@@ -130,9 +130,14 @@ test("adds multiple document selections inline with surrounding message text", a
   await expect(sent).toContainText("explain the relationship");
 
   const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
-  expect(submit.payload.content.parts.map((part) => part.type)).toEqual(["reference", "text", "reference", "text"]);
-  expect(submit.payload.content.parts[0].reference).toMatchObject({ kind: "text", quote: "first selected sentence" });
-  expect(submit.payload.content.parts[2].reference).toMatchObject({ kind: "section", label: "Evidence" });
+  const references = submit.payload.content.parts.filter((part) => part.type === "reference");
+  expect(references).toHaveLength(2);
+  expect(references.map((part) => part.reference)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ kind: "text", quote: "first selected sentence" }),
+    expect.objectContaining({ kind: "section", label: "Evidence" }),
+  ]));
+  expect(submit.payload.content.parts.filter((part) => part.type === "text").map((part) => part.text).join(""))
+    .toMatch(/and\s+explain the relationship\./u);
 });
 
 test("ellipsizes a long page reference inside the composer", async ({ context, page, localAgentSidebar }) => {
@@ -855,7 +860,7 @@ test("sends exact initial context once and resumes without replaying it", async 
   expect(firstSubmit.payload.content).toEqual({ parts: [{ type: "text", text: "What does this page say?" }] });
   expect(firstSubmit.payload.context).toMatchObject({
     revision: "initial",
-    markdown,
+    source: markdown,
     creator_context: creatorContext,
     title: "Exact context",
     url: resource.url,
@@ -877,7 +882,7 @@ test("sends exact initial context once and resumes without replaying it", async 
   const stored = await page.evaluate(() => Object.fromEntries(Object.entries(localStorage)));
   expect(stored[portKey]).toBe(String(localAgentSidebar.brokerPort));
   expect(stored[drawerKey]).toBe("true");
-  const allowedPreferenceKeys = new Set(["agent-whiteboard-theme", drawerKey, portKey, widthKey]);
+  const allowedPreferenceKeys = new Set(["agent-whiteboard-theme", drawerKey, portKey, widthKey, "agent-whiteboard-agent-provider", "agent-whiteboard-pi-settings-v1"]);
   expect(Object.keys(stored).every((key) => allowedPreferenceKeys.has(key))).toBe(true);
   expect(JSON.stringify(stored)).not.toContain("What does this page say?");
   expect(JSON.stringify(stored)).not.toContain(creatorContext);

@@ -3,6 +3,7 @@ package protocol
 import (
 	"errors"
 	"regexp"
+	"time"
 )
 
 const (
@@ -77,6 +78,7 @@ type InteractionField struct {
 	Type        InteractionFieldType `json:"type"`
 	Required    bool                 `json:"required"`
 	Secret      bool                 `json:"secret"`
+	Multiline   bool                 `json:"multiline"`
 	Options     []InteractionOption  `json:"options"`
 }
 
@@ -144,6 +146,7 @@ type InteractionRequestPayload struct {
 	Options          []InteractionOption   `json:"options"`
 	Questions        []InteractionQuestion `json:"questions"`
 	Fields           []InteractionField    `json:"fields"`
+	LocalDeadline    *time.Time            `json:"local_deadline"`
 }
 
 func (InteractionRequestPayload) EventType() EventType { return EventInteractionRequest }
@@ -151,7 +154,8 @@ func (payload InteractionRequestPayload) validate() error {
 	if !validID(payload.RequestID) || (payload.TurnID != "" && !validID(payload.TurnID)) || !validInteractionKind(payload.Kind) ||
 		!validBoundedText(payload.Title, MaxTitleBytes, true) || !validBoundedText(payload.Summary, MaxSummaryBytes, false) ||
 		!validBoundedText(payload.Command, MaxInteractionTextBytes, false) || !validBoundedText(payload.WorkingDirectory, MaxURLBytes, false) ||
-		len(payload.Options) > MaxInteractionOptions || len(payload.Questions) > MaxInteractionQuestions || len(payload.Fields) > MaxInteractionAnswers || validateInteractionOptions(payload.Options) != nil {
+		len(payload.Options) > MaxInteractionOptions || len(payload.Questions) > MaxInteractionQuestions || len(payload.Fields) > MaxInteractionAnswers || validateInteractionOptions(payload.Options) != nil ||
+		payload.LocalDeadline != nil && (payload.LocalDeadline.IsZero() || payload.LocalDeadline.Location() != time.UTC) {
 		return invalid(nil)
 	}
 	seen := make(map[string]struct{}, len(payload.Questions)+len(payload.Fields))
@@ -165,7 +169,7 @@ func (payload InteractionRequestPayload) validate() error {
 		seen[question.ID] = struct{}{}
 	}
 	for _, field := range payload.Fields {
-		if !validInteractionKey(field.ID) || !validBoundedText(field.Label, MaxTitleBytes, true) || !validBoundedText(field.Description, MaxSummaryBytes, false) || !validInteractionFieldType(field.Type) || len(field.Options) > MaxInteractionOptions || validateInteractionOptions(field.Options) != nil {
+		if !validInteractionKey(field.ID) || !validBoundedText(field.Label, MaxTitleBytes, true) || !validBoundedText(field.Description, MaxSummaryBytes, false) || !validInteractionFieldType(field.Type) || field.Multiline && field.Type != InteractionText || len(field.Options) > MaxInteractionOptions || validateInteractionOptions(field.Options) != nil {
 			return invalid(nil)
 		}
 		if _, duplicate := seen[field.ID]; duplicate {

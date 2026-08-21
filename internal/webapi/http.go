@@ -19,6 +19,7 @@ const (
 	APIWhiteboardMarkdown         = "/api/v1/whiteboards/markdown"
 	APIWhiteboardMarkdownResource = APIWhiteboardMarkdown + "/"
 	APIWhiteboardHTML             = "/api/v1/whiteboards/html"
+	APIWhiteboardHTMLResource     = APIWhiteboardHTML + "/"
 	APIImages                     = "/api/v1/images"
 	PublicMarkdown                = "/whiteboards/markdown/"
 	PublicHTML                    = "/whiteboards/html/"
@@ -59,6 +60,12 @@ type ResourceResponse struct {
 type MarkdownResponse struct {
 	Resource Resource `json:"resource"`
 	Markdown string   `json:"markdown"`
+	Context  string   `json:"context"`
+}
+
+type HTMLResponse struct {
+	Resource Resource `json:"resource"`
+	HTML     string   `json:"html"`
 	Context  string   `json:"context"`
 }
 

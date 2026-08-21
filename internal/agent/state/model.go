@@ -24,7 +24,10 @@ const (
 
 type ResourceKind string
 
-const ResourceMarkdown ResourceKind = "markdown"
+const (
+	ResourceMarkdown ResourceKind = "markdown"
+	ResourceHTML     ResourceKind = "html"
+)
 
 type Identity struct {
 	Origin       string
@@ -35,7 +38,7 @@ type Identity struct {
 
 func (identity Identity) Validate() error {
 	canonical, err := config.CanonicalBrowserOrigin(identity.Origin)
-	if err != nil || canonical != identity.Origin || identity.Kind != ResourceMarkdown || common.ValidateID(identity.CapabilityID) != nil || !identity.Provider.Valid() {
+	if err != nil || canonical != identity.Origin || (identity.Kind != ResourceMarkdown && identity.Kind != ResourceHTML) || common.ValidateID(identity.CapabilityID) != nil || !identity.Provider.Valid() {
 		return errors.New("invalid conversation identity")
 	}
 	return nil
@@ -134,9 +137,7 @@ func (session Session) validateForProvider(name provider.Name) error {
 	}
 	switch name {
 	case provider.NamePi:
-		if session.Settings != nil || session.Presentation != nil {
-			return errors.New("Pi session contains execution settings")
-		}
+		// Nil settings are retained solely for legacy durable Pi mappings.
 	case provider.NameCodex:
 		if session.Settings == nil || session.Presentation == nil {
 			return errors.New("Codex session lacks execution settings")

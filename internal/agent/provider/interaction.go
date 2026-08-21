@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"time"
 )
 
 const (
@@ -96,6 +97,7 @@ type InteractionField struct {
 	Type        InteractionFieldType
 	Required    bool
 	Secret      bool
+	Multiline   bool
 	Options     []InteractionOption
 }
 
@@ -110,13 +112,17 @@ type InteractionRequest struct {
 	Options          []InteractionOption
 	Questions        []InteractionQuestion
 	Fields           []InteractionField
+	// LocalDeadline is an optional local delivery cutoff. It does not represent
+	// native-provider acknowledgment of a response.
+	LocalDeadline *time.Time
 }
 
 func (request InteractionRequest) Validate() error {
 	if !validID(request.ID) || (request.TurnID != "" && !validID(request.TurnID)) || !validInteractionKind(request.Kind) ||
 		!validBoundedText(request.Title, MaxTitleBytes, true) || !validBoundedText(request.Summary, MaxSummaryBytes, false) ||
 		!validBoundedText(request.Command, MaxInteractionTextBytes, false) || !validBoundedText(request.WorkingDirectory, MaxURLBytes, false) ||
-		len(request.Options) > MaxInteractionOptions || len(request.Questions) > MaxInteractionQuestions || len(request.Fields) > MaxInteractionAnswers {
+		len(request.Options) > MaxInteractionOptions || len(request.Questions) > MaxInteractionQuestions || len(request.Fields) > MaxInteractionAnswers ||
+		request.LocalDeadline != nil && (request.LocalDeadline.IsZero() || request.LocalDeadline.Location() != time.UTC) {
 		return errors.New("invalid provider interaction request")
 	}
 	if err := validateOptions(request.Options); err != nil {
@@ -135,7 +141,7 @@ func (request InteractionRequest) Validate() error {
 	}
 	for _, field := range request.Fields {
 		if !validInteractionKey(field.ID) || !validBoundedText(field.Label, MaxTitleBytes, true) || !validBoundedText(field.Description, MaxSummaryBytes, false) ||
-			!validInteractionFieldType(field.Type) || len(field.Options) > MaxInteractionOptions || interactionFieldOptionsInvalid(field) || validateOptions(field.Options) != nil {
+			!validInteractionFieldType(field.Type) || field.Multiline && field.Type != InteractionText || len(field.Options) > MaxInteractionOptions || interactionFieldOptionsInvalid(field) || validateOptions(field.Options) != nil {
 			return errors.New("invalid provider interaction field")
 		}
 		if _, duplicate := seen[field.ID]; duplicate {
@@ -238,7 +244,8 @@ func (response InteractionResponse) Validate() error {
 }
 
 // InteractiveSession is implemented by providers that can pause native work
-// for a local reader decision. The base Session remains usable by Pi.
+// for a local reader decision. Respond succeeds only after local ownership and
+// the complete native write; it does not imply native-provider acknowledgment.
 type InteractiveSession interface {
 	Respond(context.Context, InteractionResponse) error
 	CancelInteraction(context.Context, string) error

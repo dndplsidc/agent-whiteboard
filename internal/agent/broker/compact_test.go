@@ -4,10 +4,86 @@ import (
 	"context"
 	"testing"
 
+	"github.com/edocsss/agent-whiteboard/internal/agent"
 	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
 	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
+	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
 	"github.com/stretchr/testify/require"
 )
+
+func codexHTMLPendingFixture(t *testing.T, base uint64) (*Broker, *repairState, *settingsTurnSession, *Connection, protocol.PageContext) {
+	t.Helper()
+	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(base))
+	identity.Provider = provider.NameCodex
+	identity.Kind = statepkg.ResourceHTML
+	mapping.Identity = identity
+	initial := provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: provider.SpeedFast}
+	presentation := provider.ModelPresentation{ModelDisplayName: "5.6 Sol", Selectable: true}
+	mapping.Current.ProviderLabel = "codex"
+	mapping.Current.ModelLabel = presentation.ModelDisplayName
+	mapping.Current.Settings = &initial
+	mapping.Current.Presentation = &presentation
+	resource := testResource(identity.CapabilityID)
+	resource.Kind = protocol.ResourceHTML
+	page := testPageContext(resource)
+	page.Source = "<!doctype html><title>Exact</title>"
+	page.Digest, _ = agent.CalculateContextDigestForKind(agent.ResourceKindHTML, []byte(page.Source), []byte(page.CreatorContext))
+	observed := statepkg.Revision{Digest: page.Digest, Revision: statepkg.RevisionInitial, SourceUpdatedAt: resource.UpdatedAt}
+	mapping.Current.Observed = &observed
+	state := &repairState{mapping: &mapping, promotions: []repairMutation{{outcome: statepkg.CommitApplied, apply: true}}}
+	session := codexSettingsSession(mapping.Current.NativeSession.Value(), initial)
+	driver := &settingsDriver{hardeningDriver: &hardeningDriver{resumeSession: session}}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCodex: driver})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: base + 100})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+	command := observationConnect(sequenceID(base+1), identity.CapabilityID, page.Digest, resource, "")
+	payload := command.Payload.(protocol.ConnectPayload)
+	payload.Provider = protocol.ProviderCodex
+	command.Payload = payload
+	connected, err := broker.Connect(context.Background(), identity.Origin, command)
+	require.NoError(t, err)
+	connection := connected.(*Connection)
+	snapshot := receiveLifecycle(t, connection.Events()).Payload.(protocol.SnapshotPayload)
+	require.Equal(t, protocol.ContextPending, snapshot.ContextState)
+	return broker, state, session, connection, page
+}
+
+func TestHTMLCompactLeavesPendingContextForSkillOnlyTurn(t *testing.T) {
+	broker, state, session, connection, page := codexHTMLPendingFixture(t, 8180)
+	defer broker.Close(context.Background())
+	defer connection.Close(context.Background())
+	conversationID := connection.ConversationID()
+	clientID := sequenceID(8181)
+
+	workID := sequenceID(8182)
+	result, err := connection.Command(context.Background(), codexCompact(sequenceID(8183), clientID, conversationID, workID))
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandSucceeded, "")
+	require.Equal(t, workID, receiveLifecycle(t, session.compacted).WorkID)
+	require.Nil(t, state.mapping.Current.PreparedCommit)
+	require.NotNil(t, state.mapping.Current.Observed)
+	drainEvents(t, connection.Events(), 3)
+	session.events <- provider.NewCompactEvent(workID, provider.CompactCompleted)
+	drainEvents(t, connection.Events(), 2)
+
+	skill := provider.SkillDescriptor{ID: sequenceID(8184), Name: "review-helper", Scope: provider.SkillScopeRepo}
+	session.skillCatalog = provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}, MaxSelectedSkills: provider.MaxMessageSkills}
+	session.events <- provider.NewSkillCatalogEvent(session.skillCatalog)
+	require.Equal(t, protocol.EventSkillCatalog, receiveLifecycle(t, connection.Events()).Type)
+	settings := &protocol.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: protocol.SpeedFast}
+	content := protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartSkill, Skill: &protocol.SkillInvocation{ID: skill.ID, Name: skill.Name}}}}
+	command := protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(8185), ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandSubmit, Payload: protocol.SubmitPayload{TurnID: sequenceID(8186), MessageID: sequenceID(8187), Content: content, Context: &page, Settings: settings}}
+	_, err = connection.Command(context.Background(), command)
+	require.NoError(t, err)
+	captured := receiveLifecycle(t, session.submitted)
+	require.NotNil(t, captured.Context)
+	require.Equal(t, provider.ResourceHTML, captured.Context.Resource.Kind)
+	require.Equal(t, []byte(page.Source), captured.Context.Source)
+	require.Equal(t, provider.MessagePartSkill, captured.Content.Parts[0].Kind)
+}
 
 func TestCodexSnapshotPublishesSafeSkillsAndCompactCapability(t *testing.T) {
 	broker, _, session, connection, identity := codexSettingsFixture(t, 8200)
@@ -15,7 +91,7 @@ func TestCodexSnapshotPublishesSafeSkillsAndCompactCapability(t *testing.T) {
 	defer connection.Close(context.Background())
 
 	skill := provider.SkillDescriptor{ID: sequenceID(8202), Name: "review-helper", DisplayName: "Review helper", Description: "Review the current work", Scope: provider.SkillScopeRepo}
-	session.events <- provider.NewSkillCatalogEvent(provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}})
+	session.events <- provider.NewSkillCatalogEvent(provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}, MaxSelectedSkills: provider.MaxMessageSkills})
 	catalogEvent := receiveLifecycle(t, connection.Events())
 	require.Equal(t, protocol.EventSkillCatalog, catalogEvent.Type)
 	catalog := catalogEvent.Payload.(protocol.SkillCatalogPayload)
@@ -44,7 +120,7 @@ func TestCodexSkillValidationRejectsStaleSelectionBeforeProviderWork(t *testing.
 	conversationID := connection.ConversationID()
 	clientID := sequenceID(8211)
 	skill := provider.SkillDescriptor{ID: sequenceID(8212), Name: "review-helper", Scope: provider.SkillScopeRepo}
-	session.skillCatalog = provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}}
+	session.skillCatalog = provider.SkillCatalog{State: provider.SkillsReady, Skills: []provider.SkillDescriptor{skill}, MaxSelectedSkills: provider.MaxMessageSkills}
 	session.events <- provider.NewSkillCatalogEvent(session.skillCatalog)
 	require.Equal(t, protocol.EventSkillCatalog, receiveLifecycle(t, connection.Events()).Type)
 
@@ -142,6 +218,31 @@ func TestCodexCompactLifecycleAndStopAreSharedAcrossTabs(t *testing.T) {
 	require.NoError(t, err)
 	requireCommandResult(t, nextResult, protocol.CommandSucceeded, "")
 	require.Equal(t, nextWorkID, receiveLifecycle(t, session.compacted).WorkID)
+}
+
+func TestCompactAcceptanceUnknownRetainsOwnershipUntilCorrelatedTerminal(t *testing.T) {
+	broker, _, session, connection, _ := codexSettingsFixture(t, 8240)
+	defer broker.Close(context.Background())
+	defer connection.Close(context.Background())
+	conversationID := connection.ConversationID()
+	clientID := sequenceID(8241)
+	workID := sequenceID(8242)
+	session.compactErr = provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+
+	result, err := connection.Command(context.Background(), codexCompact(sequenceID(8243), clientID, conversationID, workID))
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandRejected, protocol.ErrorAcceptanceOutcomeUnknown)
+	require.Equal(t, workID, receiveLifecycle(t, session.compacted).WorkID)
+	unavailable := receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload)
+	require.Equal(t, protocol.LifecycleUnavailable, unavailable.State)
+	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
+
+	session.events <- provider.NewCompactEvent(workID, provider.CompactCompleted)
+	terminal := receiveLifecycle(t, connection.Events())
+	require.Equal(t, protocol.CompactionPayload{WorkID: workID, Status: protocol.CompactionCompleted}, terminal.Payload)
+	lifecycle := receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload)
+	require.Equal(t, protocol.LifecycleReady, lifecycle.State)
+	require.Nil(t, lifecycle.ActiveWork)
 }
 
 func TestCodexCompactUnsupportedDowngradesRuntimeCapability(t *testing.T) {

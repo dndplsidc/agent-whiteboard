@@ -38,15 +38,24 @@ func TestSchema2PersistsCompleteCodexSettingsAndPresentation(t *testing.T) {
 	require.Equal(t, []string{"model_display_name", "selectable"}, sortedKeys(current["model_presentation"].(map[string]any)))
 }
 
-func TestSchema2EnforcesProviderSpecificSettingsPresence(t *testing.T) {
+func TestSchema2AcceptsCompleteSettingsForEitherProviderAndLegacyPiNil(t *testing.T) {
 	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
 	settings := codexSettings("gpt-5.6-sol", "high", provider.SpeedFast)
 	presentation := provider.ModelPresentation{ModelDisplayName: "5.6 Sol", Selectable: true}
 
-	pi := testSession(t, testID, "sessions/pi-current", now)
+	legacyPi := testSession(t, testID, "sessions/pi-legacy", now)
+	legacyMapping := Mapping{SchemaVersion: SchemaVersion, Identity: testIdentity(), Current: &legacyPi, Archives: []Session{}, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, legacyMapping.Validate(testIdentity()))
+
+	pi := legacyPi
 	pi.Settings = &settings
 	pi.Presentation = &presentation
+	pi.ModelLabel = presentation.ModelDisplayName
 	mapping := Mapping{SchemaVersion: SchemaVersion, Identity: testIdentity(), Current: &pi, Archives: []Session{}, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, mapping.Validate(testIdentity()))
+
+	pi.Presentation = nil
+	mapping.Current = &pi
 	require.Error(t, mapping.Validate(testIdentity()))
 
 	codex := codexSession(t, testID, "sessions/codex-current", now, settings, "5.6 Sol", true)
@@ -55,11 +64,6 @@ func TestSchema2EnforcesProviderSpecificSettingsPresence(t *testing.T) {
 	require.Error(t, codexMapping.Validate(codexIdentity()))
 	codex = codexSession(t, testID, "sessions/codex-current", now, settings, "5.6 Sol", true)
 	codex.Presentation = nil
-	codexMapping.Current = &codex
-	require.Error(t, codexMapping.Validate(codexIdentity()))
-
-	codex = codexSession(t, testID, "sessions/codex-current", now, settings, "5.6 Sol", true)
-	codex.ModelLabel = "different"
 	codexMapping.Current = &codex
 	require.Error(t, codexMapping.Validate(codexIdentity()))
 }
@@ -103,6 +107,34 @@ func TestSchema2RejectsSchema1AndMalformedSettingsWithoutMigration(t *testing.T)
 			require.NoError(t, os.WriteFile(path, canonical, 0o600))
 		})
 	}
+}
+
+func TestUpdateCurrentSettingsUpgradesExactLegacyPiSessionAtomically(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	identity := testIdentity()
+	legacy := testSession(t, testID, "sessions/pi-current", now)
+	_, err := store.Create(identity, legacy, now)
+	require.NoError(t, err)
+
+	settings := codexSettings("pi-provider/model", "high", provider.SpeedStandard)
+	presentation := provider.ModelPresentation{ModelDisplayName: "Pi Model", Selectable: true}
+	outcome, err := store.UpdateCurrentSettings(identity, legacy.ConversationID, legacy.NativeSession, settings, presentation, now.Add(time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, CommitApplied, outcome)
+	loaded, err := store.Load(identity)
+	require.NoError(t, err)
+	require.Equal(t, settings, *loaded.Current.Settings)
+	require.Equal(t, presentation, *loaded.Current.Presentation)
+	require.Equal(t, legacy.ConversationID, loaded.Current.ConversationID)
+	require.Equal(t, legacy.NativeSession, loaded.Current.NativeSession)
+
+	outcome, err = store.UpdateCurrentSettings(identity, "MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1u", legacy.NativeSession, settings, presentation, now.Add(2*time.Minute))
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+	after, err := store.Load(identity)
+	require.NoError(t, err)
+	require.Equal(t, loaded, after)
 }
 
 func TestUpdateCurrentSettingsRequiresExactCurrentSessionAndIsAtomic(t *testing.T) {

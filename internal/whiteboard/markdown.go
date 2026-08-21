@@ -16,12 +16,12 @@ func validateMarkdown(source []byte) error {
 	return nil
 }
 
-func validateMarkdownContext(creatorContext []byte) error {
+func validateCreatorContext(creatorContext []byte) error {
 	if len(creatorContext) == 0 {
-		return common.NewError(common.CodeInvalidRequest, "markdown context must not be empty", nil)
+		return common.NewError(common.CodeInvalidRequest, "creator context must not be empty", nil)
 	}
 	if !utf8.Valid(creatorContext) {
-		return common.NewError(common.CodeInvalidRequest, "markdown context must be UTF-8", nil)
+		return common.NewError(common.CodeInvalidRequest, "creator context must be UTF-8", nil)
 	}
 	return nil
 }

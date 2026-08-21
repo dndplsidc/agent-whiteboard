@@ -158,15 +158,6 @@ func (d *lifecycleDriver) Resume(_ context.Context, request provider.ResumeReque
 func (d *lifecycleDriver) Inspect(context.Context, provider.InspectRequest) (provider.NativeSession, error) {
 	return provider.NativeSession{}, nil
 }
-func (d *lifecycleDriver) ModelCatalog(context.Context) (provider.ModelCatalog, error) {
-	if d.name != provider.NameCodex {
-		return provider.ModelCatalog{}, errors.New("model catalog unavailable")
-	}
-	return provider.ModelCatalog{Models: []provider.CatalogModel{{
-		Model: "model", DisplayName: "Model", Description: "Test model", DefaultEffort: "high",
-		SupportedReasoningEfforts: []provider.ReasoningEffort{{Value: "high", Description: "High reasoning"}}, Default: true,
-	}}}, nil
-}
 func (d *lifecycleDriver) Delete(_ context.Context, request provider.DeleteRequest) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -188,13 +179,9 @@ func newLifecycleSession(refValue string) *lifecycleSession {
 
 func newLifecycleSessionForProvider(refValue string, name provider.Name) *lifecycleSession {
 	ref, _ := provider.NewNativeSessionRef(refValue)
-	native := provider.NativeSession{Ref: ref, Provider: name, Model: "model", CreatedAt: testTime(), UpdatedAt: testTime()}
-	if name == provider.NameCodex {
-		settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
-		presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: true}
-		native.Settings = &settings
-		native.Presentation = &presentation
-	}
+	settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: name == provider.NameCodex}
+	native := provider.NativeSession{Ref: ref, Provider: name, Model: "model", Settings: &settings, Presentation: &presentation, CreatedAt: testTime(), UpdatedAt: testTime()}
 	return &lifecycleSession{native: native, events: make(chan provider.Event, 4096)}
 }
 func (s *lifecycleSession) NativeSession() provider.NativeSession { return s.native }

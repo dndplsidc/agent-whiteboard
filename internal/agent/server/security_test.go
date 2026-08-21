@@ -125,13 +125,19 @@ func ordinaryCommand() protocol.Command {
 }
 
 func snapshotEvent() protocol.Event {
+	skillsState := protocol.SkillsUnavailable
 	return protocol.Event{
 		APIVersion:     protocol.APIVersion,
 		EventID:        eventID,
 		ConversationID: conversation,
 		Type:           protocol.EventSnapshot,
 		Timestamp:      time.Unix(2, 0).UTC(),
-		Payload:        protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{}, Skills: []protocol.SkillDescriptor{}},
+		Payload: protocol.SnapshotPayload{
+			Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted,
+			SettingsState: nil, EffectiveSettings: nil, Catalog: []protocol.CatalogModel{},
+			SkillsState: &skillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: nil,
+			BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit,
+		},
 	}
 }
 

@@ -79,7 +79,7 @@ The current release validates the complete schema, uses `client` and `server` fo
 
 Pi and Codex executable selection is intentionally not stored in YAML. Foreground `agent serve` uses an explicit provider flag first, then the matching non-empty environment variable, then resolves `pi` or `codex` from `PATH`. An explicitly supplied empty executable flag is invalid. A missing provider executable marks only that provider unavailable; it does not prevent the broker or the other provider from starting.
 
-Pi and Codex inherit the foreground process environment so providers use the normal effective user home, authentication, tools, extensions, apps, hooks, skills, approval policy, sandbox, project trust, and other native configuration. Agent Whiteboard does not set a production `CODEX_HOME`, edit provider configuration files, copy authentication, or override approval, sandbox, tools, or other native settings. For Codex only, Page Agent may apply a model, one advertised reasoning effort, and Standard/Fast service speed through native thread and turn fields. It also consumes the stable native enabled-skill catalog and manual-compaction APIs without adding configuration fields: skill enablement and paths remain Codex-owned, and unsupported skill/compact methods degrade only those UI features. Existing and restored conversations inherit their effective native tuple; the selected tuple for a genuinely new conversation may come from the same-origin browser's last accepted preference. App Server experimental APIs remain disabled for Codex.
+Pi and Codex inherit the foreground process environment so providers use the normal effective user home, authentication, tools, extensions, apps, hooks, skills, approval policy, sandbox, project trust, and other native configuration. Agent Whiteboard does not set a production `CODEX_HOME`, edit provider configuration files, copy authentication, or override approval, sandbox, tools, or other native settings. Page Agent builds Model, Effort, skill, and manual-compaction controls from each provider's live capabilities; Codex also exposes Standard/Fast Speed, while Pi omits it and limits selection to one skill per message. Existing and restored conversations inherit their effective native tuple. A genuinely new conversation may use that provider's same-origin last-accepted preference. Applying Pi settings follows normal Pi behavior: it changes the current Page Agent Pi session and Pi's future default, not already-running Pi sessions. App Server experimental APIs remain disabled for Codex.
 
 With `--daemon`, `--pi-executable` and `--codex-executable` and their matching environment variables select executable paths during installation. The foreground-only `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` flags are rejected because the managed child reads them from Agent Whiteboard configuration at startup. The LaunchAgent records the absolute Agent Whiteboard and configuration paths and resolved provider executable paths; it does not copy Pi or Codex configuration, authentication, or the installing shell's ambient environment. Managed providers therefore use the same effective default user configuration as foreground providers, without editing provider configuration files.
 
@@ -97,7 +97,7 @@ Durations use Go duration syntax and must be positive. `server.port` accepts 0â€
 | Shutdown timeout | `10s` |
 | Log mode | `console` |
 | Whiteboard source limit | 10 MiB |
-| Markdown context limit | 1 MiB |
+| Creator context limit | 1 MiB |
 | Image limit | 25 MiB each |
 | Image request limit | 100 MiB |
 | Viewer local agent enabled | `false` |
@@ -119,7 +119,7 @@ Trusted-origin editing and listing are supported only on macOS and Linux. Other 
 
 ## Pre-production Page Agent v4 upgrade
 
-Page Agent v4 replaces v3 in place and does not migrate older broker conversation/workspace state. Before deploying the v4 viewer and broker, stop the foreground broker or managed daemon and clear the disposable Page Agent conversation/workspace state under the configured Agent Whiteboard storage. Deploy viewer and broker together, then restart `agent serve` or the daemon. Do not delete public whiteboards or provider-native Pi/Codex histories: they are outside this reset. Mixed v3/v4 viewers and brokers fail closed rather than negotiating or adapting.
+Page Agent v4 uses a format-neutral exact `source` context field for Markdown and HTML while retaining the same API and WebSocket version. It replaces v3 in place and does not migrate older broker conversation/workspace state. Before deploying the v4 viewer and broker, stop the foreground broker or managed daemon and clear the disposable Page Agent conversation/workspace state under the configured Agent Whiteboard storage. Deploy viewer and broker together, then restart `agent serve` or the daemon. Do not delete public whiteboards or provider-native Pi/Codex histories: they are outside this reset. Mixed v3/v4 viewers and brokers fail closed rather than negotiating or adapting.
 
 ## Trusted HTTPS origins
 

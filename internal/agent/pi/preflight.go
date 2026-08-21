@@ -16,6 +16,8 @@ type preflightState struct {
 	IsCompacting        *bool           `json:"isCompacting"`
 	PendingMessageCount *int            `json:"pendingMessageCount"`
 	MessageCount        *int            `json:"messageCount"`
+	SessionFile         *string         `json:"sessionFile"`
+	SessionID           *string         `json:"sessionId"`
 }
 
 type preflightStats struct {
@@ -30,7 +32,20 @@ func (s *Session) Preflight(ctx context.Context, request provider.PreflightReque
 	if request.Validate() != nil {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	if len(request.Turn.Images) != 0 && !s.state.SupportsImages {
+	s.mu.Lock()
+	captured := s.state
+	s.mu.Unlock()
+	targetModel := piModel{provider: captured.ModelProvider, id: captured.ModelID, name: captured.ModelName, images: captured.SupportsImages, contextWindow: captured.ContextWindow, maxTokens: captured.MaxTokens}
+	resolved := captured.Model
+	if request.Turn.Settings != nil {
+		prepared, err := s.prepareSettings(ctx, *request.Turn.Settings)
+		if err != nil {
+			return provider.PreflightResult{}, err
+		}
+		targetModel = prepared.model
+		resolved = request.Turn.Settings.Model
+	}
+	if len(request.Turn.Images) != 0 && !targetModel.images {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
 	}
 	envelope, err := BuildEnvelope(request.Turn)
@@ -43,15 +58,15 @@ func (s *Session) Preflight(ctx context.Context, request provider.PreflightReque
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	var state preflightState
-	if decodeStartupData(stateResponse.Data, &state) != nil || state.IsStreaming == nil || state.IsCompacting == nil || state.PendingMessageCount == nil || state.MessageCount == nil || *state.MessageCount < 0 || *state.IsStreaming || *state.IsCompacting || *state.PendingMessageCount != 0 {
+	if decodeStartupData(stateResponse.Data, &state) != nil || state.IsStreaming == nil || state.IsCompacting == nil || state.PendingMessageCount == nil || state.MessageCount == nil || state.SessionFile == nil || state.SessionID == nil || *state.MessageCount < 0 || *state.IsStreaming || *state.IsCompacting || *state.PendingMessageCount != 0 || *state.SessionFile != captured.SessionFile || *state.SessionID != captured.SessionID {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	var model startupModel
 	if decodeStartupData(state.Model, &model) != nil {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	resolved := model.Provider + "/" + model.ID
-	if resolved != s.state.Model || model.ContextWindow != s.state.ContextWindow || model.MaxTokens != s.state.MaxTokens || modelSupportsImages(model.Input) != s.state.SupportsImages {
+	currentResolved := model.Provider + "/" + model.ID
+	if !validModelModalities(model.Input) || currentResolved != captured.Model || model.ContextWindow != captured.ContextWindow || model.MaxTokens != captured.MaxTokens || modelSupportsImages(model.Input) != captured.SupportsImages {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
 	statsResponse, _, err := s.rpc.call(ctx, "get_session_stats", nil)
@@ -80,11 +95,11 @@ func (s *Session) Preflight(ctx context.Context, request provider.PreflightReque
 		}
 		nativeTokens = *usage.Tokens
 	}
-	safety := model.MaxTokens
+	safety := targetModel.maxTokens
 	if safety < 16384 {
 		safety = 16384
 	}
-	effective := model.ContextWindow - safety
+	effective := targetModel.contextWindow - safety
 	estimated := nativeTokens + conservativeTokenBound(len(envelope))
 	if effective <= 0 || estimated > effective {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorContextTooLarge)

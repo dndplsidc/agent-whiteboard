@@ -102,11 +102,7 @@ func TestHandlerCreateReturnsResourceAndPassesExactContext(t *testing.T) {
 				return got == ctx && got.Value(handlerContextKey{}) == "sentinel"
 			})
 			expectedInput := mock.MatchedBy(func(got whiteboard.CreateInput) bool {
-				wantContext := []byte(nil)
-				if route.kind == whiteboard.KindMarkdown {
-					wantContext = []byte("creator context")
-				}
-				return bytes.Equal(got.Source, []byte("source body")) && bytes.Equal(got.Context, wantContext) &&
+				return bytes.Equal(got.Source, []byte("source body")) && bytes.Equal(got.Context, []byte("creator context")) &&
 					got.ExpiresInSeconds != nil && *got.ExpiresInSeconds == expiresIn
 			})
 			if route.kind == whiteboard.KindMarkdown {
@@ -115,11 +111,11 @@ func TestHandlerCreateReturnsResourceAndPassesExactContext(t *testing.T) {
 				operations.EXPECT().CreateHTML(expectedContext, expectedInput).Return(result, nil).Once()
 			}
 			handler := newHandler(t, operations, defaultMaxBytes)
-			fields := []multipartField{{name: "file", filename: "board.txt", value: "source body"}}
-			if route.kind == whiteboard.KindMarkdown {
-				fields = append(fields, multipartField{name: "context", filename: "context.md", value: "creator context"})
+			fields := []multipartField{
+				{name: "file", filename: "board.txt", value: "source body"},
+				{name: "context", filename: "context.md", value: "creator context"},
+				{name: "expires_in_seconds", value: fmt.Sprint(expiresIn)},
 			}
-			fields = append(fields, multipartField{name: "expires_in_seconds", value: fmt.Sprint(expiresIn)})
 			body, contentType := multipartRequestBody(t, fields...)
 			req := httptest.NewRequest(http.MethodPost, route.apiPath, bytes.NewReader(body)).WithContext(ctx)
 			req.Header.Set("Content-Type", contentType)
@@ -186,12 +182,8 @@ func TestHandlerUpdateReturnsResourceAndPassesExactContext(t *testing.T) {
 					return got == ctx && got.Value(handlerContextKey{}) == "sentinel"
 				}),
 				mock.MatchedBy(func(got whiteboard.UpdateInput) bool {
-					wantContext := []byte(nil)
-					if route.kind == whiteboard.KindMarkdown {
-						wantContext = []byte("replacement context")
-					}
 					return got.ID == testWhiteboardID && got.Kind == route.kind &&
-						bytes.Equal(got.Source, []byte("replacement")) && bytes.Equal(got.Context, wantContext) &&
+						bytes.Equal(got.Source, []byte("replacement")) && bytes.Equal(got.Context, []byte("replacement context")) &&
 						got.ExpiresInSeconds == nil
 				}),
 			).Return(whiteboard.Result{
@@ -201,9 +193,9 @@ func TestHandlerUpdateReturnsResourceAndPassesExactContext(t *testing.T) {
 				UpdatedAt: updatedAt,
 			}, nil).Once()
 			handler := newHandler(t, operations, defaultMaxBytes)
-			fields := []multipartField{{name: "file", filename: "board.txt", value: "replacement"}}
-			if route.kind == whiteboard.KindMarkdown {
-				fields = append([]multipartField{{name: "context", filename: "context.md", value: "replacement context"}}, fields...)
+			fields := []multipartField{
+				{name: "context", filename: "context.md", value: "replacement context"},
+				{name: "file", filename: "board.txt", value: "replacement"},
 			}
 			body, contentType := multipartRequestBody(t, fields...)
 			req := httptest.NewRequest(http.MethodPut, route.apiPath+"/"+testWhiteboardID, bytes.NewReader(body)).WithContext(ctx)
@@ -272,7 +264,7 @@ func TestHandlerViewMarkdownRendersShellWithExactContextAndPublicHeaders(t *test
 	require.Equal(t, "text/html; charset=utf-8", rr.Header().Get("Content-Type"))
 	require.Contains(t, rr.Body.String(), testViewerCSS)
 	require.Contains(t, rr.Body.String(), testViewerJS)
-	require.Contains(t, rr.Body.String(), `{"markdown":"# Public whiteboard"}`)
+	require.Contains(t, rr.Body.String(), `{"kind":"markdown","source":"# Public whiteboard"}`)
 	require.NotContains(t, rr.Body.String(), `"context"`)
 	require.NotContains(t, rr.Body.String(), `"local_agent"`)
 	assertMarkdownHeaders(t, rr, newViewer(t).ContentSecurityPolicy())
@@ -305,6 +297,30 @@ func TestHandlerGetMarkdownReturnsExactPublicResourceMarkdownAndContext(t *testi
 	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
 	require.Equal(t, "no-store", rr.Header().Get("Cache-Control"))
 	require.Equal(t, fmt.Sprintf("{\"resource\":{\"id\":%q,\"type\":\"markdown\",\"path\":%q,\"created_at\":\"2026-07-17T03:04:05Z\",\"updated_at\":\"2026-07-17T04:04:05Z\",\"expires_at\":1784264645,\"permanent\":false},\"markdown\":\"# Exact markdown\\n\",\"context\":\"## Exact creator context\\n\"}\n", testWhiteboardID, httpx.PublicMarkdown+testWhiteboardID), rr.Body.String())
+	for _, privateName := range []string{"source_path", "context_path", "schema", "generation"} {
+		require.NotContains(t, rr.Body.String(), privateName)
+	}
+}
+
+func TestHandlerGetHTMLReturnsExactPublicResourceSourceAndContext(t *testing.T) {
+	createdAt := time.Date(2026, time.July, 17, 3, 4, 5, 0, time.UTC)
+	updatedAt := createdAt.Add(time.Hour)
+	ctx := context.WithValue(context.Background(), handlerContextKey{}, "html retrieval")
+	operations := testutil.NewMockWhiteboardOperations(t)
+	operations.EXPECT().Get(mock.MatchedBy(func(got context.Context) bool { return got == ctx }), testWhiteboardID).Return(whiteboard.Whiteboard{
+		ID: testWhiteboardID, Kind: whiteboard.KindHTML,
+		Source: []byte("<!doctype html><html><head></head><body>exact</body></html>"), Context: []byte("## Exact HTML creator context\n"),
+		CreatedAt: createdAt, UpdatedAt: updatedAt,
+	}, nil).Once()
+	req := httptest.NewRequest(http.MethodGet, httpx.APIWhiteboardHTMLResource+testWhiteboardID, nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.Equal(t, "no-store", rr.Header().Get("Cache-Control"))
+	require.Equal(t, fmt.Sprintf("{\"resource\":{\"id\":%q,\"type\":\"html\",\"path\":%q,\"created_at\":\"2026-07-17T03:04:05Z\",\"updated_at\":\"2026-07-17T04:04:05Z\",\"expires_at\":null,\"permanent\":true},\"html\":\"\\u003c!doctype html\\u003e\\u003chtml\\u003e\\u003chead\\u003e\\u003c/head\\u003e\\u003cbody\\u003eexact\\u003c/body\\u003e\\u003c/html\\u003e\",\"context\":\"## Exact HTML creator context\\n\"}\n", testWhiteboardID, httpx.PublicHTML+testWhiteboardID), rr.Body.String())
 	for _, privateName := range []string{"source_path", "context_path", "schema", "generation"} {
 		require.NotContains(t, rr.Body.String(), privateName)
 	}
@@ -409,6 +425,33 @@ func TestHandlerViewHTMLOuterServesStaticSandboxWrapperWithoutStoredBytes(t *tes
 	require.Contains(t, rr.Body.String(), `referrerpolicy="no-referrer"`)
 	require.Contains(t, rr.Body.String(), ` credentialless`)
 	assertHTMLOuterHeaders(t, rr)
+}
+
+func TestHandlerViewHTMLEnabledUsesTrustedShellAndAgentCSP(t *testing.T) {
+	source := []byte(`<!doctype html><html><head><title>Exact HTML</title></head><body><script>globalThis.SUBMITTED_SECRET=true</script></body></html>`)
+	creatorContext := []byte("exact creator context")
+	createdAt := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	operations := testutil.NewMockWhiteboardOperations(t)
+	operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
+		ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: source, Context: creatorContext,
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+	}, nil).Once()
+	viewer := newEnabledViewer(t)
+	handler, err := whiteboard.NewHandler(operations, viewer, whiteboard.HandlerConfig{
+		MaxWhiteboardBytes: defaultMaxBytes, MaxContextBytes: defaultMaxContextBytes,
+	})
+	require.NoError(t, err)
+	rr := httptest.NewRecorder()
+
+	handlerMux(t, handler).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, httpx.PublicHTML+testWhiteboardID, nil))
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "text/html; charset=utf-8", rr.Header().Get("Content-Type"))
+	require.Contains(t, rr.Body.String(), `id="agent-whiteboard-app-bar"`)
+	require.Contains(t, rr.Body.String(), `id="agent-whiteboard-html-content"`)
+	require.Contains(t, rr.Body.String(), `"kind":"html","source":"\u003c!doctype html\u003e`)
+	require.NotContains(t, rr.Body.String(), `<script>globalThis.SUBMITTED_SECRET=true</script>`)
+	assertHTMLOuterHeadersWithCSP(t, rr, viewer.HTMLContentSecurityPolicy())
 }
 
 func TestHandlerViewHTMLInnerServesStoredDocumentBytesUnchanged(t *testing.T) {
@@ -650,25 +693,29 @@ func TestHandlerMarkdownWritesRejectInvalidPairsBeforeServiceCalls(t *testing.T)
 		},
 	}
 
-	for _, method := range []string{http.MethodPost, http.MethodPut} {
-		t.Run(method, func(t *testing.T) {
-			for _, tt := range tests {
-				t.Run(tt.name, func(t *testing.T) {
-					operations := testutil.NewMockWhiteboardOperations(t)
-					handler := newHandlerWithLimits(t, operations, tt.maxBytes, tt.maxContextBytes)
-					body, contentType := multipartRequestBody(t, tt.fields...)
-					path := httpx.APIWhiteboardMarkdown
-					if method == http.MethodPut {
-						path += "/" + testWhiteboardID
+	for _, route := range whiteboardRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			for _, method := range []string{http.MethodPost, http.MethodPut} {
+				t.Run(method, func(t *testing.T) {
+					for _, tt := range tests {
+						t.Run(tt.name, func(t *testing.T) {
+							operations := testutil.NewMockWhiteboardOperations(t)
+							handler := newHandlerWithLimits(t, operations, tt.maxBytes, tt.maxContextBytes)
+							body, contentType := multipartRequestBody(t, tt.fields...)
+							path := route.apiPath
+							if method == http.MethodPut {
+								path += "/" + testWhiteboardID
+							}
+							req := httptest.NewRequest(method, path, bytes.NewReader(body))
+							req.Header.Set("Content-Type", contentType)
+							rr := httptest.NewRecorder()
+
+							handlerMux(t, handler).ServeHTTP(rr, req)
+
+							require.Equal(t, tt.wantStatus, rr.Code)
+							require.Equal(t, tt.wantBody, rr.Body.String())
+						})
 					}
-					req := httptest.NewRequest(method, path, bytes.NewReader(body))
-					req.Header.Set("Content-Type", contentType)
-					rr := httptest.NewRecorder()
-
-					handlerMux(t, handler).ServeHTTP(rr, req)
-
-					require.Equal(t, tt.wantStatus, rr.Code)
-					require.Equal(t, tt.wantBody, rr.Body.String())
 				})
 			}
 		})
@@ -718,8 +765,11 @@ func TestHandlerRejectsInvalidFormsBeforeServiceCalls(t *testing.T) {
 				wantStatus int
 			}{
 				{
-					name:       "missing file",
-					fields:     []multipartField{{name: "expires_in_seconds", value: "60"}},
+					name: "missing file",
+					fields: []multipartField{
+						{name: "context", filename: "context.md", value: "context"},
+						{name: "expires_in_seconds", value: "60"},
+					},
 					maxBytes:   defaultMaxBytes,
 					wantStatus: http.StatusBadRequest,
 				},
@@ -728,6 +778,7 @@ func TestHandlerRejectsInvalidFormsBeforeServiceCalls(t *testing.T) {
 					fields: []multipartField{
 						{name: "file", filename: "one.txt", value: "one"},
 						{name: "file", filename: "two.txt", value: "two"},
+						{name: "context", filename: "context.md", value: "context"},
 					},
 					maxBytes:   defaultMaxBytes,
 					wantStatus: http.StatusBadRequest,
@@ -736,6 +787,7 @@ func TestHandlerRejectsInvalidFormsBeforeServiceCalls(t *testing.T) {
 					name: "duplicate expiration",
 					fields: []multipartField{
 						{name: "file", filename: "board.txt", value: "source"},
+						{name: "context", filename: "context.md", value: "context"},
 						{name: "expires_in_seconds", value: "1"},
 						{name: "expires_in_seconds", value: "2"},
 					},
@@ -743,8 +795,11 @@ func TestHandlerRejectsInvalidFormsBeforeServiceCalls(t *testing.T) {
 					wantStatus: http.StatusBadRequest,
 				},
 				{
-					name:       "oversized content",
-					fields:     []multipartField{{name: "file", filename: "board.txt", value: strings.Repeat("x", 1024)}},
+					name: "oversized content",
+					fields: []multipartField{
+						{name: "file", filename: "board.txt", value: strings.Repeat("x", 1024)},
+						{name: "context", filename: "context.md", value: "context"},
+					},
 					maxBytes:   64,
 					wantStatus: http.StatusRequestEntityTooLarge,
 				},
@@ -801,9 +856,9 @@ func TestHandlerMapsWrongKindServiceErrorsToNotFound(t *testing.T) {
 				return got.ID == testWhiteboardID && got.Kind == route.kind
 			})).Return(whiteboard.Result{}, common.NewError(common.CodeNotFound, "resource not found", errors.New("wrong kind"))).Once()
 			handler := newHandler(t, operations, defaultMaxBytes)
-			fields := []multipartField{{name: "file", filename: "board.txt", value: "replacement"}}
-			if route.kind == whiteboard.KindMarkdown {
-				fields = append(fields, multipartField{name: "context", filename: "context.md", value: "replacement context"})
+			fields := []multipartField{
+				{name: "file", filename: "board.txt", value: "replacement"},
+				{name: "context", filename: "context.md", value: "replacement context"},
 			}
 			body, contentType := multipartRequestBody(t, fields...)
 			req := httptest.NewRequest(http.MethodPut, route.apiPath+"/"+testWhiteboardID, bytes.NewReader(body))
@@ -978,10 +1033,15 @@ func newHandlerWithLimits(t *testing.T, operations whiteboard.Operations, maxByt
 
 func newViewer(t *testing.T) *whiteboard.Viewer {
 	t.Helper()
+	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{CSS: []byte(testViewerCSS), JS: []byte(testViewerJS)})
+	require.NoError(t, err)
+	return viewer
+}
 
+func newEnabledViewer(t *testing.T) *whiteboard.Viewer {
+	t.Helper()
 	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
-		CSS: []byte(testViewerCSS),
-		JS:  []byte(testViewerJS),
+		CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
 	})
 	require.NoError(t, err)
 	return viewer
@@ -1039,11 +1099,17 @@ func assertMarkdownHeaders(t *testing.T, rr *httptest.ResponseRecorder, csp stri
 
 func assertHTMLOuterHeaders(t *testing.T, rr *httptest.ResponseRecorder) {
 	t.Helper()
+	assertHTMLOuterHeadersWithCSP(t, rr, whiteboard.StandaloneOuterContentSecurityPolicy)
+}
+
+func assertHTMLOuterHeadersWithCSP(t *testing.T, rr *httptest.ResponseRecorder, csp string) {
+	t.Helper()
 	assertPublicWhiteboardHeaders(t, rr)
 	require.Equal(t, "DENY", rr.Header().Get("X-Frame-Options"))
 	require.Equal(t, "no-referrer", rr.Header().Get("Referrer-Policy"))
 	require.Equal(t, whiteboard.RestrictivePermissionsPolicy, rr.Header().Get("Permissions-Policy"))
-	require.Equal(t, whiteboard.StandaloneOuterContentSecurityPolicy, rr.Header().Get("Content-Security-Policy"))
+	require.Equal(t, csp, rr.Header().Get("Content-Security-Policy"))
+	require.Contains(t, csp, "frame-ancestors 'none'")
 }
 
 func assertHTMLInnerHeaders(t *testing.T, rr *httptest.ResponseRecorder) {

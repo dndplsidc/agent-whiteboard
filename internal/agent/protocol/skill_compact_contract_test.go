@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestV4SkillPartsAreStrictSafeAndProviderSpecific(t *testing.T) {
+func TestV4SkillPartsAreStrictSafeAndProviderNeutral(t *testing.T) {
 	content := protocol.MessageContent{Parts: []protocol.MessagePart{
 		{Type: protocol.MessagePartSkill, Skill: &protocol.SkillInvocation{ID: idA, Name: "review-helper"}},
 		{Type: protocol.MessagePartText, Text: "check this page"},
@@ -18,7 +18,7 @@ func TestV4SkillPartsAreStrictSafeAndProviderSpecific(t *testing.T) {
 	require.NoError(t, content.ValidateCommand())
 	require.NoError(t, content.ValidateEvent())
 	require.NoError(t, content.ValidateForProvider(protocol.ProviderCodex, false))
-	require.Error(t, content.ValidateForProvider(protocol.ProviderPi, false))
+	require.NoError(t, content.ValidateForProvider(protocol.ProviderPi, false))
 
 	clone := content.Clone()
 	clone.Parts[0].Skill.Name = "changed"
@@ -52,11 +52,13 @@ func TestV4SkillPartsAreStrictSafeAndProviderSpecific(t *testing.T) {
 
 func TestV4ActiveWorkSkillsAndCompactSnapshotContract(t *testing.T) {
 	state := protocol.SkillsReady
+	limit := 1
 	active := &protocol.ActiveWork{WorkID: idC, Kind: protocol.ActiveWorkCompact, State: protocol.ActiveWorkRunning}
 	catalog := []protocol.SkillDescriptor{{ID: idA, Name: "review-helper", DisplayName: "Review helper", Description: "Review this page.", Scope: protocol.SkillScopeRepo}}
 	payload := protocol.SnapshotPayload{
 		Lifecycle: protocol.LifecycleCompacting, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted,
-		ActiveWork: active, SkillsState: &state, Skills: catalog, SupportsCompact: true, Catalog: []protocol.CatalogModel{},
+		ActiveWork: active, SkillsState: &state, Skills: catalog, MaxSelectedSkills: &limit, SupportsCompact: true, Catalog: []protocol.CatalogModel{},
+		BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit,
 	}
 	require.NoError(t, payload.ValidateForProvider(protocol.ProviderCodex))
 	event := validEvent(payload)
@@ -73,10 +75,7 @@ func TestV4ActiveWorkSkillsAndCompactSnapshotContract(t *testing.T) {
 	wrongLifecycle.Lifecycle = protocol.LifecycleResponding
 	require.Error(t, wrongLifecycle.ValidateForProvider(protocol.ProviderCodex))
 
-	pi := protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted, Skills: []protocol.SkillDescriptor{}, Catalog: []protocol.CatalogModel{}}
-	require.NoError(t, pi.ValidateForProvider(protocol.ProviderPi))
-	pi.SupportsCompact = true
-	require.Error(t, pi.ValidateForProvider(protocol.ProviderPi))
+	require.NoError(t, payload.ValidateForProvider(protocol.ProviderPi), "capabilities are not provider-name gated")
 }
 
 func TestV4CompactAndInterruptCommandsUseDistinctWorkIdentity(t *testing.T) {
@@ -97,7 +96,8 @@ func TestV4CompactAndInterruptCommandsUseDistinctWorkIdentity(t *testing.T) {
 }
 
 func TestV4SkillCatalogAndCompactionEventsAreReplayableAndBounded(t *testing.T) {
-	catalog := protocol.SkillCatalogPayload{State: protocol.SkillsReady, Skills: []protocol.SkillDescriptor{{ID: idA, Name: "review-helper", Scope: protocol.SkillScopeUser}}}
+	limit := protocol.MaxMessageSkills
+	catalog := protocol.SkillCatalogPayload{State: protocol.SkillsReady, Skills: []protocol.SkillDescriptor{{ID: idA, Name: "review-helper", Scope: protocol.SkillScopeUser}}, MaxSelectedSkills: &limit}
 	catalogEvent := validEvent(catalog)
 	encoded, err := protocol.EncodeEvent(catalogEvent)
 	require.NoError(t, err)

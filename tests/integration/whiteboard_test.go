@@ -42,7 +42,7 @@ func TestMarkdownLifecycle(t *testing.T) {
 	require.Contains(t, body, `<meta name="robots" content="noindex, nofollow, noarchive">`)
 	require.Contains(t, body, "<style>")
 	require.Contains(t, body, "<script>")
-	encodedSource, err := json.Marshal(map[string]string{"markdown": firstSource})
+	encodedSource, err := json.Marshal(map[string]string{"kind": "markdown", "source": firstSource})
 	require.NoError(t, err)
 	require.Contains(t, body, string(encodedSource))
 	assertNoExternalReferences(t, body)
@@ -57,10 +57,10 @@ func TestMarkdownLifecycle(t *testing.T) {
 	require.Equal(t, secondSource, got.Markdown)
 	require.Equal(t, secondContext, got.Context)
 	_, body = fetch(t, created.Resource.URL)
-	encodedSource, err = json.Marshal(map[string]string{"markdown": secondSource})
+	encodedSource, err = json.Marshal(map[string]string{"kind": "markdown", "source": secondSource})
 	require.NoError(t, err)
 	require.Contains(t, body, string(encodedSource))
-	require.NotContains(t, body, string(mustJSON(t, map[string]string{"markdown": firstSource})))
+	require.NotContains(t, body, string(mustJSON(t, map[string]string{"kind": "markdown", "source": firstSource})))
 
 	deleteOutput := runCLIWithConfigSuccess(t, server, configPath, "--json", "delete", "markdown", "--", created.Resource.ID)
 	require.JSONEq(t, `{"schema_version":1}`, deleteOutput)
@@ -141,7 +141,9 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 	server := startServer(t)
 	firstSource := []byte(`<!doctype html><html><head><style>body{color:#123}</style><script>window.inline="HOSTILE_EXACT_BYTES_8f03"</script></head><body><p>exact ✓</p></body></html>`)
 	firstFile := writeFixture(t, "first.html", firstSource)
-	created := runCLIResource(t, server, "--json", "create", "html", firstFile)
+	firstContext := []byte("# Exact HTML creator context\n\x00")
+	firstContextFile := writeFixture(t, "first-context.md", firstContext)
+	created := runCLIResource(t, server, "--json", "create", "html", firstFile, "--context", firstContextFile)
 	require.True(t, strings.HasPrefix(created.Resource.URL, server.URL+"/whiteboards/html/"))
 	contentURL := created.Resource.URL + "/content"
 
@@ -161,6 +163,24 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 	assertStandaloneInnerResponse(t, response)
 	require.Equal(t, firstSource, []byte(body))
 
+	got := getHTMLAPI(t, server.URL+"/api/v1/whiteboards/html/"+created.Resource.ID, http.StatusOK)
+	require.Equal(t, string(firstSource), got.HTML)
+	require.Equal(t, string(firstContext), got.Context)
+	stdout, stderr, err := server.RunCLI(context.Background(), "--json", "get", "html", "--", created.Resource.ID)
+	require.NoError(t, err, stderr)
+	var cliGot apiHTMLEnvelope
+	require.NoError(t, json.Unmarshal([]byte(stdout), &cliGot), stdout)
+	require.Equal(t, string(firstSource), cliGot.HTML)
+	require.Equal(t, string(firstContext), cliGot.Context)
+
+	resourceDir := filepath.Join(server.Root, "whiteboards", created.Resource.ID)
+	metadata := readMetadataFixture(t, resourceDir)
+	sourceName := metadata["content_filename"].(string)
+	contextName := metadata["context_filename"].(string)
+	require.Regexp(t, `^source-[a-f0-9]{32}\.html$`, sourceName)
+	require.Regexp(t, `^context-[a-f0-9]{32}\.md$`, contextName)
+	require.Equal(t, strings.TrimSuffix(strings.TrimPrefix(sourceName, "source-"), ".html"), strings.TrimSuffix(strings.TrimPrefix(contextName, "context-"), ".md"))
+
 	for _, endpoint := range []string{created.Resource.URL, contentURL} {
 		response, body = fetchMethod(t, http.MethodHead, endpoint)
 		require.Equal(t, http.StatusOK, response.StatusCode)
@@ -174,13 +194,18 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 
 	secondSource := []byte(`<!doctype html><html><head><style>p{font-weight:bold}</style></head><body><script>window.updated=true</script><p>replacement</p></body></html>`)
 	secondFile := writeFixture(t, "second.html", secondSource)
-	updated := runCLIResource(t, server, "--json", "update", "html", "--", created.Resource.ID, secondFile)
+	secondContext := []byte("replacement HTML creator context")
+	secondContextFile := writeFixture(t, "second-context.md", secondContext)
+	updated := runCLIResource(t, server, "--json", "update", "html", "--context", secondContextFile, "--", created.Resource.ID, secondFile)
 	require.Equal(t, created.Resource.URL, updated.Resource.URL)
 	_, outer = fetch(t, created.Resource.URL)
 	require.Equal(t, stableOuter, outer)
 	_, body = fetch(t, contentURL)
 	require.Equal(t, secondSource, []byte(body))
 	require.NotContains(t, body, "HOSTILE_EXACT_BYTES_8f03")
+	got = getHTMLAPI(t, server.URL+"/api/v1/whiteboards/html/"+created.Resource.ID, http.StatusOK)
+	require.Equal(t, string(secondSource), got.HTML)
+	require.Equal(t, string(secondContext), got.Context)
 
 	for _, endpoint := range []string{created.Resource.URL + "/raw", contentURL + "/extra", created.Resource.URL + "/source"} {
 		response, body = fetch(t, endpoint)
@@ -205,7 +230,7 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 	assertStandaloneInnerResponse(t, response)
 	requireCategoryEmpty(t, server.Root, "whiteboards")
 
-	expiring := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "2", firstFile)
+	expiring := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "2", firstFile, "--context", firstContextFile)
 	require.NotNil(t, expiring.Resource.ExpiresAt)
 	require.Greater(t, *expiring.Resource.ExpiresAt, time.Now().Unix())
 	expiringContentURL := expiring.Resource.URL + "/content"
@@ -238,7 +263,7 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 			path := writeFixture(t, "invalid.html", test.content)
 			ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 			defer cancel()
-			stdout, stderr, err := server.RunCLI(ctx, "--json", "create", "html", path)
+			stdout, stderr, err := server.RunCLI(ctx, "--json", "create", "html", path, "--context", firstContextFile)
 			require.Error(t, err)
 			require.Empty(t, stdout)
 			requireJSONError(t, stderr, "invalid_request")
@@ -259,6 +284,12 @@ type apiResourceEnvelope struct {
 type apiMarkdownEnvelope struct {
 	Resource apiResource `json:"resource"`
 	Markdown string      `json:"markdown"`
+	Context  string      `json:"context"`
+}
+
+type apiHTMLEnvelope struct {
+	Resource apiResource `json:"resource"`
+	HTML     string      `json:"html"`
 	Context  string      `json:"context"`
 }
 
@@ -283,6 +314,18 @@ func getMarkdownAPI(t *testing.T, endpoint string, wantStatus int) apiMarkdownEn
 		return apiMarkdownEnvelope{}
 	}
 	var envelope apiMarkdownEnvelope
+	require.NoError(t, json.Unmarshal(responseBody, &envelope), string(responseBody))
+	return envelope
+}
+
+func getHTMLAPI(t *testing.T, endpoint string, wantStatus int) apiHTMLEnvelope {
+	t.Helper()
+	responseBody := requestAPI(t, http.MethodGet, endpoint, "", nil, wantStatus)
+	if wantStatus != http.StatusOK {
+		requireHTTPErrorCode(t, string(responseBody), "not_found")
+		return apiHTMLEnvelope{}
+	}
+	var envelope apiHTMLEnvelope
 	require.NoError(t, json.Unmarshal(responseBody, &envelope), string(responseBody))
 	return envelope
 }

@@ -27,10 +27,21 @@ var (
 	_ provider.ManagedChild = (*fakeChild)(nil)
 )
 
+func TestHTMLPageContextValidatesKindAwareExactSource(t *testing.T) {
+	request := validTurnRequest()
+	request.Context.Resource.Kind = provider.ResourceHTML
+	request.Context.Source = []byte("<!doctype html><p>exact</p>\x00")
+	request.Context.Digest, _ = agent.CalculateContextDigestForKind(agent.ResourceKindHTML, request.Context.Source, request.Context.CreatorContext)
+	require.NoError(t, request.Validate())
+
+	request.Context.Digest = agent.CalculateContextDigest(request.Context.Source, request.Context.CreatorContext)
+	require.Error(t, request.Validate(), "HTML must not accept the Markdown digest domain")
+}
+
 func TestProviderContractCarriesExactBoundedContentOnlyTurnInMemory(t *testing.T) {
 	request := validTurnRequest()
 	require.NoError(t, request.Validate())
-	require.Equal(t, []byte("# exact\nmarkdown\n"), request.Context.Markdown)
+	require.Equal(t, []byte("# exact\nmarkdown\n"), request.Context.Source)
 	require.Equal(t, []byte("exact creator context\n"), request.Context.CreatorContext)
 	_, err := json.Marshal(request.Context)
 	require.Error(t, err)
@@ -38,7 +49,7 @@ func TestProviderContractCarriesExactBoundedContentOnlyTurnInMemory(t *testing.T
 	request.Content = provider.TextMessage(strings.Repeat("x", provider.MaxTurnMessageBytes+1))
 	require.Error(t, request.Validate())
 	request = validTurnRequest()
-	request.Context.Markdown = []byte(strings.Repeat("x", provider.MaxMarkdownBytes+1))
+	request.Context.Source = []byte(strings.Repeat("x", provider.MaxSourceBytes+1))
 	require.Error(t, request.Validate())
 	request = validTurnRequest()
 	request.Context.CreatorContext = []byte(strings.Repeat("x", provider.MaxCreatorContextBytes+1))
@@ -49,7 +60,7 @@ func TestTurnRequestRejectsPartialContextInvalidRevisionAndUTF8(t *testing.T) {
 	base := provider.TurnRequest{TurnID: idA, MessageID: idB, Content: provider.TextMessage("question")}
 	require.NoError(t, base.Validate())
 
-	base.Context = &provider.PageContext{Revision: provider.ContextInitial, Markdown: []byte("markdown")}
+	base.Context = &provider.PageContext{Revision: provider.ContextInitial, Source: []byte("markdown")}
 	require.Error(t, base.Validate())
 	base.Context = validTurnRequest().Context
 	base.Context.Revision = "partial"
@@ -235,9 +246,9 @@ func TestProviderPageContextDigestAndAuthorizedHostnameAreValidated(t *testing.T
 	require.NoError(t, request.Context.Validate())
 
 	exactControlBytes := *request.Context
-	exactControlBytes.Markdown = []byte("# exact\n\x00\x01")
+	exactControlBytes.Source = []byte("# exact\n\x00\x01")
 	exactControlBytes.CreatorContext = []byte("creator\n\x02\x03")
-	exactControlBytes.Digest = agent.CalculateContextDigest(exactControlBytes.Markdown, exactControlBytes.CreatorContext)
+	exactControlBytes.Digest = agent.CalculateContextDigest(exactControlBytes.Source, exactControlBytes.CreatorContext)
 	require.NoError(t, exactControlBytes.Validate(), "valid published UTF-8 artifacts must preserve exact control bytes")
 
 	request.Context.Digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -310,7 +321,9 @@ func TestNativeSessionReferencesAndMetadataAreValidated(t *testing.T) {
 	_, err = json.Marshal(ref)
 	require.Error(t, err)
 
-	metadata := provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: "resolved-model", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	settings := provider.ExecutionSettings{Model: "resolved-model", Effort: "medium", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Resolved model", Selectable: true}
+	metadata := provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: settings.Model, Settings: &settings, Presentation: &presentation, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	require.NoError(t, metadata.Validate())
 	metadata.Ref = provider.NativeSessionRef{}
 	require.Error(t, metadata.Validate())
@@ -594,7 +607,7 @@ func validTurnRequest() provider.TurnRequest {
 	return provider.TurnRequest{
 		TurnID: idA, MessageID: idB, Content: provider.TextMessage("reader question"),
 		Context: &provider.PageContext{
-			Revision: provider.ContextInitial, Markdown: []byte("# exact\nmarkdown\n"), CreatorContext: []byte("exact creator context\n"), Title: "Board",
+			Revision: provider.ContextInitial, Source: []byte("# exact\nmarkdown\n"), CreatorContext: []byte("exact creator context\n"), Title: "Board",
 			URL:      "https://whiteboard.example/whiteboards/markdown/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
 			Resource: provider.Resource{Kind: provider.ResourceMarkdown, ID: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", CreatedAt: now, UpdatedAt: now},
 			Digest:   agent.CalculateContextDigest([]byte("# exact\nmarkdown\n"), []byte("exact creator context\n")),
@@ -608,5 +621,7 @@ func validNativeSession() provider.NativeSession {
 		panic(err)
 	}
 	now := time.Date(2026, 7, 27, 1, 2, 3, 0, time.UTC)
-	return provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: "resolved-model", CreatedAt: now, UpdatedAt: now}
+	settings := provider.ExecutionSettings{Model: "resolved-model", Effort: "medium", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Resolved model", Selectable: true}
+	return provider.NativeSession{Ref: ref, Provider: provider.NamePi, Model: settings.Model, Settings: &settings, Presentation: &presentation, CreatedAt: now, UpdatedAt: now}
 }

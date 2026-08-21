@@ -88,7 +88,10 @@ func TestExternalConsumerCanUseCompleteFacade(t *testing.T) {
 	_, _ = service.CreateMarkdown(ctx, agentwb.CreateWhiteboardInput{
 		Source: []byte("# markdown"), Context: []byte("creator context"),
 	})
-	_, _ = service.CreateHTML(ctx, agentwb.CreateWhiteboardInput{Source: []byte("<!doctype html><html><head></head><body></body></html>")})
+	_, _ = service.CreateHTML(ctx, agentwb.CreateWhiteboardInput{
+		Source:  []byte("<!doctype html><html><head></head><body></body></html>"),
+		Context: []byte("creator context"),
+	})
 	_, _ = service.GetWhiteboard(ctx, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	_, _ = service.UpdateWhiteboard(ctx, agentwb.UpdateWhiteboardInput{
 		ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", Kind: agentwb.KindMarkdown,

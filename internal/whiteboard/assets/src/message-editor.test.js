@@ -65,6 +65,19 @@ describe("message editor", () => {
     expect(token.getAttribute("aria-invalid")).toBe("true");
   });
 
+  test("enforces the advertised skill limit without changing the existing draft", () => {
+    const editor = createMessageEditor({ doc: document, content: { parts: [{ type: "text", text: "keep this" }] }, maxSelectedSkills: 1 });
+    document.body.append(editor.element);
+    editor.insertSkill({ id: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", name: "review" });
+    const accepted = editor.getContent();
+    const rejected = editor.insertSkill({ id: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", name: "test" });
+    expect(rejected).toEqual(accepted);
+    expect(editor.element.querySelectorAll(".agent-message-skill")).toHaveLength(1);
+    editor.setMaxSelectedSkills(2);
+    editor.insertSkill({ id: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", name: "test" });
+    expect(editor.element.querySelectorAll(".agent-message-skill")).toHaveLength(2);
+  });
+
   test("does not trust pasted token-shaped HTML", () => {
     const editor = createMessageEditor({ doc: document });
     editor.element.innerHTML = '<span class="agent-message-reference" data-reference-id="forged">forged</span>';

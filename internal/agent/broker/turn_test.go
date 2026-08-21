@@ -43,6 +43,7 @@ type turnSession struct {
 	interrupted            chan provider.AcceptedTurn
 	responded              chan provider.InteractionResponse
 	respondGate            chan struct{}
+	respondIgnoreContext   bool
 	respondErr             error
 	cancelled              chan string
 	skillCatalog           provider.SkillCatalog
@@ -71,6 +72,8 @@ func newTurnSession(ref string) *turnSession {
 		compactInterrupted: make(chan provider.AcceptedCompact, 8),
 	}
 }
+func (*turnSession) BusyTurnPolicy() provider.BusyTurnPolicy { return provider.BusyTurnQueue }
+
 func (session *turnSession) Skills(context.Context) provider.SkillCatalog {
 	session.mu.Lock()
 	defer session.mu.Unlock()
@@ -289,12 +292,17 @@ func (session *turnSession) Respond(ctx context.Context, response provider.Inter
 	}
 	session.mu.Lock()
 	gate := session.respondGate
+	ignoreContext := session.respondIgnoreContext
 	session.mu.Unlock()
 	if gate != nil {
-		select {
-		case <-gate:
-		case <-ctx.Done():
-			return ctx.Err()
+		if ignoreContext {
+			<-gate
+		} else {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 	session.mu.Lock()
@@ -419,6 +427,76 @@ func TestTerminalTurnExpiresPendingInteraction(t *testing.T) {
 	case unexpected := <-session.responded:
 		t.Fatalf("terminal interaction reached provider: %#v", unexpected)
 	default:
+	}
+}
+
+func TestAuthoritativeInteractionSettlementRetiresContextIgnoringResponse(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		base       uint64
+		settle     func(*turnSession, string, string)
+		wantOption string
+		terminal   bool
+	}{
+		{
+			name: "provider resolution", base: 7070, wantOption: "decline",
+			settle: func(session *turnSession, requestID, _ string) {
+				session.events <- provider.NewInteractionResolvedEvent(provider.InteractionResolution{RequestID: requestID, Kind: provider.InteractionCommandApproval, OptionID: "decline"})
+			},
+		},
+		{
+			name: "terminal", base: 7080, wantOption: "accept", terminal: true,
+			settle: func(session *turnSession, _, turnID string) { session.events <- provider.NewCompletionEvent(turnID) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			broker, _, session, connection, clientID, _, _, page := turnFixture(t, test.base)
+			defer broker.Close(context.Background())
+			conversationID := connection.ConversationID()
+			turnID := sequenceID(test.base + 1)
+			result, err := connection.Command(context.Background(), submitCommand(sequenceID(test.base+2), clientID, conversationID, turnID, sequenceID(test.base+3), "run", &page))
+			require.NoError(t, err)
+			requireCommandResult(t, result, protocol.CommandSucceeded, "")
+			receiveLifecycle(t, session.submitted)
+			drainEvents(t, connection.Events(), 3)
+			requestID := sequenceID(test.base + 4)
+			request := provider.InteractionRequest{ID: requestID, TurnID: turnID, Kind: provider.InteractionCommandApproval, Title: "Approve", Options: []provider.InteractionOption{{ID: "accept", Label: "Accept"}, {ID: "decline", Label: "Decline"}}}
+			session.events <- provider.NewInteractionRequestEvent(request)
+			require.Equal(t, protocol.EventInteractionRequest, receiveLifecycle(t, connection.Events()).Type)
+			gate := make(chan struct{})
+			session.mu.Lock()
+			session.respondGate = gate
+			session.respondIgnoreContext = true
+			session.mu.Unlock()
+			commandID := sequenceID(test.base + 5)
+			answer := make(chan commandResponse, 1)
+			go func() {
+				event, commandErr := connection.Command(context.Background(), interactionResponseCommand(commandID, clientID, conversationID, requestID, protocol.InteractionCommandApproval, "accept"))
+				answer <- commandResponse{event: event, err: commandErr}
+			}()
+			receiveLifecycle(t, session.responded)
+			test.settle(session, requestID, turnID)
+			settled := receiveLifecycle(t, answer)
+			require.NoError(t, settled.err)
+			requireCommandResult(t, settled.event, protocol.CommandRejected, protocol.ErrorInvalidState)
+			var resolved protocol.Event
+			for resolved.Type != protocol.EventInteractionResolved {
+				resolved = receiveLifecycle(t, connection.Events())
+			}
+			require.Equal(t, test.wantOption, resolved.Payload.(protocol.InteractionResolvedPayload).OptionID)
+			if test.terminal {
+				for ready := false; !ready; {
+					event := receiveLifecycle(t, connection.Events())
+					if payload, ok := event.Payload.(protocol.LifecyclePayload); ok && payload.State == protocol.LifecycleReady {
+						ready = true
+					}
+				}
+			}
+			require.Equal(t, 1, replayInteractionResolutionCount(t, connection.actor.replay, requestID))
+			close(gate)
+			require.Eventually(t, func() bool { return len(connection.actor.interactionCallBudget) == 0 }, lifecycleTestTimeout, time.Millisecond)
+			require.Equal(t, 1, replayInteractionResolutionCount(t, connection.actor.replay, requestID))
+		})
 	}
 }
 
@@ -591,6 +669,31 @@ func TestInteractionProviderStreamFailsClosedAtPendingCountLimit(t *testing.T) {
 	select {
 	case unexpected := <-session.cancelled:
 		t.Fatalf("overflow interaction entered pending state: %q", unexpected)
+	default:
+	}
+}
+
+func TestAutomaticInteractionCancellationSettlesLocallyWhenCallBudgetIsFull(t *testing.T) {
+	conversationID := sequenceID(7590)
+	factory, err := NewEventFactory(conversationID, &lockedIDs{next: 7591}, testClock{now: testTime()})
+	require.NoError(t, err)
+	session := newTurnSession("sessions/cancel-budget")
+	budget := make(chan struct{}, 1)
+	budget <- struct{}{}
+	actor := &conversation{
+		session: captureSession(session), factory: factory, replay: NewReplayLog(),
+		pendingInteractions: make(map[string]*pendingInteraction), interactionCallBudget: budget,
+	}
+	requestID := sequenceID(7592)
+	require.NoError(t, actor.rememberInteraction(provider.InteractionRequest{ID: requestID, Kind: provider.InteractionCommandApproval, Title: "Approve", Options: []provider.InteractionOption{{ID: "accept", Label: "Accept"}}}))
+	actor.cancelPendingInteractions(map[*clientAttachment]struct{}{}, make(chan interactionWorkerResult, 1))
+	require.Empty(t, actor.pendingInteractions)
+	require.EqualValues(t, 1, actor.nextInteractionToken)
+	require.Equal(t, 1, len(actor.interactionCallBudget))
+	require.Equal(t, 1, replayInteractionResolutionCount(t, actor.replay, requestID))
+	select {
+	case unexpected := <-session.cancelled:
+		t.Fatalf("budget-exhausted cancellation spawned provider call: %q", unexpected)
 	default:
 	}
 }
@@ -1288,8 +1391,8 @@ func TestNewRevisionAttachesToTheNextExistingQueuedMessage(t *testing.T) {
 	newResource.UpdatedAt = resource.UpdatedAt.Add(lifecycleTestTimeout)
 	newPage := testPageContext(newResource)
 	newPage.Revision = protocol.ContextReplacement
-	newPage.Markdown = "# Replacement\n"
-	newPage.Digest = agent.CalculateContextDigest([]byte(newPage.Markdown), []byte(newPage.CreatorContext))
+	newPage.Source = "# Replacement\n"
+	newPage.Digest = agent.CalculateContextDigest([]byte(newPage.Source), []byte(newPage.CreatorContext))
 	secondClientID := sequenceID(7188)
 	second, err := broker.Connect(context.Background(), identity.Origin, observationConnect(secondClientID, identity.CapabilityID, newPage.Digest, newResource, ""))
 	require.NoError(t, err)
@@ -1311,7 +1414,7 @@ func TestNewRevisionAttachesToTheNextExistingQueuedMessage(t *testing.T) {
 	require.Equal(t, "already queued", dispatched.Content.PlainText())
 	require.NotNil(t, dispatched.Context)
 	require.Equal(t, newPage.Digest, dispatched.Context.Digest)
-	require.Equal(t, []byte(newPage.Markdown), dispatched.Context.Markdown)
+	require.Equal(t, []byte(newPage.Source), dispatched.Context.Source)
 	require.Equal(t, protocol.EventContext, receiveLifecycle(t, connection.Events()).Type)
 	require.Equal(t, protocol.LifecycleResponding, receiveLifecycle(t, connection.Events()).Payload.(protocol.LifecyclePayload).State)
 	state.mu.Lock()
@@ -1425,7 +1528,7 @@ func replacementPage(previous protocol.Resource, markdown string, advance time.D
 	resource.UpdatedAt = previous.UpdatedAt.Add(advance)
 	page := testPageContext(resource)
 	page.Revision = protocol.ContextReplacement
-	page.Markdown = markdown
+	page.Source = markdown
 	page.Digest = agent.CalculateContextDigest([]byte(markdown), []byte(page.CreatorContext))
 	return page
 }

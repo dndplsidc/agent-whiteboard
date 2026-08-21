@@ -3,27 +3,28 @@ import hljs from "highlight.js/lib/common";
 import MarkdownIt from "markdown-it";
 import mermaid from "mermaid";
 import { createMarkdownContextController, imageReference, indexMarkdownTokens } from "./markdown-context.js";
-import { createMessageEditor, cloneMessageContent, messageContentBytes, normalizeMessageContent, renderMessageContent } from "./message-editor.js";
+import { createMessageEditor, cloneMessageContent, insertMessageReference, messageContentBytes, normalizeMessageContent, renderMessageContent } from "./message-editor.js";
 import {
   cloneExecutionSettings,
-  createCodexDraftState,
+  createSettingsDraftState,
   createModelSettingsControl,
-  editCodexDraft,
+  editSettingsDraft,
   formatEffort,
-  readCodexSettingsPreference,
-  reconcileCodexDraft,
-  recordCodexSubmission,
+  readSettingsPreference,
+  reconcileSettingsDraft,
+  recordSettingsSubmission,
   settingsCompatibility,
   validExecutionSettings,
   validModelCatalog,
   validPresentedExecutionSettings,
-  writeCodexSettingsPreference,
+  writeSettingsPreference,
 } from "./model-settings.js";
 
 export const DEFAULT_TITLE = "Untitled whiteboard";
 export const THEME_STORAGE_KEY = "agent-whiteboard-theme";
 
 const THEME_CONTROL_CLEANUP = Symbol("theme-control-cleanup");
+const HTML_HOST_INSTANCE = Symbol("html-host-instance");
 
 const ALLOWED_THEMES = new Set(["light", "dark", "system"]);
 const MERMAID_SECURE_KEYS = [
@@ -360,6 +361,77 @@ function createThemeControl({ doc, container, controller }) {
   };
 }
 
+async function installThemeController({
+  doc,
+  container,
+  storage,
+  mediaQuery,
+  diagramSources = [],
+  semanticIndex = null,
+  renderResolvedTheme = async () => {},
+}) {
+  container[THEME_CONTROL_CLEANUP]?.();
+  container[THEME_CONTROL_CLEANUP] = undefined;
+  let theme = readTheme(storage);
+  let generation = 0;
+  let pendingRender = Promise.resolve();
+  let subscribed = false;
+
+  const onSystemThemeChange = () => {
+    if (theme === "system") queueThemeRender();
+  };
+
+  function syncSystemSubscription() {
+    if (theme === "system" && !subscribed) {
+      mediaQuery.addEventListener?.("change", onSystemThemeChange);
+      subscribed = true;
+    } else if (theme !== "system" && subscribed) {
+      mediaQuery.removeEventListener?.("change", onSystemThemeChange);
+      subscribed = false;
+    }
+  }
+
+  function queueThemeRender() {
+    const resolvedTheme = resolveTheme(theme, mediaQuery);
+    const renderGeneration = ++generation;
+    doc.documentElement.dataset.theme = resolvedTheme;
+    doc.documentElement.style.colorScheme = resolvedTheme;
+    pendingRender = pendingRender.then(() => renderResolvedTheme({
+      resolvedTheme,
+      generation: renderGeneration,
+      isCurrent: () => renderGeneration === generation,
+    }));
+    return pendingRender;
+  }
+
+  let themeControl;
+  const controller = {
+    diagramSources: [...diagramSources],
+    semanticIndex,
+    get theme() { return theme; },
+    async setTheme(value) {
+      theme = normalizeTheme(value);
+      persistTheme(storage, theme);
+      syncSystemSubscription();
+      await queueThemeRender();
+    },
+    settled() { return pendingRender; },
+    destroy() {
+      themeControl.destroy();
+      container[THEME_CONTROL_CLEANUP] = undefined;
+      if (subscribed) mediaQuery.removeEventListener?.("change", onSystemThemeChange);
+      subscribed = false;
+    },
+  };
+
+  themeControl = createThemeControl({ doc, container, controller });
+  container[THEME_CONTROL_CLEANUP] = themeControl.destroy;
+  persistTheme(storage, theme);
+  syncSystemSubscription();
+  await queueThemeRender();
+  return controller;
+}
+
 export async function renderWhiteboard(
   source,
   {
@@ -380,74 +452,22 @@ export async function renderWhiteboard(
   highlightCode(container);
   setDocumentTitle(container, doc);
 
-  let theme = readTheme(storage);
-  let generation = 0;
-  let pendingRender = Promise.resolve();
-  let subscribed = false;
-
-  const onSystemThemeChange = () => {
-    if (theme === "system") queueDiagramRender();
-  };
-
-  function syncSystemSubscription() {
-    if (theme === "system" && !subscribed) {
-      mediaQuery.addEventListener?.("change", onSystemThemeChange);
-      subscribed = true;
-    } else if (theme !== "system" && subscribed) {
-      mediaQuery.removeEventListener?.("change", onSystemThemeChange);
-      subscribed = false;
-    }
-  }
-
-  function queueDiagramRender() {
-    const selectedTheme = theme;
-    const resolvedTheme = resolveTheme(selectedTheme, mediaQuery);
-    const renderGeneration = ++generation;
-    doc.documentElement.dataset.theme = resolvedTheme;
-    doc.documentElement.style.colorScheme = resolvedTheme;
-    pendingRender = pendingRender.then(() =>
-      renderDiagrams({
-        container,
-        diagramSources,
-        doc,
-        resolvedTheme,
-        generation: renderGeneration,
-        isCurrent: () => renderGeneration === generation,
-      }),
-    );
-    return pendingRender;
-  }
-
-  const controller = {
-    diagramSources: [...diagramSources],
+  return installThemeController({
+    doc,
+    container,
+    storage,
+    mediaQuery,
+    diagramSources,
     semanticIndex,
-    get theme() {
-      return theme;
-    },
-    async setTheme(value) {
-      theme = normalizeTheme(value);
-      persistTheme(storage, theme);
-      syncSystemSubscription();
-      await queueDiagramRender();
-    },
-    settled() {
-      return pendingRender;
-    },
-    destroy() {
-      themeControl.destroy();
-      container[THEME_CONTROL_CLEANUP] = undefined;
-      if (subscribed) mediaQuery.removeEventListener?.("change", onSystemThemeChange);
-      subscribed = false;
-    },
-  };
-
-  const themeControl = createThemeControl({ doc, container, controller });
-  container[THEME_CONTROL_CLEANUP] = themeControl.destroy;
-
-  persistTheme(storage, theme);
-  syncSystemSubscription();
-  await queueDiagramRender();
-  return controller;
+    renderResolvedTheme: ({ resolvedTheme, generation, isCurrent }) => renderDiagrams({
+      container,
+      diagramSources,
+      doc,
+      resolvedTheme,
+      generation,
+      isCurrent,
+    }),
+  });
 }
 
 function viewerContainer(doc) {
@@ -533,7 +553,7 @@ const ERROR_DEFINITIONS = {
   image_missing: ["The selected image is no longer available.", "none"],
   image_storage_failure: ["The selected image could not be stored safely.", "try_again"],
   skill_unavailable: ["The selected skill is no longer available.", "refresh_skills"],
-  compact_unsupported: ["Manual compaction is unavailable in this Codex runtime.", "none"],
+  compact_unsupported: ["Manual compaction is unavailable in this provider runtime.", "none"],
 };
 
 function isRecord(value) {
@@ -665,25 +685,27 @@ function validContentAndImages(content, images, event = true) {
   return ids.length <= MAX_AGENT_IMAGES_PER_TURN && new Set(ids).size === ids.length;
 }
 
-function validResource(value) {
+function validResource(value, expectedKind) {
   if (!exactObject(value, ["kind", "id", "created_at", "updated_at", "expires_at"])) return false;
-  if (value.kind !== "markdown" || !validID(value.id) || !validDate(value.created_at) || !validDate(value.updated_at)) return false;
+  if (value.kind !== expectedKind || !["markdown", "html"].includes(value.kind) || !validID(value.id) || !validDate(value.created_at) || !validDate(value.updated_at)) return false;
   if (value.expires_at !== null && !validDate(value.expires_at)) return false;
   const created = Date.parse(value.created_at);
   return Date.parse(value.updated_at) >= created && (value.expires_at === null || Date.parse(value.expires_at) >= created);
 }
 
 export function validateViewerPayload(value) {
-  if (!isRecord(value) || typeof value.markdown !== "string" || encoder.encode(value.markdown).length > 10 * 1024 * 1024) throw new TypeError("invalid whiteboard source payload");
-  if (!Object.hasOwn(value, "local_agent")) {
-    if (!exactObject(value, ["markdown"])) throw new TypeError("invalid whiteboard source payload");
-    return { markdown: value.markdown, context: "", local_agent: { enabled: false } };
+  if (!isRecord(value) || !["markdown", "html"].includes(value.kind) || typeof value.source !== "string" || encoder.encode(value.source).length > 10 * 1024 * 1024) {
+    throw new TypeError("invalid whiteboard source payload");
   }
-  if (!exactObject(value, ["markdown", "context", "local_agent"]) || typeof value.context !== "string" || encoder.encode(value.context).length > 1024 * 1024) {
+  if (!Object.hasOwn(value, "local_agent")) {
+    if (value.kind !== "markdown" || !exactObject(value, ["kind", "source"])) throw new TypeError("invalid whiteboard source payload");
+    return { kind: value.kind, source: value.source, context: "", local_agent: { enabled: false } };
+  }
+  if (!exactObject(value, ["kind", "source", "context", "local_agent"]) || typeof value.context !== "string" || encoder.encode(value.context).length > 1024 * 1024 || value.kind === "html" && value.context.length === 0) {
     throw new TypeError("invalid whiteboard source payload");
   }
   const agent = value.local_agent;
-  if (!exactObject(agent, ["enabled", "context_digest", "resource"]) || agent.enabled !== true || !DIGEST_PATTERN.test(agent.context_digest) || !validResource(agent.resource)) {
+  if (!exactObject(agent, ["enabled", "context_digest", "resource"]) || agent.enabled !== true || !DIGEST_PATTERN.test(agent.context_digest) || !validResource(agent.resource, value.kind)) {
     throw new TypeError("invalid whiteboard source payload");
   }
   return value;
@@ -790,7 +812,7 @@ function commandEnvelope({ type, payload, clientID, conversationID, idFactory })
 export function createConnectCommand({ payload, provider = "pi", settings = null, clientID, replayAfter, idFactory = generateAgentID }) {
   validateViewerPayload(payload);
   if (payload.local_agent.enabled !== true) throw new TypeError("local agent is disabled");
-  if (!PROVIDERS.has(provider) || provider === "pi" && settings !== null || settings !== null && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
+  if (!PROVIDERS.has(provider) || settings !== null && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
   if (replayAfter && !validID(replayAfter)) throw new TypeError("invalid replay event ID");
   const connectPayload = {
     provider,
@@ -810,7 +832,7 @@ export function createPageContext(payload, { title, url, revision }) {
   if (!["initial", "replacement"].includes(revision) || !validText(title, 512) || !validText(url, 8 * 1024) || !allowedOrigin || parsedURL.username || parsedURL.password || !parsedURL.hostname) throw new TypeError("invalid page context");
   return {
     revision,
-    markdown: payload.markdown,
+    source: payload.source,
     creator_context: payload.context,
     title,
     url,
@@ -821,10 +843,14 @@ export function createPageContext(payload, { title, url, revision }) {
 
 export function createSubmitCommand({ content, message, images = [], payload, provider = "pi", settings = null, clientID, conversationID, title, url, revision, idFactory = generateAgentID }) {
   let orderedContent;
-  try { orderedContent = content ?? normalizeMessageContent({ parts: message ? [{ type: "text", text: message }] : [] }); }
+  try { orderedContent = normalizeMessageContent(content ?? { parts: message ? [{ type: "text", text: message }] : [] }); }
   catch { throw new TypeError("invalid agent message"); }
+  if (orderedContent.parts.some((part) => part.type !== "text") && !orderedContent.parts.some((part) => part.type === "text" && part.text.trim() !== "")) {
+    orderedContent = { parts: orderedContent.parts.filter((part) => part.type !== "text") };
+  }
   if (!validContentAndImages(orderedContent, images, false) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
-  if (!PROVIDERS.has(provider) || provider === "pi" && settings !== null || provider === "codex" && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
+  if (payload?.kind === "html" && orderedContent.parts.some((part) => part.type === "reference")) throw new TypeError("invalid agent message");
+  if (!PROVIDERS.has(provider) || settings !== null && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const turnID = idFactory();
   const messageID = idFactory();
@@ -909,9 +935,9 @@ function validToolActivity(payload) {
   return exactObject(payload, ["activity_id", "kind", "status", "title", "summary", "detail"], ["turn_id"]) && validID(payload.activity_id) && (!Object.hasOwn(payload, "turn_id") || validID(payload.turn_id)) && TOOL_KINDS.has(payload.kind) && TOOL_STATUSES.has(payload.status) && validText(payload.title, 512) && validText(payload.summary, 8192, true) && validText(payload.detail, 64 * 1024, true);
 }
 function validInteractionRequest(payload) {
-  if (!exactObject(payload, ["request_id", "kind", "title", "summary", "command", "working_directory", "options", "questions", "fields"], ["turn_id"]) || !validID(payload.request_id) || (Object.hasOwn(payload, "turn_id") && !validID(payload.turn_id)) || !validInteractionKind(payload.kind) || !validText(payload.title, 512) || !validText(payload.summary, 8192, true) || !validText(payload.command, 64 * 1024, true) || !validText(payload.working_directory, 8192, true) || !validInteractionOptions(payload.options) || (payload.questions !== null && !Array.isArray(payload.questions)) || (payload.questions?.length ?? 0) > 3 || (payload.fields !== null && !Array.isArray(payload.fields)) || (payload.fields?.length ?? 0) > 32) return false;
+  if (!exactObject(payload, ["request_id", "kind", "title", "summary", "command", "working_directory", "options", "questions", "fields", "local_deadline"], ["turn_id"]) || !validID(payload.request_id) || (Object.hasOwn(payload, "turn_id") && !validID(payload.turn_id)) || !validInteractionKind(payload.kind) || !validText(payload.title, 512) || !validText(payload.summary, 8192, true) || !validText(payload.command, 64 * 1024, true) || !validText(payload.working_directory, 8192, true) || (payload.local_deadline !== null && (!validDate(payload.local_deadline) || !payload.local_deadline.endsWith("Z"))) || !validInteractionOptions(payload.options) || (payload.questions !== null && !Array.isArray(payload.questions)) || (payload.questions?.length ?? 0) > 3 || (payload.fields !== null && !Array.isArray(payload.fields)) || (payload.fields?.length ?? 0) > 32) return false;
   const validQuestion = (question) => exactObject(question, ["id", "header", "prompt", "options", "allow_other", "secret", "multiple"]) && validInteractionKey(question.id) && validText(question.header, 512) && validText(question.prompt, 8192) && validInteractionOptions(question.options) && typeof question.allow_other === "boolean" && typeof question.secret === "boolean" && typeof question.multiple === "boolean" && ((question.options?.length ?? 0) > 0 || question.allow_other);
-  const validField = (field) => exactObject(field, ["id", "label", "description", "type", "required", "secret", "options"]) && validInteractionKey(field.id) && validText(field.label, 512) && validText(field.description, 8192, true) && FIELD_TYPES.has(field.type) && typeof field.required === "boolean" && typeof field.secret === "boolean" && validInteractionOptions(field.options) && (["select", "multi_select"].includes(field.type) ? (field.options?.length ?? 0) > 0 : (field.options?.length ?? 0) === 0);
+  const validField = (field) => exactObject(field, ["id", "label", "description", "type", "required", "secret", "multiline", "options"]) && validInteractionKey(field.id) && validText(field.label, 512) && validText(field.description, 8192, true) && FIELD_TYPES.has(field.type) && typeof field.required === "boolean" && typeof field.secret === "boolean" && typeof field.multiline === "boolean" && (!field.multiline || field.type === "text") && validInteractionOptions(field.options) && (["select", "multi_select"].includes(field.type) ? (field.options?.length ?? 0) > 0 : (field.options?.length ?? 0) === 0);
   const questions = payload.questions ?? [];
   const fields = payload.fields ?? [];
   const structuredIDs = [...questions, ...fields].map(({ id }) => id);
@@ -934,6 +960,13 @@ function validInteractionRequest(payload) {
 const lifecycleValues = new Set(["connecting", "ready", "responding", "compacting", "interrupted", "unavailable"]);
 const contextValues = new Set(["pending", "accepted", "unchanged", "unavailable"]);
 const providerValues = new Set(["starting", "ready", "unavailable", "recovering"]);
+const busyPolicyValues = new Set(["queue", "preserve_draft"]);
+const composerAdmissionValues = new Set(["submit", "queue", "preserve_draft", "blocked"]);
+
+function validComposerAdmission(policy, admission) {
+  return busyPolicyValues.has(policy) && composerAdmissionValues.has(admission)
+    && (admission === "submit" || admission === "blocked" || admission === policy);
+}
 
 function validActiveWork(lifecycle, work) {
   if (work === null) return !["responding", "compacting"].includes(lifecycle);
@@ -947,8 +980,9 @@ function validSkillDescriptor(skill) {
     && (!Object.hasOwn(skill, "description") || validText(skill.description, 2048, true)) && ["user", "repo", "system", "admin"].includes(skill.scope);
 }
 
-function validSkillCatalog(state, skills) {
-  if (!["ready", "unavailable"].includes(state) || !Array.isArray(skills) || skills.length > 512 || state === "unavailable" && skills.length !== 0 || !skills.every(validSkillDescriptor)) return false;
+function validSkillCatalog(state, skills, maxSelectedSkills) {
+  const validLimit = state === "ready" ? Number.isInteger(maxSelectedSkills) && maxSelectedSkills > 0 && maxSelectedSkills <= 16 : maxSelectedSkills === null;
+  if (!["ready", "unavailable"].includes(state) || !validLimit || !Array.isArray(skills) || skills.length > 512 || state === "unavailable" && skills.length !== 0 || !skills.every(validSkillDescriptor)) return false;
   return new Set(skills.map(({ id }) => id)).size === skills.length && new Set(skills.map(({ name }) => name)).size === skills.length && encoder.encode(JSON.stringify(skills)).length <= 512 * 1024;
 }
 
@@ -967,11 +1001,12 @@ function validSettingsSnapshot(settingsState, effectiveSettings, catalog) {
 function validateEventPayload(type, payload) {
   switch (type) {
     case "snapshot": {
-      if (!exactObject(payload, ["lifecycle", "queue", "context_state", "active_work", "supports_images", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "supports_compact"])
+      if (!exactObject(payload, ["lifecycle", "queue", "context_state", "active_work", "supports_images", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "max_selected_skills", "supports_compact", "busy_policy", "composer_admission"])
         || !lifecycleValues.has(payload.lifecycle) || !Array.isArray(payload.queue) || payload.queue.length > MAX_QUEUE_ITEMS || !payload.queue.every(validQueueItem)
         || !contextValues.has(payload.context_state) || !validActiveWork(payload.lifecycle, payload.active_work) || typeof payload.supports_images !== "boolean" || typeof payload.supports_compact !== "boolean"
         || !validSettingsSnapshot(payload.settings_state, payload.effective_settings, payload.catalog)
-        || (payload.skills_state === null ? payload.skills.length !== 0 : !validSkillCatalog(payload.skills_state, payload.skills))) return false;
+        || !validSkillCatalog(payload.skills_state, payload.skills, payload.max_selected_skills)
+        || !validComposerAdmission(payload.busy_policy, payload.composer_admission)) return false;
       const selected = payload.effective_settings?.selectable && payload.catalog.find(({ model }) => model === payload.effective_settings.model);
       return !selected || selected.supports_images === payload.supports_images;
     }
@@ -994,7 +1029,7 @@ function validateEventPayload(type, payload) {
     case "provider":
       return exactObject(payload, ["provider", "state", "supports_images"], ["model"]) && PROVIDERS.has(payload.provider) && providerValues.has(payload.state) && typeof payload.supports_images === "boolean" && (!Object.hasOwn(payload, "model") || validText(payload.model, 512, true)) && (payload.state !== "ready" || validText(payload.model, 512));
     case "skill_catalog":
-      return exactObject(payload, ["state", "skills"]) && validSkillCatalog(payload.state, payload.skills);
+      return exactObject(payload, ["state", "skills", "max_selected_skills"]) && validSkillCatalog(payload.state, payload.skills, payload.max_selected_skills);
     case "compaction":
       return exactObject(payload, ["work_id", "status"]) && validID(payload.work_id) && ["running", "stopping", "completed", "interrupted", "failed"].includes(payload.status);
     case "settings":
@@ -1157,7 +1192,10 @@ export function createAgentState(provider = "pi") {
     catalog: [],
     skillsState: null,
     skills: [],
+    maxSelectedSkills: null,
     supportsCompact: false,
+    busyPolicy: "queue",
+    composerAdmission: "blocked",
     compactions: [],
     transcriptSequence: 0,
     timeline: [],
@@ -1256,7 +1294,10 @@ function applyAgentEventMutable(state, untrustedEvent) {
       state.catalog = payload.catalog.map((model) => ({ ...model, supported_reasoning_efforts: model.supported_reasoning_efforts.map((effort) => ({ ...effort })) }));
       state.skillsState = payload.skills_state;
       state.skills = payload.skills.map((skill) => ({ ...skill }));
+      state.maxSelectedSkills = payload.max_selected_skills;
       state.supportsCompact = payload.supports_compact;
+      state.busyPolicy = payload.busy_policy;
+      state.composerAdmission = payload.composer_admission;
       state.connected = true;
       break;
     case "timeline": {
@@ -1300,6 +1341,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
     case "skill_catalog":
       state.skillsState = payload.state;
       state.skills = payload.skills.map((skill) => ({ ...skill }));
+      state.maxSelectedSkills = payload.max_selected_skills;
       break;
     case "compaction": {
       const current = state.compactions.find((item) => item.work_id === payload.work_id);
@@ -1320,7 +1362,18 @@ function applyAgentEventMutable(state, untrustedEvent) {
       state.supportsImages = payload.supports_images;
       break;
     case "context": state.contextDigest = payload.digest; state.contextState = payload.state; break;
-    case "activity": appendTimeline(state, { kind: "activity", activity: payload.kind, text: payload.summary, created_at: event.timestamp, item_id: event.event_id, transcript_order: transcriptOrder }); break;
+    case "activity": {
+      const turnID = state.activeWork?.kind === "turn" ? state.activeWork.work_id : null;
+      const previous = state.timeline.at(-1);
+      const coalesced = turnID !== null
+        && ["status", "visible_summary"].includes(payload.kind)
+        && previous?.kind === "activity"
+        && previous.activity === payload.kind
+        && previous.text === payload.summary
+        && previous.turn_id === turnID;
+      if (!coalesced) appendTimeline(state, { kind: "activity", activity: payload.kind, text: payload.summary, turn_id: turnID, created_at: event.timestamp, item_id: event.event_id, transcript_order: transcriptOrder });
+      break;
+    }
     case "blocked": appendTimeline(state, { kind: "activity", activity: "blocked", blockedKind: payload.kind, text: payload.message, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
     case "error": state.errors.push({ ...payload.error }); state.errors = state.errors.slice(-20); appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
     case "completion": state.lifecycle = "ready"; state.activeWork = null; break;
@@ -1701,7 +1754,7 @@ function actionGuidance(action, doc) {
     configure_model: "Configure a usable default model for the selected provider, then try again.",
     try_again: "Try the operation again; if it still fails, restart the broker.",
     restart_provider: "Restart the local agent broker before trying again.",
-    reduce_context: "Reduce the complete page Markdown or creator context before trying again.",
+    reduce_context: "Reduce the complete page source or creator context before trying again.",
     restore_session: "Restore an available archive or start a new conversation.",
     retry_turn: "Send a new message when ready; interrupted turns are never replayed automatically.",
     reload_board: "Reload the whiteboard to obtain its current complete revision.",
@@ -1761,7 +1814,7 @@ function appendToolActivity(doc, container, item) {
   container.append(details);
 }
 
-function appendInteractionCard(doc, container, request, respond) {
+function appendInteractionCard(doc, container, request, respond, formState, onFocus) {
   const disabled = request.resolved || request.submitting;
   const card = doc.createElement("article");
   card.className = "agent-interaction";
@@ -1795,6 +1848,20 @@ function appendInteractionCard(doc, container, request, respond) {
   form.className = "agent-interaction-form";
   form.setAttribute("aria-disabled", String(disabled));
   const controls = new Map();
+  formState.questions ??= {};
+  formState.fields ??= {};
+  const trackFocus = (control, identity) => {
+    control.dataset.interactionRequest = request.request_id;
+    control.dataset.interactionControl = identity;
+    const capture = () => onFocus({
+      requestID: request.request_id,
+      control: identity,
+      selectionStart: typeof control.selectionStart === "number" ? control.selectionStart : null,
+      selectionEnd: typeof control.selectionEnd === "number" ? control.selectionEnd : null,
+      selectionDirection: control.selectionDirection ?? null,
+    });
+    for (const type of ["focus", "input", "select", "keyup", "click"]) control.addEventListener(type, capture);
+  };
   for (const question of request.questions) {
     const fieldset = doc.createElement("fieldset");
     fieldset.disabled = disabled;
@@ -1804,12 +1871,16 @@ function appendInteractionCard(doc, container, request, respond) {
     prompt.textContent = question.prompt;
     fieldset.append(legend, prompt);
     const values = [];
+    const savedQuestion = formState.questions[question.id] ?? { selected: [], other: "" };
+    formState.questions[question.id] = savedQuestion;
     for (const option of question.options ?? []) {
       const label = doc.createElement("label");
       const input = doc.createElement("input");
       input.type = question.multiple ? "checkbox" : "radio";
       input.name = `interaction-${request.request_id}-${question.id}`;
       input.value = option.id;
+      input.checked = savedQuestion.selected.includes(option.id);
+      trackFocus(input, `question:${question.id}:option:${option.id}`);
       const copy = doc.createElement("span");
       copy.textContent = option.label;
       label.append(input, copy);
@@ -1828,9 +1899,17 @@ function appendInteractionCard(doc, container, request, respond) {
       otherCopy.textContent = question.allow_other ? "Other answer" : "Answer";
       other = doc.createElement("input");
       other.type = question.secret ? "password" : "text";
+      other.value = savedQuestion.other;
+      trackFocus(other, `question:${question.id}:other`);
       otherLabel.append(otherCopy, other);
       fieldset.append(otherLabel);
     }
+    const saveQuestion = () => {
+      savedQuestion.selected = values.filter((input) => input.checked).map((input) => input.value);
+      savedQuestion.other = other?.value ?? "";
+    };
+    for (const input of values) input.addEventListener("change", saveQuestion);
+    other?.addEventListener("input", saveQuestion);
     controls.set(question.id, () => [...values.filter((input) => input.checked).map((input) => input.value), ...(other?.value ? [other.value] : [])]);
     form.append(fieldset);
   }
@@ -1852,11 +1931,30 @@ function appendInteractionCard(doc, container, request, respond) {
         item.textContent = option.label;
         input.append(item);
       }
+    } else if (field.multiline) {
+      input = doc.createElement("textarea");
+      input.rows = 4;
+      if (field.secret) {
+        input.classList.add("agent-interaction-secret");
+        input.autocomplete = "off";
+        input.spellcheck = false;
+      }
     } else {
       input = doc.createElement("input");
       input.type = field.secret ? "password" : field.type === "number" ? "number" : field.type === "boolean" ? "checkbox" : "text";
     }
     input.id = fieldID;
+    const savedField = Object.hasOwn(formState.fields, field.id) ? formState.fields[field.id] : field.type === "multi_select" ? [] : field.type === "boolean" ? false : "";
+    formState.fields[field.id] = savedField;
+    if (field.type === "multi_select") for (const option of input.options) option.selected = savedField.includes(option.value);
+    else if (field.type === "boolean") input.checked = savedField === true;
+    else input.value = savedField;
+    trackFocus(input, `field:${field.id}`);
+    const saveField = () => {
+      formState.fields[field.id] = field.type === "multi_select" ? [...input.selectedOptions].map((option) => option.value) : field.type === "boolean" ? input.checked : input.value;
+    };
+    input.addEventListener("input", saveField);
+    input.addEventListener("change", saveField);
     input.required = field.required && field.type !== "boolean";
     if (field.required) input.setAttribute("aria-required", "true");
     input.disabled = disabled;
@@ -1922,7 +2020,7 @@ function appendInteractionCard(doc, container, request, respond) {
       return values.length === 0 || (!question.multiple && values.length !== 1);
     });
     if (invalidQuestion || Object.keys(answers).length === 0) {
-      const firstControl = form.querySelector("input, select");
+      const firstControl = form.querySelector("input, select, textarea");
       firstControl?.setCustomValidity(invalidQuestion ? "Answer every question with the allowed number of choices." : "Provide at least one answer.");
       firstControl?.reportValidity();
       return;
@@ -1930,7 +2028,7 @@ function appendInteractionCard(doc, container, request, respond) {
     void respond("", answers);
   });
   form.addEventListener("input", () => {
-    for (const control of form.querySelectorAll("input, select")) control.setCustomValidity("");
+    for (const control of form.querySelectorAll("input, select, textarea")) control.setCustomValidity("");
   });
   form.append(actions);
   card.append(form);
@@ -1962,7 +2060,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let handoffCommandID = null;
   let attachmentSerial = 0;
   let draftAttachments = [];
-  const draftInlineVisuals = new Map();
+  let draftInlineVisuals = new Map();
   let queueEditors = [];
   const imageObjectURLs = new Map();
   const imageLoads = new Map();
@@ -2114,9 +2212,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const consentList = doc.createElement("ul");
   consentList.className = "agent-consent-list";
   const contextListItem = doc.createElement("li");
-  contextListItem.textContent = "Complete Markdown and creator notes on the first message";
+  contextListItem.textContent = `Complete ${payload.kind === "html" ? "HTML source" : "Markdown"} and creator notes on the first message`;
   const accessListItem = doc.createElement("li");
-  accessListItem.textContent = "Pi has no tools, files, network, or project access";
+  accessListItem.textContent = "Uses your effective provider-native tools, extensions, approvals, sandbox, project trust, and configuration";
   consentList.append(contextListItem, accessListItem);
   consentList.hidden = true;
   const guidance = doc.createElement("p");
@@ -2169,7 +2267,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const contextDisclosureHeading = doc.createElement("strong");
   contextDisclosureHeading.textContent = "Page context";
   const contextDisclosureDescription = doc.createElement("span");
-  contextDisclosureDescription.textContent = "Markdown + creator notes";
+  contextDisclosureDescription.textContent = `${payload.kind === "html" ? "HTML source" : "Markdown"} + creator notes`;
   contextDisclosureCopy.append(contextDisclosureHeading, contextDisclosureDescription);
   const contextDisclosureChevron = doc.createElement("span");
   contextDisclosureChevron.className = "agent-context-disclosure-chevron";
@@ -2254,12 +2352,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     details.append(summary, preview);
     return details;
   };
-  const markdownCard = contextCard({ title: "Page Markdown", description: "Original page content", content: payload.markdown, label: "Page Markdown", open: true });
+  const sourceLabel = payload.kind === "html" ? "HTML source" : "Page Markdown";
+  const sourceCard = contextCard({ title: sourceLabel, description: "Original page content", content: payload.source, label: sourceLabel, open: true });
   const creatorCard = contextCard({ title: "Creator notes", description: "Notes supplied by the creator", content: payload.context, label: "Creator notes" });
   const contextPrivacy = doc.createElement("p");
   contextPrivacy.className = "agent-context-privacy";
   contextPrivacy.textContent = "Context is included with the next message that needs it—not when you simply open this panel.";
-  contextDetails.append(contextIntro, markdownCard, creatorCard, contextPrivacy);
+  contextDetails.append(contextIntro, sourceCard, creatorCard, contextPrivacy);
 
   const timeline = doc.createElement("section");
   timeline.className = "agent-timeline";
@@ -2399,17 +2498,36 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   doc.body.append(overlay, drawer, toggle, toast);
 
   function buildController(provider) {
-    const initialSettings = provider === "codex" ? readCodexSettingsPreference(storage) : null;
-    const owned = { provider, state: createAgentState(provider), settingsDraft: createCodexDraftState(initialSettings), transport: null, reconnectTimer: null, connecting: false, contextRevision: undefined, contextAccepted: false, contextCommandID: null, contextDeliveryUnknown: false, handoffCommandID: null, pendingSubmitCommandID: null, pendingSubmission: null };
+    const initialSettings = readSettingsPreference(storage, provider);
+    const owned = {
+      provider,
+      state: createAgentState(provider),
+      settingsDraft: createSettingsDraftState(initialSettings),
+      composerDraft: { generation: 0, content: { parts: [] }, attachments: [], inlineVisuals: new Map(), inlineClaims: new Set(), pendingCompactCommandID: null, pendingCompactDraft: null },
+      interactionForms: new Map(),
+      interactionFocus: null,
+      transport: null,
+      reconnectTimer: null,
+      connecting: false,
+      contextRevision: undefined,
+      contextAccepted: false,
+      contextCommandID: null,
+      contextDeliveryUnknown: false,
+      handoffCommandID: null,
+      pendingSubmitCommandID: null,
+      pendingSubmission: null,
+    };
     owned.transport = transportFactory({
       payload,
       provider,
       port,
-      initialSettings: () => provider === "codex" ? cloneExecutionSettings(owned.settingsDraft.draft) : null,
+      initialSettings: () => cloneExecutionSettings(owned.settingsDraft.draft),
       onEvent(event) {
         if (!applyAgentEvent(owned.state, event)) return;
-        if (provider === "codex" && (event.type === "snapshot" || event.type === "settings")) {
-          reconcileCodexDraft(owned.settingsDraft, {
+        if (["snapshot", "timeline"].includes(event.type)) reconcilePendingSubmitRecovery(owned, event);
+        if (event.type === "interaction_resolved") owned.interactionForms.delete(event.payload.request_id);
+        if ((event.type === "snapshot" || event.type === "settings") && event.payload.settings_state !== null) {
+          reconcileSettingsDraft(owned.settingsDraft, {
             identity: event.conversation_id,
             settingsState: event.payload.settings_state,
             effectiveSettings: event.payload.effective_settings,
@@ -2417,7 +2535,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
             acceptedTurnID: event.type === "settings" ? event.payload.accepted_turn_id : null,
           });
           if (event.type === "settings" && event.payload.settings_state === "verified" && event.payload.accepted_turn_id !== null) {
-            writeCodexSettingsPreference(storage, cloneExecutionSettings(event.payload.effective_settings));
+            writeSettingsPreference(storage, provider, cloneExecutionSettings(event.payload.effective_settings));
           }
         }
         if (event.type === "command_result" && event.payload.command_id === owned.handoffCommandID && event.payload.status === "rejected") owned.handoffCommandID = null;
@@ -2426,10 +2544,19 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           owned.pendingSubmitCommandID = null;
           owned.pendingSubmission = null;
         }
-        if (owned === controller && event.type === "command_result" && event.payload.command_id === pendingCompactCommandID) {
-          if (event.payload.status === "succeeded" && JSON.stringify(messageEditor.getContent()) === JSON.stringify(pendingCompactDraft)) messageEditor.clear();
-          pendingCompactCommandID = null;
-          pendingCompactDraft = null;
+        if (event.type === "command_result" && event.payload.command_id === owned.composerDraft.pendingCompactCommandID) {
+          const compactDraft = owned.composerDraft.pendingCompactDraft;
+          const currentContent = owned === controller ? messageEditor.getContent() : owned.composerDraft.content;
+          if (event.payload.status === "succeeded" && JSON.stringify(currentContent) === JSON.stringify(compactDraft)) {
+            if (owned === controller) messageEditor.clear();
+            else owned.composerDraft.content = { parts: [] };
+          }
+          owned.composerDraft.pendingCompactCommandID = null;
+          owned.composerDraft.pendingCompactDraft = null;
+          if (owned === controller) {
+            pendingCompactCommandID = null;
+            pendingCompactDraft = null;
+          }
         }
         if (event.type === "command_result" && event.payload.command_id === owned.contextCommandID && event.payload.status === "rejected") owned.contextCommandID = null;
         if (event.type === "snapshot" && owned.contextDeliveryUnknown) {
@@ -2453,8 +2580,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         owned.connecting = false;
         owned.state.connected = false;
         owned.state.lifecycle = "unavailable";
-        owned.pendingSubmitCommandID = null;
-        owned.pendingSubmission = null;
         if (owned.contextCommandID !== null) {
           owned.contextDeliveryUnknown = true;
           resetControllerForFreshSnapshot(owned, { preserveContextDelivery: true });
@@ -2466,6 +2591,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           owned.state.timeline = [];
           owned.state.queue = [];
           owned.state.interactions = [];
+          owned.interactionForms.clear();
+          owned.interactionFocus = null;
           owned.state.timelineCursor = null;
           owned.state.archiveStatus = "idle";
           owned.state.pendingCommandIDs.clear();
@@ -2479,7 +2606,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           owned.state.catalog = [];
           owned.state.skillsState = null;
           owned.state.skills = [];
+          owned.state.maxSelectedSkills = null;
           owned.state.supportsCompact = false;
+          owned.state.busyPolicy = "queue";
+          owned.state.composerAdmission = "blocked";
           owned.state.compactions = [];
           owned.state.transcriptSequence = 0;
           owned.state.activeWork = null;
@@ -2507,6 +2637,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
 
   function saveController() {
     if (!controller) return;
+    Object.assign(controller.composerDraft, {
+      content: messageEditor ? cloneMessageContent(messageEditor.getContent()) : cloneMessageContent(controller.composerDraft.content),
+      attachments: draftAttachments,
+      inlineVisuals: draftInlineVisuals,
+      pendingCompactCommandID,
+      pendingCompactDraft: pendingCompactDraft ? cloneMessageContent(pendingCompactDraft) : null,
+    });
     Object.assign(controller, { contextRevision, contextAccepted, contextCommandID, contextDeliveryUnknown, handoffCommandID, pendingSubmitCommandID });
   }
 
@@ -2514,27 +2651,45 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     controller = next;
     state = next.state;
     transport = next.transport;
+    draftAttachments = next.composerDraft.attachments;
+    draftInlineVisuals = next.composerDraft.inlineVisuals;
+    pendingCompactCommandID = next.composerDraft.pendingCompactCommandID;
+    pendingCompactDraft = next.composerDraft.pendingCompactDraft ? cloneMessageContent(next.composerDraft.pendingCompactDraft) : null;
+    if (messageEditor) messageEditor.setContent(next.composerDraft.content);
     ({ contextRevision, contextAccepted, contextCommandID, contextDeliveryUnknown, handoffCommandID, pendingSubmitCommandID } = next);
   }
 
   loadController(buildController(selectedProvider));
 
-  function resetControllerForFreshSnapshot(target, { preserveContextDelivery = false } = {}) {
+  function resetControllerForFreshSnapshot(target, { preserveContextDelivery = false, reconcilePendingSubmit = false } = {}) {
+    const pendingSubmitID = target.pendingSubmitCommandID;
+    if (reconcilePendingSubmit && pendingSubmitID !== null && target.pendingSubmission !== null) {
+      target.pendingSubmission.recovery = { snapshotSeen: false, firstPageSeen: false, firstPageMatched: false };
+    }
     target.transport.resetReplay();
     target.state.seenEventIDs.clear();
     target.state.lastEventID = null;
     target.state.timeline = [];
     target.state.interactions = [];
+    target.interactionForms.clear();
+    target.interactionFocus = null;
     target.state.compactions = [];
     target.state.transcriptSequence = 0;
     target.state.activeWork = null;
     target.state.skillsState = null;
     target.state.skills = [];
+    target.state.maxSelectedSkills = null;
     target.state.supportsCompact = false;
+    target.state.busyPolicy = "queue";
+    target.state.composerAdmission = "blocked";
     target.state.timelineCursor = null;
     target.state.archiveStatus = "idle";
     target.state.pendingCommandIDs.clear();
     target.state.knownCommandIDs.clear();
+    if (pendingSubmitID !== null) {
+      target.state.pendingCommandIDs.add(pendingSubmitID);
+      target.state.knownCommandIDs.add(pendingSubmitID);
+    }
     target.state.freshArchiveCommandIDs.clear();
     target.state.moreArchiveCommandIDs.clear();
     if (!preserveContextDelivery) {
@@ -2560,7 +2715,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         if (target === controller) render();
         if (target.state.timeline.length === 0) void sendControllerCommand(target, "history_page", { limit: 50 });
       } catch (error) {
-        if (error?.code === "replay_window_unavailable") resetControllerForFreshSnapshot(target);
+        if (error?.code === "replay_window_unavailable") resetControllerForFreshSnapshot(target, { reconcilePendingSubmit: true });
         if (!destroyed) scheduleReconnect(target);
       }
     }, 1000);
@@ -2686,7 +2841,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       closeConfirmation({ restore: false });
       modelControl.close();
       closeCompletionMenu();
-      clearDraftAttachments();
+      saveController();
+      for (const owned of controllers.values()) {
+        for (const item of [...owned.composerDraft.attachments]) removeAttachment(item);
+      }
     }
     const modal = open && !isDockedViewport();
     drawer.classList.toggle("is-open", open);
@@ -2764,14 +2922,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     finally { closeConfirmation({ restore: true, expected: submitted }); }
   });
 
-  function currentCodexSettings() {
-    if (selectedProvider !== "codex" || state.settingsState !== "verified") return null;
+  function currentSettings() {
+    if (state.settingsState === null) return null;
+    if (state.settingsState !== "verified") return null;
     const candidate = controller.settingsDraft.draft;
     return candidate && settingsCompatibility(state.catalog, candidate).compatible ? cloneExecutionSettings(candidate) : null;
   }
 
+  function settingsRequired() { return state.settingsState !== null; }
+
   function selectedModelSupportsImages() {
-    if (selectedProvider !== "codex") return state.supportsImages;
+    if (!settingsRequired()) return state.supportsImages;
     const candidate = controller.settingsDraft.draft;
     const model = candidate && state.catalog.find(({ model: value }) => value === candidate.model);
     if (model) return model.supports_images;
@@ -2779,23 +2940,20 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function selectDraftSettings(next) {
-    if (selectedProvider !== "codex") return;
+    if (!settingsRequired()) return;
     try {
-      editCodexDraft(controller.settingsDraft, next);
+      editSettingsDraft(controller.settingsDraft, next);
       render();
     } catch {
-      showTransientStatus("Model settings unavailable", "Choose another option", "The live Codex catalog no longer supports that combination.");
+      showTransientStatus("Model settings unavailable", "Choose another option", "The live provider catalog no longer supports that combination.");
     }
   }
 
-  function codexBusy() {
-    return selectedProvider === "codex" && state.activeWork !== null;
-  }
-
   function selectedSkillsUnavailable(content = messageEditor.getContent()) {
-    if (selectedProvider !== "codex") return false;
+    const selected = content.parts.filter((part) => part.type === "skill");
+    if (state.skillsState !== "ready" || !Number.isInteger(state.maxSelectedSkills) || selected.length > state.maxSelectedSkills) return selected.length > 0;
     const available = new Map(state.skills.map((skill) => [skill.id, skill.name]));
-    return content.parts.some((part) => part.type === "skill" && available.get(part.skill.id) !== part.skill.name);
+    return selected.some((part) => available.get(part.skill.id) !== part.skill.name);
   }
 
   function exactCompactDraft(content = messageEditor.getContent()) {
@@ -2812,12 +2970,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function completionQuery(content = messageEditor.getContent()) {
-    if (selectedProvider !== "codex" || codexBusy() || draftAttachments.length > 0 || draftInlineVisuals.size > 0) return null;
+    if (!["submit", "queue"].includes(state.composerAdmission) || draftAttachments.length > 0 || draftInlineVisuals.size > 0) return null;
     const tail = content.parts.at(-1);
     if (!tail || tail.type !== "text") return null;
     const text = tail.text;
     const skill = /(?:^|\s)\$([\p{L}\p{N}_.-]*)$/u.exec(text);
-    if (skill) return { mode: "skill", query: skill[1].toLocaleLowerCase(), replacement: `$${skill[1]}` };
+    if (skill && state.skillsState === "ready" && Number.isInteger(state.maxSelectedSkills) && content.parts.filter((part) => part.type === "skill").length < state.maxSelectedSkills) return { mode: "skill", query: skill[1].toLocaleLowerCase(), replacement: `$${skill[1]}` };
     const slash = content.parts.length === 1 ? /^\/([a-z]*)$/u.exec(text) : null;
     if (slash && text !== "/compact" && state.supportsCompact) return { mode: "slash", query: slash[1] };
     return null;
@@ -2897,7 +3055,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function submitBlocked() {
-    return state.contextState === "pending" && contextRevision === undefined || contextCommandID !== null || contextDeliveryUnknown || pendingSubmitCommandID !== null || codexBusy() || selectedSkillsUnavailable() || selectedProvider === "codex" && currentCodexSettings() === null;
+    return state.contextState === "pending" && contextRevision === undefined || contextCommandID !== null || contextDeliveryUnknown || pendingSubmitCommandID !== null || !["submit", "queue"].includes(state.composerAdmission) || selectedSkillsUnavailable() || settingsRequired() && currentSettings() === null;
   }
 
   function revokeObjectURL(url) {
@@ -2906,6 +3064,17 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
 
   function createObjectURL(value) {
     return doc.defaultView?.URL?.createObjectURL?.(value) ?? "";
+  }
+
+  function deleteCapturedImage(ownerTransport, imageID, conversationID, deletedIDs) {
+    if (!imageID || deletedIDs.has(imageID)) return;
+    deletedIDs.add(imageID);
+    if (typeof ownerTransport.deleteImage === "function") void ownerTransport.deleteImage(imageID, conversationID).catch(() => {});
+  }
+
+  function invalidateControllerDraft(owner) {
+    owner.composerDraft.generation += 1;
+    owner.composerDraft.inlineClaims.clear();
   }
 
   function attachmentSummary() {
@@ -2924,6 +3093,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     const hasMessage = content.parts.length > 0;
     const incompatibleImages = (hasReadyImage || draftInlineVisuals.size > 0) && !selectedModelSupportsImages();
     sendButton.disabled = submitBlocked() || preparing || incompatibleImages || (!hasMessage && !hasReadyImage);
+    messageEditor.setMaxSelectedSkills(state.skillsState === "ready" ? state.maxSelectedSkills : 0);
     messageEditor.markUnavailableSkills(state.skills.map(({ id }) => id));
     refreshCompletionMenu();
   }
@@ -2933,7 +3103,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     for (const [imageID, visual] of draftInlineVisuals) {
       if (retained.has(imageID)) continue;
       draftInlineVisuals.delete(imageID);
-      if (typeof visual.owner.transport.deleteImage === "function") void visual.owner.transport.deleteImage(imageID, visual.conversationID).catch(() => {});
+      deleteCapturedImage(visual.owner.transport, imageID, visual.conversationID, visual.deletedImageIDs);
     }
   }
 
@@ -2986,21 +3156,34 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
     if (draftAttachments.length + draftInlineVisuals.size >= MAX_AGENT_IMAGES_PER_TURN) throw new Error(`A message can contain at most ${MAX_AGENT_IMAGES_PER_TURN} images.`);
     const owner = controller;
-    const conversationID = transport.conversationID;
-    const { file, name } = await readRenderedImage(metadata);
-    const aggregate = draftAttachments.reduce((total, item) => total + item.file.size, 0) + [...draftInlineVisuals.values()].reduce((total, item) => total + item.bytes, 0) + file.size;
-    if (aggregate > MAX_AGENT_TURN_IMAGE_BYTES) throw new Error("A message can contain at most 20 MiB of image data.");
-    if (owner !== controller || conversationID !== transport.conversationID) throw new Error("The Page Agent conversation changed while preparing this image.");
-    const staged = await owner.transport.uploadImage(file, conversationID, undefined, "inline_reference");
-    if (owner !== controller || conversationID !== transport.conversationID) {
-      await owner.transport.deleteImage?.(staged.image_id, conversationID).catch(() => {});
-      throw new Error("The Page Agent conversation changed while preparing this image.");
+    const ownerTransport = owner.transport;
+    const draft = owner.composerDraft;
+    const generation = draft.generation;
+    const conversationID = ownerTransport.conversationID;
+    const insertionCaret = messageEditor.saveCaret();
+    const claim = {};
+    const deletedIDs = new Set();
+    draft.inlineClaims.add(claim);
+    const stillOwned = () => !destroyed && owner.composerDraft === draft && draft.generation === generation && draft.inlineClaims.has(claim) && ownerTransport.conversationID === conversationID;
+    try {
+      const { file, name } = await readRenderedImage(metadata);
+      const aggregate = draft.attachments.reduce((total, item) => total + item.file.size, 0) + [...draft.inlineVisuals.values()].reduce((total, item) => total + item.bytes, 0) + file.size;
+      if (aggregate > MAX_AGENT_TURN_IMAGE_BYTES) throw new Error("A message can contain at most 20 MiB of image data.");
+      if (!stillOwned()) throw new Error("The Page Agent draft changed while preparing this image.");
+      const staged = await ownerTransport.uploadImage(file, conversationID, undefined, "inline_reference");
+      if (!stillOwned()) {
+        deleteCapturedImage(ownerTransport, staged.image_id, conversationID, deletedIDs);
+        throw new Error("The Page Agent draft changed while preparing this image.");
+      }
+      draft.inlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size, deletedImageIDs: deletedIDs });
+      const reference = imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name);
+      if (owner === controller) messageEditor.insertReference(reference);
+      else draft.content = insertMessageReference(draft.content, reference, insertionCaret).content;
+      announce(`Added ${reference.label} to the message.`);
+      return reference;
+    } finally {
+      draft.inlineClaims.delete(claim);
     }
-    draftInlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size });
-    const reference = imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name);
-    messageEditor.insertReference(reference);
-    announce(`Added ${reference.label} to the message.`);
-    return reference;
   }
 
   function renderDraftAttachments() {
@@ -3042,28 +3225,39 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   async function stageAttachment(item) {
-    if (!draftAttachments.includes(item) || destroyed) return;
     const owner = item.owner;
+    const ownerTransport = owner.transport;
+    const draft = owner.composerDraft;
+    const attachments = draft.attachments;
+    const generation = draft.generation;
+    const conversationID = item.conversationID;
+    if (!attachments.includes(item) || destroyed) return;
     item.abort?.abort();
-    item.abort = new AbortController();
+    const abort = new AbortController();
+    item.abort = abort;
     item.status = "preparing";
     item.error = "";
     item.retryable = false;
-    renderDraftAttachments();
+    if (owner === controller) renderDraftAttachments();
+    const stillOwned = () => !destroyed && !abort.signal.aborted && owner.composerDraft === draft && draft.generation === generation
+      && ownerTransport.conversationID === conversationID && draft.attachments.includes(item) && item.owner === owner && item.abort === abort;
     try {
-      if (typeof owner.transport.uploadImage !== "function") throw new Error("image_storage_failure");
-      const staged = await owner.transport.uploadImage(item.file, item.conversationID, item.abort.signal);
-      if (!draftAttachments.includes(item) || item.abort.signal.aborted) return;
+      if (typeof ownerTransport.uploadImage !== "function") throw new Error("image_storage_failure");
+      const staged = await ownerTransport.uploadImage(item.file, conversationID, abort.signal);
+      if (!stillOwned()) {
+        deleteCapturedImage(ownerTransport, staged.image_id, conversationID, item.deletedImageIDs);
+        return;
+      }
       item.imageID = staged.image_id;
       item.mediaType = staged.media_type;
       item.status = "ready";
     } catch (error) {
-      if (!draftAttachments.includes(item) || item.abort.signal.aborted) return;
+      if (!stillOwned()) return;
       item.status = "failed";
       item.error = browserErrorText(error?.code, doc, "Could not prepare this image.");
       item.retryable = error?.code === "image_storage_failure" || !error?.code;
     }
-    renderDraftAttachments();
+    if (owner === controller) renderDraftAttachments();
   }
 
   function addImageFiles(files) {
@@ -3101,6 +3295,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         imageID: null,
         mediaType: null,
         abort: null,
+        deletedImageIDs: new Set(),
       };
       draftAttachments.push(item);
       void stageAttachment(item);
@@ -3109,25 +3304,82 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function removeAttachment(item, { deleteStaged = true } = {}) {
-    if (!draftAttachments.includes(item)) return;
+    const attachments = item.owner.composerDraft.attachments;
+    const index = attachments.indexOf(item);
+    if (index < 0) return;
     item.abort?.abort();
-    draftAttachments = draftAttachments.filter((candidate) => candidate !== item);
+    attachments.splice(index, 1);
     revokeObjectURL(item.objectURL);
-    if (deleteStaged && item.imageID && typeof item.owner.transport.deleteImage === "function") void item.owner.transport.deleteImage(item.imageID, item.conversationID).catch(() => {});
-    renderDraftAttachments();
+    if (deleteStaged && item.imageID) deleteCapturedImage(item.owner.transport, item.imageID, item.conversationID, item.deletedImageIDs);
+    if (item.owner === controller) renderDraftAttachments();
   }
 
   function clearDraftAttachments({ deleteStaged = true } = {}) {
     for (const item of [...draftAttachments]) removeAttachment(item, { deleteStaged });
   }
 
+  function discardControllerDraft(owner) {
+    invalidateControllerDraft(owner);
+    for (const [imageID, visual] of owner.composerDraft.inlineVisuals) {
+      deleteCapturedImage(visual.owner.transport, imageID, visual.conversationID, visual.deletedImageIDs);
+    }
+    owner.composerDraft.inlineVisuals.clear();
+    for (const item of [...owner.composerDraft.attachments]) {
+      item.abort?.abort();
+      revokeObjectURL(item.objectURL);
+      if (item.imageID) deleteCapturedImage(item.owner.transport, item.imageID, item.conversationID, item.deletedImageIDs);
+    }
+    owner.composerDraft.attachments.splice(0);
+    owner.composerDraft.content = { parts: [] };
+    owner.composerDraft.pendingCompactCommandID = null;
+    owner.composerDraft.pendingCompactDraft = null;
+  }
+
+  function settleRecoveredSubmission(owner, accepted) {
+    const commandID = owner.pendingSubmitCommandID;
+    if (commandID === null || owner.pendingSubmission === null) return;
+    if (accepted) completePendingSubmission(owner);
+    owner.state.pendingCommandIDs.delete(commandID);
+    owner.state.knownCommandIDs.delete(commandID);
+    owner.pendingSubmitCommandID = null;
+    owner.pendingSubmission = null;
+    if (owner === controller) pendingSubmitCommandID = null;
+  }
+
+  function reconcilePendingSubmitRecovery(owner, event) {
+    const submission = owner.pendingSubmission;
+    const recovery = submission?.recovery;
+    if (!recovery) return;
+    if (event.type === "snapshot") {
+      recovery.snapshotSeen = true;
+      const queued = event.payload.queue.some((item) => item.turn_id === submission.turnID && item.message_id === submission.messageID);
+      const active = event.payload.active_work?.kind === "turn" && event.payload.active_work.work_id === submission.turnID;
+      if (queued || active) {
+        settleRecoveredSubmission(owner, true);
+        return;
+      }
+    } else if (event.type === "timeline" && !recovery.firstPageSeen) {
+      recovery.firstPageSeen = true;
+      recovery.firstPageMatched = event.payload.items.some((item) => item.kind === "user" && item.turn_id === submission.turnID && item.message_id === submission.messageID);
+      if (recovery.firstPageMatched) {
+        settleRecoveredSubmission(owner, true);
+        return;
+      }
+    }
+    if (recovery.snapshotSeen && recovery.firstPageSeen) settleRecoveredSubmission(owner, false);
+  }
+
   function completePendingSubmission(owner) {
     const submission = owner.pendingSubmission;
-    if (!submission || owner !== controller) return;
-    if (JSON.stringify(messageEditor.getContent()) === JSON.stringify(submission.content)) {
-      for (const { image_id: imageID } of inlineImages(submission.content)) draftInlineVisuals.delete(imageID);
-      messageEditor.clear();
-      resizeComposer();
+    if (!submission) return;
+    const currentContent = owner === controller ? messageEditor.getContent() : owner.composerDraft.content;
+    if (JSON.stringify(currentContent) === JSON.stringify(submission.content)) {
+      for (const { image_id: imageID } of inlineImages(submission.content)) owner.composerDraft.inlineVisuals.delete(imageID);
+      owner.composerDraft.content = { parts: [] };
+      if (owner === controller) {
+        messageEditor.clear();
+        resizeComposer();
+      }
     }
     for (const item of submission.attachments) removeAttachment(item, { deleteStaged: false });
   }
@@ -3166,15 +3418,23 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
 
   function render() {
     saveController();
+    const activeInteractionControl = timeline.contains(doc.activeElement) && doc.activeElement?.dataset?.interactionRequest
+      ? {
+          requestID: doc.activeElement.dataset.interactionRequest,
+          control: doc.activeElement.dataset.interactionControl,
+          selectionStart: typeof doc.activeElement.selectionStart === "number" ? doc.activeElement.selectionStart : null,
+          selectionEnd: typeof doc.activeElement.selectionEnd === "number" ? doc.activeElement.selectionEnd : null,
+          selectionDirection: doc.activeElement.selectionDirection ?? null,
+        }
+      : null;
+    if (activeInteractionControl) controller.interactionFocus = activeInteractionControl;
     const providerName = selectedProvider === "codex" ? "Codex" : "Pi";
     const connectionState = controller.connecting ? "connecting" : brokerState;
     agentGlyph.textContent = providerName[0];
     connectButton.textContent = `Connect to ${providerName}`;
     message.setAttribute("aria-label", `Message ${providerName} about this whiteboard`);
     composerFineprint.textContent = `${providerName} can make mistakes. Review important details.`;
-    accessListItem.textContent = selectedProvider === "codex"
-      ? "Uses your current Codex tools, approvals, sandbox, and configuration"
-      : "Pi has no tools, files, network, or project access";
+    accessListItem.textContent = `Uses your effective ${providerName} native tools, extensions, approvals, sandbox, project trust, and configuration`;
     headerSubtitle.removeAttribute("title");
     if (!timeline.hidden) {
       timelineScrollTop = timeline.scrollTop;
@@ -3254,7 +3514,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     checkButton.textContent = connectionState === "offline" ? "Try again" : "Check again";
     checkButton.disabled = connectionState === "checking";
     checkButton.hidden = connectionState === "checking";
-    newMenuButton.disabled = !state.connected || selectedProvider === "codex" && currentCodexSettings() === null;
+    newMenuButton.disabled = !state.connected || settingsRequired() && currentSettings() === null;
     archivesMenuButton.disabled = !state.connected;
     reconnectMenuButton.disabled = transport.consented !== true;
     composerWrap.hidden = !state.connected || activeView !== "conversation";
@@ -3276,14 +3536,14 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     archives.hidden = activeView !== "archives";
     const contextAttached = state.contextState === "accepted" || state.contextState === "unchanged";
     const draftSupportsImages = selectedModelSupportsImages();
-    imageButton.disabled = !state.connected || !draftSupportsImages || codexBusy();
+    imageButton.disabled = !state.connected || !draftSupportsImages || !["submit", "queue"].includes(state.composerAdmission);
     imageButton.title = draftSupportsImages ? "Add PNG, JPEG, GIF, or WebP images" : "The selected model does not support image input.";
-    const codexDraft = selectedProvider === "codex" ? controller.settingsDraft : null;
+    const settingsDraft = settingsRequired() ? controller.settingsDraft : null;
     modelControl.render({
-      visible: selectedProvider === "codex",
+      visible: settingsRequired(),
       enabled: state.connected && state.settingsState === "verified" && state.catalog.length > 0,
-      settings: codexDraft?.draft ?? null,
-      presentation: codexDraft?.effectivePresentation ?? state.effectiveSettings,
+      settings: settingsDraft?.draft ?? null,
+      presentation: settingsDraft?.effectivePresentation ?? state.effectiveSettings,
       catalog: state.catalog,
     });
     renderDraftAttachments();
@@ -3291,7 +3551,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     stopButton.hidden = state.activeWork === null;
     stopButton.dataset.state = state.activeWork?.state === "stopping" ? "stopping" : "running";
     stopButton.setAttribute("aria-label", state.activeWork?.state === "stopping" ? "Stopping…" : "Stop");
-    sendButton.hidden = state.activeWork !== null;
+    sendButton.hidden = !["submit", "queue"].includes(state.composerAdmission);
     contextChip.textContent = `Context · ${contextAttached ? "current" : "available"}`;
     queueChip.textContent = `Queue · ${state.queue.length}`;
     queueChip.hidden = state.queue.length === 0;
@@ -3390,8 +3650,31 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         details.append(summary, content); timeline.append(details);
       }
     }
+    const pendingInteractionIDs = new Set(state.interactions.filter((request) => !request.resolved).map((request) => request.request_id));
+    for (const requestID of controller.interactionForms.keys()) {
+      if (!pendingInteractionIDs.has(requestID)) controller.interactionForms.delete(requestID);
+    }
     for (const request of state.interactions) {
-      appendInteractionCard(doc, timeline, request, (optionID, answers) => respondToInteraction(request, optionID, answers));
+      const formState = request.resolved ? { questions: {}, fields: {} } : controller.interactionForms.get(request.request_id) ?? { questions: {}, fields: {} };
+      if (!request.resolved) controller.interactionForms.set(request.request_id, formState);
+      appendInteractionCard(
+        doc,
+        timeline,
+        request,
+        (optionID, answers) => respondToInteraction(request, optionID, answers),
+        formState,
+        (focus) => { controller.interactionFocus = focus; },
+      );
+    }
+    if (activeInteractionControl) {
+      const focus = controller.interactionFocus;
+      const control = [...timeline.querySelectorAll("[data-interaction-request][data-interaction-control]")].find((candidate) => candidate.dataset.interactionRequest === focus?.requestID && candidate.dataset.interactionControl === focus?.control);
+      if (control && !control.disabled) {
+        control.focus();
+        if (focus.selectionStart !== null && typeof control.setSelectionRange === "function") {
+          try { control.setSelectionRange(focus.selectionStart, focus.selectionEnd, focus.selectionDirection ?? undefined); } catch { /* Selection is unavailable for this control type. */ }
+        }
+      }
     }
     const activeTurnID = state.activeWork?.kind === "turn" ? state.activeWork.work_id : null;
     const hasActiveAssistant = activeTurnID !== null && state.timeline.some((item) => item.kind === "assistant" && item.turn_id === activeTurnID);
@@ -3694,7 +3977,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     closeConfirmation({ restore: false });
     const previousView = activeView;
     activeView = ["conversation", "settings", "context", "archives"].includes(view) ? view : "conversation";
-    if (activeView === "context") markdownCard.open = true;
+    if (activeView === "context") sourceCard.open = true;
     if (activeView === "archives" && previousView !== "archives" && state.connected) {
       state.archiveStatus = "loading";
       void sendCommand("archive_list", { limit: 50 }, { freshArchivePage: true });
@@ -3714,8 +3997,6 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     closeConfirmation({ restore: false });
     const nextProvider = providerSelect.value;
     if (!PROVIDERS.has(nextProvider) || nextProvider === selectedProvider) return;
-    clearDraftAttachments();
-    clearDraftInlineVisuals();
     saveController();
     selectedProvider = nextProvider;
     persistAgentPreference(storage, AGENT_PROVIDER_STORAGE_KEY, selectedProvider);
@@ -3819,20 +4100,24 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();
     const content = messageEditor.getContent();
-    if (codexBusy()) return;
-    if (selectedProvider === "codex" && exactCompactDraft(content)) {
-      if (!state.supportsCompact || draftAttachments.length > 0 || draftInlineVisuals.size > 0) return;
+    if (!["submit", "queue"].includes(state.composerAdmission)) return;
+    if (exactCompactDraft(content)) {
+      if (state.composerAdmission !== "submit" || !state.supportsCompact || draftAttachments.length > 0 || draftInlineVisuals.size > 0) return;
       const target = controller;
       const workID = generateAgentID();
       const command = createAgentCommand({ type: "compact", payload: { work_id: workID }, clientID: target.transport.clientID, conversationID: target.transport.conversationID });
       registerAgentCommand(target.state, command);
       pendingCompactCommandID = command.command_id;
       pendingCompactDraft = cloneMessageContent(content);
+      target.composerDraft.pendingCompactCommandID = pendingCompactCommandID;
+      target.composerDraft.pendingCompactDraft = cloneMessageContent(pendingCompactDraft);
       try {
         await target.transport.send(command);
       } catch (error) {
         pendingCompactCommandID = null;
         pendingCompactDraft = null;
+        target.composerDraft.pendingCompactCommandID = null;
+        target.composerDraft.pendingCompactDraft = null;
         if (error?.code) target.state.pendingCommandIDs.delete(command.command_id);
       }
       return;
@@ -3855,20 +4140,26 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       return;
     }
     const revision = target.state.contextState === "pending" ? target.contextRevision : undefined;
-    const executionSettings = selectedProvider === "codex" ? currentCodexSettings() : null;
-    if (selectedProvider === "codex" && executionSettings === null) {
-      showTransientStatus("Model options unavailable", "Choose valid settings", "Reconnect or choose a model, effort, and speed supported by the live Codex catalog.");
+    const executionSettings = settingsRequired() ? currentSettings() : null;
+    if (settingsRequired() && executionSettings === null) {
+      showTransientStatus("Model options unavailable", "Choose valid settings", "Reconnect or choose settings supported by the live provider catalog.");
       return;
     }
-    if (selectedProvider === "codex" && (imageReferences.length > 0 || inlineImages(content).length > 0) && !selectedModelSupportsImages()) {
+    if ((imageReferences.length > 0 || inlineImages(content).length > 0) && !selectedModelSupportsImages()) {
       showTransientStatus("Images unavailable", "Choose another model", "The selected model does not support image input.");
       return;
     }
     const command = createSubmitCommand({ content, images: imageReferences, payload, provider: selectedProvider, settings: executionSettings, clientID: target.transport.clientID, conversationID: target.transport.conversationID, title: pageTitle, url: pageURL, revision });
     registerAgentCommand(target.state, command);
     target.pendingSubmitCommandID = command.command_id;
-    target.pendingSubmission = { content: cloneMessageContent(content), attachments: [...sentAttachments] };
-    if (selectedProvider === "codex") recordCodexSubmission(target.settingsDraft, command.payload.turn_id);
+    target.pendingSubmission = {
+      turnID: command.payload.turn_id,
+      messageID: command.payload.message_id,
+      content: cloneMessageContent(content),
+      attachments: [...sentAttachments],
+      recovery: null,
+    };
+    if (settingsRequired()) recordSettingsSubmission(target.settingsDraft, command.payload.turn_id);
     if (revision !== undefined) target.contextCommandID = command.command_id;
     loadController(target);
     render();
@@ -3876,9 +4167,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       await target.transport.send(command);
     }
     catch (error) {
-      target.pendingSubmitCommandID = null;
-      target.pendingSubmission = null;
-      if (error?.code) target.state.pendingCommandIDs.delete(command.command_id);
+      if (error?.code) {
+        target.pendingSubmitCommandID = null;
+        target.pendingSubmission = null;
+        target.state.pendingCommandIDs.delete(command.command_id);
+      }
       if (target.contextCommandID === command.command_id) {
         if (error?.code) target.contextCommandID = null;
         else target.contextDeliveryUnknown = true;
@@ -3905,9 +4198,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   });
   newButton.addEventListener("click", () => {
     const invoker = doc.activeElement;
-    const executionSettings = selectedProvider === "codex" ? currentCodexSettings() : null;
-    if (selectedProvider === "codex" && executionSettings === null) {
-      showTransientStatus("Model options unavailable", "New conversation not started", "Choose settings supported by the live Codex catalog.");
+    const executionSettings = settingsRequired() ? currentSettings() : null;
+    if (settingsRequired() && executionSettings === null) {
+      showTransientStatus("Model options unavailable", "New conversation not started", "Choose settings supported by the live provider catalog.");
       return;
     }
     openConfirmation({
@@ -3917,6 +4210,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       action: "new",
       invoker,
       onConfirm: async () => {
+        invalidateControllerDraft(controller);
         clearDraftAttachments();
         clearDraftInlineVisuals();
         activeView = "conversation";
@@ -4027,10 +4321,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     destroy() {
       destroyed = true;
       if (toastTimer !== null) doc.defaultView?.clearTimeout?.(toastTimer);
-      clearDraftInlineVisuals();
+      saveController();
       for (const editor of queueEditors) editor.destroy();
       queueEditors = [];
-      clearDraftAttachments();
+      for (const owned of controllers.values()) discardControllerDraft(owned);
       closeConfirmation({ restore: false });
       modelControl.destroy();
       messageEditor.destroy();
@@ -4057,6 +4351,61 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   };
 }
 
+async function bootHTMLHost(payload, doc) {
+  const appBar = doc.querySelector("#agent-whiteboard-app-bar");
+  const themeSlot = doc.querySelector("#agent-whiteboard-app-bar-theme");
+  const agentSlot = doc.querySelector("#agent-whiteboard-app-bar-agent");
+  const surface = doc.querySelector("#agent-whiteboard-html-surface");
+  const frame = doc.querySelector("#agent-whiteboard-html-content");
+  if (!appBar || !themeSlot || !agentSlot || !surface || !frame || !surface.contains(frame)) {
+    throw new TypeError("invalid HTML host shell");
+  }
+  if (appBar[HTML_HOST_INSTANCE]) return appBar[HTML_HOST_INSTANCE];
+
+  const construction = (async () => {
+    const theme = await installThemeController({
+      doc,
+      container: themeSlot,
+      storage: browserStorage(doc),
+      mediaQuery: browserMediaQuery(doc),
+    });
+    let agent;
+    try {
+      agent = createAgentDrawer({ payload, doc });
+    } catch (error) {
+      theme.destroy();
+      throw error;
+    }
+    agentSlot.append(agent.elements.toggle);
+    let destroyed = false;
+    const viewer = {
+      kind: "html",
+      appBar,
+      surface,
+      frame,
+      theme,
+      agent,
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        if (appBar[HTML_HOST_INSTANCE] === viewer) appBar[HTML_HOST_INSTANCE] = undefined;
+        agent.destroy();
+        theme.destroy();
+      },
+    };
+    return viewer;
+  })();
+  appBar[HTML_HOST_INSTANCE] = construction;
+  try {
+    const viewer = await construction;
+    if (appBar[HTML_HOST_INSTANCE] === construction) appBar[HTML_HOST_INSTANCE] = viewer;
+    return viewer;
+  } catch (error) {
+    if (appBar[HTML_HOST_INSTANCE] === construction) appBar[HTML_HOST_INSTANCE] = undefined;
+    throw error;
+  }
+}
+
 export async function bootViewer(doc = document) {
   const sourceElement = doc.querySelector("#agent-whiteboard-source");
   if (!sourceElement) return undefined;
@@ -4064,8 +4413,11 @@ export async function bootViewer(doc = document) {
   try { parsed = JSON.parse(sourceElement.textContent || "null"); }
   catch { throw new TypeError("invalid whiteboard source payload"); }
   const payload = validateViewerPayload(parsed);
+  if (payload.kind === "html") return bootHTMLHost(payload, doc);
+
   const container = viewerContainer(doc);
-  const viewer = await renderWhiteboard(payload.markdown, { container, doc, contextEnabled: payload.local_agent.enabled });
+  const viewer = await renderWhiteboard(payload.source, { container, doc, contextEnabled: payload.local_agent.enabled });
+  viewer.kind = "markdown";
   if (payload.local_agent.enabled) {
     let contextController;
     viewer.agent = createAgentDrawer({ payload, doc, onReference: (reference) => contextController?.navigate(reference) ?? false });
@@ -4088,6 +4440,10 @@ export async function bootViewer(doc = document) {
 
 function startBrowserEntry() {
   void bootViewer().catch(() => {
+    if (document.querySelector("#agent-whiteboard-html-content")) {
+      document.body.dataset.agentBootstrap = "failed";
+      return;
+    }
     const container = viewerContainer(document);
     container.replaceChildren();
     const error = document.createElement("p");
