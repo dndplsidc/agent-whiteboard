@@ -126,6 +126,9 @@ func validateExplicitDeclarations(source []byte) error {
 func walkElements(node *html.Node, visit func(*html.Node)) {
 	if node.Type == html.ElementNode {
 		visit(node)
+		if strings.EqualFold(node.Data, "template") {
+			return
+		}
 	}
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
 		walkElements(child, visit)
@@ -259,6 +262,9 @@ func firstDescendantAttribute(node *html.Node, element, name string) string {
 	var find func(*html.Node) (string, bool)
 	find = func(current *html.Node) (string, bool) {
 		for child := current.FirstChild; child != nil; child = child.NextSibling {
+			if child.Type == html.ElementNode && strings.EqualFold(child.Data, "template") {
+				continue
+			}
 			if child.Type == html.ElementNode && strings.EqualFold(child.Data, element) {
 				value, _ := attribute(child, name)
 				return normalizedText(value), true
@@ -276,11 +282,8 @@ func firstDescendantAttribute(node *html.Node, element, name string) string {
 func codeFallbackLabel(node *html.Node) string {
 	code := node
 	if !strings.EqualFold(code.Data, "code") {
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			if child.Type == html.ElementNode && strings.EqualFold(child.Data, "code") {
-				code = child
-				break
-			}
+		if descendant := firstDescendantElement(node, "code"); descendant != nil {
+			code = descendant
 		}
 	}
 	if language, ok := attribute(node, "data-language"); ok && normalizedText(language) != "" {
@@ -307,6 +310,21 @@ func previewLabel(value string) string {
 	return string(characters)
 }
 
+func firstDescendantElement(node *html.Node, name string) *html.Node {
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if child.Type == html.ElementNode && strings.EqualFold(child.Data, "template") {
+			continue
+		}
+		if child.Type == html.ElementNode && strings.EqualFold(child.Data, name) {
+			return child
+		}
+		if descendant := firstDescendantElement(child, name); descendant != nil {
+			return descendant
+		}
+	}
+	return nil
+}
+
 func directChildText(node *html.Node, name string) string {
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
 		if child.Type == html.ElementNode && strings.EqualFold(child.Data, name) {
@@ -318,6 +336,9 @@ func directChildText(node *html.Node, name string) string {
 
 func firstDescendantText(node *html.Node, match func(string) bool) string {
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if child.Type == html.ElementNode && strings.EqualFold(child.Data, "template") {
+			continue
+		}
 		if child.Type == html.ElementNode && match(strings.ToLower(child.Data)) {
 			if text := nodeText(child); text != "" {
 				return text
@@ -334,6 +355,9 @@ func nodeText(node *html.Node) string {
 	var text strings.Builder
 	var walk func(*html.Node)
 	walk = func(current *html.Node) {
+		if current.Type == html.ElementNode && strings.EqualFold(current.Data, "template") {
+			return
+		}
 		if current.Type == html.TextNode {
 			text.WriteString(current.Data)
 		}

@@ -58,6 +58,16 @@ describe("inert HTML component index", () => {
     expect(index.byID.has("movie")).toBe(false);
   });
 
+  test("detects code nested anywhere inside pre and preserves language fallback", () => {
+    const index = buildHTMLComponentIndex(`<pre id="direct"><code class="language-go">direct()</code></pre>
+      <pre id="nested"><span><code class="language-js">nested()</code></span></pre>
+      <pre id="template"><template><code class="language-rust">secret()</code></template></pre>`);
+    expect(ids(index)).toEqual([
+      { id: "direct", type: "code", label: "go code" },
+      { id: "nested", type: "code", label: "js code" },
+    ]);
+  });
+
   test("uses stable unique IDs and bounded accessible labels and excerpts", () => {
     const source = `<section id="dup" aria-label="One"></section><table id="dup" aria-label="Two"></table>
       <section id="long" aria-label="${"x".repeat(257)}"></section><section id="${"i".repeat(257)}" aria-label="Long ID"></section>

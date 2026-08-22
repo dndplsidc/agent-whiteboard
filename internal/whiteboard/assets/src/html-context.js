@@ -2,7 +2,7 @@ import { decodeChildBridgeFrame, decodeParentBridgeFrame, HTML_BRIDGE_VERSION, M
 
 const encoder = new TextEncoder();
 const TYPES = new Set(["section", "image", "chart", "table", "code", "quote", "component"]);
-const EXCLUDED_SELECTOR = "nav,header,footer,form,input,button,select,textarea,option,fieldset,script,style,template,noscript,video,audio,[hidden],[inert],[aria-hidden=\"true\"]";
+const EXCLUDED_SELECTOR = "nav,header,footer,form,input,button,select,textarea,option,fieldset,script,style,template,noscript,video,audio,[hidden],[inert]";
 const LABEL_BYTES = 256;
 const EXCERPT_BYTES = 48 * 1024;
 const RASTER_PATTERN = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/iu;
@@ -43,7 +43,7 @@ function labelledBy(element, doc) {
 }
 
 function codeLanguage(element) {
-  const code = element.matches("code") ? element : element.querySelector(":scope > code");
+  const code = element.matches("code") ? element : element.querySelector("code");
   const explicit = normalizeText(element.getAttribute("data-language") || code?.getAttribute("data-language"));
   if (explicit) return explicit;
   const match = /(?:^|\s)language-([^\s]+)/u.exec(code?.className || "");
@@ -90,7 +90,7 @@ function automaticType(element) {
   if (element.matches("img")) return meaningfulImage(element) && !element.closest("figure") ? "image" : "";
   if (element.matches("svg,canvas")) return !element.closest("figure") ? "chart" : "";
   if (element.matches("table")) return "table";
-  if (element.matches("pre") && element.querySelector(":scope > code")) return "code";
+  if (element.matches("pre") && element.querySelector("code")) return "code";
   if (element.matches("blockquote,[role=\"note\"],[role=\"alert\"]")) return "quote";
   if (element.matches("section,article,[role=\"region\"]")) return "section";
   return "";
@@ -112,20 +112,19 @@ function declarationState(doc) {
     const id = element.id;
     if (!bounded(id, 256) || id.trim() !== id || explicitIDs.has(id) || idCounts.get(id) !== 1) return { valid: false };
     explicitIDs.add(id);
-    if (excluded(element, type) || !labelFor(element, type, doc)) return { valid: false };
+    if (excluded(element) || !labelFor(element, type, doc)) return { valid: false };
   }
   return { valid: true };
 }
 
-function excluded(element, explicitType) {
+function excluded(element) {
   if (element.closest("[data-agent-section-ignore],[data-agent-select=\"none\"]")) return true;
   for (let current = element; current; current = current.parentElement) {
     const style = current.getAttribute("style") || "";
     if (/(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:;|$)/iu.test(style)) return true;
+    if (normalizeText(current.getAttribute("aria-hidden")).toLowerCase() === "true") return true;
   }
-  const boundary = element.closest(EXCLUDED_SELECTOR);
-  if (!boundary) return false;
-  return !(explicitType === "component" && boundary === element && !element.matches("form,input,button,select,textarea,option,fieldset,script,style,template,noscript,video,audio"));
+  return Boolean(element.closest(EXCLUDED_SELECTOR));
 }
 
 function rasterFor(element, type) {
@@ -165,7 +164,7 @@ export function buildHTMLComponentIndex(source, options = {}) {
   for (const element of doc.querySelectorAll("[id]")) {
     if (components.length >= MAX_HTML_BRIDGE_COMPONENTS) break;
     const explicitType = element.hasAttribute("data-agent-section") ? "section" : TYPES.has(element.getAttribute("data-agent-select")) ? element.getAttribute("data-agent-select") : "";
-    if (!bounded(element.id, 256) || element.id.trim() !== element.id || /[\u0000-\u001f\u007f]/u.test(element.id) || excluded(element, explicitType) || idCounts.get(element.id) !== 1) continue;
+    if (!bounded(element.id, 256) || element.id.trim() !== element.id || /[\u0000-\u001f\u007f]/u.test(element.id) || excluded(element) || idCounts.get(element.id) !== 1) continue;
     const type = explicitType || automaticType(element);
     if (!type) continue;
     const label = labelFor(element, type, doc);

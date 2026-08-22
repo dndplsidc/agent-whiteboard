@@ -165,6 +165,36 @@
       "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
     },
     {
+      "name": "hidden-custom-component-is-rejected",
+      "html": "<div id=\"hidden-custom\" data-agent-select=\"component\" aria-label=\"Hidden custom\" hidden></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "inert-custom-component-is-rejected",
+      "html": "<div id=\"inert-custom\" data-agent-select=\"component\" aria-label=\"Inert custom\" inert></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "aria-hidden-custom-component-is-rejected",
+      "html": "<div id=\"aria-hidden-custom\" data-agent-select=\"component\" aria-label=\"Hidden custom\" aria-hidden=\"true\"></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "normalized-aria-hidden-custom-component-is-rejected",
+      "html": "<div id=\"normalized-aria-hidden-custom\" data-agent-select=\"component\" aria-label=\"Hidden custom\" aria-hidden=\" TRUE \"></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "navigation-custom-component-is-rejected",
+      "html": "<nav id=\"nav-custom\" data-agent-select=\"component\" aria-label=\"Navigation custom\"></nav>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
       "name": "explicit-inert-ancestor-is-rejected",
       "html": "<div inert><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></div>",
       "mutation": {"valid": false},
@@ -199,6 +229,48 @@
       "html": "<figure id=\"photo\" data-agent-select=\"image\"><img alt=\"Portrait\"></figure><figure id=\"plot\" data-agent-select=\"chart\"><canvas></canvas><figcaption>Quarterly plot</figcaption></figure><svg id=\"svg-chart\" data-agent-select=\"chart\"><title>Revenue chart</title></svg><pre id=\"snippet\" data-agent-select=\"code\"><code class=\"language-js\">const value = 1;</code></pre>",
       "mutation": {"valid": true},
       "browser": {"canonical_components": [{"id": "photo", "type": "image", "label": "Portrait"}, {"id": "plot", "type": "chart", "label": "Quarterly plot"}, {"id": "svg-chart", "type": "chart", "label": "Revenue chart"}, {"id": "snippet", "type": "code", "label": "js code"}], "explicit_ids": ["photo", "plot", "svg-chart", "snippet"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "nested-code-fallback",
+      "html": "<pre id=\"nested-code\" data-agent-select=\"code\"><span><code class=\"language-js\"></code></span></pre>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "nested-code", "type": "code", "label": "js code"}], "explicit_ids": ["nested-code"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-code-is-not-a-fallback",
+      "html": "<pre id=\"template-code\" data-agent-select=\"code\"><template><code class=\"language-js\">secret()</code></template></pre>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-heading-is-not-a-fallback",
+      "html": "<section id=\"template-section\" data-agent-select=\"section\"><template><h2>Secret heading</h2></template></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-image-is-not-a-fallback",
+      "html": "<figure id=\"template-image\" data-agent-select=\"image\"><template><img alt=\"Secret image\"></template></figure>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-labelledby-target-is-not-resolved",
+      "html": "<template><span id=\"template-label\">Secret label</span></template><section id=\"live-section\" data-agent-section aria-labelledby=\"template-label\"></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-declaration-is-inert",
+      "html": "<template><div data-agent-select=\"component\"></div></template>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-id-does-not-conflict",
+      "html": "<template><span id=\"shared-id\">Inert</span></template><section id=\"shared-id\" data-agent-section aria-label=\"Live section\"></section>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "shared-id", "type": "section", "label": "Live section"}], "explicit_ids": ["shared-id"], "omitted_automatic_ids": []}
     },
     {
       "name": "explicit-under-header-is-rejected",
