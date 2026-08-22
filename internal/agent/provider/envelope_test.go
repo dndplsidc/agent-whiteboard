@@ -11,14 +11,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEnvelopeV3UsesFormatNeutralFramingAndParsesHTML(t *testing.T) {
+func TestEnvelopeV4UsesNestedReferenceFramingAndParsesHTML(t *testing.T) {
 	request := configuredTurn()
 	request.Context.Resource.Kind = provider.ResourceHTML
 	request.Context.Source = []byte("<!doctype html><title>Exact</title>")
 	request.Context.Digest, _ = agent.CalculateContextDigestForKind(agent.ResourceKindHTML, request.Context.Source, request.Context.CreatorContext)
 	encoded, err := provider.Build(request, provider.PolicyConfigured)
 	require.NoError(t, err)
-	require.True(t, bytes.HasPrefix(encoded, []byte("agent-whiteboard-turn-v3\n")))
+	require.True(t, bytes.HasPrefix(encoded, []byte("agent-whiteboard-turn-v4\n")))
 	require.Contains(t, string(encoded), "page-source-untrusted")
 	require.NotContains(t, string(encoded), "markdown-source-untrusted")
 	parsed, err := provider.Parse(encoded)
@@ -53,6 +53,42 @@ func TestEnvelopeParsesHistoricalV2Markdown(t *testing.T) {
 	require.Equal(t, string(provider.ResourceMarkdown), parsed.ResourceKind)
 	require.Equal(t, []byte("# board\n"), parsed.Source)
 	require.Equal(t, provider.TextMessage("use the available tools when useful"), parsed.ReaderContent)
+}
+
+func TestEnvelopeParsesImmutableHistoricalReferenceFixturesIntoNestedMarkdownAnchors(t *testing.T) {
+	for _, name := range []string{"turn-v2-references.envelope", "turn-v3-references.envelope"} {
+		t.Run(name, func(t *testing.T) {
+			// These immutable fixtures use the exact released flat Markdown source
+			// shape and were framed independently of the current encoder.
+			encoded, err := os.ReadFile("testdata/" + name)
+			require.NoError(t, err)
+			parsed, err := provider.Parse(encoded)
+			require.NoError(t, err)
+			require.Len(t, parsed.ReaderContent.Parts, 3)
+			require.Equal(t, provider.ReferenceText, parsed.ReaderContent.Parts[0].Reference.Kind)
+			require.Equal(t, provider.ReferenceSection, parsed.ReaderContent.Parts[1].Reference.Kind)
+			require.Equal(t, provider.ReferenceImage, parsed.ReaderContent.Parts[2].Reference.Kind)
+			for _, part := range parsed.ReaderContent.Parts {
+				require.NotNil(t, part.Reference.Source.Anchor.Markdown)
+				require.Nil(t, part.Reference.Source.Anchor.HTML)
+			}
+		})
+	}
+}
+
+func TestEnvelopeV4RoundTripsComponentAndMixedContent(t *testing.T) {
+	component := validComponentReference()
+	request := configuredTurn()
+	request.Content = provider.MessageContent{Parts: []provider.MessagePart{
+		{Kind: provider.MessagePartText, Text: "Explain "},
+		{Kind: provider.MessagePartReference, Reference: &component},
+	}}
+	encoded, err := provider.Build(request, provider.PolicyConfigured)
+	require.NoError(t, err)
+	require.True(t, bytes.HasPrefix(encoded, []byte("agent-whiteboard-turn-v4\n")))
+	parsed, err := provider.Parse(encoded)
+	require.NoError(t, err)
+	require.Equal(t, request.Content, parsed.ReaderContent)
 }
 
 func TestConfiguredEnvelopeAllowsHostCapabilitiesWithoutChangingContextFraming(t *testing.T) {

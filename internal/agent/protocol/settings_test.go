@@ -10,11 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestV4SettingsCommandsAreStrictCompleteAndProviderSpecific(t *testing.T) {
-	require.Equal(t, "4", protocol.APIVersion)
-	require.Equal(t, "agent-whiteboard.v4", protocol.WebSocketSubprotocol)
+func TestV5SettingsCommandsAreStrictCompleteAndProviderSpecific(t *testing.T) {
+	require.Equal(t, "5", protocol.APIVersion)
+	require.Equal(t, "agent-whiteboard.v5", protocol.WebSocketSubprotocol)
 
-	codexConnect := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"codex","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","settings":{"model":"gpt-5.6-sol","effort":"high","speed":"fast"}}}`
+	codexConnect := `{"api_version":"5","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"codex","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","settings":{"model":"gpt-5.6-sol","effort":"high","speed":"fast"}}}`
 	decoded, err := protocol.DecodeCommand([]byte(codexConnect))
 	require.NoError(t, err)
 	connect := decoded.Payload.(protocol.ConnectPayload)
@@ -55,8 +55,8 @@ func TestV4SettingsCommandsAreStrictCompleteAndProviderSpecific(t *testing.T) {
 	require.NotEqual(t, fastBytes, standardBytes, "canonical command bytes must distinguish captured settings for command fingerprints")
 }
 
-func TestV4SettingsCommandsRejectMissingPartialDuplicateNullAndNativeValues(t *testing.T) {
-	valid := `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"new","payload":{"settings":{"model":"gpt-5.6-sol","effort":"high","speed":"fast"}}}`
+func TestV5SettingsCommandsRejectMissingPartialDuplicateNullAndNativeValues(t *testing.T) {
+	valid := `{"api_version":"5","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"new","payload":{"settings":{"model":"gpt-5.6-sol","effort":"high","speed":"fast"}}}`
 	cases := map[string]string{
 		"missing settings":    strings.Replace(valid, `"settings":{"model":"gpt-5.6-sol","effort":"high","speed":"fast"}`, ``, 1),
 		"partial settings":    strings.Replace(valid, `,"effort":"high"`, ``, 1),
@@ -77,7 +77,7 @@ func TestV4SettingsCommandsRejectMissingPartialDuplicateNullAndNativeValues(t *t
 	require.NoError(t, err, "nullable settings represent Pi/non-configurable providers")
 }
 
-func TestV4QueueSnapshotAndSettingsEventsCarryBoundedPresentationAndCatalog(t *testing.T) {
+func TestV5QueueSnapshotAndSettingsEventsCarryBoundedPresentationAndCatalog(t *testing.T) {
 	settings := validPresentedSettings()
 	catalog := validProtocolCatalog()
 	state := protocol.SettingsVerified
@@ -109,7 +109,7 @@ func TestV4QueueSnapshotAndSettingsEventsCarryBoundedPresentationAndCatalog(t *t
 	require.Contains(t, string(encoded), `"effective_settings":null`)
 }
 
-func TestV4SettingsEventsRejectContradictoryAndMalformedState(t *testing.T) {
+func TestV5SettingsEventsRejectContradictoryAndMalformedState(t *testing.T) {
 	settings := validPresentedSettings()
 	catalog := validProtocolCatalog()
 	state := protocol.SettingsVerified
@@ -156,7 +156,7 @@ func TestV4SettingsEventsRejectContradictoryAndMalformedState(t *testing.T) {
 	}
 }
 
-func TestV4CatalogWorstCaseFitsMeasuredEventBound(t *testing.T) {
+func TestV5CatalogWorstCaseFitsMeasuredEventBound(t *testing.T) {
 	catalog := make([]protocol.CatalogModel, 0, protocol.MaxCatalogModels)
 	remaining := protocol.MaxCatalogBytes
 	for index := 0; index < protocol.MaxCatalogModels && remaining > 0; index++ {
@@ -201,7 +201,7 @@ func TestV4CatalogWorstCaseFitsMeasuredEventBound(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestV4InvalidModelConfigurationBrowserErrorIsClosed(t *testing.T) {
+func TestV5InvalidModelConfigurationBrowserErrorIsClosed(t *testing.T) {
 	err := protocol.NewBrowserError(protocol.ErrorInvalidModelConfiguration)
 	require.Equal(t, protocol.ErrorInvalidModelConfiguration, err.Code())
 	require.Equal(t, protocol.ActionConfigureModel, err.Action())

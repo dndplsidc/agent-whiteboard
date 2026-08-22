@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "supported_types": ["section", "image", "chart", "table", "code", "quote", "component"],
+  "cases": [
+    {
+      "name": "all-supported-explicit-values",
+      "html": "<section id=\"s\" data-agent-select=\"section\" aria-label=\"Section\"></section><img id=\"i\" data-agent-select=\"image\" alt=\"Image\"><div id=\"c\" data-agent-select=\"chart\" aria-label=\"Chart\"></div><div id=\"t\" data-agent-select=\"table\" aria-label=\"Table\"></div><pre id=\"code\" data-agent-select=\"code\" aria-label=\"Code\"></pre><blockquote id=\"q\" data-agent-select=\"quote\" aria-label=\"Quote\"></blockquote><div id=\"custom\" data-agent-select=\"component\" aria-label=\"Custom\"></div>",
+      "mutation": { "valid": true },
+      "browser": { "canonical_components": [{ "id": "s", "type": "section", "label": "Section" }, { "id": "i", "type": "image", "label": "Image" }, { "id": "c", "type": "chart", "label": "Chart" }, { "id": "t", "type": "table", "label": "Table" }, { "id": "code", "type": "code", "label": "Code" }, { "id": "q", "type": "quote", "label": "Quote" }, { "id": "custom", "type": "component", "label": "Custom" }], "explicit_ids": ["s", "i", "c", "t", "code", "q", "custom"], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "section-shorthand",
+      "html": "<div id=\"summary\" data-agent-section aria-label=\"Summary\"></div>",
+      "mutation": { "valid": true },
+      "browser": { "canonical_components": [{ "id": "summary", "type": "section", "label": "Summary" }], "explicit_ids": ["summary"], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "aria-labelledby-resolution",
+      "html": "<h2 id=\"label\">Results</h2><div id=\"results\" data-agent-select=\"chart\" aria-labelledby=\"label\"></div>",
+      "mutation": { "valid": true },
+      "browser": { "canonical_components": [{ "id": "results", "type": "chart", "label": "Results" }], "explicit_ids": ["results"], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "aria-label-resolution",
+      "html": "<div id=\"results\" data-agent-select=\"chart\" aria-label=\"Quarterly results\"></div>",
+      "mutation": { "valid": true },
+      "browser": { "canonical_components": [{ "id": "results", "type": "chart", "label": "Quarterly results" }], "explicit_ids": ["results"], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "kind-fallback-label",
+      "html": "<section id=\"intro\" data-agent-select=\"section\"><h2>Introduction</h2></section><table id=\"totals\" data-agent-select=\"table\"><caption>Totals</caption></table>",
+      "mutation": { "valid": true },
+      "browser": { "canonical_components": [{ "id": "intro", "type": "section", "label": "Introduction" }, { "id": "totals", "type": "table", "label": "Totals" }], "explicit_ids": ["intro", "totals"], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "unsupported-explicit-value",
+      "html": "<div id=\"x\" data-agent-select=\"video\" aria-label=\"Video\"></div>",
+      "mutation": { "valid": false, "error": "unsupported_select_value" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "empty-explicit-value",
+      "html": "<div id=\"x\" data-agent-select=\"\" aria-label=\"Empty\"></div>",
+      "mutation": { "valid": false, "error": "unsupported_select_value" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "missing-explicit-id",
+      "html": "<div data-agent-select=\"component\" aria-label=\"Widget\"></div>",
+      "mutation": { "valid": false, "error": "missing_explicit_id" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "duplicate-explicit-id",
+      "html": "<div id=\"same\" data-agent-select=\"section\" aria-label=\"One\"></div><div id=\"same\" data-agent-select=\"table\" aria-label=\"Two\"></div>",
+      "mutation": { "valid": false, "error": "duplicate_explicit_id" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "missing-explicit-label",
+      "html": "<div id=\"widget\" data-agent-select=\"component\"></div>",
+      "mutation": { "valid": false, "error": "missing_explicit_label" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "unresolved-labelledby",
+      "html": "<div id=\"widget\" data-agent-select=\"component\" aria-labelledby=\"missing\"></div>",
+      "mutation": { "valid": false, "error": "missing_explicit_label" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "shorthand-select-conflict",
+      "html": "<div id=\"x\" data-agent-section data-agent-select=\"table\" aria-label=\"Conflict\"></div>",
+      "mutation": { "valid": false, "error": "conflicting_declaration" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "select-ignore-conflict",
+      "html": "<div id=\"x\" data-agent-select=\"chart\" data-agent-section-ignore aria-label=\"Conflict\"></div>",
+      "mutation": { "valid": false, "error": "conflicting_declaration" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "none-shorthand-conflict",
+      "html": "<div id=\"x\" data-agent-select=\"none\" data-agent-section aria-label=\"Conflict\"></div>",
+      "mutation": { "valid": false, "error": "conflicting_declaration" },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": [] }
+    },
+    {
+      "name": "ignore-and-none-are-compatible-exclusions",
+      "html": "<section id=\"ignored\" data-agent-section-ignore><h2>Ignored</h2></section><section id=\"none\" data-agent-select=\"none\"><h2>None</h2></section>",
+      "mutation": { "valid": true },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": ["ignored", "none"] }
+    },
+    {
+      "name": "unqualified-wrapper-is-omitted-without-mutation-error",
+      "html": "<div id=\"automatic\" aria-label=\"Not a semantic kind\">Automatic</div><section><h2>No stable ID</h2></section>",
+      "mutation": { "valid": true },
+      "browser": { "canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": ["automatic"] }
+    }
+  ]
+}

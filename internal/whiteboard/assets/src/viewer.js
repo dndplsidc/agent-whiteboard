@@ -488,8 +488,8 @@ export const DEFAULT_AGENT_DRAWER_WIDTH = 420;
 export const MIN_AGENT_DRAWER_WIDTH = 360;
 export const MAX_AGENT_DRAWER_WIDTH = 720;
 export const AGENT_DRAWER_DOCK_BREAKPOINT = 64 * 16;
-export const AGENT_API_VERSION = "4";
-export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v4";
+export const AGENT_API_VERSION = "5";
+export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v5";
 export const MAX_AGENT_MESSAGE_BYTES = 64 * 1024;
 export const MAX_AGENT_EVENT_BYTES = 1024 * 1024;
 export const MAX_AGENT_IMAGES_PER_TURN = 8;
@@ -627,21 +627,59 @@ function validHeading(value) {
   return exactObject(value, ["level", "title", "ordinal"]) && Number.isInteger(value.level) && value.level >= 1 && value.level <= 6 && validText(value.title, 256) && Number.isInteger(value.ordinal) && value.ordinal >= 1;
 }
 
-function validReferenceSource(value) {
-  return exactObject(value, ["resource_kind", "resource_id", "resource_updated_at", "context_digest", "heading_path", "start", "end"])
-    && value.resource_kind === "markdown" && validID(value.resource_id) && validDate(value.resource_updated_at) && DIGEST_PATTERN.test(value.context_digest)
+const COMPONENT_TYPES = new Set(["section", "image", "chart", "table", "code", "quote", "component"]);
+const ELEMENT_TAG_PATTERN = /^[a-z0-9-]+$/;
+
+function validMarkdownReferenceAnchor(value) {
+  return exactObject(value, ["heading_path", "start", "end"])
     && Array.isArray(value.heading_path) && value.heading_path.length <= 12 && value.heading_path.every(validHeading)
     && validAnchor(value.start) && validAnchor(value.end)
     && (value.start.block < value.end.block || value.start.block === value.end.block && value.start.offset <= value.end.offset);
 }
 
-function validContextReference(value, event = false) {
-  if (!exactObject(value, ["id", "kind", "label", "source"], ["quote", "markdown", "section_lines", "visual"]) || !validID(value.id) || !["text", "section", "image"].includes(value.kind) || !validText(value.label, 256) || !validReferenceSource(value.source)) return false;
-  if (value.kind === "text") return exactObject(value, ["id", "kind", "label", "source", "quote"]) && validText(value.quote, 16 * 1024);
-  if (value.kind === "section") return exactObject(value, ["id", "kind", "label", "source", "markdown", "section_lines"]) && validText(value.markdown, 48 * 1024) && exactObject(value.section_lines, ["start", "end"]) && Number.isInteger(value.section_lines.start) && value.section_lines.start >= 1 && Number.isInteger(value.section_lines.end) && value.section_lines.end > value.section_lines.start;
-  if (!exactObject(value, ["id", "kind", "label", "source", "visual"]) || !isRecord(value.visual)) return false;
+function validHTMLReferenceAnchor(value) {
+  return exactObject(value, ["element_id", "tag", "ordinal"])
+    && validText(value.element_id, 256) && validText(value.tag, 32) && ELEMENT_TAG_PATTERN.test(value.tag)
+    && Number.isInteger(value.ordinal) && value.ordinal >= 1 && value.ordinal <= 128;
+}
+
+function validReferenceSource(value) {
+  if (!exactObject(value, ["resource_kind", "resource_id", "resource_updated_at", "context_digest", "anchor"])
+      || !validID(value.resource_id) || !validDate(value.resource_updated_at) || !DIGEST_PATTERN.test(value.context_digest)
+      || !isRecord(value.anchor)) return false;
+  if (value.resource_kind === "markdown") return exactObject(value.anchor, ["markdown"]) && validMarkdownReferenceAnchor(value.anchor.markdown);
+  if (value.resource_kind === "html") return exactObject(value.anchor, ["html"]) && validHTMLReferenceAnchor(value.anchor.html);
+  return false;
+}
+
+function nestedMarkdownReference(reference) {
+  const source = reference?.source;
+  if (!source || source.anchor !== undefined || !exactObject(source, ["resource_kind", "resource_id", "resource_updated_at", "context_digest", "heading_path", "start", "end"])) return reference;
+  return {
+    ...reference,
+    source: {
+      resource_kind: source.resource_kind,
+      resource_id: source.resource_id,
+      resource_updated_at: source.resource_updated_at,
+      context_digest: source.context_digest,
+      anchor: { markdown: { heading_path: structuredClone(source.heading_path), start: { ...source.start }, end: { ...source.end } } },
+    },
+  };
+}
+
+function validReferenceVisual(value, event) {
+  if (!isRecord(value)) return false;
   const required = event ? ["image_id", "name", "alt", "media_type"] : ["image_id", "name", "alt"];
-  return exactObject(value.visual, required) && validID(value.visual.image_id) && validImageName(value.visual.name) && validText(value.visual.alt, 512, true) && (!event || IMAGE_MEDIA_TYPES.has(value.visual.media_type));
+  return exactObject(value, required) && validID(value.image_id) && validImageName(value.name) && validText(value.alt, 512, true) && (!event || IMAGE_MEDIA_TYPES.has(value.media_type));
+}
+
+function validContextReference(value, event = false) {
+  if (!exactObject(value, ["id", "kind", "label", "source"], ["quote", "markdown", "section_lines", "component", "visual"]) || !validID(value.id) || !["text", "section", "image", "component"].includes(value.kind) || !validText(value.label, 256) || !validReferenceSource(value.source)) return false;
+  if (value.kind === "text") return value.source.resource_kind === "markdown" && exactObject(value, ["id", "kind", "label", "source", "quote"]) && validText(value.quote, 16 * 1024);
+  if (value.kind === "section") return value.source.resource_kind === "markdown" && exactObject(value, ["id", "kind", "label", "source", "markdown", "section_lines"]) && validText(value.markdown, 48 * 1024) && exactObject(value.section_lines, ["start", "end"]) && Number.isInteger(value.section_lines.start) && value.section_lines.start >= 1 && Number.isInteger(value.section_lines.end) && value.section_lines.end > value.section_lines.start;
+  if (value.kind === "image") return value.source.resource_kind === "markdown" && exactObject(value, ["id", "kind", "label", "source", "visual"]) && validReferenceVisual(value.visual, event);
+  if (value.source.resource_kind !== "html" || !exactObject(value, ["id", "kind", "label", "source", "component"], ["visual"]) || !exactObject(value.component, ["type", "source_excerpt"]) || !COMPONENT_TYPES.has(value.component.type) || !validText(value.component.source_excerpt, 48 * 1024)) return false;
+  return value.visual === undefined || value.component.type === "image" && validReferenceVisual(value.visual, event);
 }
 
 export function validMessageContent(value, event = false) {
@@ -668,13 +706,13 @@ export function validMessageContent(value, event = false) {
 }
 
 function inlineImages(content) {
-  return content.parts.filter((part) => part.type === "reference" && part.reference.kind === "image").map((part) => ({ image_id: part.reference.visual.image_id, name: part.reference.visual.name }));
+  return content.parts.filter((part) => part.type === "reference" && part.reference.visual).map((part) => ({ image_id: part.reference.visual.image_id, name: part.reference.visual.name }));
 }
 
 function messageContentForCommand(content) {
   const result = cloneMessageContent(content);
   for (const part of result.parts) {
-    if (part.type === "reference" && part.reference.kind === "image") delete part.reference.visual.media_type;
+    if (part.type === "reference" && part.reference.visual) delete part.reference.visual.media_type;
   }
   return result;
 }
@@ -849,7 +887,7 @@ export function createSubmitCommand({ content, message, images = [], payload, pr
     orderedContent = { parts: orderedContent.parts.filter((part) => part.type !== "text") };
   }
   if (!validContentAndImages(orderedContent, images, false) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
-  if (payload?.kind === "html" && orderedContent.parts.some((part) => part.type === "reference")) throw new TypeError("invalid agent message");
+  if (orderedContent.parts.some((part) => part.type === "reference" && part.reference.source.resource_kind !== payload?.kind)) throw new TypeError("invalid agent message");
   if (!PROVIDERS.has(provider) || settings !== null && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const turnID = idFactory();
@@ -3110,7 +3148,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   function clearDraftInlineVisuals({ deleteStaged = true } = {}) {
     if (!deleteStaged) draftInlineVisuals.clear();
     const content = messageEditor.getContent();
-    const retained = content.parts.filter((part) => part.type !== "reference" || part.reference.kind !== "image");
+    const retained = content.parts.filter((part) => part.type !== "reference" || !part.reference.visual);
     if (!deleteStaged) messageEditor.setContent({ parts: retained });
     else messageEditor.setContent({ parts: retained });
   }
@@ -3176,7 +3214,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         throw new Error("The Page Agent draft changed while preparing this image.");
       }
       draft.inlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size, deletedImageIDs: deletedIDs });
-      const reference = imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name);
+      const reference = nestedMarkdownReference(imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name));
       if (owner === controller) messageEditor.insertReference(reference);
       else draft.content = insertMessageReference(draft.content, reference, insertionCaret).content;
       announce(`Added ${reference.label} to the message.`);
@@ -4312,7 +4350,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     addReference(reference) {
       setOpen(true, { focus: false });
       showView("conversation");
-      const content = messageEditor.insertReference(reference);
+      const content = messageEditor.insertReference(nestedMarkdownReference(reference));
       updateComposerAvailability();
       return content;
     },

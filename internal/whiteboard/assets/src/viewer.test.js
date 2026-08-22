@@ -42,6 +42,7 @@ import {
   renderAgentMarkdown,
   renderWhiteboard,
   validateViewerPayload,
+  validMessageContent,
 } from "./viewer.js";
 
 function makeMediaQuery(dark = false) {
@@ -381,7 +382,7 @@ function agentEvent(type, payload, overrides = {}) {
           ? { ...payload, fields: (payload.fields ?? []).map((field) => ({ multiline: false, ...field })), local_deadline: payload.local_deadline ?? null }
           : payload;
   return {
-    api_version: "4",
+    api_version: "5",
     event_id: agentIDs.event,
     conversation_id: agentIDs.conversation,
     type,
@@ -525,7 +526,7 @@ describe("local agent source and commands", () => {
   test("builds an exact context-free connect command", () => {
     const command = createConnectCommand({ payload: agentPayload(), clientID: agentIDs.message, replayAfter: agentIDs.event, idFactory: fixedIDFactory });
     expect(command).toEqual({
-      api_version: "4",
+      api_version: "5",
       command_id: agentIDs.command,
       client_id: agentIDs.message,
       conversation_id: null,
@@ -598,9 +599,11 @@ describe("local agent source and commands", () => {
         resource_id: agentIDs.resource,
         resource_updated_at: "2026-07-27T02:03:04Z",
         context_digest: "0".repeat(64),
-        heading_path: [],
-        start: { block: 1, line: 1, offset: 0 },
-        end: { block: 1, line: 1, offset: 6 },
+        anchor: { markdown: {
+          heading_path: [],
+          start: { block: 1, line: 1, offset: 0 },
+          end: { block: 1, line: 1, offset: 6 },
+        } },
       },
     };
     const content = { parts: [{ type: "reference", reference }] };
@@ -647,9 +650,37 @@ describe("local agent source and commands", () => {
   });
 });
 
+describe("v5 component reference contract", () => {
+  test("accepts only exact nested HTML component references and eligible image visuals", () => {
+    const reference = {
+      id: agentIDs.archive,
+      kind: "component",
+      label: "Revenue chart",
+      source: {
+        resource_kind: "html",
+        resource_id: agentIDs.resource,
+        resource_updated_at: "2026-07-27T02:03:04Z",
+        context_digest: "0".repeat(64),
+        anchor: { html: { element_id: "revenue", tag: "figure", ordinal: 2 } },
+      },
+      component: { type: "chart", source_excerpt: '<figure id="revenue">Revenue</figure>' },
+    };
+    expect(validMessageContent({ parts: [{ type: "reference", reference }] })).toBe(true);
+    expect(validMessageContent({ parts: [{ type: "reference", reference: { ...reference, extra: true } }] })).toBe(false);
+    const flatLegacySource = { resource_kind: "markdown", resource_id: agentIDs.resource, resource_updated_at: "2026-07-27T02:03:04Z", context_digest: "0".repeat(64), heading_path: [], start: { block: 0, line: 1, offset: 0 }, end: { block: 0, line: 1, offset: 0 } };
+    const { component: _component, ...legacyBase } = reference;
+    expect(validMessageContent({ parts: [{ type: "reference", reference: { ...legacyBase, kind: "text", quote: "legacy", source: flatLegacySource } }] })).toBe(false);
+    const bothAnchors = { ...reference, source: { ...reference.source, anchor: { ...reference.source.anchor, markdown: { heading_path: [], start: { block: 0, line: 1, offset: 0 }, end: { block: 0, line: 1, offset: 0 } } } } };
+    expect(validMessageContent({ parts: [{ type: "reference", reference: bothAnchors }] })).toBe(false);
+    expect(validMessageContent({ parts: [{ type: "reference", reference: { ...reference, visual: { image_id: agentIDs.command, name: "chart.png", alt: "Revenue" } } }] })).toBe(false);
+    const image = { ...reference, component: { ...reference.component, type: "image" }, visual: { image_id: agentIDs.command, name: "chart.png", alt: "Revenue" } };
+    expect(validMessageContent({ parts: [{ type: "reference", reference: image }] })).toBe(true);
+  });
+});
+
 describe("local agent transport and event state", () => {
   test("probes only the literal loopback status endpoint before consent", async () => {
-    const fetchImpl = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ available: true, api_version: "4", origin_trusted: true }) }));
+    const fetchImpl = vi.fn(async () => ({ ok: true, text: async () => JSON.stringify({ available: true, api_version: "5", origin_trusted: true }) }));
     const transport = createAgentTransport({ payload: agentPayload(), port: 9123, clientID: agentIDs.message, fetchImpl, WebSocketImpl: undefined, idFactory: fixedIDFactory });
     await expect(transport.connect()).rejects.toThrow("consent");
     await expect(transport.probe()).resolves.toEqual({ ok: true, code: null });
@@ -697,7 +728,7 @@ describe("local agent transport and event state", () => {
     expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "POST", body: png, credentials: "omit", referrerPolicy: "no-referrer" });
     expect(fetchImpl.mock.calls[0][1].headers).toEqual({
       "Content-Type": "image/png",
-      "X-Agent-Whiteboard-API-Version": "4",
+      "X-Agent-Whiteboard-API-Version": "5",
       "X-Agent-Whiteboard-Client-ID": agentIDs.message,
       "X-Agent-Whiteboard-Conversation-ID": agentIDs.conversation,
       "X-Agent-Whiteboard-Provider": "codex",
@@ -725,7 +756,7 @@ describe("local agent transport and event state", () => {
     await transport.connect();
     expect(transport.transportKind).toBe("fallback");
     expect(fetchImpl.mock.calls[0][0]).toBe("http://127.0.0.1:8568/api/v1/agent/connect");
-    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": "4" });
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ "Content-Type": "application/json", "X-Agent-Whiteboard-API-Version": "5" });
     expect(fetchImpl.mock.calls[0][1].body).not.toContain("Creator summary");
     transport.close();
   });
@@ -753,7 +784,7 @@ describe("local agent transport and event state", () => {
 
   test("strictly rejects unknown event fields, malformed IDs, and raw provider fields", () => {
     expect(() => decodeAgentEvent(JSON.stringify({ ...snapshotEvent(), extra: true }))).toThrow(TypeError);
-    expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"4"', '"api_version":"4","api_version":"4"'))).toThrow(TypeError);
+    expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent()).replace('"api_version":"5"', '"api_version":"5","api_version":"5"'))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(snapshotEvent({ event_id: "short" })))).toThrow(TypeError);
     expect(() => decodeAgentEvent(JSON.stringify(agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "hello", reasoning: "secret" })))).toThrow(TypeError);
   });

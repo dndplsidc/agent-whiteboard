@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	envelopeHeader = "agent-whiteboard-turn-v3\n"
-	envelopeFooter = "end-agent-whiteboard-turn-v3\n"
+	envelopeHeader = "agent-whiteboard-turn-v4\n"
+	envelopeFooter = "end-agent-whiteboard-turn-v4\n"
+	v3Header       = "agent-whiteboard-turn-v3\n"
+	v3Footer       = "end-agent-whiteboard-turn-v3\n"
 	v2Header       = "agent-whiteboard-turn-v2\n"
 	v2Footer       = "end-agent-whiteboard-turn-v2\n"
 	legacyHeader   = "agent-whiteboard-turn-v1\n"
@@ -122,7 +124,7 @@ func Build(request TurnRequest, policy Policy) ([]byte, error) {
 	values[1] = []byte(request.TurnID)
 	values[2] = []byte(request.MessageID)
 	values[13] = readerContent
-	initial, replacement, continuation := policyInstructions(policy, 3)
+	initial, replacement, continuation := policyInstructions(policy, 4)
 	if request.Context == nil {
 		values[0] = []byte("continuation")
 		values[3] = []byte(continuation)
@@ -149,7 +151,7 @@ func Build(request TurnRequest, policy Policy) ([]byte, error) {
 }
 
 func Parse(encoded []byte) (Envelope, error) {
-	version := 3
+	version := 4
 	labels := envelopeLabels[:]
 	header := envelopeHeader
 	footer := envelopeFooter
@@ -164,6 +166,10 @@ func Parse(encoded []byte) (Envelope, error) {
 		labels = v2EnvelopeLabels[:]
 		header = v2Header
 		footer = v2Footer
+	case bytes.HasPrefix(encoded, []byte(v3Header)):
+		version = 3
+		header = v3Header
+		footer = v3Footer
 	}
 	values, err := parseFrame(encoded, header, footer, labels)
 	if err != nil {
@@ -172,6 +178,11 @@ func Parse(encoded []byte) (Envelope, error) {
 	var readerContent MessageContent
 	if version == 1 {
 		readerContent = TextMessage(string(values[13]))
+	} else if version < 4 {
+		readerContent, err = decodeLegacyReaderContent(values[13])
+		if err != nil {
+			return Envelope{}, err
+		}
 	} else {
 		readerContent, err = decodeReaderContent(values[13])
 		if err != nil {
@@ -289,6 +300,87 @@ func encodeReaderContent(content MessageContent) ([]byte, error) {
 		return nil, errors.New("invalid reader content")
 	}
 	return json.Marshal(content)
+}
+
+type legacyMessageContent struct {
+	Parts []legacyMessagePart `json:"parts"`
+}
+
+type legacyMessagePart struct {
+	Kind      MessagePartKind         `json:"type"`
+	Text      string                  `json:"text,omitempty"`
+	Reference *legacyContextReference `json:"reference,omitempty"`
+	Skill     *SkillInvocation        `json:"skill,omitempty"`
+}
+
+type legacyContextReference struct {
+	ID           string                `json:"id"`
+	Kind         ReferenceKind         `json:"kind"`
+	Label        string                `json:"label"`
+	Source       legacyReferenceSource `json:"source"`
+	Quote        string                `json:"quote,omitempty"`
+	Markdown     string                `json:"markdown,omitempty"`
+	SectionLines *SourceLineRange      `json:"section_lines,omitempty"`
+	Visual       *ReferenceVisual      `json:"visual,omitempty"`
+}
+
+type legacyReferenceSource struct {
+	ResourceKind      ResourceKind       `json:"resource_kind"`
+	ResourceID        string             `json:"resource_id"`
+	ResourceUpdatedAt time.Time          `json:"resource_updated_at"`
+	ContextDigest     string             `json:"context_digest"`
+	HeadingPath       []HeadingReference `json:"heading_path"`
+	Start             SourceAnchor       `json:"start"`
+	End               SourceAnchor       `json:"end"`
+}
+
+func decodeLegacyReaderContent(encoded []byte) (MessageContent, error) {
+	if err := rejectDuplicateJSONFields(encoded); err != nil {
+		return MessageContent{}, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return MessageContent{}, errors.New("invalid historical reader content")
+	}
+	parts, exists := fields["parts"]
+	if !exists || bytes.Equal(parts, []byte("null")) {
+		return MessageContent{}, errors.New("historical reader content parts are required")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var legacy legacyMessageContent
+	if err := decoder.Decode(&legacy); err != nil {
+		return MessageContent{}, errors.New("invalid historical reader content")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return MessageContent{}, errors.New("invalid historical reader content")
+	}
+	content := MessageContent{Parts: make([]MessagePart, len(legacy.Parts))}
+	for index, part := range legacy.Parts {
+		content.Parts[index] = MessagePart{Kind: part.Kind, Text: part.Text, Skill: part.Skill}
+		if part.Reference != nil {
+			legacyReference := part.Reference
+			reference := ContextReference{
+				ID: legacyReference.ID, Kind: legacyReference.Kind, Label: legacyReference.Label,
+				Quote: legacyReference.Quote, Markdown: legacyReference.Markdown,
+				SectionLines: legacyReference.SectionLines, Visual: legacyReference.Visual,
+				Source: ReferenceSource{
+					ResourceKind: legacyReference.Source.ResourceKind, ResourceID: legacyReference.Source.ResourceID,
+					ResourceUpdatedAt: legacyReference.Source.ResourceUpdatedAt, ContextDigest: legacyReference.Source.ContextDigest,
+					Anchor: ReferenceAnchor{Markdown: &MarkdownReferenceAnchor{
+						HeadingPath: legacyReference.Source.HeadingPath, Start: legacyReference.Source.Start, End: legacyReference.Source.End,
+					}},
+				},
+			}
+			content.Parts[index].Reference = &reference
+		}
+	}
+	normalized, err := NormalizeMessageContent(content)
+	if err != nil || !equalMessageContent(content, normalized) {
+		return MessageContent{}, errors.New("noncanonical historical reader content")
+	}
+	return normalized, nil
 }
 
 func decodeReaderContent(encoded []byte) (MessageContent, error) {

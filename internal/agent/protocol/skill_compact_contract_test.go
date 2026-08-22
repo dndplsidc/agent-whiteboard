@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestV4SkillPartsAreStrictSafeAndProviderNeutral(t *testing.T) {
+func TestV5SkillPartsAreStrictSafeAndProviderNeutral(t *testing.T) {
 	content := protocol.MessageContent{Parts: []protocol.MessagePart{
 		{Type: protocol.MessagePartSkill, Skill: &protocol.SkillInvocation{ID: idA, Name: "review-helper"}},
 		{Type: protocol.MessagePartText, Text: "check this page"},
@@ -50,7 +50,7 @@ func TestV4SkillPartsAreStrictSafeAndProviderNeutral(t *testing.T) {
 	require.Error(t, tooMany.ValidateCommand())
 }
 
-func TestV4ActiveWorkSkillsAndCompactSnapshotContract(t *testing.T) {
+func TestV5ActiveWorkSkillsAndCompactSnapshotContract(t *testing.T) {
 	state := protocol.SkillsReady
 	limit := 1
 	active := &protocol.ActiveWork{WorkID: idC, Kind: protocol.ActiveWorkCompact, State: protocol.ActiveWorkRunning}
@@ -78,12 +78,12 @@ func TestV4ActiveWorkSkillsAndCompactSnapshotContract(t *testing.T) {
 	require.NoError(t, payload.ValidateForProvider(protocol.ProviderPi), "capabilities are not provider-name gated")
 }
 
-func TestV4CompactAndInterruptCommandsUseDistinctWorkIdentity(t *testing.T) {
+func TestV5CompactAndInterruptCommandsUseDistinctWorkIdentity(t *testing.T) {
 	conversationID := idC
 	compact := protocol.Command{APIVersion: protocol.APIVersion, CommandID: idA, ClientID: idB, ConversationID: &conversationID, Type: protocol.CommandCompact, Payload: protocol.CompactPayload{WorkID: "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}
 	encodedCompact, err := protocol.EncodeCommand(compact)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"api_version":"4","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"compact","payload":{"work_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`, string(encodedCompact))
+	require.JSONEq(t, `{"api_version":"5","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","type":"compact","payload":{"work_id":"DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"}}`, string(encodedCompact))
 	decodedCompact, err := protocol.DecodeCommand(encodedCompact)
 	require.NoError(t, err)
 	require.Equal(t, compact, decodedCompact)
@@ -95,7 +95,7 @@ func TestV4CompactAndInterruptCommandsUseDistinctWorkIdentity(t *testing.T) {
 	require.NotContains(t, string(encodedInterrupt), "turn_id")
 }
 
-func TestV4SkillCatalogAndCompactionEventsAreReplayableAndBounded(t *testing.T) {
+func TestV5SkillCatalogAndCompactionEventsAreReplayableAndBounded(t *testing.T) {
 	limit := protocol.MaxMessageSkills
 	catalog := protocol.SkillCatalogPayload{State: protocol.SkillsReady, Skills: []protocol.SkillDescriptor{{ID: idA, Name: "review-helper", Scope: protocol.SkillScopeUser}}, MaxSelectedSkills: &limit}
 	catalogEvent := validEvent(catalog)
