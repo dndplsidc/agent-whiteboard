@@ -3,9 +3,73 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Agent Whiteboard Example</title>
+  <title>Agent Whiteboard Component Example</title>
+  <style>
+    body { margin: 0 auto; max-width: 72rem; padding: 2rem; font: 1rem/1.5 system-ui, sans-serif; color: #172033; }
+    main { display: grid; gap: 1.5rem; }
+    section, figure, table, pre, blockquote, [role="note"], .metric { border: 1px solid #ccd4e0; border-radius: .75rem; padding: 1rem; }
+    figure { margin: 0; }
+    svg { display: block; max-width: 100%; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #ccd4e0; padding: .5rem; text-align: left; }
+    pre { overflow: auto; }
+  </style>
 </head>
 <body>
-  <main><h1>Standalone HTML</h1><p>This trusted document is served unchanged.</p></main>
+  <main>
+    <h1>Quarterly product review</h1>
+
+    <section id="summary">
+      <h2>Summary</h2>
+      <p>Adoption increased while median response time remained stable.</p>
+    </section>
+
+    <figure id="workspace-preview">
+      <img
+        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        alt="A compact preview of the product workspace">
+      <figcaption>Product workspace preview</figcaption>
+    </figure>
+
+    <figure id="adoption-chart">
+      <svg viewBox="0 0 420 180" role="img" aria-labelledby="adoption-chart-title adoption-chart-desc">
+        <title id="adoption-chart-title">Weekly active teams</title>
+        <desc id="adoption-chart-desc">A bar chart rising from 120 teams in April to 190 teams in June.</desc>
+        <rect x="45" y="75" width="70" height="80" fill="#5876d8"></rect>
+        <rect x="175" y="45" width="70" height="110" fill="#5876d8"></rect>
+        <rect x="305" y="20" width="70" height="135" fill="#5876d8"></rect>
+        <text x="60" y="175">April</text>
+        <text x="187" y="175">May</text>
+        <text x="315" y="175">June</text>
+      </svg>
+      <figcaption>Weekly active teams by month</figcaption>
+    </figure>
+
+    <table id="release-table">
+      <caption>Release readiness</caption>
+      <thead><tr><th scope="col">Area</th><th scope="col">Status</th></tr></thead>
+      <tbody><tr><th scope="row">Documentation</th><td>Ready</td></tr><tr><th scope="row">Migration</th><td>Scheduled</td></tr></tbody>
+    </table>
+
+    <pre id="api-example" data-language="json"><code class="language-json">{"status":"ready","teams":190}</code></pre>
+
+    <blockquote id="customer-quote">
+      “The new workflow keeps the review focused.”
+      <footer>— Design partner</footer>
+    </blockquote>
+
+    <aside id="rollout-note" role="note" aria-label="Rollout note">
+      Enable the release for one workspace cohort at a time.
+    </aside>
+
+    <div id="north-star-metric" class="metric" data-agent-select="component" aria-label="North-star metric">
+      <strong>190</strong> weekly active teams
+    </div>
+
+    <section id="internal-details" data-agent-section-ignore>
+      <h2>Internal details</h2>
+      <p>This region is intentionally excluded from component discovery.</p>
+    </section>
+  </main>
 </body>
 </html>
