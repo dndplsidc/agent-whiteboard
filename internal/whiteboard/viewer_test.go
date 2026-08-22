@@ -34,6 +34,12 @@ func TestNewViewerRejectsMissingAssets(t *testing.T) {
 		{name: "empty CSS", config: whiteboard.ViewerConfig{CSS: []byte{}, JS: []byte(testViewerJS)}},
 		{name: "nil JavaScript", config: whiteboard.ViewerConfig{CSS: []byte(testViewerCSS)}},
 		{name: "empty JavaScript", config: whiteboard.ViewerConfig{CSS: []byte(testViewerCSS), JS: []byte{}}},
+		{name: "unsafe HTML bridge terminator", config: whiteboard.ViewerConfig{
+			CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), HTMLBridge: []byte(`const value = "</script>"`),
+		}},
+		{name: "invalid HTML bridge UTF-8", config: whiteboard.ViewerConfig{
+			CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), HTMLBridge: []byte{0xff},
+		}},
 	}
 
 	for _, tt := range tests {
@@ -217,6 +223,7 @@ func TestViewerEnabledPreservesLegacyEmptyContext(t *testing.T) {
 func TestViewerEnabledRendersTrustedHTMLShellAndOpaqueChild(t *testing.T) {
 	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
 		CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
+		HTMLBridge: []byte("globalThis.testBridge=true;"),
 	})
 	require.NoError(t, err)
 
@@ -241,7 +248,7 @@ func TestViewerEnabledRendersTrustedHTMLShellAndOpaqueChild(t *testing.T) {
 
 	frames := findElements(document, "iframe", nil)
 	require.Len(t, frames, 1)
-	require.Equal(t, httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLContentSuffix, attribute(frames[0], "src"))
+	require.Equal(t, httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLRenderedSuffix, attribute(frames[0], "src"))
 	require.Equal(t, "allow-scripts", attribute(frames[0], "sandbox"))
 	require.Equal(t, "no-referrer", attribute(frames[0], "referrerpolicy"))
 	require.True(t, hasBooleanAttribute(frames[0], "credentialless"))

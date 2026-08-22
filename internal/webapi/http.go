@@ -24,6 +24,7 @@ const (
 	PublicMarkdown                = "/whiteboards/markdown/"
 	PublicHTML                    = "/whiteboards/html/"
 	PublicHTMLContentSuffix       = "/content"
+	PublicHTMLRenderedSuffix      = "/rendered"
 	PublicImages                  = "/images/"
 
 	MultipartOverheadBytes  int64 = 64 << 10

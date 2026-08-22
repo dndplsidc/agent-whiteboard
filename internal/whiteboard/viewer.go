@@ -27,12 +27,14 @@ type ViewerConfig struct {
 	CSS               []byte
 	JS                []byte
 	LocalAgentEnabled bool
+	HTMLBridge        []byte
 }
 
 type Viewer struct {
 	css               []byte
 	js                []byte
 	localAgentEnabled bool
+	htmlBridge        []byte
 	csp               string
 	htmlCSP           string
 }
@@ -57,10 +59,16 @@ func NewViewer(config ViewerConfig) (*Viewer, error) {
 			"; font-src 'none'; form-action 'none'; frame-ancestors 'none'; frame-src " + frameSource + "; img-src " + imageSource + "; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'sha256-" +
 			base64.StdEncoding.EncodeToString(jsDigest[:]) + "'; style-src 'unsafe-inline'; worker-src 'none'"
 	}
+	if len(config.HTMLBridge) != 0 {
+		if _, err := injectHTMLBridge([]byte("<head></head>"), config.HTMLBridge); err != nil {
+			return nil, common.NewError(common.CodeInvalidRequest, "viewer HTML bridge is invalid", err)
+		}
+	}
 	viewer := &Viewer{
 		css:               append([]byte(nil), config.CSS...),
 		js:                append([]byte(nil), config.JS...),
 		localAgentEnabled: config.LocalAgentEnabled,
+		htmlBridge:        append([]byte(nil), config.HTMLBridge...),
 		csp:               policy("'none'"),
 		htmlCSP:           StandaloneOuterContentSecurityPolicy,
 	}
@@ -76,6 +84,10 @@ func (v *Viewer) ContentSecurityPolicy() string {
 
 func (v *Viewer) HTMLContentSecurityPolicy() string {
 	return v.htmlCSP
+}
+
+func (v *Viewer) renderHTMLChild(source []byte) ([]byte, error) {
+	return injectHTMLBridge(source, v.htmlBridge)
 }
 
 func (v *Viewer) Render(w io.Writer, board Whiteboard) error {
@@ -125,7 +137,11 @@ func (v *Viewer) renderHTML(w io.Writer, board Whiteboard) error {
 	if err := writeViewerString(w, `</style></head><body class="agent-whiteboard-html-host"><header id="agent-whiteboard-app-bar"><div id="agent-whiteboard-app-bar-theme"></div><span id="agent-whiteboard-app-title">`+escapedTitle+`</span><div id="agent-whiteboard-app-bar-agent"></div></header><main id="agent-whiteboard-html-surface"><iframe id="agent-whiteboard-html-content" title="Published content: `+escapedTitle+`" src="`); err != nil {
 		return err
 	}
-	if err := writeViewerString(w, httpx.PublicHTML+board.ID+httpx.PublicHTMLContentSuffix); err != nil {
+	childSuffix := httpx.PublicHTMLContentSuffix
+	if len(v.htmlBridge) != 0 {
+		childSuffix = httpx.PublicHTMLRenderedSuffix
+	}
+	if err := writeViewerString(w, httpx.PublicHTML+board.ID+childSuffix); err != nil {
 		return err
 	}
 	if err := writeViewerString(w, `" sandbox="allow-scripts" referrerpolicy="no-referrer" credentialless></iframe></main><noscript>Page Agent requires JavaScript. The published content remains available above.</noscript><script type="application/json" id="agent-whiteboard-source">`); err != nil {
