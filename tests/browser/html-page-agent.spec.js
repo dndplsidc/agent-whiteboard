@@ -33,6 +33,121 @@ async function connect(page, provider) {
   await expect(page.locator(".agent-provider-label")).toBeVisible();
 }
 
+const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+V3x7WQAAAABJRU5ErkJggg==";
+
+test("selects canonical HTML components through hover and the trusted chooser into ordered v5 content", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  const html = `<!doctype html><html><head><title>Component board</title></head><body>
+    <section id="overview"><h2>Canonical overview</h2><table id="nested-table" style="width:400px;height:160px"><caption>Quarterly revenue</caption><tbody><tr><td>42</td></tr></tbody></table></section>
+    <article id="article"><h2>Article findings</h2></article><div id="region" role="region" aria-label="Regional summary"></div>
+    <figure id="photo"><img alt="Embedded pixel" src="data:image/png;base64,${onePixelPNG}"><figcaption>Source photograph</figcaption></figure>
+    <svg id="svg-chart" role="img" aria-label="SVG trend"></svg><canvas id="canvas-chart" aria-label="Canvas trend"></canvas>
+    <pre id="sample-code"><code class="language-js">const answer = 42;</code></pre>
+    <blockquote id="quote">Quoted source statement.</blockquote><aside id="note" role="note">Source note.</aside><div id="alert" role="alert">Source alert.</div>
+    <div id="custom" data-agent-select="component" aria-label="Custom card"><button type="button" id="child-control">Child control</button></div>
+    <div id="override" data-agent-select="quote" aria-label="Forced quote">Forced content</div>
+    <section id="ignored" data-agent-select="none"><h2>Ignored section</h2><table id="ignored-table"><caption>Ignored table</caption></table></section>
+    <script>document.querySelector('#overview h2').textContent='Runtime forged overview';</script>
+  </body></html>`;
+  const resource = await openHTMLPage({ context, page, fixture: localAgentSidebar, html, creatorContext: "Component integration context.\n" });
+  const child = page.frameLocator("#agent-whiteboard-html-content");
+  await expect(page.locator("#agent-whiteboard-html-content")).toHaveAttribute("src", /\/rendered$/u);
+
+  await child.locator("#nested-table").hover();
+  const add = page.locator(".agent-html-add");
+  await expect(add).toBeVisible();
+  await expect(add).toHaveText("+ Add");
+  await expect(add).toHaveAttribute("aria-label", "Add table: Quarterly revenue to message");
+  await add.click();
+
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  await expect(composer.locator(".agent-message-reference")).toHaveCount(1);
+  await connect(page, "pi");
+  await composer.press("Control+End");
+  await composer.pressSequentially(" then ");
+
+  const chooser = page.locator(".agent-html-chooser");
+  await chooser.locator("summary").click();
+  await expect(chooser.getByRole("button", { name: "Add section: Canonical overview to message" })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: "Add section: Article findings to message" })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: "Add section: Regional summary to message" })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: "Add chart: SVG trend to message" })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: "Add chart: Canvas trend to message" })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: /Add code:/u })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: "Add quote: Source note. to message" })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: "Add quote: Source alert. to message" })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: "Add component: Custom card to message" })).toBeVisible();
+  await expect(chooser.getByRole("button", { name: "Add quote: Forced quote to message" })).toBeVisible();
+  await expect(chooser).not.toContainText("Ignored section");
+  await chooser.getByRole("button", { name: "Add image: Source photograph to message" }).click();
+  await expect(composer.locator(".agent-message-reference")).toHaveCount(2);
+  await composer.press("Control+End");
+  await composer.pressSequentially(" explain both.");
+  await composer.press("Enter");
+
+  await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "submit")).toBe(true);
+  const submit = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit");
+  expect(submit.api_version).toBe("5");
+  expect(submit.payload.content.parts.map(({ type }) => type)).toEqual(["text", "reference", "text", "reference", "text"]);
+  expect(submit.payload.content.parts.filter(({ type }) => type === "text").map(({ text }) => text).join(" ")).toContain("then");
+  expect(submit.payload.content.parts.filter(({ type }) => type === "text").map(({ text }) => text).join(" ")).toContain("explain both");
+  const references = submit.payload.content.parts.filter(({ type }) => type === "reference").map(({ reference }) => reference);
+  expect(references[0]).toMatchObject({
+    kind: "component", label: "Source photograph", component: { type: "image" },
+    source: { resource_kind: "html", resource_id: resource.id, anchor: { html: { element_id: "photo", tag: "figure" } } },
+    visual: { image_id: expect.any(String), name: expect.stringMatching(/^component-\d+\.png$/u), alt: "Source photograph" },
+  });
+  expect(references[1]).toMatchObject({
+    kind: "component", label: "Quarterly revenue", component: { type: "table" },
+    source: { resource_kind: "html", resource_id: resource.id, anchor: { html: { element_id: "nested-table", tag: "table", ordinal: 2 } } },
+  });
+  expect(JSON.stringify(references)).not.toContain("Runtime forged overview");
+  expect(localAgentSidebar.brokerRequests.some(({ method, url, status }) => method === "POST" && url === "/api/v1/agent/images" && status === 201)).toBe(true);
+});
+
+test("rejects transferred ports and hostile child frames while preserving the chooser fallback", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  const html = `<!doctype html><html><head><title>Hostile bridge child</title></head><body>
+    <section id="safe"><h2>Canonical safe section</h2></section>
+    <script>
+      addEventListener('message', (event) => {
+        const frame = event.data;
+        if (!frame || frame.type !== 'manifest' || frame.version !== 1) return;
+        const valid = {version:1,type:'candidate',epoch:frame.epoch,id:'safe',rect:{x:0,y:0,width:100,height:50}};
+        const channel = new MessageChannel();
+        parent.postMessage(valid, '*', [channel.port2]);
+        parent.postMessage({...valid,label:'forged label',html:'<img src=x onerror=alert(1)>'}, '*');
+        parent.postMessage({...valid,id:'unknown'}, '*');
+        parent.postMessage({...valid,rect:{x:0,y:0,width:1e20,height:50}}, '*');
+        for (let index = 0; index < 300; index += 1) parent.postMessage({broken:index}, '*');
+        fetch('http://127.0.0.1:1/api/v1/agent/status').catch(() => {});
+      });
+    </script>
+  </body></html>`;
+  await openHTMLPage({ context, page, fixture: localAgentSidebar, html, creatorContext: "Hostile child context.\n" });
+  await page.waitForTimeout(150);
+
+  await expect(page.locator(".agent-html-add")).toBeHidden();
+  await expect(page.locator(".agent-message-reference")).toHaveCount(0);
+  expect(parsedCommands(localAgentSidebar.brokerRequests)).toEqual([]);
+  expect(localAgentSidebar.brokerRequests.map(({ method, url }) => ({ method, url }))).toEqual([{ method: "GET", url: "/api/v1/agent/status" }]);
+
+  const chooser = page.locator(".agent-html-chooser");
+  await chooser.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  const fallback = chooser.getByRole("button", { name: "Add section: Canonical safe section to message" });
+  await fallback.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByLabel("Message Pi about this whiteboard").locator(".agent-message-reference")).toHaveCount(1);
+  expect(parsedCommands(localAgentSidebar.brokerRequests)).toEqual([]);
+});
+
 test("keeps exact HTML in an opaque child while shared trusted chrome owns consent, theme, and context", async ({
   context,
   page,
@@ -113,7 +228,7 @@ test("keeps sandbox inheritance credentialless when a hostile child self-navigat
 }) => {
   await context.addCookies([{ name: "publishing_secret", value: "must-not-leak", url: localAgentSidebar.origin }]);
   const resource = await localAgentSidebar.publishHTML(`<!doctype html><html><head><title>Self navigation</title></head><body><script>
-    setTimeout(() => { location.href = location.pathname.replace(/\\/content$/u, ""); }, 100);
+    setTimeout(() => { location.href = location.pathname.replace(/\\/rendered$/u, ""); }, 100);
   </script></body></html>`, "Self-navigation context.\n");
   await context.grantPermissions(["local-network-access"], { origin: localAgentSidebar.origin });
   await page.addInitScript((port) => localStorage.setItem("agent-whiteboard-agent-port", String(port)), localAgentSidebar.brokerPort);
@@ -132,6 +247,7 @@ test("keeps sandbox inheritance credentialless when a hostile child self-navigat
   expect(wrapperRequests[1].headers.referer).toBeUndefined();
   expect(wrapperRequests[1].headers.origin).not.toBe(localAgentSidebar.origin);
   await expect(page.locator("#agent-whiteboard-html-content")).toHaveCount(1);
+  await expect(page.locator(".agent-html-chooser")).toBeVisible();
 
   const trustedAccepted = localAgentSidebar.brokerRequests.filter((request) => request.headers.origin === localAgentSidebar.origin && request.status >= 200 && request.status < 300);
   expect(trustedAccepted.map(({ method, url }) => ({ method, url }))).toEqual([{ method: "GET", url: "/api/v1/agent/status" }]);

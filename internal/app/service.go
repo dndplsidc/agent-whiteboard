@@ -72,10 +72,15 @@ func NewService(config ServiceConfig, options ...Option) (*Service, error) {
 	if err != nil {
 		return fail(err)
 	}
+	var htmlBridge []byte
+	if resolved.viewerLocalAgentEnabled {
+		htmlBridge = resolved.viewerHTMLBridge
+	}
 	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
 		CSS:               resolved.viewerCSS,
 		JS:                resolved.viewerJS,
 		LocalAgentEnabled: resolved.viewerLocalAgentEnabled,
+		HTMLBridge:        htmlBridge,
 	})
 	if err != nil {
 		return fail(err)

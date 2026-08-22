@@ -5,11 +5,12 @@ import (
 	"embed"
 )
 
-//go:embed assets/dist/viewer.min.js assets/dist/viewer.min.css assets/manifest.json assets/licenses/THIRD_PARTY_NOTICES.txt
+//go:embed assets/dist/viewer.min.js assets/dist/html-bridge.min.js assets/dist/viewer.min.css assets/manifest.json assets/licenses/THIRD_PARTY_NOTICES.txt
 var files embed.FS
 
 var (
 	viewerJS          = mustReadBrowserAsset("assets/dist/viewer.min.js")
+	htmlBridgeJS      = mustReadBrowserAsset("assets/dist/html-bridge.min.js")
 	viewerCSS         = mustReadBrowserAsset("assets/dist/viewer.min.css")
 	manifest          = mustReadBrowserAsset("assets/manifest.json")
 	thirdPartyNotices = mustReadBrowserAsset("assets/licenses/THIRD_PARTY_NOTICES.txt")
@@ -18,6 +19,11 @@ var (
 // ViewerJS returns a fresh copy of the bundled browser renderer.
 func ViewerJS() []byte {
 	return bytes.Clone(viewerJS)
+}
+
+// HTMLBridgeJS returns a fresh copy of the bundled opaque-child bridge.
+func HTMLBridgeJS() []byte {
+	return bytes.Clone(htmlBridgeJS)
 }
 
 // ViewerCSS returns a fresh copy of the bundled viewer stylesheet.

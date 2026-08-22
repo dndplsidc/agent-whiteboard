@@ -35,6 +35,7 @@ func TestResolveServiceConfigUsesExactDefaults(t *testing.T) {
 	require.Equal(t, int64(25<<20), resolved.maxImageBytes)
 	require.Equal(t, int64(100<<20), resolved.maxImageRequestBytes)
 	require.False(t, resolved.viewerLocalAgentEnabled)
+	require.Equal(t, whiteboard.HTMLBridgeJS(), resolved.viewerHTMLBridge)
 	require.Equal(t, LogModeConsole, resolved.logMode)
 	require.IsType(t, &slog.TextHandler{}, resolved.logger.Handler())
 }

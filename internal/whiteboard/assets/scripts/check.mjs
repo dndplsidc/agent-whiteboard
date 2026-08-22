@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { buildAssets } from "./build.mjs";
 
 const assetsDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const generatedFiles = ["dist/viewer.min.js", "dist/viewer.min.css", "manifest.json"];
+const generatedFiles = ["dist/viewer.min.js", "dist/html-bridge.min.js", "dist/viewer.min.css", "manifest.json"];
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "agent-whiteboard-assets-"));
 
 try {

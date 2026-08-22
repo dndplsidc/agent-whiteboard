@@ -1,9 +1,11 @@
 import { expect, test } from "./fixture.js";
 
 const portKey = "agent-whiteboard-agent-port";
+const nativeEnvelopeHeader = "agent-whiteboard-turn-v4\n";
+const nativeEnvelopeFooter = "end-agent-whiteboard-turn-v4\n";
 
 function parseProviderEnvelope(text) {
-  const start = text.indexOf("agent-whiteboard-turn-v3\n");
+  const start = text.indexOf(nativeEnvelopeHeader);
   expect(start).toBeGreaterThanOrEqual(0);
   let envelope = text.slice(start);
   if (!envelope.endsWith("\n")) envelope += "\n";
@@ -12,7 +14,7 @@ function parseProviderEnvelope(text) {
     "resource-kind-untrusted", "resource-id-untrusted", "resource-created-at-untrusted", "resource-updated-at-untrusted",
     "resource-expires-at-untrusted", "creator-context-untrusted", "page-source-untrusted", "reader-content-untrusted",
   ];
-  let cursor = "agent-whiteboard-turn-v3\n".length;
+  let cursor = nativeEnvelopeHeader.length;
   const fields = {};
   for (const label of labels) {
     const prefix = `${label} `;
@@ -27,7 +29,7 @@ function parseProviderEnvelope(text) {
     expect(envelope[cursor]).toBe("\n");
     cursor += 1;
   }
-  expect(envelope.slice(cursor)).toBe("end-agent-whiteboard-turn-v3\n");
+  expect(envelope.slice(cursor)).toBe(nativeEnvelopeFooter);
   return { fields, envelope };
 }
 
@@ -178,8 +180,8 @@ test("streams exact HTML context through the real publishing server, broker, and
     { type: "skill", skill: { id: expect.any(String), name: "whiteboard-review" } },
     { type: "text", text: "  M3_REAL_PI_INTERACTION Describe the published HTML dashboard." },
   ] });
-  expect(providerContent.endsWith("end-agent-whiteboard-turn-v3")).toBe(true);
-  expect(`${parsed.envelope}`).toContain("end-agent-whiteboard-turn-v3\n");
+  expect(providerContent.endsWith(nativeEnvelopeFooter.trimEnd())).toBe(true);
+  expect(`${parsed.envelope}`).toContain(nativeEnvelopeFooter);
   expect(modelRequest.body).not.toContain("browser-placeholder-key");
 
   await composer.fill("/compact");

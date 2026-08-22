@@ -115,6 +115,8 @@ describe("trusted parent HTML context controller", () => {
     const controller = createHTMLContextController({ doc: document, chooserHost, surface, frame, index, identity, idFactory: () => "I".repeat(32), epochFactory: () => "epoch_1", onAdd: added });
     expect(postMessage.mock.calls[0][0]).toEqual({ version: 1, type: "manifest", epoch: "epoch_1", components: [{ id: "main", type: "section" }] });
     expect(JSON.stringify(postMessage.mock.calls[0][0])).not.toContain("Main");
+    window.dispatchEvent(new MessageEvent("message", { data: { version: 1, type: "ready", epoch: "epoch_1" }, source: frame.contentWindow }));
+    expect(postMessage).toHaveBeenCalledTimes(1);
 
     const otherFrame = document.createElement("iframe");
     document.body.append(otherFrame);
@@ -135,6 +137,16 @@ describe("trusted parent HTML context controller", () => {
     expect(button.hidden).toBe(true);
     window.dispatchEvent(new MessageEvent("message", { data: { version: 1, type: "candidate", epoch: "epoch_1", id: "main", rect: { x: 0, y: 0, width: 20, height: 20 }, label: "forged" }, source: frame.contentWindow }));
     expect(button.hidden).toBe(true);
+    const channel = new MessageChannel();
+    window.dispatchEvent(new MessageEvent("message", {
+      data: { version: 1, type: "candidate", epoch: "epoch_1", id: "main", rect: { x: 0, y: 0, width: 20, height: 20 } },
+      source: frame.contentWindow,
+      ports: [channel.port1],
+    }));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    expect(button.hidden).toBe(true);
+    channel.port1.close();
+    channel.port2.close();
     button.click();
     expect(added).not.toHaveBeenCalled();
     controller.destroy();
@@ -154,6 +166,7 @@ describe("trusted parent HTML context controller", () => {
     expect(options.map(({ textContent }) => textContent)).toEqual(["Parent — section", "Child — table"]);
     options[1].click();
     await vi.waitFor(() => expect(added).toHaveBeenCalledOnce());
+    expect(chooser.open).toBe(false);
     expect(added.mock.calls[0][0]).toMatchObject({ kind: "component", label: "Child" });
     controller.destroy();
   });

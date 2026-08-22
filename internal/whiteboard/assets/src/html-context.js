@@ -309,11 +309,12 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
 
   function onMessage(event) {
     if (destroyed || event.source !== frame.contentWindow) return;
+    if (event.ports?.length) { dismiss(); return; }
     let message;
     try { message = decodeChildBridgeFrame(event.data); } catch { dismiss(); return; }
     if (message.epoch !== epoch) return;
     if (message.type === "clear") { dismiss(); return; }
-    if (message.type === "ready") { post({ version: HTML_BRIDGE_VERSION, type: "manifest", epoch, components: index.projection }); return; }
+    if (message.type === "ready") return;
     const component = index.byID.get(message.id);
     if (!component) { dismiss(); return; }
     schedule(component, message.rect);
@@ -326,6 +327,7 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
     try {
       const reference = componentReference(component, identity, idFactory());
       await onAdd(reference, component, { semanticOnly: button.dataset.visualFailed === "true" });
+      if (button !== addButton) chooser.open = false;
       button.dataset.state = "added";
       button.textContent = button === addButton ? "+ Add" : button.textContent;
       announce(`Added ${component.label} to the message.`);
