@@ -24,7 +24,9 @@ describe("Markdown semantic index", () => {
     ]);
     expect(headings[1].markdown).toContain("### Nested\ntwo");
     expect(headings[1].markdown).not.toContain("## Details\nthree");
-    expect(sectionReference(headings[0], identity, "S".repeat(32)).section_lines).toEqual({ start: 3, end: 14 });
+    const reference = sectionReference(headings[0], identity, "S".repeat(32));
+    expect(reference.section_lines).toEqual({ start: 3, end: 14 });
+    expect(reference.source.anchor.markdown.heading_path[0].title).toBe("Page");
   });
 
   test("maps a native selection to revision-pinned block anchors and Unicode scalar offsets", () => {
@@ -38,8 +40,9 @@ describe("Markdown semantic index", () => {
     selection.addRange(range);
     const reference = referenceFromSelection({ doc: document, container, index, identity, id: "T".repeat(32) });
     expect(reference.quote).toContain("😀 beta");
-    expect(reference.source.start.offset).toBe(6);
-    expect(reference.source.end.block).toBeGreaterThan(reference.source.start.block);
+    expect(reference.source.anchor.markdown.start.offset).toBe(6);
+    expect(reference.source.anchor.markdown.end.block).toBeGreaterThan(reference.source.anchor.markdown.start.block);
+    expect(Object.keys(reference.source)).toEqual(["resource_kind", "resource_id", "resource_updated_at", "context_digest", "anchor"]);
   });
 });
 

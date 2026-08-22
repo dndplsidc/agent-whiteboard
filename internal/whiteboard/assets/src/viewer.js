@@ -2,6 +2,7 @@ import createDOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import MarkdownIt from "markdown-it";
 import mermaid from "mermaid";
+import { createHTMLContextController, buildHTMLComponentIndex, decodeEmbeddedRaster } from "./html-context.js";
 import { createMarkdownContextController, imageReference, indexMarkdownTokens } from "./markdown-context.js";
 import { createMessageEditor, cloneMessageContent, insertMessageReference, messageContentBytes, normalizeMessageContent, renderMessageContent } from "./message-editor.js";
 import {
@@ -650,21 +651,6 @@ function validReferenceSource(value) {
   if (value.resource_kind === "markdown") return exactObject(value.anchor, ["markdown"]) && validMarkdownReferenceAnchor(value.anchor.markdown);
   if (value.resource_kind === "html") return exactObject(value.anchor, ["html"]) && validHTMLReferenceAnchor(value.anchor.html);
   return false;
-}
-
-function nestedMarkdownReference(reference) {
-  const source = reference?.source;
-  if (!source || source.anchor !== undefined || !exactObject(source, ["resource_kind", "resource_id", "resource_updated_at", "context_digest", "heading_path", "start", "end"])) return reference;
-  return {
-    ...reference,
-    source: {
-      resource_kind: source.resource_kind,
-      resource_id: source.resource_id,
-      resource_updated_at: source.resource_updated_at,
-      context_digest: source.context_digest,
-      anchor: { markdown: { heading_path: structuredClone(source.heading_path), start: { ...source.start }, end: { ...source.end } } },
-    },
-  };
 }
 
 function validReferenceVisual(value, event) {
@@ -3214,11 +3200,68 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         throw new Error("The Page Agent draft changed while preparing this image.");
       }
       draft.inlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size, deletedImageIDs: deletedIDs });
-      const reference = nestedMarkdownReference(imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name));
-      if (owner === controller) messageEditor.insertReference(reference);
-      else draft.content = insertMessageReference(draft.content, reference, insertionCaret).content;
+      const reference = imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name);
+      try {
+        if (owner === controller) messageEditor.insertReference(reference);
+        else draft.content = insertMessageReference(draft.content, reference, insertionCaret).content;
+      } catch (error) {
+        draft.inlineVisuals.delete(staged.image_id);
+        deleteCapturedImage(ownerTransport, staged.image_id, conversationID, deletedIDs);
+        throw error;
+      }
       announce(`Added ${reference.label} to the message.`);
       return reference;
+    } finally {
+      draft.inlineClaims.delete(claim);
+    }
+  }
+
+  async function addComponentReference(reference, component, { semanticOnly = false } = {}) {
+    setOpen(true, { focus: false });
+    showView("conversation", { focus: false });
+    if (!component?.raster || reference?.component?.type !== "image" || semanticOnly || !state.connected || !selectedModelSupportsImages() || !transport.conversationID) {
+      const content = messageEditor.insertReference(reference);
+      updateComposerAvailability();
+      return content;
+    }
+    if (draftAttachments.length + draftInlineVisuals.size >= MAX_AGENT_IMAGES_PER_TURN) throw new Error(`A message can contain at most ${MAX_AGENT_IMAGES_PER_TURN} images.`);
+    const owner = controller;
+    const ownerTransport = owner.transport;
+    const draft = owner.composerDraft;
+    const generation = draft.generation;
+    const conversationID = ownerTransport.conversationID;
+    const insertionCaret = messageEditor.saveCaret();
+    const claim = {};
+    const deletedIDs = new Set();
+    draft.inlineClaims.add(claim);
+    const stillOwned = () => !destroyed && owner.composerDraft === draft && draft.generation === generation && draft.inlineClaims.has(claim) && ownerTransport.conversationID === conversationID;
+    try {
+      const decoded = decodeEmbeddedRaster(component.raster, doc.defaultView);
+      const extension = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" }[decoded.mediaType];
+      const name = `component-${component.ordinal}.${extension}`;
+      const FileType = doc.defaultView?.File;
+      const blob = new doc.defaultView.Blob([decoded.bytes], { type: decoded.mediaType });
+      const file = FileType ? new FileType([blob], name, { type: decoded.mediaType }) : Object.assign(blob, { name });
+      const aggregate = draft.attachments.reduce((total, item) => total + item.file.size, 0) + [...draft.inlineVisuals.values()].reduce((total, item) => total + item.bytes, 0) + file.size;
+      if (aggregate > MAX_AGENT_TURN_IMAGE_BYTES) throw new Error("A message can contain at most 20 MiB of image data.");
+      if (!stillOwned()) throw new Error("The Page Agent draft changed while preparing this image.");
+      const staged = await ownerTransport.uploadImage(file, conversationID, undefined, "inline_reference");
+      if (!stillOwned()) {
+        deleteCapturedImage(ownerTransport, staged.image_id, conversationID, deletedIDs);
+        throw new Error("The Page Agent draft changed while preparing this image.");
+      }
+      draft.inlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size, deletedImageIDs: deletedIDs });
+      const visualReference = { ...reference, visual: { image_id: staged.image_id, name, alt: component.label } };
+      try {
+        if (owner === controller) messageEditor.insertReference(visualReference);
+        else draft.content = insertMessageReference(draft.content, visualReference, insertionCaret).content;
+      } catch (error) {
+        draft.inlineVisuals.delete(staged.image_id);
+        deleteCapturedImage(ownerTransport, staged.image_id, conversationID, deletedIDs);
+        throw error;
+      }
+      updateComposerAvailability();
+      return visualReference;
     } finally {
       draft.inlineClaims.delete(claim);
     }
@@ -4350,11 +4393,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     addReference(reference) {
       setOpen(true, { focus: false });
       showView("conversation");
-      const content = messageEditor.insertReference(nestedMarkdownReference(reference));
+      const content = messageEditor.insertReference(reference);
       updateComposerAvailability();
       return content;
     },
     addImageReference: addInlineImage,
+    addComponentReference,
     announce,
     destroy() {
       destroyed = true;
@@ -4408,9 +4452,20 @@ async function bootHTMLHost(payload, doc) {
       mediaQuery: browserMediaQuery(doc),
     });
     let agent;
+    let context;
     try {
-      agent = createAgentDrawer({ payload, doc });
+      agent = createAgentDrawer({ payload, doc, onReference: (reference) => context?.navigate(reference) ?? false });
+      const index = buildHTMLComponentIndex(payload.source);
+      context = createHTMLContextController({
+        doc, surface, frame, index,
+        identity: { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest },
+        idFactory: generateAgentID,
+        onAdd: (reference, component, options) => agent.addComponentReference(reference, component, options),
+        announce: (messageText) => agent.announce(messageText),
+      });
     } catch (error) {
+      context?.destroy();
+      agent?.destroy();
       theme.destroy();
       throw error;
     }
@@ -4423,10 +4478,12 @@ async function bootHTMLHost(payload, doc) {
       frame,
       theme,
       agent,
+      context,
       destroy() {
         if (destroyed) return;
         destroyed = true;
         if (appBar[HTML_HOST_INSTANCE] === viewer) appBar[HTML_HOST_INSTANCE] = undefined;
+        context.destroy();
         agent.destroy();
         theme.destroy();
       },

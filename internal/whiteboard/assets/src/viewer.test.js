@@ -102,10 +102,10 @@ describe("Markdown rendering", () => {
     viewer.destroy();
   });
 
-  test("boots the shared Page Agent around a preserved HTML iframe without references", async () => {
+  test("boots the shared Page Agent and trusted component context around a preserved HTML iframe", async () => {
     const payload = agentPayload({
       kind: "html",
-      source: "<!doctype html><html><head><title>Publisher</title></head><body>exact</body></html>",
+      source: "<!doctype html><html><head><title>Publisher</title></head><body><section id=\"main\"><h2>Overview</h2></section></body></html>",
       local_agent: { ...agentPayload().local_agent, resource: { ...agentPayload().local_agent.resource, kind: "html" } },
     });
     document.body.innerHTML = `
@@ -125,7 +125,12 @@ describe("Markdown rendering", () => {
     expect(document.querySelector("#agent-whiteboard-app-bar-theme [data-theme-control]")).not.toBeNull();
     expect(document.querySelector("#agent-whiteboard-app-bar-agent .agent-toggle")).not.toBeNull();
     expect(document.querySelector("#agent-whiteboard-agent-drawer")).not.toBeNull();
-    expect(viewer.context).toBeUndefined();
+    expect(viewer.context).toBeDefined();
+    expect(viewer.context.index.components.map(({ id }) => id)).toEqual(["main"]);
+    expect(document.querySelector(".agent-html-chooser")?.textContent).toContain("Overview");
+    document.querySelector(".agent-html-chooser button").click();
+    await vi.waitFor(() => expect(viewer.agent.elements.message.querySelector('[data-reference-kind="component"]')?.textContent).toBe("Overview"));
+    expect(viewer.agent.open).toBe(true);
     expect(viewer.kind).toBe("html");
     const rebooted = await bootViewer(document);
     expect(rebooted).toBe(viewer);
@@ -137,6 +142,7 @@ describe("Markdown rendering", () => {
     expect(document.body.textContent).not.toContain("Add selection");
     viewer.destroy();
     expect(document.querySelector("#agent-whiteboard-html-content")).toBe(frame);
+    expect(document.querySelector(".agent-html-chooser")).toBeNull();
 
     const [concurrentA, concurrentB] = await Promise.all([bootViewer(document), bootViewer(document)]);
     expect(concurrentA).toBe(concurrentB);
@@ -2130,6 +2136,43 @@ describe("local agent rendering and controls", () => {
       ] },
     });
     expect(transport.send.mock.calls[0][0].payload.images).toBeUndefined();
+    drawer.destroy();
+  });
+
+  test("stages source-declared component rasters atomically and does not silently downgrade failures", async () => {
+    let options;
+    const failure = new Error("stage failed");
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(),
+      uploadImage: vi.fn().mockRejectedValueOnce(failure).mockResolvedValue({ image_id: agentIDs.archive, media_type: "image/png", bytes: 8 }), deleteImage: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true }));
+    const reference = {
+      id: "H".repeat(32), kind: "component", label: "Pixel", source: { resource_kind: "html", resource_id: agentIDs.resource, resource_updated_at: "2026-07-27T02:03:04Z", context_digest: "0".repeat(64), anchor: { html: { element_id: "pixel", tag: "img", ordinal: 1 } } },
+      component: { type: "image", source_excerpt: '<img id="pixel" alt="Pixel">' },
+    };
+    const component = { label: "Pixel", ordinal: 1, raster: { mediaType: "image/png", dataURL: "data:image/png;base64,iVBORw0KGgo=" } };
+    await expect(drawer.addComponentReference(reference, component)).rejects.toThrow("stage failed");
+    expect(drawer.elements.message.querySelector(".agent-message-reference")).toBeNull();
+    drawer.elements.message.value = "x".repeat(MAX_AGENT_MESSAGE_BYTES);
+    await expect(drawer.addComponentReference(reference, component)).rejects.toThrow("message content is too large");
+    await vi.waitFor(() => expect(transport.deleteImage).toHaveBeenCalledWith(agentIDs.archive, agentIDs.conversation));
+    drawer.elements.message.value = "";
+    await drawer.addComponentReference(reference, component);
+    expect(transport.uploadImage).toHaveBeenLastCalledWith(expect.any(File), agentIDs.conversation, undefined, "inline_reference");
+    expect(drawer.elements.message.querySelector('[data-reference-kind="component"]')?.textContent).toBe("Pixel");
+    drawer.destroy();
+  });
+
+  test("keeps an embedded image component semantic when image staging is unavailable", async () => {
+    const transport = { clientID: agentIDs.message, conversationID: null, consented: false, probe: vi.fn(async () => ({ ok: false, code: "broker_unavailable" })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(), uploadImage: vi.fn(), deleteImage: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: () => transport });
+    const reference = { id: "H".repeat(32), kind: "component", label: "Pixel", source: { resource_kind: "html", resource_id: agentIDs.resource, resource_updated_at: "2026-07-27T02:03:04Z", context_digest: "0".repeat(64), anchor: { html: { element_id: "pixel", tag: "img", ordinal: 1 } } }, component: { type: "image", source_excerpt: '<img id="pixel" alt="Pixel">' } };
+    await drawer.addComponentReference(reference, { label: "Pixel", ordinal: 1, raster: { mediaType: "image/png", dataURL: "data:image/png;base64,iVBORw0KGgo=" } });
+    expect(transport.uploadImage).not.toHaveBeenCalled();
+    expect(drawer.elements.message.querySelector('[data-reference-kind="component"]')?.textContent).toBe("Pixel");
     drawer.destroy();
   });
 

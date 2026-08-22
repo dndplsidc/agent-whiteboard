@@ -34,6 +34,12 @@ describe("ordered message model", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector(".agent-message-reference-label")?.textContent).toBe("<img onerror=alert(1)>");
     expect(container.textContent).toBe("before <img onerror=alert(1)> after");
+
+    const component = reference("component", "Revenue");
+    component.kind = "component";
+    const componentContainer = document.createElement("div");
+    componentContainer.append(renderMessageContent(document, { parts: [{ type: "reference", reference: component }] }));
+    expect(componentContainer.querySelector(".agent-message-reference")?.getAttribute("aria-label")).toBe("Component: Revenue");
   });
 });
 

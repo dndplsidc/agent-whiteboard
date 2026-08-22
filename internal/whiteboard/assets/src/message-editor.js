@@ -102,7 +102,7 @@ export function insertMessageReference(content, reference, caret) {
 }
 
 function referenceLabel(reference) {
-  const kind = reference.kind === "section" ? "Section" : reference.kind === "image" ? "Image" : "Selection";
+  const kind = reference.kind === "section" ? "Section" : reference.kind === "image" ? "Image" : reference.kind === "component" ? "Component" : "Selection";
   return `${kind}: ${reference.label}`;
 }
 

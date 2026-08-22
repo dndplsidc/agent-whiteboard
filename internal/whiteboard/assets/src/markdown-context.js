@@ -102,9 +102,11 @@ export function referenceFromSelection({ doc, container, index, identity, id }) 
       resource_id: identity.resource.id,
       resource_updated_at: identity.resource.updated_at,
       context_digest: identity.digest,
-      heading_path: cloneHeadingPath(start.headingPath),
-      start: { block: Number(start.id), line: start.startLine, offset: endpointOffset(doc, startElement, range.startContainer, range.startOffset) },
-      end: { block: Number(end.id), line: end.startLine, offset: endpointOffset(doc, endElement, range.endContainer, range.endOffset) },
+      anchor: { markdown: {
+        heading_path: cloneHeadingPath(start.headingPath),
+        start: { block: Number(start.id), line: start.startLine, offset: endpointOffset(doc, startElement, range.startContainer, range.startOffset) },
+        end: { block: Number(end.id), line: end.startLine, offset: endpointOffset(doc, endElement, range.endContainer, range.endOffset) },
+      } },
     },
   };
 }
@@ -115,9 +117,11 @@ function sourceBase(identity, metadata) {
     resource_id: identity.resource.id,
     resource_updated_at: identity.resource.updated_at,
     context_digest: identity.digest,
-    heading_path: cloneHeadingPath(metadata.headingPath),
-    start: { block: Number(metadata.id ?? metadata.block), line: metadata.startLine, offset: 0 },
-    end: { block: Number(metadata.id ?? metadata.block), line: metadata.endLine, offset: 0 },
+    anchor: { markdown: {
+      heading_path: cloneHeadingPath(metadata.headingPath),
+      start: { block: Number(metadata.id ?? metadata.block), line: metadata.startLine, offset: 0 },
+      end: { block: Number(metadata.id ?? metadata.block), line: metadata.endLine, offset: 0 },
+    } },
   };
 }
 
@@ -239,8 +243,8 @@ export function createMarkdownContextController({ doc = document, container, ind
 
   return {
     navigate(reference) {
-      if (reference?.source?.resource_id !== identity.resource.id || reference?.source?.context_digest !== identity.digest) return false;
-      const target = container.querySelector(`[data-agent-block="${reference.source.start.block}"]`);
+      if (reference?.source?.resource_kind !== "markdown" || reference.source.resource_id !== identity.resource.id || reference.source.resource_updated_at !== identity.resource.updated_at || reference.source.context_digest !== identity.digest) return false;
+      const target = container.querySelector(`[data-agent-block="${reference.source.anchor?.markdown?.start.block}"]`);
       if (!target) return false;
       target.scrollIntoView?.({ block: "center", behavior: "smooth" });
       pulse(target);

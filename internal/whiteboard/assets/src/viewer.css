@@ -1976,6 +1976,10 @@ body.agent-drawer-modal-open .agent-toast {
   content: "▧";
 }
 
+.agent-message-reference[data-reference-kind="component"]::before {
+  content: "◇";
+}
+
 .agent-message-skill {
   background: color-mix(in srgb, var(--awb-link) 12%, var(--awb-surface));
   border: 1px solid color-mix(in srgb, var(--awb-link) 44%, var(--awb-border));
@@ -2144,6 +2148,86 @@ body.agent-drawer-modal-open .agent-toast {
   color: var(--awb-link);
 }
 
+.agent-html-outline {
+  border: 2px solid var(--awb-link);
+  border-radius: 0.5rem;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--awb-surface) 82%, transparent);
+  box-sizing: border-box;
+  pointer-events: none;
+  position: fixed;
+  z-index: 30;
+}
+
+.agent-html-add {
+  position: fixed;
+  z-index: 31;
+}
+
+.agent-html-add[data-state="added"] {
+  border-color: color-mix(in srgb, var(--awb-link) 55%, var(--awb-border));
+  color: var(--awb-link);
+}
+
+.agent-html-add[data-state="error"],
+.agent-html-chooser button[data-state="error"] {
+  border-color: #c2410c;
+  color: #9a3412;
+}
+
+.agent-html-chooser {
+  background: color-mix(in srgb, var(--awb-surface) 96%, transparent);
+  border: 1px solid var(--awb-border);
+  border-radius: 0.65rem;
+  box-shadow: var(--awb-shadow);
+  color: var(--awb-foreground);
+  font-size: 0.75rem;
+  left: 0.65rem;
+  max-height: calc(100% - 1.3rem);
+  max-width: min(22rem, calc(100% - 1.3rem));
+  overflow: auto;
+  position: absolute;
+  top: 0.65rem;
+  z-index: 29;
+}
+
+.agent-html-chooser summary {
+  cursor: pointer;
+  font-weight: 650;
+  padding: 0.4rem 0.6rem;
+}
+
+.agent-html-chooser ol {
+  display: grid;
+  gap: 0.2rem;
+  list-style: none;
+  margin: 0;
+  max-height: min(24rem, 60dvh);
+  overflow: auto;
+  padding: 0 0.35rem 0.35rem;
+}
+
+.agent-html-chooser button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0.42rem;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.38rem 0.48rem;
+  text-align: left;
+  width: 100%;
+}
+
+.agent-html-chooser button:hover {
+  background: var(--awb-accent-soft);
+}
+
+.agent-html-chooser button:focus-visible,
+.agent-html-add:focus-visible {
+  outline: 2px solid var(--awb-link);
+  outline-offset: 2px;
+}
+
 .agent-source-added {
   animation: agent-source-pulse 850ms ease-out;
 }
@@ -2166,7 +2250,9 @@ body.agent-drawer-modal-open .agent-toast {
 @media (prefers-reduced-motion: reduce) {
   .agent-source-added { animation: none; }
   .agent-section-action,
-  .agent-image-source-action { transition: none; }
+  .agent-image-source-action,
+  .agent-html-add,
+  .agent-html-outline { transition: none; }
 }
 
 .agent-image-picker {
