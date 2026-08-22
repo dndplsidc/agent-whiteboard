@@ -302,6 +302,8 @@ func (queue *Queue) Items() []protocol.QueueItem {
 }
 
 func referencesAreImmutable(before, after provider.MessageContent) bool {
+	before = before.Clone()
+	after = after.Clone()
 	old := make(map[string]provider.ContextReference)
 	for _, part := range before.Parts {
 		if part.Reference != nil {

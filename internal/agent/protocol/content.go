@@ -87,11 +87,6 @@ type ReferenceSource struct {
 	ResourceUpdatedAt time.Time       `json:"resource_updated_at"`
 	ContextDigest     string          `json:"context_digest"`
 	Anchor            ReferenceAnchor `json:"anchor"`
-	// Deprecated internal compatibility projection. These fields are never
-	// accepted from or emitted onto the v5 wire.
-	HeadingPath []HeadingReference `json:"-"`
-	Start       SourceAnchor       `json:"-"`
-	End         SourceAnchor       `json:"-"`
 }
 
 type ReferenceAnchor struct {
@@ -124,7 +119,7 @@ func (source ReferenceSource) MarshalJSON() ([]byte, error) {
 		ContextDigest     string          `json:"context_digest"`
 		Anchor            ReferenceAnchor `json:"anchor"`
 	}
-	return marshalApplicationJSON(wire{source.ResourceKind, source.ResourceID, source.ResourceUpdatedAt, source.ContextDigest, effectiveReferenceAnchor(source)})
+	return marshalApplicationJSON(wire{source.ResourceKind, source.ResourceID, source.ResourceUpdatedAt, source.ContextDigest, source.Anchor})
 }
 
 type HeadingReference struct {
@@ -326,7 +321,7 @@ func validateContextReference(reference ContextReference, event bool) error {
 }
 
 func validateReferenceSource(source ReferenceSource) error {
-	anchorUnion := effectiveReferenceAnchor(source)
+	anchorUnion := source.Anchor
 	if !validID(source.ResourceID) || source.ResourceUpdatedAt.IsZero() || !validDigest(source.ContextDigest) || (anchorUnion.Markdown == nil) == (anchorUnion.HTML == nil) {
 		return errors.New("invalid reference source")
 	}
@@ -350,16 +345,6 @@ func validateReferenceSource(source ReferenceSource) error {
 		return nil
 	}
 	return errors.New("reference resource kind does not match anchor")
-}
-
-func effectiveReferenceAnchor(source ReferenceSource) ReferenceAnchor {
-	if source.Anchor.Markdown != nil || source.Anchor.HTML != nil {
-		return source.Anchor
-	}
-	if validAnchor(source.Start) && validAnchor(source.End) {
-		return ReferenceAnchor{Markdown: &MarkdownReferenceAnchor{HeadingPath: source.HeadingPath, Start: source.Start, End: source.End}}
-	}
-	return source.Anchor
 }
 
 func (kind ComponentType) Valid() bool {
@@ -410,7 +395,7 @@ func compareAnchors(left, right SourceAnchor) int {
 
 func referenceBytes(reference ContextReference) int {
 	total := len(reference.ID) + len(reference.Label) + len(reference.Quote) + len(reference.Markdown) + len(reference.Source.ResourceID) + len(reference.Source.ContextDigest)
-	anchorUnion := effectiveReferenceAnchor(reference.Source)
+	anchorUnion := reference.Source.Anchor
 	if anchorUnion.Markdown != nil {
 		for _, heading := range anchorUnion.Markdown.HeadingPath {
 			total += len(heading.Title)
@@ -430,7 +415,7 @@ func referenceBytes(reference ContextReference) int {
 
 func cloneContextReference(reference ContextReference) ContextReference {
 	result := reference
-	anchorUnion := effectiveReferenceAnchor(reference.Source)
+	anchorUnion := reference.Source.Anchor
 	if anchorUnion.Markdown != nil {
 		anchor := *anchorUnion.Markdown
 		anchor.HeadingPath = append([]HeadingReference(nil), anchor.HeadingPath...)
