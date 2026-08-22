@@ -4457,7 +4457,7 @@ async function bootHTMLHost(payload, doc) {
       agent = createAgentDrawer({ payload, doc, onReference: (reference) => context?.navigate(reference) ?? false });
       const index = buildHTMLComponentIndex(payload.source);
       context = createHTMLContextController({
-        doc, surface, frame, index,
+        doc, chooserHost: themeSlot, surface, frame, index,
         identity: { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest },
         idFactory: generateAgentID,
         onAdd: (reference, component, options) => agent.addComponentReference(reference, component, options),

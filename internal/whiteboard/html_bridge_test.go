@@ -8,23 +8,52 @@ import (
 )
 
 func TestInjectHTMLBridgePreservesSourceOutsideEarlyScript(t *testing.T) {
-	source := []byte("<!DOCTYPE HTML>\n<HTML><HeAd data-x='1'>\n<script>publisher()</script></HeAd><body>exact & bytes</body></HTML>")
+	source := []byte(" \n<!--before-->\n\xef\xbb\xbf \n<!DOCTYPE HTML>\n<HTML><HeAd data-x='1'>\n<script>publisher()</script></HeAd><body>exact & bytes</body></HTML>")
 	bridge := []byte("(()=>{globalThis.bridge=true})()")
 
 	got, err := injectHTMLBridge(source, bridge)
 	require.NoError(t, err)
 	injected := append(append([]byte("<script>"), bridge...), []byte("</script>")...)
-	require.Equal(t, append([]byte("<!DOCTYPE HTML>\n<HTML><HeAd data-x='1'>"), append(injected, []byte("\n<script>publisher()</script></HeAd><body>exact & bytes</body></HTML>")...)...), got)
+	require.Equal(t, append([]byte(" \n<!--before-->\n\xef\xbb\xbf \n<!DOCTYPE HTML>\n<HTML><HeAd data-x='1'>"), append(injected, []byte("\n<script>publisher()</script></HeAd><body>exact & bytes</body></HTML>")...)...), got)
 	require.Equal(t, source, bytes.Replace(got, injected, nil, 1))
 }
 
-func TestInjectHTMLBridgeFailsClosedForUnsafeBridgeOrMissingHead(t *testing.T) {
+func TestInjectHTMLBridgeFallsBackAtomicallyForPublisherContentBeforeExplicitHead(t *testing.T) {
+	allowedPrefix := []byte("<!DOCTYPE html>\n<!--exact comment-->\n<HTML data-x='1'>\n  ")
+	bridge := []byte("safe()")
+	for _, prefix := range []string{
+		"<script>publisher()</script>",
+		"<meta charset='utf-8'>",
+		"<body>publisher</body>",
+		"publisher text",
+		"</HTML>",
+		"<?publisher execute?>",
+	} {
+		source := append(append(append([]byte{}, allowedPrefix...), []byte(prefix)...), []byte("<HeAd></HeAd><body>exact</body></HTML>")...)
+		got, err := injectHTMLBridge(source, bridge)
+		require.NoError(t, err, prefix)
+		require.Equal(t, source, got, prefix)
+		require.NotContains(t, string(got), "<script>safe()</script>", prefix)
+	}
+
+	missingHead := []byte("<!doctype html><html><body>legacy</body></html>")
+	got, err := injectHTMLBridge(missingHead, bridge)
+	require.NoError(t, err)
+	require.Equal(t, missingHead, got)
+
+	source := append(append([]byte{}, allowedPrefix...), []byte("<HeAd></HeAd><body>exact</body></HTML>")...)
+	got, err = injectHTMLBridge(source, bridge)
+	require.NoError(t, err)
+	injected := []byte("<script>safe()</script>")
+	require.Equal(t, source, bytes.Replace(got, injected, nil, 1))
+}
+
+func TestInjectHTMLBridgeFailsClosedForUnsafeBridge(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		source []byte
 		bridge []byte
 	}{
-		{name: "missing head", source: []byte("<!doctype html><html><body>x</body></html>"), bridge: []byte("safe()")},
 		{name: "empty bridge", source: []byte("<!doctype html><html><head></head><body></body></html>")},
 		{name: "script terminator", source: []byte("<!doctype html><html><head></head><body></body></html>"), bridge: []byte(`const x="</ScRiPt>"`)},
 	} {

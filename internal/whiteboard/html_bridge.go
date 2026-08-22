@@ -2,12 +2,10 @@ package whiteboard
 
 import (
 	"bytes"
-	"io"
-	"strings"
+	"errors"
 	"unicode/utf8"
 
 	"github.com/edocsss/agent-whiteboard/internal/common"
-	"golang.org/x/net/html"
 )
 
 var (
@@ -26,30 +24,18 @@ func injectHTMLBridge(source, bridge []byte) ([]byte, error) {
 		return nil, common.NewError(common.CodeInternal, "could not locate HTML head for bridge injection", nil)
 	}
 
-	tokenizer := html.NewTokenizer(bytes.NewReader(source))
-	offset := 0
-	for {
-		tokenType := tokenizer.Next()
-		raw := tokenizer.Raw()
-		offset += len(raw)
-		switch tokenType {
-		case html.StartTagToken:
-			token := tokenizer.Token()
-			if strings.EqualFold(token.Data, "head") {
-				result := make([]byte, 0, len(source)+len(bridgeScriptStart)+len(bridge)+len(bridgeScriptEnd))
-				result = append(result, source[:offset]...)
-				result = append(result, bridgeScriptStart...)
-				result = append(result, bridge...)
-				result = append(result, bridgeScriptEnd...)
-				result = append(result, source[offset:]...)
-				return result, nil
-			}
-		case html.ErrorToken:
-			err := tokenizer.Err()
-			if err != nil && err != io.EOF {
-				return nil, common.NewError(common.CodeInternal, "could not locate HTML head for bridge injection", err)
-			}
-			return nil, common.NewError(common.CodeInternal, "could not locate HTML head for bridge injection", nil)
-		}
+	offset, err := htmlHeadStartOffset(source)
+	if errors.Is(err, errPublisherContentBeforeHead) {
+		return bytes.Clone(source), nil
 	}
+	if err != nil {
+		return nil, common.NewError(common.CodeInternal, "could not locate safe HTML head for bridge injection", err)
+	}
+	result := make([]byte, 0, len(source)+len(bridgeScriptStart)+len(bridge)+len(bridgeScriptEnd))
+	result = append(result, source[:offset]...)
+	result = append(result, bridgeScriptStart...)
+	result = append(result, bridge...)
+	result = append(result, bridgeScriptEnd...)
+	result = append(result, source[offset:]...)
+	return result, nil
 }

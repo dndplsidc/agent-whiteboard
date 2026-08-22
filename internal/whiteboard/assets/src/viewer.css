@@ -8,6 +8,7 @@
   --awb-link: #0b63ce;
   --awb-error-background: #fff1f1;
   --awb-error-border: #dc3545;
+  --awb-error-text: #9a3412;
   --awb-surface: #ffffff;
   --awb-surface-translucent: rgb(255 255 255 / 94%);
   --awb-accent-soft: #edf5ff;
@@ -25,6 +26,7 @@
   --awb-link: #74b7ff;
   --awb-error-background: #321b1d;
   --awb-error-border: #ff7b86;
+  --awb-error-text: #ffb4a2;
   --awb-surface: #1c2229;
   --awb-surface-translucent: rgb(28 34 41 / 96%);
   --awb-accent-soft: #182a3e;
@@ -88,6 +90,7 @@ body.agent-whiteboard-html-host {
 #agent-whiteboard-app-bar-agent {
   align-items: center;
   display: flex;
+  gap: 0.4rem;
   min-width: 0;
 }
 
@@ -2170,40 +2173,53 @@ body.agent-drawer-modal-open .agent-toast {
 
 .agent-html-add[data-state="error"],
 .agent-html-chooser button[data-state="error"] {
-  border-color: #c2410c;
-  color: #9a3412;
+  border-color: var(--awb-error-border);
+  color: var(--awb-error-text);
 }
 
 .agent-html-chooser {
-  background: color-mix(in srgb, var(--awb-surface) 96%, transparent);
+  background: var(--awb-surface);
   border: 1px solid var(--awb-border);
-  border-radius: 0.65rem;
-  box-shadow: var(--awb-shadow);
+  border-radius: 0.55rem;
   color: var(--awb-foreground);
+  flex: none;
   font-size: 0.75rem;
-  left: 0.65rem;
-  max-height: calc(100% - 1.3rem);
-  max-width: min(22rem, calc(100% - 1.3rem));
-  overflow: auto;
-  position: absolute;
-  top: 0.65rem;
-  z-index: 29;
+  position: relative;
 }
 
 .agent-html-chooser summary {
   cursor: pointer;
   font-weight: 650;
+  list-style-position: inside;
   padding: 0.4rem 0.6rem;
+  white-space: nowrap;
+}
+
+.agent-html-chooser ol,
+.agent-html-chooser > p {
+  background: var(--awb-surface);
+  border: 1px solid var(--awb-border);
+  border-radius: 0.65rem;
+  box-shadow: var(--awb-shadow);
+  left: calc(-2.625rem - 0.4rem);
+  margin: 0.25rem 0 0;
+  max-height: min(24rem, 60dvh);
+  overflow: auto;
+  position: absolute;
+  top: 100%;
+  width: min(22rem, calc(100vw - 1rem));
+  z-index: 39;
 }
 
 .agent-html-chooser ol {
   display: grid;
   gap: 0.2rem;
   list-style: none;
-  margin: 0;
-  max-height: min(24rem, 60dvh);
-  overflow: auto;
-  padding: 0 0.35rem 0.35rem;
+  padding: 0.35rem;
+}
+
+.agent-html-chooser > p {
+  padding: 0.6rem;
 }
 
 .agent-html-chooser button {
@@ -2220,6 +2236,17 @@ body.agent-drawer-modal-open .agent-toast {
 
 .agent-html-chooser button:hover {
   background: var(--awb-accent-soft);
+}
+
+@media (max-width: 40rem) {
+  .agent-html-chooser summary {
+    font-size: 0;
+  }
+
+  .agent-html-chooser summary::after {
+    content: "Parts";
+    font-size: 0.7rem;
+  }
 }
 
 .agent-html-chooser button:focus-visible,

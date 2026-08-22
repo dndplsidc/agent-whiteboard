@@ -6,9 +6,12 @@ const EXCLUDED_SELECTOR = "nav,header,footer,form,input,button,select,textarea,o
 const LABEL_BYTES = 256;
 const EXCERPT_BYTES = 48 * 1024;
 const RASTER_PATTERN = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/iu;
+const sourceIDCache = new WeakMap();
 
 function normalizeText(value) { return (value ?? "").replace(/\s+/gu, " ").trim(); }
-function bounded(value, bytes) { return value.length > 0 && encoder.encode(value).length <= bytes; }
+function bounded(value, bytes) {
+  return value.length > 0 && encoder.encode(value).length <= bytes && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+}
 
 function parserFor(options) {
   const Parser = options?.DOMParser ?? globalThis.DOMParser;
@@ -16,11 +19,27 @@ function parserFor(options) {
   return new Parser();
 }
 
+function sourceIDs(doc) {
+  let result = sourceIDCache.get(doc);
+  if (result) return result;
+  result = new Map();
+  for (const element of doc.querySelectorAll("[id]")) {
+    const matches = result.get(element.id) ?? [];
+    matches.push(element);
+    result.set(element.id, matches);
+  }
+  sourceIDCache.set(doc, result);
+  return result;
+}
+
 function labelledBy(element, doc) {
   const ids = normalizeText(element.getAttribute("aria-labelledby")).split(" ").filter(Boolean);
   if (!ids.length) return "";
-  const labels = ids.map((id) => doc.getElementById(id)).filter(Boolean).map((item) => normalizeText(item.textContent)).filter(Boolean);
-  return labels.length === ids.length ? normalizeText(labels.join(" ")) : "";
+  const index = sourceIDs(doc);
+  const labels = ids.map((id) => index.get(id) ?? []);
+  if (labels.some((matches) => matches.length !== 1)) return "";
+  const text = labels.map(([item]) => normalizeText(item.textContent));
+  return text.every(Boolean) ? normalizeText(text.join(" ")) : "";
 }
 
 function codeLanguage(element) {
@@ -31,21 +50,25 @@ function codeLanguage(element) {
   return match ? `${match[1]} code` : "";
 }
 
+function fallbackPreview(value) { return [...normalizeText(value)].slice(0, 160).join(""); }
+
 function fallbackLabel(element, type) {
   if (type === "section") return normalizeText(element.querySelector("h1,h2,h3,h4,h5,h6")?.textContent);
   if (type === "image" || type === "chart") {
     if (element.matches("figure")) return normalizeText(element.querySelector(":scope > figcaption")?.textContent || element.querySelector("img")?.getAttribute("alt"));
-    return normalizeText(element.getAttribute("alt") || element.querySelector("title")?.textContent);
+    return normalizeText(element.getAttribute("alt") || element.querySelector("img")?.getAttribute("alt") || element.querySelector("title")?.textContent);
   }
   if (type === "table") return normalizeText(element.querySelector(":scope > caption")?.textContent);
-  if (type === "code") return codeLanguage(element) || normalizeText(element.textContent).slice(0, 160);
-  if (type === "quote") return normalizeText(element.textContent).slice(0, 160);
+  if (type === "code") return codeLanguage(element) || fallbackPreview(element.textContent);
+  if (type === "quote") return fallbackPreview(element.textContent);
   return "";
 }
 
 function labelFor(element, type, doc) {
-  const value = labelledBy(element, doc) || normalizeText(element.getAttribute("aria-label")) || fallbackLabel(element, type);
-  return bounded(value, LABEL_BYTES) ? value : "";
+  for (const value of [labelledBy(element, doc), normalizeText(element.getAttribute("aria-label")), fallbackLabel(element, type)]) {
+    if (bounded(value, LABEL_BYTES)) return value;
+  }
+  return "";
 }
 
 function meaningfulImage(image) {
@@ -75,6 +98,7 @@ function automaticType(element) {
 
 function declarationState(doc) {
   const declarations = [...doc.querySelectorAll("[data-agent-select],[data-agent-section],[data-agent-section-ignore]")];
+  const idCounts = new Map([...sourceIDs(doc)].map(([id, matches]) => [id, matches.length]));
   const explicitIDs = new Set();
   for (const element of declarations) {
     const hasSelect = element.hasAttribute("data-agent-select");
@@ -86,9 +110,9 @@ function declarationState(doc) {
     const type = shorthand ? "section" : hasSelect && select !== "none" ? select : "";
     if (!type) continue;
     const id = element.id;
-    if (!id || explicitIDs.has(id)) return { valid: false };
+    if (!bounded(id, 256) || id.trim() !== id || explicitIDs.has(id) || idCounts.get(id) !== 1) return { valid: false };
     explicitIDs.add(id);
-    if (!labelFor(element, type, doc)) return { valid: false };
+    if (excluded(element, type) || !labelFor(element, type, doc)) return { valid: false };
   }
   return { valid: true };
 }
@@ -107,9 +131,13 @@ function excluded(element, explicitType) {
 function rasterFor(element, type) {
   if (type !== "image") return undefined;
   const images = element.matches("img") ? [element] : [...element.querySelectorAll("img")];
-  const eligible = images.map((image) => RASTER_PATTERN.exec(image.getAttribute("src") || "")).filter(Boolean);
-  if (eligible.length !== 1 || images.length !== 1) return undefined;
-  const [, mediaType, base64] = eligible[0];
+  if (images.length !== 1 || element.matches("svg,canvas") || element.querySelector("svg,canvas")) return undefined;
+  const [image] = images;
+  const picture = image.closest("picture");
+  if (image.hasAttribute("srcset") || picture?.querySelector("source") || element.querySelector("source,[srcset]")) return undefined;
+  const eligible = RASTER_PATTERN.exec(image.getAttribute("src") || "");
+  if (!eligible) return undefined;
+  const [, mediaType, base64] = eligible;
   return { mediaType: mediaType.toLowerCase(), dataURL: `data:${mediaType.toLowerCase()};base64,${base64.replace(/\s/gu, "")}` };
 }
 
@@ -132,8 +160,7 @@ export function buildHTMLComponentIndex(source, options = {}) {
   const doc = parserFor(options).parseFromString(source, "text/html");
   const declaration = declarationState(doc);
   if (!declaration.valid) return { components: [], byID: new Map(), projection: [] };
-  const idCounts = new Map();
-  for (const element of doc.querySelectorAll("[id]")) idCounts.set(element.id, (idCounts.get(element.id) ?? 0) + 1);
+  const idCounts = new Map([...sourceIDs(doc)].map(([id, matches]) => [id, matches.length]));
   const components = [];
   for (const element of doc.querySelectorAll("[id]")) {
     if (components.length >= MAX_HTML_BRIDGE_COMPONENTS) break;
@@ -186,8 +213,8 @@ function sameIdentity(reference, identity) {
   return source?.resource_kind === "html" && source.resource_id === identity.resource.id && source.resource_updated_at === identity.resource.updated_at && source.context_digest === identity.digest;
 }
 
-export function createHTMLContextController({ doc = document, surface, frame, index, identity, idFactory, epochFactory, onAdd, announce = () => {} }) {
-  if (!surface?.contains(frame) || !index?.components || !identity?.resource || typeof idFactory !== "function" || typeof onAdd !== "function") throw new TypeError("invalid HTML context controller");
+export function createHTMLContextController({ doc = document, chooserHost, surface, frame, index, identity, idFactory, epochFactory, onAdd, announce = () => {} }) {
+  if (!chooserHost || !surface?.contains(frame) || surface.contains(chooserHost) || !index?.components || !identity?.resource || typeof idFactory !== "function" || typeof onAdd !== "function") throw new TypeError("invalid HTML context controller");
   const view = doc.defaultView;
   const makeEpoch = epochFactory ?? (() => defaultEpoch(view));
   let epoch = "";
@@ -195,6 +222,7 @@ export function createHTMLContextController({ doc = document, surface, frame, in
   let pendingFrame = null;
   let destroyed = false;
   let timer = null;
+  let generation = 0;
   const feedbackTimers = new Set();
 
   const outline = doc.createElement("div");
@@ -213,9 +241,17 @@ export function createHTMLContextController({ doc = document, surface, frame, in
   const list = doc.createElement("ol");
   chooser.append(summary, list);
   doc.body.append(outline, addButton);
-  surface.append(chooser);
+  chooserHost.append(chooser);
+
+  function clearPending() {
+    generation += 1;
+    pendingFrame = null;
+    if (timer !== null) view.cancelAnimationFrame(timer);
+    timer = null;
+  }
 
   function dismiss() {
+    clearPending();
     candidate = null;
     outline.hidden = true;
     addButton.hidden = true;
@@ -246,7 +282,7 @@ export function createHTMLContextController({ doc = document, surface, frame, in
   function renderCandidate(component, rect) {
     const clipped = clippedRect(rect);
     if (!clipped) { dismiss(); return; }
-    candidate = component;
+    candidate = { component, rect };
     Object.assign(outline.style, { left: `${clipped.left}px`, top: `${clipped.top}px`, width: `${clipped.width}px`, height: `${clipped.height}px` });
     outline.hidden = false;
     addButton.hidden = false;
@@ -259,13 +295,15 @@ export function createHTMLContextController({ doc = document, surface, frame, in
   }
 
   function schedule(component, rect) {
-    pendingFrame = { component, rect };
+    pendingFrame = { component, rect, generation };
     if (timer !== null) return;
+    const scheduledGeneration = generation;
     timer = view.requestAnimationFrame(() => {
+      if (scheduledGeneration !== generation) return;
       timer = null;
       const next = pendingFrame;
       pendingFrame = null;
-      if (next && !destroyed) renderCandidate(next.component, next.rect);
+      if (next && next.generation === generation && !destroyed) renderCandidate(next.component, next.rect);
     });
   }
 
@@ -307,8 +345,12 @@ export function createHTMLContextController({ doc = document, surface, frame, in
     }
   }
 
+  function onOuterLayout() {
+    if (candidate && !destroyed) renderCandidate(candidate.component, candidate.rect);
+  }
+
   addButton.addEventListener("pointerdown", (event) => event.preventDefault());
-  addButton.addEventListener("click", () => { if (candidate) void activate(candidate, addButton); });
+  addButton.addEventListener("click", () => { if (candidate) void activate(candidate.component, addButton); });
   for (const component of index.components) {
     const item = doc.createElement("li");
     const button = doc.createElement("button");
@@ -327,6 +369,10 @@ export function createHTMLContextController({ doc = document, surface, frame, in
 
   frame.addEventListener("load", reset);
   view.addEventListener("message", onMessage);
+  view.addEventListener("resize", onOuterLayout);
+  const resizeObserver = typeof view.ResizeObserver === "function" ? new view.ResizeObserver(onOuterLayout) : null;
+  resizeObserver?.observe(surface);
+  resizeObserver?.observe(frame);
   reset();
 
   return {
@@ -342,11 +388,13 @@ export function createHTMLContextController({ doc = document, surface, frame, in
     destroy() {
       if (destroyed) return;
       destroyed = true;
-      if (timer !== null) view.cancelAnimationFrame(timer);
+      clearPending();
       for (const feedbackTimer of feedbackTimers) view.clearTimeout(feedbackTimer);
       feedbackTimers.clear();
       frame.removeEventListener("load", reset);
       view.removeEventListener("message", onMessage);
+      view.removeEventListener("resize", onOuterLayout);
+      resizeObserver?.disconnect();
       chooser.remove(); outline.remove(); addButton.remove();
     },
   };

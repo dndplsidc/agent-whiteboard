@@ -455,7 +455,7 @@ func TestHandlerViewHTMLEnabledUsesTrustedShellAndAgentCSP(t *testing.T) {
 }
 
 func TestHandlerViewHTMLRenderedInjectsConfiguredBridgeAndSupportsHEAD(t *testing.T) {
-	source := []byte("<!DOCTYPE html>\n<html><head data-exact='yes'><script>publisher()</script></head><body>exact</body></html>")
+	source := []byte(" \n<!--prefix-->\n\xef\xbb\xbf\n<!DOCTYPE html>\n<html><head data-exact='yes'><script>publisher()</script></head><body>exact</body></html>")
 	bridge := []byte("globalThis.trustedBridge=true;")
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		t.Run(method, func(t *testing.T) {
@@ -478,7 +478,7 @@ func TestHandlerViewHTMLRenderedInjectsConfiguredBridgeAndSupportsHEAD(t *testin
 
 			require.Equal(t, http.StatusOK, rr.Code)
 			if method == http.MethodGet {
-				require.Equal(t, "<!DOCTYPE html>\n<html><head data-exact='yes'><script>"+string(bridge)+"</script><script>publisher()</script></head><body>exact</body></html>", rr.Body.String())
+				require.Equal(t, " \n<!--prefix-->\n\xef\xbb\xbf\n<!DOCTYPE html>\n<html><head data-exact='yes'><script>"+string(bridge)+"</script><script>publisher()</script></head><body>exact</body></html>", rr.Body.String())
 			} else {
 				require.Empty(t, rr.Body.Bytes())
 			}
@@ -487,29 +487,39 @@ func TestHandlerViewHTMLRenderedInjectsConfiguredBridgeAndSupportsHEAD(t *testin
 	}
 }
 
-func TestHandlerViewHTMLRenderedFailsBeforePartialSuccess(t *testing.T) {
-	source := []byte("<!doctype html><html><body>PRIVATE_PARTIAL_SOURCE</body></html>")
-	operations := testutil.NewMockWhiteboardOperations(t)
-	operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
-		ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: source,
-	}, nil).Once()
-	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
-		CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
-		HTMLBridge: []byte("globalThis.trustedBridge=true;"),
-	})
-	require.NoError(t, err)
-	handler, err := whiteboard.NewHandler(operations, viewer, whiteboard.HandlerConfig{
-		MaxWhiteboardBytes: defaultMaxBytes, MaxContextBytes: defaultMaxContextBytes,
-	})
-	require.NoError(t, err)
-	rr := httptest.NewRecorder()
+func TestHandlerViewHTMLRenderedFallsBackAtomicallyForLegacyPreHeadContent(t *testing.T) {
+	// This represents legacy stored input that predates publish-time validation.
+	source := []byte("<!doctype html><html><script>PRIVATE_LEGACY_SOURCE</script><head></head><body>exact</body></html>")
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			operations := testutil.NewMockWhiteboardOperations(t)
+			operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
+				ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: source,
+			}, nil).Once()
+			viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
+				CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
+				HTMLBridge: []byte("globalThis.trustedBridge=true;"),
+			})
+			require.NoError(t, err)
+			handler, err := whiteboard.NewHandler(operations, viewer, whiteboard.HandlerConfig{
+				MaxWhiteboardBytes: defaultMaxBytes, MaxContextBytes: defaultMaxContextBytes,
+			})
+			require.NoError(t, err)
+			rr := httptest.NewRecorder()
 
-	handlerMux(t, handler).ServeHTTP(rr, httptest.NewRequest(http.MethodGet,
-		httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLRenderedSuffix, nil))
+			handlerMux(t, handler).ServeHTTP(rr, httptest.NewRequest(method,
+				httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLRenderedSuffix, nil))
 
-	require.Equal(t, http.StatusInternalServerError, rr.Code)
-	require.NotContains(t, rr.Body.String(), "PRIVATE_PARTIAL_SOURCE")
-	assertHTMLInnerHeaders(t, rr)
+			require.Equal(t, http.StatusOK, rr.Code)
+			if method == http.MethodGet {
+				require.Equal(t, source, rr.Body.Bytes())
+				require.NotContains(t, rr.Body.String(), "globalThis.trustedBridge")
+			} else {
+				require.Empty(t, rr.Body.Bytes())
+			}
+			assertHTMLInnerHeaders(t, rr)
+		})
+	}
 }
 
 func TestHandlerViewHTMLInnerServesStoredDocumentBytesUnchanged(t *testing.T) {

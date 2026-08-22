@@ -128,6 +128,8 @@ describe("Markdown rendering", () => {
     expect(viewer.context).toBeDefined();
     expect(viewer.context.index.components.map(({ id }) => id)).toEqual(["main"]);
     expect(document.querySelector(".agent-html-chooser")?.textContent).toContain("Overview");
+    expect(document.querySelector("#agent-whiteboard-app-bar-theme > .agent-html-chooser")).not.toBeNull();
+    expect(document.querySelector("#agent-whiteboard-html-surface .agent-html-chooser")).toBeNull();
     document.querySelector(".agent-html-chooser button").click();
     await vi.waitFor(() => expect(viewer.agent.elements.message.querySelector('[data-reference-kind="component"]')?.textContent).toBe("Overview"));
     expect(viewer.agent.open).toBe(true);
