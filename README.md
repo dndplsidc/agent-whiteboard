@@ -244,6 +244,12 @@ Publish images before Markdown that references their returned URLs:
 agent-whiteboard image upload --expires-in 3600 chart.png photo.webp
 ```
 
+Replace an uploaded image in place while keeping its capability URL:
+
+```sh
+agent-whiteboard image update --expires-in 7200 -- CAPABILITY_ID chart.png
+```
+
 ## How it works
 
 ```text
@@ -313,12 +319,7 @@ agent-whiteboard image delete -- CAPABILITY_ID
 Put global flags before the command, or set `AGENT_WHITEBOARD_SERVER`:
 
 ```sh
-agent-whiteboard \
-  --server https://whiteboard.example \
-  --timeout 20s \
-  create markdown \
-  --context "$context_file" \
-  board.md
+agent-whiteboard --server https://whiteboard.example --timeout 20s create markdown --context "$context_file" board.md
 ```
 
 ## Security model
