@@ -6,6 +6,7 @@ const EXCLUDED_SELECTOR = "nav,header,footer,form,input,button,select,textarea,o
 const LABEL_BYTES = 256;
 const EXCERPT_BYTES = 48 * 1024;
 const ADD_TRANSFER_GRACE_MS = 80;
+const ADD_BUTTON_INSET = 12;
 const RASTER_PATTERN = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/iu;
 const sourceIDCache = new WeakMap();
 
@@ -309,8 +310,10 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
     addButton.setAttribute("aria-label", `Add ${component.type}: ${component.label} to message`);
     const buttonWidth = addButton.offsetWidth || 56;
     const buttonHeight = addButton.offsetHeight || 32;
-    addButton.style.left = `${Math.max(8, Math.min(clipped.left + clipped.width - buttonWidth, view.innerWidth - buttonWidth - 8))}px`;
-    addButton.style.top = `${Math.max(8, Math.min(clipped.top + 6, view.innerHeight - buttonHeight - 8))}px`;
+    const horizontalInset = Math.min(ADD_BUTTON_INSET, Math.max(0, (clipped.width - buttonWidth) / 2));
+    const verticalInset = Math.min(ADD_BUTTON_INSET, Math.max(0, (clipped.height - buttonHeight) / 2));
+    addButton.style.left = `${Math.max(8, Math.min(clipped.left + clipped.width - buttonWidth - horizontalInset, view.innerWidth - buttonWidth - 8))}px`;
+    addButton.style.top = `${Math.max(8, Math.min(clipped.top + verticalInset, view.innerHeight - buttonHeight - 8))}px`;
   }
 
   function schedule(component, rect) {

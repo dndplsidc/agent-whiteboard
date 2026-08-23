@@ -62,7 +62,11 @@ test("selects canonical HTML components through hover and the trusted chooser in
   await expect(add).toHaveText("+ Add");
   await expect(add).toHaveAttribute("aria-label", "Add table: Quarterly revenue to message");
   const addBox = await add.boundingBox();
+  const candidateBox = await child.locator("#nested-table").boundingBox();
   expect(addBox).not.toBeNull();
+  expect(candidateBox).not.toBeNull();
+  expect(candidateBox.x + candidateBox.width - addBox.x - addBox.width).toBeGreaterThanOrEqual(10);
+  expect(addBox.y - candidateBox.y).toBeGreaterThanOrEqual(10);
   await page.evaluate(() => {
     const button = document.querySelector(".agent-html-add");
     window.__agentHTMLAddVisibilityChanges = 0;

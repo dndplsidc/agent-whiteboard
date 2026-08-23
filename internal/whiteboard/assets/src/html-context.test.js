@@ -141,6 +141,8 @@ describe("trusted parent HTML context controller", () => {
     expect(button.hidden).toBe(false);
     expect(button.textContent).toBe("+ Add");
     expect(button.getAttribute("aria-label")).toBe("Add section: Main to message");
+    expect(button.style.left).toBe("242px");
+    expect(button.style.top).toBe("32px");
     expect(document.querySelector(".agent-html-outline").style.cssText).toContain("width: 300px");
 
     window.dispatchEvent(new MessageEvent("message", { data: { version: 1, type: "candidate", epoch: "epoch_1", id: "forged", rect: { x: 0, y: 0, width: 20, height: 20 } }, source: frame.contentWindow }));
