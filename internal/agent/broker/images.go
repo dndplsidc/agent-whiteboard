@@ -13,6 +13,9 @@ import (
 func (actor *conversation) claimTurnImages(command protocol.Command, payload protocol.SubmitPayload) ([]provider.ImageInput, []protocol.ImageDescriptor, protocol.BrowserErrorCode) {
 	inline := payload.Content.InlineImages()
 	images := append(append([]protocol.ImageReference(nil), inline...), payload.Images...)
+	if !validCombinedImageReferences(images) {
+		return nil, nil, protocol.ErrorInvalidCommand
+	}
 	if len(images) == 0 {
 		return nil, nil, ""
 	}
@@ -35,7 +38,39 @@ func (actor *conversation) claimTurnImages(command protocol.Command, payload pro
 	if err != nil {
 		return nil, nil, mapAttachmentError(err)
 	}
+	if !claimedImagesMatchRequest(claimed, images) {
+		_ = actor.releaseMessageImages(payload.MessageID)
+		return nil, nil, protocol.ErrorImageStorageFailure
+	}
 	return claimed.Inputs, claimed.Descriptors, ""
+}
+
+func validCombinedImageReferences(images []protocol.ImageReference) bool {
+	if len(images) > protocol.MaxImagesPerTurn {
+		return false
+	}
+	seen := make(map[string]struct{}, len(images))
+	for _, image := range images {
+		if _, duplicate := seen[image.ImageID]; duplicate {
+			return false
+		}
+		seen[image.ImageID] = struct{}{}
+	}
+	return true
+}
+
+func claimedImagesMatchRequest(claimed attachment.Claimed, requested []protocol.ImageReference) bool {
+	if len(claimed.Inputs) != len(requested) || len(claimed.Descriptors) != len(requested) {
+		return false
+	}
+	for index, image := range requested {
+		input := claimed.Inputs[index]
+		descriptor := claimed.Descriptors[index]
+		if input.ID != image.ImageID || input.Name != image.Name || descriptor.ImageID != input.ID || descriptor.Name != input.Name || descriptor.MediaType != input.MediaType {
+			return false
+		}
+	}
+	return true
 }
 
 func (actor *conversation) messageImages(messageID string) ([]protocol.ImageDescriptor, error) {

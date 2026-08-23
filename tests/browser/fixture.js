@@ -381,12 +381,12 @@ function createLoopbackBroker(initialAllowedOrigin) {
         record,
         200,
         { ...corsHeaders(), "Content-Type": "application/json", "Cache-Control": "no-store" },
-        '{"available":true,"api_version":"4"}',
+        '{"available":true,"api_version":"5"}',
       );
       return;
     }
     if (request.method === "POST" && request.url === "/api/v1/agent/connect") {
-      if (request.headers["x-agent-whiteboard-api-version"] !== "4") {
+      if (request.headers["x-agent-whiteboard-api-version"] !== "5") {
         send(response, record, 400, corsHeaders(), '{"error":"unsupported API version"}');
         return;
       }
@@ -407,7 +407,7 @@ function createLoopbackBroker(initialAllowedOrigin) {
   server.on("upgrade", (request, socket) => {
     const record = requestRecord(request);
     requests.push(record);
-    if (!originAllowed(request) || request.url !== "/api/v1/agent/connect" || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v4") {
+    if (!originAllowed(request) || request.url !== "/api/v1/agent/connect" || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v5") {
       record.status = 403;
       socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
       return;
@@ -425,14 +425,14 @@ function createLoopbackBroker(initialAllowedOrigin) {
     }
     const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
     record.status = 101;
-    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v4" };
+    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v5" };
     socket.write(
       [
         "HTTP/1.1 101 Switching Protocols",
         "Upgrade: websocket",
         "Connection: Upgrade",
         `Sec-WebSocket-Accept: ${accept}`,
-        "Sec-WebSocket-Protocol: agent-whiteboard.v4",
+        "Sec-WebSocket-Protocol: agent-whiteboard.v5",
         "",
         "",
       ].join("\r\n"),
@@ -608,7 +608,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     return { image_id: image.id, name: image.name, media_type: image.mediaType };
   };
   const nextEvent = (state, type, payload) => ({
-    api_version: "4",
+    api_version: "5",
     event_id: protocolID(state.sequence++),
     conversation_id: state.conversationID,
     type,
@@ -763,13 +763,13 @@ function createSidebarBroker(initialAllowedOrigin) {
         });
         return commandResult(state, command, { code: "invalid_model_configuration", message: "The selected model settings are no longer available.", action: "configure_model" });
       }
-      const inlineReferences = command.payload.content.parts.filter((part) => part.type === "reference" && part.reference.kind === "image");
+      const inlineReferences = command.payload.content.parts.filter((part) => part.type === "reference" && part.reference.visual);
       if ((command.payload.images?.length ?? 0) + inlineReferences.length > 0 && !state.supportsImages) {
         return commandResult(state, command, { code: "image_input_unsupported", message: "The selected model does not support image input.", action: "configure_model" });
       }
       const content = structuredClone(command.payload.content);
       for (const part of content.parts) {
-        if (part.type !== "reference" || part.reference.kind !== "image") continue;
+        if (part.type !== "reference" || !part.reference.visual) continue;
         const descriptor = claimFixtureImage(state, command, part.reference.visual);
         part.reference.visual.media_type = descriptor.media_type;
       }
@@ -915,7 +915,7 @@ function createSidebarBroker(initialAllowedOrigin) {
       return;
     }
     if (request.method === "GET" && request.url === "/api/v1/agent/status") {
-      sendJSON(response, record, 200, { available: true, api_version: "4", origin_trusted: true });
+      sendJSON(response, record, 200, { available: true, api_version: "5", origin_trusted: true });
       return;
     }
     const chunks = [];
@@ -1006,7 +1006,7 @@ function createSidebarBroker(initialAllowedOrigin) {
   server.on("upgrade", (request, socket) => {
     const record = requestRecord(request);
     requests.push(record);
-    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v4") {
+    if (!webSocketEnabled || request.headers.origin !== allowedOrigin || request.headers["sec-websocket-protocol"] !== "agent-whiteboard.v5") {
       record.status = 503;
       socket.end("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
       return;
@@ -1014,13 +1014,13 @@ function createSidebarBroker(initialAllowedOrigin) {
     const key = request.headers["sec-websocket-key"];
     const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
     record.status = 101;
-    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v4" };
+    record.responseHeaders = { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Accept": accept, "Sec-WebSocket-Protocol": "agent-whiteboard.v5" };
     socket.write([
       "HTTP/1.1 101 Switching Protocols",
       "Upgrade: websocket",
       "Connection: Upgrade",
       `Sec-WebSocket-Accept: ${accept}`,
-      "Sec-WebSocket-Protocol: agent-whiteboard.v4",
+      "Sec-WebSocket-Protocol: agent-whiteboard.v5",
       "",
       "",
     ].join("\r\n"));

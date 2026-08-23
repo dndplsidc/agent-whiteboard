@@ -28,9 +28,9 @@ func TestMessageContentNormalizesOrderedTextAndReferences(t *testing.T) {
 
 	clone := content.Clone()
 	clone.Parts[1].Reference.Label = "changed"
-	clone.Parts[1].Reference.Source.HeadingPath[0].Title = "changed"
+	clone.Parts[1].Reference.Source.Anchor.Markdown.HeadingPath[0].Title = "changed"
 	require.Equal(t, "Finding", content.Parts[1].Reference.Label)
-	require.Equal(t, "Analysis", content.Parts[1].Reference.Source.HeadingPath[0].Title)
+	require.Equal(t, "Analysis", content.Parts[1].Reference.Source.Anchor.Markdown.HeadingPath[0].Title)
 }
 
 func TestMessageContentValidatesReferenceKindsAndBounds(t *testing.T) {
@@ -52,7 +52,7 @@ func TestMessageContentValidatesReferenceKindsAndBounds(t *testing.T) {
 		{"duplicate id", func(reference *provider.ContextReference) { reference.ID = text.ID }},
 		{"invalid digest", func(reference *provider.ContextReference) { reference.Source.ContextDigest = "bad" }},
 		{"reversed anchor", func(reference *provider.ContextReference) {
-			reference.Source.End = provider.SourceAnchor{Block: 0, Line: 1, Offset: 0}
+			reference.Source.Anchor.Markdown.End = provider.SourceAnchor{Block: 0, Line: 1, Offset: 0}
 		}},
 		{"oversized quote", func(reference *provider.ContextReference) {
 			reference.Kind = provider.ReferenceText
@@ -79,6 +79,32 @@ func TestMessageContentValidatesReferenceKindsAndBounds(t *testing.T) {
 			require.Error(t, bad.Validate())
 		})
 	}
+}
+
+func TestComponentReferencesValidateCloneSizeAndImages(t *testing.T) {
+	component := validComponentReference()
+	content := provider.MessageContent{Parts: []provider.MessagePart{{Kind: provider.MessagePartReference, Reference: &component}}}
+	require.NoError(t, content.Validate())
+	require.Empty(t, content.InlineImageIDs())
+	expectedBytes := len(component.ID) + len(component.Label) + len(component.Source.ResourceID) + len(component.Source.ContextDigest) +
+		len(component.Source.Anchor.HTML.ElementID) + len(component.Source.Anchor.HTML.Tag) + len(component.Component.Type) + len(component.Component.SourceExcerpt)
+	require.Equal(t, expectedBytes, content.SemanticBytes())
+
+	clone := content.Clone()
+	clone.Parts[0].Reference.Source.Anchor.HTML.ElementID = "changed"
+	clone.Parts[0].Reference.Component.SourceExcerpt = "changed"
+	require.Equal(t, "revenue", content.Parts[0].Reference.Source.Anchor.HTML.ElementID)
+	require.NotEqual(t, "changed", content.Parts[0].Reference.Component.SourceExcerpt)
+
+	component.Component.Type = provider.ComponentImage
+	component.Visual = &provider.ReferenceVisual{ImageID: idC, Name: "revenue.png", Alt: "Revenue", Ordinal: 1}
+	withVisual := provider.MessageContent{Parts: []provider.MessagePart{{Kind: provider.MessagePartReference, Reference: &component}}}
+	require.NoError(t, withVisual.Validate())
+	require.Equal(t, []string{idC}, withVisual.InlineImageIDs())
+	require.NoError(t, withVisual.ValidateImages([]provider.ImageInput{{ID: idC}}))
+
+	component.Component.Type = provider.ComponentChart
+	require.Error(t, (provider.MessageContent{Parts: []provider.MessagePart{{Kind: provider.MessagePartReference, Reference: &component}}}).Validate())
 }
 
 func TestMessageContentRejectsNonCanonicalPartsAndAggregateOverflow(t *testing.T) {
@@ -151,13 +177,24 @@ func validImageReference() provider.ContextReference {
 
 func validReferenceSource() provider.ReferenceSource {
 	return provider.ReferenceSource{
-		ResourceKind:      provider.ResourceMarkdown,
-		ResourceID:        idA,
-		ResourceUpdatedAt: time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC),
-		ContextDigest:     strings.Repeat("a", 64),
-		HeadingPath:       []provider.HeadingReference{{Level: 2, Title: "Analysis", Ordinal: 1}},
-		Start:             provider.SourceAnchor{Block: 3, Line: 5, Offset: 7},
-		End:               provider.SourceAnchor{Block: 3, Line: 5, Offset: 42},
+		ResourceKind: provider.ResourceMarkdown, ResourceID: idA,
+		ResourceUpdatedAt: time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC), ContextDigest: strings.Repeat("a", 64),
+		Anchor: provider.ReferenceAnchor{Markdown: &provider.MarkdownReferenceAnchor{
+			HeadingPath: []provider.HeadingReference{{Level: 2, Title: "Analysis", Ordinal: 1}},
+			Start:       provider.SourceAnchor{Block: 3, Line: 5, Offset: 7}, End: provider.SourceAnchor{Block: 3, Line: 5, Offset: 42},
+		}},
+	}
+}
+
+func validComponentReference() provider.ContextReference {
+	return provider.ContextReference{
+		ID: idB, Kind: provider.ReferenceComponent, Label: "Revenue chart",
+		Source: provider.ReferenceSource{
+			ResourceKind: provider.ResourceHTML, ResourceID: idA,
+			ResourceUpdatedAt: time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC), ContextDigest: strings.Repeat("b", 64),
+			Anchor: provider.ReferenceAnchor{HTML: &provider.HTMLReferenceAnchor{ElementID: "revenue", Tag: "figure", Ordinal: 4}},
+		},
+		Component: &provider.ComponentReference{Type: provider.ComponentChart, SourceExcerpt: `<figure id="revenue">Revenue</figure>`},
 	}
 }
 

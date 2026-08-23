@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestV4ProviderControlSnapshotIsStrictAndProviderNeutral(t *testing.T) {
+func TestV5ProviderControlSnapshotIsStrictAndProviderNeutral(t *testing.T) {
 	skillsState := protocol.SkillsReady
 	limit := 1
 	for _, providerName := range []protocol.ProviderName{protocol.ProviderPi, protocol.ProviderCodex} {
@@ -30,7 +30,7 @@ func TestV4ProviderControlSnapshotIsStrictAndProviderNeutral(t *testing.T) {
 	}
 }
 
-func TestV4SkillLimitsBusyPolicyAndAdmissionRejectInvalidValues(t *testing.T) {
+func TestV5SkillLimitsBusyPolicyAndAdmissionRejectInvalidValues(t *testing.T) {
 	ready := protocol.SkillsReady
 	limit := protocol.MaxMessageSkills
 	base := protocol.SnapshotPayload{
@@ -67,7 +67,7 @@ func TestV4SkillLimitsBusyPolicyAndAdmissionRejectInvalidValues(t *testing.T) {
 	require.Error(t, base.ValidateForProvider(protocol.ProviderCodex))
 }
 
-func TestV4SkillAndInteractionEventsCarryStrictGenericMetadata(t *testing.T) {
+func TestV5SkillAndInteractionEventsCarryStrictGenericMetadata(t *testing.T) {
 	limit := 1
 	catalog := protocol.SkillCatalogPayload{State: protocol.SkillsReady, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &limit}
 	encodedCatalog, err := protocol.EncodeEvent(validEvent(catalog))

@@ -102,8 +102,9 @@ type resolvedServiceConfig struct {
 	logMode LogMode
 	logger  *slog.Logger
 
-	viewerCSS []byte
-	viewerJS  []byte
+	viewerCSS        []byte
+	viewerJS         []byte
+	viewerHTMLBridge []byte
 }
 
 func WithPort(port int) Option {
@@ -235,6 +236,7 @@ func resolveServiceConfig(config ServiceConfig, options []Option) (resolvedServi
 	}
 	viewerCSS := whiteboard.ViewerCSS()
 	viewerJS := whiteboard.ViewerJS()
+	viewerHTMLBridge := whiteboard.HTMLBridgeJS()
 	if values.viewerAssetsSet {
 		viewerCSS = bytes.Clone(values.viewerCSS)
 		viewerJS = bytes.Clone(values.viewerJS)
@@ -276,6 +278,7 @@ func resolveServiceConfig(config ServiceConfig, options []Option) (resolvedServi
 		logger:                  logger,
 		viewerCSS:               bytes.Clone(viewerCSS),
 		viewerJS:                bytes.Clone(viewerJS),
+		viewerHTMLBridge:        bytes.Clone(viewerHTMLBridge),
 	}, nil
 }
 

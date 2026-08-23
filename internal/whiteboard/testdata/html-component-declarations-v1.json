@@ -1,0 +1,342 @@
+{
+  "version": 1,
+  "supported_types": ["section", "image", "chart", "table", "code", "quote", "component"],
+  "cases": [
+    {
+      "name": "all-supported-explicit-values",
+      "html": "<section id=\"s\" data-agent-select=\"section\" aria-label=\"Section\"></section><img id=\"i\" data-agent-select=\"image\" alt=\"Image\"><div id=\"c\" data-agent-select=\"chart\" aria-label=\"Chart\"></div><div id=\"t\" data-agent-select=\"table\" aria-label=\"Table\"></div><pre id=\"code\" data-agent-select=\"code\" aria-label=\"Code\"></pre><blockquote id=\"q\" data-agent-select=\"quote\" aria-label=\"Quote\"></blockquote><div id=\"custom\" data-agent-select=\"component\" aria-label=\"Custom\"></div>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "s", "type": "section", "label": "Section"}, {"id": "i", "type": "image", "label": "Image"}, {"id": "c", "type": "chart", "label": "Chart"}, {"id": "t", "type": "table", "label": "Table"}, {"id": "code", "type": "code", "label": "Code"}, {"id": "q", "type": "quote", "label": "Quote"}, {"id": "custom", "type": "component", "label": "Custom"}], "explicit_ids": ["s", "i", "c", "t", "code", "q", "custom"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "section-shorthand",
+      "html": "<div id=\"summary\" data-agent-section aria-label=\"Summary\"></div>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "summary", "type": "section", "label": "Summary"}], "explicit_ids": ["summary"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "aria-labelledby-resolution",
+      "html": "<h2 id=\"label\">Results</h2><div id=\"results\" data-agent-select=\"chart\" aria-labelledby=\"label\"></div>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "results", "type": "chart", "label": "Results"}], "explicit_ids": ["results"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "aria-label-resolution",
+      "html": "<div id=\"results\" data-agent-select=\"chart\" aria-label=\"Quarterly results\"></div>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "results", "type": "chart", "label": "Quarterly results"}], "explicit_ids": ["results"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "kind-fallback-label",
+      "html": "<section id=\"intro\" data-agent-select=\"section\"><h2>Introduction</h2></section><table id=\"totals\" data-agent-select=\"table\"><caption>Totals</caption></table>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "intro", "type": "section", "label": "Introduction"}, {"id": "totals", "type": "table", "label": "Totals"}], "explicit_ids": ["intro", "totals"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "unsupported-explicit-value",
+      "html": "<div id=\"x\" data-agent-select=\"video\" aria-label=\"Video\"></div>",
+      "mutation": {"valid": false, "error": "unsupported_select_value"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "empty-explicit-value",
+      "html": "<div id=\"x\" data-agent-select=\"\" aria-label=\"Empty\"></div>",
+      "mutation": {"valid": false, "error": "unsupported_select_value"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "missing-explicit-id",
+      "html": "<div data-agent-select=\"component\" aria-label=\"Widget\"></div>",
+      "mutation": {"valid": false, "error": "missing_explicit_id"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "duplicate-explicit-id",
+      "html": "<div id=\"same\" data-agent-select=\"section\" aria-label=\"One\"></div><div id=\"same\" data-agent-select=\"table\" aria-label=\"Two\"></div>",
+      "mutation": {"valid": false, "error": "duplicate_explicit_id"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "missing-explicit-label",
+      "html": "<div id=\"widget\" data-agent-select=\"component\"></div>",
+      "mutation": {"valid": false, "error": "missing_explicit_label"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "unresolved-labelledby",
+      "html": "<div id=\"widget\" data-agent-select=\"component\" aria-labelledby=\"missing\"></div>",
+      "mutation": {"valid": false, "error": "missing_explicit_label"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "shorthand-select-conflict",
+      "html": "<div id=\"x\" data-agent-section data-agent-select=\"table\" aria-label=\"Conflict\"></div>",
+      "mutation": {"valid": false, "error": "conflicting_declaration"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "select-ignore-conflict",
+      "html": "<div id=\"x\" data-agent-select=\"chart\" data-agent-section-ignore aria-label=\"Conflict\"></div>",
+      "mutation": {"valid": false, "error": "conflicting_declaration"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "none-shorthand-conflict",
+      "html": "<div id=\"x\" data-agent-select=\"none\" data-agent-section aria-label=\"Conflict\"></div>",
+      "mutation": {"valid": false, "error": "conflicting_declaration"},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "ignore-and-none-are-compatible-exclusions",
+      "html": "<section id=\"ignored\" data-agent-section-ignore><h2>Ignored</h2></section><section id=\"none\" data-agent-select=\"none\"><h2>None</h2></section>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": ["ignored", "none"]}
+    },
+    {
+      "name": "unqualified-wrapper-is-omitted-without-mutation-error",
+      "html": "<div id=\"automatic\" aria-label=\"Not a semantic kind\">Automatic</div><section><h2>No stable ID</h2></section>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": ["automatic"]}
+    },
+    {
+      "name": "labelledby-precedes-aria-label",
+      "html": "<span id=\"preferred\">Preferred label</span><div id=\"chart\" data-agent-select=\"chart\" aria-labelledby=\"preferred\" aria-label=\"Secondary label\"></div>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "chart", "type": "chart", "label": "Preferred label"}], "explicit_ids": ["chart"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "invalid-labelledby-falls-through-to-aria-label",
+      "html": "<div id=\"chart\" data-agent-select=\"chart\" aria-labelledby=\"missing\" aria-label=\"Available label\"></div>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "chart", "type": "chart", "label": "Available label"}], "explicit_ids": ["chart"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "bounded-multibyte-id-and-label",
+      "html": "<section id=\"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\" data-agent-section aria-label=\"界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界a\"></section>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé", "type": "section", "label": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界a"}], "explicit_ids": ["éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "excessive-multibyte-id",
+      "html": "<section id=\"ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\" data-agent-section aria-label=\"Label\"></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "excessive-multibyte-label",
+      "html": "<section id=\"long-label\" data-agent-section aria-label=\"界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\"></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "control-in-explicit-id",
+      "html": "<section id=\"bad&#1;id\" data-agent-section aria-label=\"Label\"></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "control-in-explicit-label",
+      "html": "<section id=\"bad-label\" data-agent-section aria-label=\"Bad&#1;label\"></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-id-duplicates-ordinary-element",
+      "html": "<div id=\"same\"></div><section id=\"same\" data-agent-section aria-label=\"Named\"></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "shorthand-ignore-conflict",
+      "html": "<section id=\"conflict\" data-agent-section data-agent-section-ignore aria-label=\"Conflict\"></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-under-navigation-is-rejected",
+      "html": "<nav><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></nav>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-hidden-state-is-rejected",
+      "html": "<section id=\"forced\" data-agent-section aria-label=\"Forced\" hidden></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "hidden-custom-component-is-rejected",
+      "html": "<div id=\"hidden-custom\" data-agent-select=\"component\" aria-label=\"Hidden custom\" hidden></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "inert-custom-component-is-rejected",
+      "html": "<div id=\"inert-custom\" data-agent-select=\"component\" aria-label=\"Inert custom\" inert></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "aria-hidden-custom-component-is-rejected",
+      "html": "<div id=\"aria-hidden-custom\" data-agent-select=\"component\" aria-label=\"Hidden custom\" aria-hidden=\"true\"></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "normalized-aria-hidden-custom-component-is-rejected",
+      "html": "<div id=\"normalized-aria-hidden-custom\" data-agent-select=\"component\" aria-label=\"Hidden custom\" aria-hidden=\" TRUE \"></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "navigation-custom-component-is-rejected",
+      "html": "<nav id=\"nav-custom\" data-agent-select=\"component\" aria-label=\"Navigation custom\"></nav>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-inert-ancestor-is-rejected",
+      "html": "<div inert><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-aria-hidden-ancestor-is-rejected",
+      "html": "<div aria-hidden=\"true\"><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-style-hidden-ancestor-is-rejected",
+      "html": "<div style=\"visibility: hidden\"><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "custom-component-may-contain-control",
+      "html": "<div id=\"widget\" data-agent-select=\"component\" aria-label=\"Widget\"><button type=\"button\">Operate</button></div>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "widget", "type": "component", "label": "Widget"}], "explicit_ids": ["widget"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "control-itself-cannot-be-custom-component",
+      "html": "<button id=\"widget\" data-agent-select=\"component\" aria-label=\"Widget\">Operate</button>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "figure-chart-and-code-fallbacks",
+      "html": "<figure id=\"photo\" data-agent-select=\"image\"><img alt=\"Portrait\"></figure><figure id=\"plot\" data-agent-select=\"chart\"><canvas></canvas><figcaption>Quarterly plot</figcaption></figure><svg id=\"svg-chart\" data-agent-select=\"chart\"><title>Revenue chart</title></svg><pre id=\"snippet\" data-agent-select=\"code\"><code class=\"language-js\">const value = 1;</code></pre>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "photo", "type": "image", "label": "Portrait"}, {"id": "plot", "type": "chart", "label": "Quarterly plot"}, {"id": "svg-chart", "type": "chart", "label": "Revenue chart"}, {"id": "snippet", "type": "code", "label": "js code"}], "explicit_ids": ["photo", "plot", "svg-chart", "snippet"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "nested-code-fallback",
+      "html": "<pre id=\"nested-code\" data-agent-select=\"code\"><span><code class=\"language-js\"></code></span></pre>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "nested-code", "type": "code", "label": "js code"}], "explicit_ids": ["nested-code"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-code-is-not-a-fallback",
+      "html": "<pre id=\"template-code\" data-agent-select=\"code\"><template><code class=\"language-js\">secret()</code></template></pre>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-heading-is-not-a-fallback",
+      "html": "<section id=\"template-section\" data-agent-select=\"section\"><template><h2>Secret heading</h2></template></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-image-is-not-a-fallback",
+      "html": "<figure id=\"template-image\" data-agent-select=\"image\"><template><img alt=\"Secret image\"></template></figure>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-labelledby-target-is-not-resolved",
+      "html": "<template><span id=\"template-label\">Secret label</span></template><section id=\"live-section\" data-agent-section aria-labelledby=\"template-label\"></section>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-declaration-is-inert",
+      "html": "<template><div data-agent-select=\"component\"></div></template>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "template-contained-id-does-not-conflict",
+      "html": "<template><span id=\"shared-id\">Inert</span></template><section id=\"shared-id\" data-agent-section aria-label=\"Live section\"></section>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "shared-id", "type": "section", "label": "Live section"}], "explicit_ids": ["shared-id"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-under-header-is-rejected",
+      "html": "<header><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></header>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-under-footer-is-rejected",
+      "html": "<footer><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></footer>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-under-form-is-rejected",
+      "html": "<form><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></form>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-under-media-is-rejected",
+      "html": "<video><div id=\"forced\" data-agent-select=\"component\" aria-label=\"Forced\"></div></video>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-under-ignore-is-rejected",
+      "html": "<div data-agent-section-ignore><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "explicit-under-none-is-rejected",
+      "html": "<div data-agent-select=\"none\"><section id=\"forced\" data-agent-section aria-label=\"Forced\"></section></div>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "quote-fallback",
+      "html": "<blockquote id=\"quote\" data-agent-select=\"quote\"> Useful quoted text. </blockquote>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "quote", "type": "quote", "label": "Useful quoted text."}], "explicit_ids": ["quote"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "excessive-labelledby-falls-through-to-aria-label",
+      "html": "<span id=\"long\">xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</span><div id=\"chart\" data-agent-select=\"chart\" aria-labelledby=\"long\" aria-label=\"Available label\"></div>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_components": [{"id": "chart", "type": "chart", "label": "Available label"}], "explicit_ids": ["chart"], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "nested-table-caption-is-not-a-fallback",
+      "html": "<table id=\"nested-table\" data-agent-select=\"table\"><template><caption>Nested caption</caption></template></table>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "nested-figure-caption-is-not-a-fallback",
+      "html": "<figure id=\"nested-figure\" data-agent-select=\"chart\"><div><figcaption>Nested caption</figcaption></div></figure>",
+      "mutation": {"valid": false},
+      "browser": {"canonical_components": [], "explicit_ids": [], "omitted_automatic_ids": []}
+    },
+    {
+      "name": "canonical-source-component-cap",
+      "html": "<section id=\"cap-0\" data-agent-section aria-label=\"Cap 0\"></section><section id=\"cap-1\" data-agent-section aria-label=\"Cap 1\"></section><section id=\"cap-2\" data-agent-section aria-label=\"Cap 2\"></section><section id=\"cap-3\" data-agent-section aria-label=\"Cap 3\"></section><section id=\"cap-4\" data-agent-section aria-label=\"Cap 4\"></section><section id=\"cap-5\" data-agent-section aria-label=\"Cap 5\"></section><section id=\"cap-6\" data-agent-section aria-label=\"Cap 6\"></section><section id=\"cap-7\" data-agent-section aria-label=\"Cap 7\"></section><section id=\"cap-8\" data-agent-section aria-label=\"Cap 8\"></section><section id=\"cap-9\" data-agent-section aria-label=\"Cap 9\"></section><section id=\"cap-10\" data-agent-section aria-label=\"Cap 10\"></section><section id=\"cap-11\" data-agent-section aria-label=\"Cap 11\"></section><section id=\"cap-12\" data-agent-section aria-label=\"Cap 12\"></section><section id=\"cap-13\" data-agent-section aria-label=\"Cap 13\"></section><section id=\"cap-14\" data-agent-section aria-label=\"Cap 14\"></section><section id=\"cap-15\" data-agent-section aria-label=\"Cap 15\"></section><section id=\"cap-16\" data-agent-section aria-label=\"Cap 16\"></section><section id=\"cap-17\" data-agent-section aria-label=\"Cap 17\"></section><section id=\"cap-18\" data-agent-section aria-label=\"Cap 18\"></section><section id=\"cap-19\" data-agent-section aria-label=\"Cap 19\"></section><section id=\"cap-20\" data-agent-section aria-label=\"Cap 20\"></section><section id=\"cap-21\" data-agent-section aria-label=\"Cap 21\"></section><section id=\"cap-22\" data-agent-section aria-label=\"Cap 22\"></section><section id=\"cap-23\" data-agent-section aria-label=\"Cap 23\"></section><section id=\"cap-24\" data-agent-section aria-label=\"Cap 24\"></section><section id=\"cap-25\" data-agent-section aria-label=\"Cap 25\"></section><section id=\"cap-26\" data-agent-section aria-label=\"Cap 26\"></section><section id=\"cap-27\" data-agent-section aria-label=\"Cap 27\"></section><section id=\"cap-28\" data-agent-section aria-label=\"Cap 28\"></section><section id=\"cap-29\" data-agent-section aria-label=\"Cap 29\"></section><section id=\"cap-30\" data-agent-section aria-label=\"Cap 30\"></section><section id=\"cap-31\" data-agent-section aria-label=\"Cap 31\"></section><section id=\"cap-32\" data-agent-section aria-label=\"Cap 32\"></section><section id=\"cap-33\" data-agent-section aria-label=\"Cap 33\"></section><section id=\"cap-34\" data-agent-section aria-label=\"Cap 34\"></section><section id=\"cap-35\" data-agent-section aria-label=\"Cap 35\"></section><section id=\"cap-36\" data-agent-section aria-label=\"Cap 36\"></section><section id=\"cap-37\" data-agent-section aria-label=\"Cap 37\"></section><section id=\"cap-38\" data-agent-section aria-label=\"Cap 38\"></section><section id=\"cap-39\" data-agent-section aria-label=\"Cap 39\"></section><section id=\"cap-40\" data-agent-section aria-label=\"Cap 40\"></section><section id=\"cap-41\" data-agent-section aria-label=\"Cap 41\"></section><section id=\"cap-42\" data-agent-section aria-label=\"Cap 42\"></section><section id=\"cap-43\" data-agent-section aria-label=\"Cap 43\"></section><section id=\"cap-44\" data-agent-section aria-label=\"Cap 44\"></section><section id=\"cap-45\" data-agent-section aria-label=\"Cap 45\"></section><section id=\"cap-46\" data-agent-section aria-label=\"Cap 46\"></section><section id=\"cap-47\" data-agent-section aria-label=\"Cap 47\"></section><section id=\"cap-48\" data-agent-section aria-label=\"Cap 48\"></section><section id=\"cap-49\" data-agent-section aria-label=\"Cap 49\"></section><section id=\"cap-50\" data-agent-section aria-label=\"Cap 50\"></section><section id=\"cap-51\" data-agent-section aria-label=\"Cap 51\"></section><section id=\"cap-52\" data-agent-section aria-label=\"Cap 52\"></section><section id=\"cap-53\" data-agent-section aria-label=\"Cap 53\"></section><section id=\"cap-54\" data-agent-section aria-label=\"Cap 54\"></section><section id=\"cap-55\" data-agent-section aria-label=\"Cap 55\"></section><section id=\"cap-56\" data-agent-section aria-label=\"Cap 56\"></section><section id=\"cap-57\" data-agent-section aria-label=\"Cap 57\"></section><section id=\"cap-58\" data-agent-section aria-label=\"Cap 58\"></section><section id=\"cap-59\" data-agent-section aria-label=\"Cap 59\"></section><section id=\"cap-60\" data-agent-section aria-label=\"Cap 60\"></section><section id=\"cap-61\" data-agent-section aria-label=\"Cap 61\"></section><section id=\"cap-62\" data-agent-section aria-label=\"Cap 62\"></section><section id=\"cap-63\" data-agent-section aria-label=\"Cap 63\"></section><section id=\"cap-64\" data-agent-section aria-label=\"Cap 64\"></section><section id=\"cap-65\" data-agent-section aria-label=\"Cap 65\"></section><section id=\"cap-66\" data-agent-section aria-label=\"Cap 66\"></section><section id=\"cap-67\" data-agent-section aria-label=\"Cap 67\"></section><section id=\"cap-68\" data-agent-section aria-label=\"Cap 68\"></section><section id=\"cap-69\" data-agent-section aria-label=\"Cap 69\"></section><section id=\"cap-70\" data-agent-section aria-label=\"Cap 70\"></section><section id=\"cap-71\" data-agent-section aria-label=\"Cap 71\"></section><section id=\"cap-72\" data-agent-section aria-label=\"Cap 72\"></section><section id=\"cap-73\" data-agent-section aria-label=\"Cap 73\"></section><section id=\"cap-74\" data-agent-section aria-label=\"Cap 74\"></section><section id=\"cap-75\" data-agent-section aria-label=\"Cap 75\"></section><section id=\"cap-76\" data-agent-section aria-label=\"Cap 76\"></section><section id=\"cap-77\" data-agent-section aria-label=\"Cap 77\"></section><section id=\"cap-78\" data-agent-section aria-label=\"Cap 78\"></section><section id=\"cap-79\" data-agent-section aria-label=\"Cap 79\"></section><section id=\"cap-80\" data-agent-section aria-label=\"Cap 80\"></section><section id=\"cap-81\" data-agent-section aria-label=\"Cap 81\"></section><section id=\"cap-82\" data-agent-section aria-label=\"Cap 82\"></section><section id=\"cap-83\" data-agent-section aria-label=\"Cap 83\"></section><section id=\"cap-84\" data-agent-section aria-label=\"Cap 84\"></section><section id=\"cap-85\" data-agent-section aria-label=\"Cap 85\"></section><section id=\"cap-86\" data-agent-section aria-label=\"Cap 86\"></section><section id=\"cap-87\" data-agent-section aria-label=\"Cap 87\"></section><section id=\"cap-88\" data-agent-section aria-label=\"Cap 88\"></section><section id=\"cap-89\" data-agent-section aria-label=\"Cap 89\"></section><section id=\"cap-90\" data-agent-section aria-label=\"Cap 90\"></section><section id=\"cap-91\" data-agent-section aria-label=\"Cap 91\"></section><section id=\"cap-92\" data-agent-section aria-label=\"Cap 92\"></section><section id=\"cap-93\" data-agent-section aria-label=\"Cap 93\"></section><section id=\"cap-94\" data-agent-section aria-label=\"Cap 94\"></section><section id=\"cap-95\" data-agent-section aria-label=\"Cap 95\"></section><section id=\"cap-96\" data-agent-section aria-label=\"Cap 96\"></section><section id=\"cap-97\" data-agent-section aria-label=\"Cap 97\"></section><section id=\"cap-98\" data-agent-section aria-label=\"Cap 98\"></section><section id=\"cap-99\" data-agent-section aria-label=\"Cap 99\"></section><section id=\"cap-100\" data-agent-section aria-label=\"Cap 100\"></section><section id=\"cap-101\" data-agent-section aria-label=\"Cap 101\"></section><section id=\"cap-102\" data-agent-section aria-label=\"Cap 102\"></section><section id=\"cap-103\" data-agent-section aria-label=\"Cap 103\"></section><section id=\"cap-104\" data-agent-section aria-label=\"Cap 104\"></section><section id=\"cap-105\" data-agent-section aria-label=\"Cap 105\"></section><section id=\"cap-106\" data-agent-section aria-label=\"Cap 106\"></section><section id=\"cap-107\" data-agent-section aria-label=\"Cap 107\"></section><section id=\"cap-108\" data-agent-section aria-label=\"Cap 108\"></section><section id=\"cap-109\" data-agent-section aria-label=\"Cap 109\"></section><section id=\"cap-110\" data-agent-section aria-label=\"Cap 110\"></section><section id=\"cap-111\" data-agent-section aria-label=\"Cap 111\"></section><section id=\"cap-112\" data-agent-section aria-label=\"Cap 112\"></section><section id=\"cap-113\" data-agent-section aria-label=\"Cap 113\"></section><section id=\"cap-114\" data-agent-section aria-label=\"Cap 114\"></section><section id=\"cap-115\" data-agent-section aria-label=\"Cap 115\"></section><section id=\"cap-116\" data-agent-section aria-label=\"Cap 116\"></section><section id=\"cap-117\" data-agent-section aria-label=\"Cap 117\"></section><section id=\"cap-118\" data-agent-section aria-label=\"Cap 118\"></section><section id=\"cap-119\" data-agent-section aria-label=\"Cap 119\"></section><section id=\"cap-120\" data-agent-section aria-label=\"Cap 120\"></section><section id=\"cap-121\" data-agent-section aria-label=\"Cap 121\"></section><section id=\"cap-122\" data-agent-section aria-label=\"Cap 122\"></section><section id=\"cap-123\" data-agent-section aria-label=\"Cap 123\"></section><section id=\"cap-124\" data-agent-section aria-label=\"Cap 124\"></section><section id=\"cap-125\" data-agent-section aria-label=\"Cap 125\"></section><section id=\"cap-126\" data-agent-section aria-label=\"Cap 126\"></section><section id=\"cap-127\" data-agent-section aria-label=\"Cap 127\"></section><section id=\"cap-128\" data-agent-section aria-label=\"Cap 128\"></section>",
+      "mutation": {"valid": true},
+      "browser": {"canonical_count": 128, "first_component": {"id": "cap-0", "type": "section", "label": "Cap 0"}, "last_component": {"id": "cap-127", "type": "section", "label": "Cap 127"}, "explicit_ids": ["cap-0", "cap-1", "cap-2", "cap-3", "cap-4", "cap-5", "cap-6", "cap-7", "cap-8", "cap-9", "cap-10", "cap-11", "cap-12", "cap-13", "cap-14", "cap-15", "cap-16", "cap-17", "cap-18", "cap-19", "cap-20", "cap-21", "cap-22", "cap-23", "cap-24", "cap-25", "cap-26", "cap-27", "cap-28", "cap-29", "cap-30", "cap-31", "cap-32", "cap-33", "cap-34", "cap-35", "cap-36", "cap-37", "cap-38", "cap-39", "cap-40", "cap-41", "cap-42", "cap-43", "cap-44", "cap-45", "cap-46", "cap-47", "cap-48", "cap-49", "cap-50", "cap-51", "cap-52", "cap-53", "cap-54", "cap-55", "cap-56", "cap-57", "cap-58", "cap-59", "cap-60", "cap-61", "cap-62", "cap-63", "cap-64", "cap-65", "cap-66", "cap-67", "cap-68", "cap-69", "cap-70", "cap-71", "cap-72", "cap-73", "cap-74", "cap-75", "cap-76", "cap-77", "cap-78", "cap-79", "cap-80", "cap-81", "cap-82", "cap-83", "cap-84", "cap-85", "cap-86", "cap-87", "cap-88", "cap-89", "cap-90", "cap-91", "cap-92", "cap-93", "cap-94", "cap-95", "cap-96", "cap-97", "cap-98", "cap-99", "cap-100", "cap-101", "cap-102", "cap-103", "cap-104", "cap-105", "cap-106", "cap-107", "cap-108", "cap-109", "cap-110", "cap-111", "cap-112", "cap-113", "cap-114", "cap-115", "cap-116", "cap-117", "cap-118", "cap-119", "cap-120", "cap-121", "cap-122", "cap-123", "cap-124", "cap-125", "cap-126", "cap-127"], "omitted_automatic_ids": ["cap-128"]}
+    }
+  ]
+}

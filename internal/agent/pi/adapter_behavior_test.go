@@ -279,6 +279,46 @@ func TestSessionHistoryPagesNewestFirstOnActiveBranch(t *testing.T) {
 	require.Empty(t, second.page.NextCursor)
 }
 
+func TestSessionHistoryReplaysImmutablePreV5ReferenceFixtures(t *testing.T) {
+	for _, fixture := range []string{"turn-v2-references.envelope", "turn-v3-references.envelope"} {
+		t.Run(fixture, func(t *testing.T) {
+			session, child := newBehaviorSession(t)
+			envelope, err := os.ReadFile(filepath.Join("..", "provider", "testdata", fixture))
+			require.NoError(t, err)
+			parsed, err := ParseEnvelope(envelope)
+			require.NoError(t, err)
+			entries := []nativeEntry{
+				{ID: "historical-user", Type: "message", Message: behaviorNativeMessage("user", string(envelope), "", 1)},
+				{ID: "historical-assistant", ParentID: stringPointer("historical-user"), Type: "message", Message: behaviorNativeMessage("assistant", "answer", "stop", 2)},
+			}
+			answer := make(chan struct {
+				page provider.HistoryPage
+				err  error
+			}, 1)
+			go func() {
+				page, historyErr := session.History(context.Background(), provider.HistoryRequest{Limit: 10})
+				answer <- struct {
+					page provider.HistoryPage
+					err  error
+				}{page, historyErr}
+			}()
+			respondEntries(t, child, entries, "historical-assistant")
+			result := <-answer
+			require.NoError(t, result.err)
+			require.Len(t, result.page.Items, 2)
+			user := result.page.Items[1]
+			require.Equal(t, parsed.MessageID, user.MessageID)
+			require.Equal(t, parsed.ReaderContent, user.Content)
+			for _, part := range user.Content.Parts {
+				if part.Reference != nil {
+					require.NotNil(t, part.Reference.Source.Anchor.Markdown)
+					require.Nil(t, part.Reference.Source.Anchor.HTML)
+				}
+			}
+		})
+	}
+}
+
 func TestSessionReconcileUsesActiveLeafWithoutPromptReplay(t *testing.T) {
 	session, child := newBehaviorSession(t)
 	entries, ids := behaviorHistoryEntries(t)
@@ -413,6 +453,8 @@ func behaviorHistoryEntries(t *testing.T) ([]nativeEntry, []string) {
 	}
 	return entries, ids
 }
+
+func stringPointer(value string) *string { return &value }
 
 func behaviorNativeMessage(role, text, stopReason string, second int64) json.RawMessage {
 	encoded, _ := json.Marshal(map[string]any{"role": role, "content": []any{map[string]any{"type": "text", "text": text}}, "stopReason": stopReason, "timestamp": time.Date(2026, 1, 2, 3, 4, int(second), 0, time.UTC).UnixMilli()})

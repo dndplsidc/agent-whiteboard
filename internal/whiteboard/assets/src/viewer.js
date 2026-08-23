@@ -2,6 +2,7 @@ import createDOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import MarkdownIt from "markdown-it";
 import mermaid from "mermaid";
+import { createHTMLContextController, buildHTMLComponentIndex, decodeEmbeddedRaster } from "./html-context.js";
 import { createMarkdownContextController, imageReference, indexMarkdownTokens } from "./markdown-context.js";
 import { createMessageEditor, cloneMessageContent, insertMessageReference, messageContentBytes, normalizeMessageContent, renderMessageContent } from "./message-editor.js";
 import {
@@ -488,8 +489,8 @@ export const DEFAULT_AGENT_DRAWER_WIDTH = 420;
 export const MIN_AGENT_DRAWER_WIDTH = 360;
 export const MAX_AGENT_DRAWER_WIDTH = 720;
 export const AGENT_DRAWER_DOCK_BREAKPOINT = 64 * 16;
-export const AGENT_API_VERSION = "4";
-export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v4";
+export const AGENT_API_VERSION = "5";
+export const AGENT_WEBSOCKET_PROTOCOL = "agent-whiteboard.v5";
 export const MAX_AGENT_MESSAGE_BYTES = 64 * 1024;
 export const MAX_AGENT_EVENT_BYTES = 1024 * 1024;
 export const MAX_AGENT_IMAGES_PER_TURN = 8;
@@ -627,21 +628,44 @@ function validHeading(value) {
   return exactObject(value, ["level", "title", "ordinal"]) && Number.isInteger(value.level) && value.level >= 1 && value.level <= 6 && validText(value.title, 256) && Number.isInteger(value.ordinal) && value.ordinal >= 1;
 }
 
-function validReferenceSource(value) {
-  return exactObject(value, ["resource_kind", "resource_id", "resource_updated_at", "context_digest", "heading_path", "start", "end"])
-    && value.resource_kind === "markdown" && validID(value.resource_id) && validDate(value.resource_updated_at) && DIGEST_PATTERN.test(value.context_digest)
+const COMPONENT_TYPES = new Set(["section", "image", "chart", "table", "code", "quote", "component"]);
+const ELEMENT_TAG_PATTERN = /^[a-z0-9-]+$/;
+
+function validMarkdownReferenceAnchor(value) {
+  return exactObject(value, ["heading_path", "start", "end"])
     && Array.isArray(value.heading_path) && value.heading_path.length <= 12 && value.heading_path.every(validHeading)
     && validAnchor(value.start) && validAnchor(value.end)
     && (value.start.block < value.end.block || value.start.block === value.end.block && value.start.offset <= value.end.offset);
 }
 
-function validContextReference(value, event = false) {
-  if (!exactObject(value, ["id", "kind", "label", "source"], ["quote", "markdown", "section_lines", "visual"]) || !validID(value.id) || !["text", "section", "image"].includes(value.kind) || !validText(value.label, 256) || !validReferenceSource(value.source)) return false;
-  if (value.kind === "text") return exactObject(value, ["id", "kind", "label", "source", "quote"]) && validText(value.quote, 16 * 1024);
-  if (value.kind === "section") return exactObject(value, ["id", "kind", "label", "source", "markdown", "section_lines"]) && validText(value.markdown, 48 * 1024) && exactObject(value.section_lines, ["start", "end"]) && Number.isInteger(value.section_lines.start) && value.section_lines.start >= 1 && Number.isInteger(value.section_lines.end) && value.section_lines.end > value.section_lines.start;
-  if (!exactObject(value, ["id", "kind", "label", "source", "visual"]) || !isRecord(value.visual)) return false;
+function validHTMLReferenceAnchor(value) {
+  return exactObject(value, ["element_id", "tag", "ordinal"])
+    && validText(value.element_id, 256) && validText(value.tag, 32) && ELEMENT_TAG_PATTERN.test(value.tag)
+    && Number.isInteger(value.ordinal) && value.ordinal >= 1 && value.ordinal <= 128;
+}
+
+function validReferenceSource(value) {
+  if (!exactObject(value, ["resource_kind", "resource_id", "resource_updated_at", "context_digest", "anchor"])
+      || !validID(value.resource_id) || !validDate(value.resource_updated_at) || !DIGEST_PATTERN.test(value.context_digest)
+      || !isRecord(value.anchor)) return false;
+  if (value.resource_kind === "markdown") return exactObject(value.anchor, ["markdown"]) && validMarkdownReferenceAnchor(value.anchor.markdown);
+  if (value.resource_kind === "html") return exactObject(value.anchor, ["html"]) && validHTMLReferenceAnchor(value.anchor.html);
+  return false;
+}
+
+function validReferenceVisual(value, event) {
+  if (!isRecord(value)) return false;
   const required = event ? ["image_id", "name", "alt", "media_type"] : ["image_id", "name", "alt"];
-  return exactObject(value.visual, required) && validID(value.visual.image_id) && validImageName(value.visual.name) && validText(value.visual.alt, 512, true) && (!event || IMAGE_MEDIA_TYPES.has(value.visual.media_type));
+  return exactObject(value, required) && validID(value.image_id) && validImageName(value.name) && validText(value.alt, 512, true) && (!event || IMAGE_MEDIA_TYPES.has(value.media_type));
+}
+
+function validContextReference(value, event = false) {
+  if (!exactObject(value, ["id", "kind", "label", "source"], ["quote", "markdown", "section_lines", "component", "visual"]) || !validID(value.id) || !["text", "section", "image", "component"].includes(value.kind) || !validText(value.label, 256) || !validReferenceSource(value.source)) return false;
+  if (value.kind === "text") return value.source.resource_kind === "markdown" && exactObject(value, ["id", "kind", "label", "source", "quote"]) && validText(value.quote, 16 * 1024);
+  if (value.kind === "section") return value.source.resource_kind === "markdown" && exactObject(value, ["id", "kind", "label", "source", "markdown", "section_lines"]) && validText(value.markdown, 48 * 1024) && exactObject(value.section_lines, ["start", "end"]) && Number.isInteger(value.section_lines.start) && value.section_lines.start >= 1 && Number.isInteger(value.section_lines.end) && value.section_lines.end > value.section_lines.start;
+  if (value.kind === "image") return value.source.resource_kind === "markdown" && exactObject(value, ["id", "kind", "label", "source", "visual"]) && validReferenceVisual(value.visual, event);
+  if (value.source.resource_kind !== "html" || !exactObject(value, ["id", "kind", "label", "source", "component"], ["visual"]) || !exactObject(value.component, ["type", "source_excerpt"]) || !COMPONENT_TYPES.has(value.component.type) || !validText(value.component.source_excerpt, 48 * 1024)) return false;
+  return value.visual === undefined || value.component.type === "image" && validReferenceVisual(value.visual, event);
 }
 
 export function validMessageContent(value, event = false) {
@@ -668,13 +692,13 @@ export function validMessageContent(value, event = false) {
 }
 
 function inlineImages(content) {
-  return content.parts.filter((part) => part.type === "reference" && part.reference.kind === "image").map((part) => ({ image_id: part.reference.visual.image_id, name: part.reference.visual.name }));
+  return content.parts.filter((part) => part.type === "reference" && part.reference.visual).map((part) => ({ image_id: part.reference.visual.image_id, name: part.reference.visual.name }));
 }
 
 function messageContentForCommand(content) {
   const result = cloneMessageContent(content);
   for (const part of result.parts) {
-    if (part.type === "reference" && part.reference.kind === "image") delete part.reference.visual.media_type;
+    if (part.type === "reference" && part.reference.visual) delete part.reference.visual.media_type;
   }
   return result;
 }
@@ -849,7 +873,7 @@ export function createSubmitCommand({ content, message, images = [], payload, pr
     orderedContent = { parts: orderedContent.parts.filter((part) => part.type !== "text") };
   }
   if (!validContentAndImages(orderedContent, images, false) || (revision !== undefined && !["initial", "replacement"].includes(revision))) throw new TypeError("invalid agent message");
-  if (payload?.kind === "html" && orderedContent.parts.some((part) => part.type === "reference")) throw new TypeError("invalid agent message");
+  if (orderedContent.parts.some((part) => part.type === "reference" && part.reference.source.resource_kind !== payload?.kind)) throw new TypeError("invalid agent message");
   if (!PROVIDERS.has(provider) || settings !== null && !validExecutionSettings(settings)) throw new TypeError("invalid agent provider settings");
   if (!validID(conversationID)) throw new TypeError("invalid agent conversation");
   const turnID = idFactory();
@@ -3110,7 +3134,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   function clearDraftInlineVisuals({ deleteStaged = true } = {}) {
     if (!deleteStaged) draftInlineVisuals.clear();
     const content = messageEditor.getContent();
-    const retained = content.parts.filter((part) => part.type !== "reference" || part.reference.kind !== "image");
+    const retained = content.parts.filter((part) => part.type !== "reference" || !part.reference.visual);
     if (!deleteStaged) messageEditor.setContent({ parts: retained });
     else messageEditor.setContent({ parts: retained });
   }
@@ -3177,10 +3201,67 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       }
       draft.inlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size, deletedImageIDs: deletedIDs });
       const reference = imageReference(metadata, { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest }, metadata.referenceID, staged.image_id, name);
-      if (owner === controller) messageEditor.insertReference(reference);
-      else draft.content = insertMessageReference(draft.content, reference, insertionCaret).content;
+      try {
+        if (owner === controller) messageEditor.insertReference(reference);
+        else draft.content = insertMessageReference(draft.content, reference, insertionCaret).content;
+      } catch (error) {
+        draft.inlineVisuals.delete(staged.image_id);
+        deleteCapturedImage(ownerTransport, staged.image_id, conversationID, deletedIDs);
+        throw error;
+      }
       announce(`Added ${reference.label} to the message.`);
       return reference;
+    } finally {
+      draft.inlineClaims.delete(claim);
+    }
+  }
+
+  async function addComponentReference(reference, component, { semanticOnly = false } = {}) {
+    setOpen(true, { focus: false });
+    showView("conversation", { focus: false });
+    if (!component?.raster || reference?.component?.type !== "image" || semanticOnly || !state.connected || !selectedModelSupportsImages() || !transport.conversationID) {
+      const content = messageEditor.insertReference(reference);
+      updateComposerAvailability();
+      return content;
+    }
+    if (draftAttachments.length + draftInlineVisuals.size >= MAX_AGENT_IMAGES_PER_TURN) throw new Error(`A message can contain at most ${MAX_AGENT_IMAGES_PER_TURN} images.`);
+    const owner = controller;
+    const ownerTransport = owner.transport;
+    const draft = owner.composerDraft;
+    const generation = draft.generation;
+    const conversationID = ownerTransport.conversationID;
+    const insertionCaret = messageEditor.saveCaret();
+    const claim = {};
+    const deletedIDs = new Set();
+    draft.inlineClaims.add(claim);
+    const stillOwned = () => !destroyed && owner.composerDraft === draft && draft.generation === generation && draft.inlineClaims.has(claim) && ownerTransport.conversationID === conversationID;
+    try {
+      const decoded = decodeEmbeddedRaster(component.raster, doc.defaultView);
+      const extension = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" }[decoded.mediaType];
+      const name = `component-${component.ordinal}.${extension}`;
+      const FileType = doc.defaultView?.File;
+      const blob = new doc.defaultView.Blob([decoded.bytes], { type: decoded.mediaType });
+      const file = FileType ? new FileType([blob], name, { type: decoded.mediaType }) : Object.assign(blob, { name });
+      const aggregate = draft.attachments.reduce((total, item) => total + item.file.size, 0) + [...draft.inlineVisuals.values()].reduce((total, item) => total + item.bytes, 0) + file.size;
+      if (aggregate > MAX_AGENT_TURN_IMAGE_BYTES) throw new Error("A message can contain at most 20 MiB of image data.");
+      if (!stillOwned()) throw new Error("The Page Agent draft changed while preparing this image.");
+      const staged = await ownerTransport.uploadImage(file, conversationID, undefined, "inline_reference");
+      if (!stillOwned()) {
+        deleteCapturedImage(ownerTransport, staged.image_id, conversationID, deletedIDs);
+        throw new Error("The Page Agent draft changed while preparing this image.");
+      }
+      draft.inlineVisuals.set(staged.image_id, { owner, conversationID, bytes: file.size, deletedImageIDs: deletedIDs });
+      const visualReference = { ...reference, visual: { image_id: staged.image_id, name, alt: component.label } };
+      try {
+        if (owner === controller) messageEditor.insertReference(visualReference);
+        else draft.content = insertMessageReference(draft.content, visualReference, insertionCaret).content;
+      } catch (error) {
+        draft.inlineVisuals.delete(staged.image_id);
+        deleteCapturedImage(ownerTransport, staged.image_id, conversationID, deletedIDs);
+        throw error;
+      }
+      updateComposerAvailability();
+      return visualReference;
     } finally {
       draft.inlineClaims.delete(claim);
     }
@@ -4317,6 +4398,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       return content;
     },
     addImageReference: addInlineImage,
+    addComponentReference,
     announce,
     destroy() {
       destroyed = true;
@@ -4370,9 +4452,20 @@ async function bootHTMLHost(payload, doc) {
       mediaQuery: browserMediaQuery(doc),
     });
     let agent;
+    let context;
     try {
-      agent = createAgentDrawer({ payload, doc });
+      agent = createAgentDrawer({ payload, doc, onReference: (reference) => context?.navigate(reference) ?? false });
+      const index = buildHTMLComponentIndex(payload.source);
+      context = createHTMLContextController({
+        doc, chooserHost: themeSlot, surface, frame, index,
+        identity: { resource: payload.local_agent.resource, digest: payload.local_agent.context_digest },
+        idFactory: generateAgentID,
+        onAdd: (reference, component, options) => agent.addComponentReference(reference, component, options),
+        announce: (messageText) => agent.announce(messageText),
+      });
     } catch (error) {
+      context?.destroy();
+      agent?.destroy();
       theme.destroy();
       throw error;
     }
@@ -4385,10 +4478,12 @@ async function bootHTMLHost(payload, doc) {
       frame,
       theme,
       agent,
+      context,
       destroy() {
         if (destroyed) return;
         destroyed = true;
         if (appBar[HTML_HOST_INSTANCE] === viewer) appBar[HTML_HOST_INSTANCE] = undefined;
+        context.destroy();
         agent.destroy();
         theme.destroy();
       },

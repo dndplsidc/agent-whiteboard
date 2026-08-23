@@ -121,6 +121,29 @@ func TestParseEnvelopeRejectsMalformedAndNoncanonicalFrames(t *testing.T) {
 	}
 }
 
+func TestBuildEnvelopeRoundTripsOrderedComponentContent(t *testing.T) {
+	component := provider.ContextReference{
+		ID: testTurnID, Kind: provider.ReferenceComponent, Label: "Revenue chart",
+		Source: provider.ReferenceSource{
+			ResourceKind: provider.ResourceHTML, ResourceID: testMessageID,
+			ResourceUpdatedAt: time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC), ContextDigest: strings.Repeat("b", 64),
+			Anchor: provider.ReferenceAnchor{HTML: &provider.HTMLReferenceAnchor{ElementID: "revenue-chart", Tag: "figure", Ordinal: 2}},
+		},
+		Component: &provider.ComponentReference{Type: provider.ComponentChart, SourceExcerpt: `<figure id="revenue-chart">Revenue</figure>`},
+	}
+	request := provider.TurnRequest{TurnID: testTurnID, MessageID: testMessageID, Content: provider.MessageContent{Parts: []provider.MessagePart{
+		{Kind: provider.MessagePartText, Text: "Explain "},
+		{Kind: provider.MessagePartReference, Reference: &component},
+	}}}
+
+	encoded, err := BuildEnvelope(request)
+	require.NoError(t, err)
+	parsed, err := ParseEnvelope(encoded)
+	require.NoError(t, err)
+	require.Equal(t, request.Content, parsed.ReaderContent)
+	require.Contains(t, parsed.ApplicationInstructions, "untrusted")
+}
+
 func TestBuildEnvelopeRejectsInvalidRequest(t *testing.T) {
 	request := envelopeRequest(provider.ContextInitial)
 	request.Context.Source = []byte{0xff}

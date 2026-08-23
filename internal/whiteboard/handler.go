@@ -66,6 +66,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+httpx.PublicMarkdown+"{id}", h.viewMarkdown)
 	mux.HandleFunc("GET "+httpx.PublicHTML+"{id}", h.viewHTML)
 	mux.HandleFunc("GET "+httpx.PublicHTML+"{id}"+httpx.PublicHTMLContentSuffix, h.viewHTMLContent)
+	mux.HandleFunc("GET "+httpx.PublicHTML+"{id}"+httpx.PublicHTMLRenderedSuffix, h.viewHTMLRendered)
 }
 
 func (h *Handler) getMarkdown(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +154,25 @@ func (h *Handler) viewHTMLContent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(board.Source)
+	}
+}
+
+func (h *Handler) viewHTMLRendered(w http.ResponseWriter, r *http.Request) {
+	setStandaloneInnerHeaders(w)
+	board, ok := h.loadPublicWhiteboard(w, r, KindHTML)
+	if !ok {
+		return
+	}
+	rendered, err := h.viewer.renderHTMLChild(board.Source)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(rendered)
 	}
 }
 

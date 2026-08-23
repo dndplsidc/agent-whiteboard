@@ -117,9 +117,11 @@ Trusted-origin list and edit operations have stronger rules on macOS and Linux: 
 
 Trusted-origin editing and listing are supported only on macOS and Linux. Other platforms return an unsupported-platform configuration error. Managed agent daemon lifecycle operations are macOS-only; Linux returns explicit foreground guidance.
 
-## Pre-production Page Agent v4 upgrade
+## Coordinated Page Agent v5 upgrade
 
-Page Agent v4 uses a format-neutral exact `source` context field for Markdown and HTML while retaining the same API and WebSocket version. It replaces v3 in place and does not migrate older broker conversation/workspace state. Before deploying the v4 viewer and broker, stop the foreground broker or managed daemon and clear the disposable Page Agent conversation/workspace state under the configured Agent Whiteboard storage. Deploy viewer and broker together, then restart `agent serve` or the daemon. Do not delete public whiteboards or provider-native Pi/Codex histories: they are outside this reset. Mixed v3/v4 viewers and brokers fail closed rather than negotiating or adapting.
+Page Agent browser/local API v5 and WebSocket subprotocol `agent-whiteboard.v5` add strict ordered HTML component references. New provider submissions use native envelope v4; historical native v1, v2, and v3 envelopes remain parseable and normalized.
+
+Before deployment, stop the foreground broker or managed daemon and clear only disposable Page Agent broker conversation/workspace state under the configured Agent Whiteboard storage. Deploy the v5 viewer and broker together, then restart `agent serve` or the daemon. Do not delete public whiteboards or provider-native Pi/Codex histories: they remain valid and are outside this reset. Mixed older/v5 viewers and brokers fail closed rather than negotiating or adapting, so do not reconnect until both halves are updated.
 
 ## Trusted HTTPS origins
 

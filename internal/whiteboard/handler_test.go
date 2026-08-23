@@ -454,6 +454,74 @@ func TestHandlerViewHTMLEnabledUsesTrustedShellAndAgentCSP(t *testing.T) {
 	assertHTMLOuterHeadersWithCSP(t, rr, viewer.HTMLContentSecurityPolicy())
 }
 
+func TestHandlerViewHTMLRenderedInjectsConfiguredBridgeAndSupportsHEAD(t *testing.T) {
+	source := []byte(" \n<!--prefix-->\n\xef\xbb\xbf\n<!DOCTYPE html>\n<html><head data-exact='yes'><script>publisher()</script></head><body>exact</body></html>")
+	bridge := []byte("globalThis.trustedBridge=true;")
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			operations := testutil.NewMockWhiteboardOperations(t)
+			operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
+				ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: source,
+			}, nil).Once()
+			viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
+				CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true, HTMLBridge: bridge,
+			})
+			require.NoError(t, err)
+			handler, err := whiteboard.NewHandler(operations, viewer, whiteboard.HandlerConfig{
+				MaxWhiteboardBytes: defaultMaxBytes, MaxContextBytes: defaultMaxContextBytes,
+			})
+			require.NoError(t, err)
+			rr := httptest.NewRecorder()
+
+			handlerMux(t, handler).ServeHTTP(rr, httptest.NewRequest(method,
+				httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLRenderedSuffix, nil))
+
+			require.Equal(t, http.StatusOK, rr.Code)
+			if method == http.MethodGet {
+				require.Equal(t, " \n<!--prefix-->\n\xef\xbb\xbf\n<!DOCTYPE html>\n<html><head data-exact='yes'><script>"+string(bridge)+"</script><script>publisher()</script></head><body>exact</body></html>", rr.Body.String())
+			} else {
+				require.Empty(t, rr.Body.Bytes())
+			}
+			assertHTMLInnerHeaders(t, rr)
+		})
+	}
+}
+
+func TestHandlerViewHTMLRenderedFallsBackAtomicallyForLegacyPreHeadContent(t *testing.T) {
+	// This represents legacy stored input that predates publish-time validation.
+	source := []byte("<!doctype html><html><script>PRIVATE_LEGACY_SOURCE</script><head></head><body>exact</body></html>")
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			operations := testutil.NewMockWhiteboardOperations(t)
+			operations.EXPECT().Get(mock.Anything, testWhiteboardID).Return(whiteboard.Whiteboard{
+				ID: testWhiteboardID, Kind: whiteboard.KindHTML, Source: source,
+			}, nil).Once()
+			viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
+				CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
+				HTMLBridge: []byte("globalThis.trustedBridge=true;"),
+			})
+			require.NoError(t, err)
+			handler, err := whiteboard.NewHandler(operations, viewer, whiteboard.HandlerConfig{
+				MaxWhiteboardBytes: defaultMaxBytes, MaxContextBytes: defaultMaxContextBytes,
+			})
+			require.NoError(t, err)
+			rr := httptest.NewRecorder()
+
+			handlerMux(t, handler).ServeHTTP(rr, httptest.NewRequest(method,
+				httpx.PublicHTML+testWhiteboardID+httpx.PublicHTMLRenderedSuffix, nil))
+
+			require.Equal(t, http.StatusOK, rr.Code)
+			if method == http.MethodGet {
+				require.Equal(t, source, rr.Body.Bytes())
+				require.NotContains(t, rr.Body.String(), "globalThis.trustedBridge")
+			} else {
+				require.Empty(t, rr.Body.Bytes())
+			}
+			assertHTMLInnerHeaders(t, rr)
+		})
+	}
+}
+
 func TestHandlerViewHTMLInnerServesStoredDocumentBytesUnchanged(t *testing.T) {
 	source := []byte("<!DOCTYPE html>\n<html><head><style>body { color: red; }</style></head>\n<body><script>globalThis.answer = 42;</script></body></html>\n")
 	ctx := context.WithValue(context.Background(), handlerContextKey{}, "sentinel")
@@ -482,6 +550,7 @@ func TestHandlerHTMLOuterAndInnerErrorsHaveSecurityHeadersAndIndistinguishableBo
 	}{
 		{name: "outer", assertHeaders: assertHTMLOuterHeaders},
 		{name: "inner", assertHeaders: assertHTMLInnerHeaders},
+		{name: "rendered", assertHeaders: assertHTMLInnerHeaders},
 	}
 	for _, route := range paths {
 		t.Run(route.name, func(t *testing.T) {
@@ -499,8 +568,11 @@ func TestHandlerHTMLOuterAndInnerErrorsHaveSecurityHeadersAndIndistinguishableBo
 							common.NewError(common.CodeNotFound, "resource not found", errors.New("private "+condition))).Once()
 					}
 					path := httpx.PublicHTML + id
-					if route.name == "inner" {
+					switch route.name {
+					case "inner":
 						path += httpx.PublicHTMLContentSuffix
+					case "rendered":
+						path += httpx.PublicHTMLRenderedSuffix
 					}
 					rr := httptest.NewRecorder()
 					handlerMux(t, newHandler(t, operations, defaultMaxBytes)).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
@@ -1042,6 +1114,7 @@ func newEnabledViewer(t *testing.T) *whiteboard.Viewer {
 	t.Helper()
 	viewer, err := whiteboard.NewViewer(whiteboard.ViewerConfig{
 		CSS: []byte(testViewerCSS), JS: []byte(testViewerJS), LocalAgentEnabled: true,
+		HTMLBridge: []byte("globalThis.testBridge=true;"),
 	})
 	require.NoError(t, err)
 	return viewer

@@ -10,8 +10,8 @@ import (
 )
 
 func TestImageAttachmentLimitsAreFrozen(t *testing.T) {
-	require.Equal(t, "4", protocol.APIVersion)
-	require.Equal(t, "agent-whiteboard.v4", protocol.WebSocketSubprotocol)
+	require.Equal(t, "5", protocol.APIVersion)
+	require.Equal(t, "agent-whiteboard.v5", protocol.WebSocketSubprotocol)
 	require.Equal(t, "/api/v1/agent/images", protocol.ImagesPath)
 	require.Equal(t, 8, protocol.MaxImagesPerTurn)
 	require.Equal(t, 10<<20, protocol.MaxImageBytes)

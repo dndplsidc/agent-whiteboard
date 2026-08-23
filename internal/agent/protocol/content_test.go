@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestV4SubmitRoundTripsOrderedContentStrictly(t *testing.T) {
+func TestV5SubmitRoundTripsOrderedContentStrictly(t *testing.T) {
 	conversationID := protocolID("C")
 	reference := protocolTextReference()
 	command := protocol.Command{
@@ -23,7 +23,7 @@ func TestV4SubmitRoundTripsOrderedContentStrictly(t *testing.T) {
 	}
 	encoded, err := command.MarshalJSON()
 	require.NoError(t, err)
-	require.Contains(t, string(encoded), `"api_version":"4"`)
+	require.Contains(t, string(encoded), `"api_version":"5"`)
 	require.NotContains(t, string(encoded), `"message"`)
 
 	decoded, err := protocol.DecodeCommand(encoded)
@@ -31,7 +31,7 @@ func TestV4SubmitRoundTripsOrderedContentStrictly(t *testing.T) {
 	require.Equal(t, command, decoded)
 }
 
-func TestV4ContentRejectsNoncanonicalDuplicateAndPhaseInvalidVisuals(t *testing.T) {
+func TestV5ContentRejectsNoncanonicalDuplicateAndPhaseInvalidVisuals(t *testing.T) {
 	text := protocolTextReference()
 	content := protocol.MessageContent{Parts: []protocol.MessagePart{
 		{Type: protocol.MessagePartText, Text: "a"},
@@ -48,7 +48,7 @@ func TestV4ContentRejectsNoncanonicalDuplicateAndPhaseInvalidVisuals(t *testing.
 	image.Visual.MediaType = "image/png"
 	require.NoError(t, (protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &image}}}).ValidateEvent())
 
-	duplicate := `{"api_version":"4","command_id":"` + protocolID("D") + `","client_id":"` + protocolID("E") + `","conversation_id":"` + protocolID("C") + `","type":"submit","payload":{"turn_id":"` + protocolID("T") + `","message_id":"` + protocolID("M") + `","content":{"parts":[{"type":"text","text":"a","text":"b"}]},"settings":null}}`
+	duplicate := `{"api_version":"5","command_id":"` + protocolID("D") + `","client_id":"` + protocolID("E") + `","conversation_id":"` + protocolID("C") + `","type":"submit","payload":{"turn_id":"` + protocolID("T") + `","message_id":"` + protocolID("M") + `","content":{"parts":[{"type":"text","text":"a","text":"b"}]},"settings":null}}`
 	_, err := protocol.DecodeCommand([]byte(duplicate))
 	require.Error(t, err)
 
@@ -56,7 +56,7 @@ func TestV4ContentRejectsNoncanonicalDuplicateAndPhaseInvalidVisuals(t *testing.
 	require.Error(t, (protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &text}}}).ValidateCommand())
 }
 
-func TestV4ContentBoundsQuotesSectionsAndReferences(t *testing.T) {
+func TestV5ContentBoundsQuotesSectionsAndReferences(t *testing.T) {
 	text := protocolTextReference()
 	text.Quote = strings.Repeat("x", protocol.MaxReferenceQuoteBytes+1)
 	require.Error(t, (protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &text}}}).ValidateCommand())
@@ -77,14 +77,41 @@ func TestV4ContentBoundsQuotesSectionsAndReferences(t *testing.T) {
 	require.Error(t, (protocol.MessageContent{Parts: parts}).ValidateCommand())
 }
 
+func TestV5ComponentReferenceUsesStrictNestedHTMLAnchor(t *testing.T) {
+	component := protocol.ContextReference{
+		ID: protocolID("H"), Kind: protocol.ReferenceComponent, Label: "Revenue chart",
+		Source: protocol.ReferenceSource{
+			ResourceKind: protocol.ResourceHTML, ResourceID: protocolID("B"),
+			ResourceUpdatedAt: time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC), ContextDigest: strings.Repeat("b", 64),
+			Anchor: protocol.ReferenceAnchor{HTML: &protocol.HTMLReferenceAnchor{ElementID: "revenue-chart", Tag: "figure", Ordinal: 7}},
+		},
+		Component: &protocol.ComponentReference{Type: protocol.ComponentChart, SourceExcerpt: `<figure id="revenue-chart">…</figure>`},
+	}
+	content := protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &component}}}
+	require.NoError(t, content.ValidateCommand())
+
+	both := content.Clone()
+	both.Parts[0].Reference.Source.Anchor.Markdown = &protocol.MarkdownReferenceAnchor{Start: protocol.SourceAnchor{Line: 1}, End: protocol.SourceAnchor{Line: 1}}
+	require.Error(t, both.ValidateCommand())
+	badVisual := content.Clone()
+	badVisual.Parts[0].Reference.Visual = &protocol.ReferenceVisual{ImageID: protocolID("I"), Name: "chart.png"}
+	require.Error(t, badVisual.ValidateCommand())
+	image := content.Clone()
+	image.Parts[0].Reference.Component.Type = protocol.ComponentImage
+	image.Parts[0].Reference.Visual = &protocol.ReferenceVisual{ImageID: protocolID("I"), Name: "chart.png"}
+	require.NoError(t, image.ValidateCommand())
+}
+
 func protocolTextReference() protocol.ContextReference {
 	return protocol.ContextReference{
 		ID: protocolID("R"), Kind: protocol.ReferenceText, Label: "Finding", Quote: "Only 23% invited a collaborator.",
 		Source: protocol.ReferenceSource{
 			ResourceKind: protocol.ResourceMarkdown, ResourceID: protocolID("B"),
 			ResourceUpdatedAt: time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC), ContextDigest: strings.Repeat("a", 64),
-			HeadingPath: []protocol.HeadingReference{{Level: 2, Title: "Analysis", Ordinal: 1}},
-			Start:       protocol.SourceAnchor{Block: 3, Line: 5, Offset: 7}, End: protocol.SourceAnchor{Block: 3, Line: 5, Offset: 42},
+			Anchor: protocol.ReferenceAnchor{Markdown: &protocol.MarkdownReferenceAnchor{
+				HeadingPath: []protocol.HeadingReference{{Level: 2, Title: "Analysis", Ordinal: 1}},
+				Start:       protocol.SourceAnchor{Block: 3, Line: 5, Offset: 7}, End: protocol.SourceAnchor{Block: 3, Line: 5, Offset: 42},
+			}},
 		},
 	}
 }

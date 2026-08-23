@@ -9,15 +9,19 @@ import (
 )
 
 const (
-	MaxMessageParts           = 64
-	MaxMessageReferences      = 16
-	MaxMessageSkills          = 16
-	MaxReferenceQuoteBytes    = 16 << 10
-	MaxReferenceMarkdownBytes = 48 << 10
-	MaxReferenceLabelBytes    = 256
-	MaxHeadingPathItems       = 12
-	MaxHeadingTitleBytes      = 256
-	MaxReferenceAltBytes      = 512
+	MaxMessageParts                = 64
+	MaxMessageReferences           = 16
+	MaxMessageSkills               = 16
+	MaxReferenceQuoteBytes         = 16 << 10
+	MaxReferenceMarkdownBytes      = 48 << 10
+	MaxReferenceLabelBytes         = 256
+	MaxHeadingPathItems            = 12
+	MaxHeadingTitleBytes           = 256
+	MaxReferenceAltBytes           = 512
+	MaxReferenceElementIDBytes     = 256
+	MaxReferenceTagBytes           = 32
+	MaxReferenceSourceExcerptBytes = 48 << 10
+	MaxComponentOrdinal            = 128
 )
 
 type MessagePartType string
@@ -31,9 +35,22 @@ const (
 type ReferenceKind string
 
 const (
-	ReferenceText    ReferenceKind = "text"
-	ReferenceSection ReferenceKind = "section"
-	ReferenceImage   ReferenceKind = "image"
+	ReferenceText      ReferenceKind = "text"
+	ReferenceSection   ReferenceKind = "section"
+	ReferenceImage     ReferenceKind = "image"
+	ReferenceComponent ReferenceKind = "component"
+)
+
+type ComponentType string
+
+const (
+	ComponentSection ComponentType = "section"
+	ComponentImage   ComponentType = "image"
+	ComponentChart   ComponentType = "chart"
+	ComponentTable   ComponentType = "table"
+	ComponentCode    ComponentType = "code"
+	ComponentQuote   ComponentType = "quote"
+	ComponentCustom  ComponentType = "component"
 )
 
 type MessageContent struct {
@@ -53,24 +70,56 @@ type SkillInvocation struct {
 }
 
 type ContextReference struct {
-	ID           string           `json:"id"`
-	Kind         ReferenceKind    `json:"kind"`
-	Label        string           `json:"label"`
-	Source       ReferenceSource  `json:"source"`
-	Quote        string           `json:"quote,omitempty"`
-	Markdown     string           `json:"markdown,omitempty"`
-	SectionLines *SourceLineRange `json:"section_lines,omitempty"`
-	Visual       *ReferenceVisual `json:"visual,omitempty"`
+	ID           string              `json:"id"`
+	Kind         ReferenceKind       `json:"kind"`
+	Label        string              `json:"label"`
+	Source       ReferenceSource     `json:"source"`
+	Quote        string              `json:"quote,omitempty"`
+	Markdown     string              `json:"markdown,omitempty"`
+	SectionLines *SourceLineRange    `json:"section_lines,omitempty"`
+	Component    *ComponentReference `json:"component,omitempty"`
+	Visual       *ReferenceVisual    `json:"visual,omitempty"`
 }
 
 type ReferenceSource struct {
-	ResourceKind      ResourceKind       `json:"resource_kind"`
-	ResourceID        string             `json:"resource_id"`
-	ResourceUpdatedAt time.Time          `json:"resource_updated_at"`
-	ContextDigest     string             `json:"context_digest"`
-	HeadingPath       []HeadingReference `json:"heading_path"`
-	Start             SourceAnchor       `json:"start"`
-	End               SourceAnchor       `json:"end"`
+	ResourceKind      ResourceKind    `json:"resource_kind"`
+	ResourceID        string          `json:"resource_id"`
+	ResourceUpdatedAt time.Time       `json:"resource_updated_at"`
+	ContextDigest     string          `json:"context_digest"`
+	Anchor            ReferenceAnchor `json:"anchor"`
+}
+
+type ReferenceAnchor struct {
+	Markdown *MarkdownReferenceAnchor `json:"markdown,omitempty"`
+	HTML     *HTMLReferenceAnchor     `json:"html,omitempty"`
+}
+
+type MarkdownReferenceAnchor struct {
+	HeadingPath []HeadingReference `json:"heading_path"`
+	Start       SourceAnchor       `json:"start"`
+	End         SourceAnchor       `json:"end"`
+}
+
+type HTMLReferenceAnchor struct {
+	ElementID string `json:"element_id"`
+	Tag       string `json:"tag"`
+	Ordinal   int    `json:"ordinal"`
+}
+
+type ComponentReference struct {
+	Type          ComponentType `json:"type"`
+	SourceExcerpt string        `json:"source_excerpt"`
+}
+
+func (source ReferenceSource) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		ResourceKind      ResourceKind    `json:"resource_kind"`
+		ResourceID        string          `json:"resource_id"`
+		ResourceUpdatedAt time.Time       `json:"resource_updated_at"`
+		ContextDigest     string          `json:"context_digest"`
+		Anchor            ReferenceAnchor `json:"anchor"`
+	}
+	return marshalApplicationJSON(wire{source.ResourceKind, source.ResourceID, source.ResourceUpdatedAt, source.ContextDigest, source.Anchor})
 }
 
 type HeadingReference struct {
@@ -250,16 +299,20 @@ func validateContextReference(reference ContextReference, event bool) error {
 	}
 	switch reference.Kind {
 	case ReferenceText:
-		if !validBoundedText(reference.Quote, MaxReferenceQuoteBytes, true) || reference.Markdown != "" || reference.SectionLines != nil || reference.Visual != nil {
+		if reference.Source.ResourceKind != ResourceMarkdown || !validBoundedText(reference.Quote, MaxReferenceQuoteBytes, true) || reference.Markdown != "" || reference.SectionLines != nil || reference.Component != nil || reference.Visual != nil {
 			return errors.New("invalid text reference")
 		}
 	case ReferenceSection:
-		if reference.Quote != "" || !validBoundedText(reference.Markdown, MaxReferenceMarkdownBytes, true) || reference.SectionLines == nil || reference.SectionLines.Start < 1 || reference.SectionLines.End <= reference.SectionLines.Start || reference.Visual != nil {
+		if reference.Source.ResourceKind != ResourceMarkdown || reference.Quote != "" || !validBoundedText(reference.Markdown, MaxReferenceMarkdownBytes, true) || reference.SectionLines == nil || reference.SectionLines.Start < 1 || reference.SectionLines.End <= reference.SectionLines.Start || reference.Component != nil || reference.Visual != nil {
 			return errors.New("invalid section reference")
 		}
 	case ReferenceImage:
-		if reference.Quote != "" || reference.Markdown != "" || reference.SectionLines != nil || validateReferenceVisual(reference.Visual, event) != nil {
+		if reference.Source.ResourceKind != ResourceMarkdown || reference.Quote != "" || reference.Markdown != "" || reference.SectionLines != nil || reference.Component != nil || validateReferenceVisual(reference.Visual, event) != nil {
 			return errors.New("invalid image reference")
+		}
+	case ReferenceComponent:
+		if reference.Source.ResourceKind != ResourceHTML || reference.Quote != "" || reference.Markdown != "" || reference.SectionLines != nil || reference.Component == nil || !reference.Component.Type.Valid() || !validBoundedText(reference.Component.SourceExcerpt, MaxReferenceSourceExcerptBytes, true) || (reference.Visual != nil && (reference.Component.Type != ComponentImage || validateReferenceVisual(reference.Visual, event) != nil)) {
+			return errors.New("invalid component reference")
 		}
 	default:
 		return errors.New("invalid reference kind")
@@ -268,15 +321,51 @@ func validateContextReference(reference ContextReference, event bool) error {
 }
 
 func validateReferenceSource(source ReferenceSource) error {
-	if source.ResourceKind != ResourceMarkdown || !validID(source.ResourceID) || source.ResourceUpdatedAt.IsZero() || !validDigest(source.ContextDigest) || len(source.HeadingPath) > MaxHeadingPathItems || !validAnchor(source.Start) || !validAnchor(source.End) || compareAnchors(source.Start, source.End) > 0 {
+	anchorUnion := source.Anchor
+	if !validID(source.ResourceID) || source.ResourceUpdatedAt.IsZero() || !validDigest(source.ContextDigest) || (anchorUnion.Markdown == nil) == (anchorUnion.HTML == nil) {
 		return errors.New("invalid reference source")
 	}
-	for _, heading := range source.HeadingPath {
-		if heading.Level < 1 || heading.Level > 6 || heading.Ordinal < 1 || !validBoundedText(heading.Title, MaxHeadingTitleBytes, true) {
-			return errors.New("invalid heading reference")
+	if source.ResourceKind == ResourceMarkdown && anchorUnion.Markdown != nil {
+		anchor := anchorUnion.Markdown
+		if len(anchor.HeadingPath) > MaxHeadingPathItems || !validAnchor(anchor.Start) || !validAnchor(anchor.End) || compareAnchors(anchor.Start, anchor.End) > 0 {
+			return errors.New("invalid Markdown reference source")
+		}
+		for _, heading := range anchor.HeadingPath {
+			if heading.Level < 1 || heading.Level > 6 || heading.Ordinal < 1 || !validBoundedText(heading.Title, MaxHeadingTitleBytes, true) {
+				return errors.New("invalid heading reference")
+			}
+		}
+		return nil
+	}
+	if source.ResourceKind == ResourceHTML && anchorUnion.HTML != nil {
+		anchor := anchorUnion.HTML
+		if !validBoundedText(anchor.ElementID, MaxReferenceElementIDBytes, true) || !validElementTag(anchor.Tag) || anchor.Ordinal < 1 || anchor.Ordinal > MaxComponentOrdinal {
+			return errors.New("invalid HTML reference source")
+		}
+		return nil
+	}
+	return errors.New("reference resource kind does not match anchor")
+}
+
+func (kind ComponentType) Valid() bool {
+	switch kind {
+	case ComponentSection, ComponentImage, ComponentChart, ComponentTable, ComponentCode, ComponentQuote, ComponentCustom:
+		return true
+	default:
+		return false
+	}
+}
+
+func validElementTag(value string) bool {
+	if !validBoundedText(value, MaxReferenceTagBytes, true) {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+			return false
 		}
 	}
-	return nil
+	return true
 }
 
 func validateReferenceVisual(visual *ReferenceVisual, event bool) error {
@@ -306,8 +395,17 @@ func compareAnchors(left, right SourceAnchor) int {
 
 func referenceBytes(reference ContextReference) int {
 	total := len(reference.ID) + len(reference.Label) + len(reference.Quote) + len(reference.Markdown) + len(reference.Source.ResourceID) + len(reference.Source.ContextDigest)
-	for _, heading := range reference.Source.HeadingPath {
-		total += len(heading.Title)
+	anchorUnion := reference.Source.Anchor
+	if anchorUnion.Markdown != nil {
+		for _, heading := range anchorUnion.Markdown.HeadingPath {
+			total += len(heading.Title)
+		}
+	}
+	if anchorUnion.HTML != nil {
+		total += len(anchorUnion.HTML.ElementID) + len(anchorUnion.HTML.Tag)
+	}
+	if reference.Component != nil {
+		total += len(reference.Component.Type) + len(reference.Component.SourceExcerpt)
 	}
 	if reference.Visual != nil {
 		total += len(reference.Visual.ImageID) + len(reference.Visual.Name) + len(reference.Visual.Alt) + len(reference.Visual.MediaType)
@@ -317,10 +415,23 @@ func referenceBytes(reference ContextReference) int {
 
 func cloneContextReference(reference ContextReference) ContextReference {
 	result := reference
-	result.Source.HeadingPath = append([]HeadingReference(nil), reference.Source.HeadingPath...)
+	anchorUnion := reference.Source.Anchor
+	if anchorUnion.Markdown != nil {
+		anchor := *anchorUnion.Markdown
+		anchor.HeadingPath = append([]HeadingReference(nil), anchor.HeadingPath...)
+		result.Source.Anchor.Markdown = &anchor
+	}
+	if anchorUnion.HTML != nil {
+		anchor := *anchorUnion.HTML
+		result.Source.Anchor.HTML = &anchor
+	}
 	if reference.SectionLines != nil {
 		lines := *reference.SectionLines
 		result.SectionLines = &lines
+	}
+	if reference.Component != nil {
+		component := *reference.Component
+		result.Component = &component
 	}
 	if reference.Visual != nil {
 		visual := *reference.Visual

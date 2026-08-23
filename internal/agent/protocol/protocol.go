@@ -14,12 +14,12 @@ import (
 )
 
 const (
-	APIVersion           = "4"
+	APIVersion           = "5"
 	Namespace            = "/api/v1/agent"
 	StatusPath           = Namespace + "/status"
 	ConnectPath          = Namespace + "/connect"
 	ImagesPath           = Namespace + "/images"
-	WebSocketSubprotocol = "agent-whiteboard.v4"
+	WebSocketSubprotocol = "agent-whiteboard.v5"
 	APIVersionHeader     = "X-Agent-Whiteboard-API-Version"
 	ClientIDHeader       = "X-Agent-Whiteboard-Client-ID"
 	ConversationIDHeader = "X-Agent-Whiteboard-Conversation-ID"

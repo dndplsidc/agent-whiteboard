@@ -26,7 +26,7 @@ func TestMessageContentConversionPreservesInterleavedOrderAndSourceContext(t *te
 	domain, err := messageContentToProvider(wire)
 	require.NoError(t, err)
 	require.Equal(t, "compare [first] with [second] please", domain.PlainText())
-	require.Equal(t, first.Source.Start.Line, domain.Parts[1].Reference.Source.Start.Line)
+	require.Equal(t, first.Source.Anchor.Markdown.Start.Line, domain.Parts[1].Reference.Source.Anchor.Markdown.Start.Line)
 
 	roundTrip, err := messageContentFromProvider(domain, nil)
 	require.NoError(t, err)
@@ -89,6 +89,88 @@ func TestSubmitRejectsReferenceFromStalePageRevision(t *testing.T) {
 	requireCommandResult(t, result, protocol.CommandRejected, protocol.ErrorBoardRevisionUnavailable)
 }
 
+func TestComponentContentConversionPreservesNestedAnchorsDescriptorsAndClones(t *testing.T) {
+	markdownResource := protocol.Resource{Kind: protocol.ResourceMarkdown, ID: testID('R'), CreatedAt: testTime(), UpdatedAt: testTime()}
+	htmlResource := protocol.Resource{Kind: protocol.ResourceHTML, ID: testID('H'), CreatedAt: testTime(), UpdatedAt: testTime()}
+	markdown := protocolTextReference(testID('A'), "finding", "quoted finding", markdownResource, strings.Repeat("a", 64))
+	component := protocolComponentReference(testID('B'), "Revenue chart", protocol.ComponentChart, htmlResource, strings.Repeat("b", 64), nil)
+	visual := &protocol.ReferenceVisual{ImageID: testID('I'), Name: "photo.png", Alt: "Product photo"}
+	imageComponent := protocolComponentReference(testID('C'), "Product photo", protocol.ComponentImage, htmlResource, strings.Repeat("b", 64), visual)
+	wire := protocol.MessageContent{Parts: []protocol.MessagePart{
+		{Type: protocol.MessagePartText, Text: "Compare "},
+		{Type: protocol.MessagePartReference, Reference: &markdown},
+		{Type: protocol.MessagePartReference, Reference: &component},
+		{Type: protocol.MessagePartReference, Reference: &imageComponent},
+	}}
+
+	domain, err := messageContentToProvider(wire)
+	require.NoError(t, err)
+	require.Equal(t, 1, domain.Parts[3].Reference.Visual.Ordinal)
+	require.Equal(t, provider.ComponentChart, domain.Parts[2].Reference.Component.Type)
+	require.Equal(t, "revenue-chart", domain.Parts[2].Reference.Source.Anchor.HTML.ElementID)
+
+	// Conversion must not alias caller-owned nested values.
+	wire.Parts[2].Reference.Source.Anchor.HTML.ElementID = "mutated"
+	wire.Parts[2].Reference.Component.SourceExcerpt = "mutated"
+	require.Equal(t, "revenue-chart", domain.Parts[2].Reference.Source.Anchor.HTML.ElementID)
+	require.NotEqual(t, "mutated", domain.Parts[2].Reference.Component.SourceExcerpt)
+
+	descriptor := protocol.ImageDescriptor{ImageID: testID('I'), Name: "photo.png", MediaType: "image/png"}
+	roundTrip, err := messageContentFromProvider(domain, []protocol.ImageDescriptor{descriptor})
+	require.NoError(t, err)
+	require.Equal(t, protocol.ComponentChart, roundTrip.Parts[2].Reference.Component.Type)
+	require.Equal(t, "revenue-chart", roundTrip.Parts[2].Reference.Source.Anchor.HTML.ElementID)
+	require.Equal(t, "image/png", roundTrip.Parts[3].Reference.Visual.MediaType)
+}
+
+func TestCurrentPageMatchingRequiresExactReferenceResourceKindRevisionAndDigest(t *testing.T) {
+	resource := protocol.Resource{Kind: protocol.ResourceHTML, ID: testID('H'), CreatedAt: testTime(), UpdatedAt: testTime()}
+	reference := protocolComponentReference(testID('C'), "Revenue chart", protocol.ComponentChart, resource, strings.Repeat("a", 64), nil)
+	content, err := messageContentToProvider(protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &reference}}})
+	require.NoError(t, err)
+	require.True(t, referencesMatchCurrentPage(content, resource, strings.Repeat("a", 64)))
+
+	kindMismatch := resource
+	kindMismatch.Kind = protocol.ResourceMarkdown
+	require.False(t, referencesMatchCurrentPage(content, kindMismatch, strings.Repeat("a", 64)))
+	stale := resource
+	stale.UpdatedAt = stale.UpdatedAt.Add(1)
+	require.False(t, referencesMatchCurrentPage(content, stale, strings.Repeat("a", 64)))
+	require.False(t, referencesMatchCurrentPage(content, resource, strings.Repeat("b", 64)))
+}
+
+func TestQueueEditCannotForgeComponentReference(t *testing.T) {
+	resource := protocol.Resource{Kind: protocol.ResourceHTML, ID: testID('H'), CreatedAt: testTime(), UpdatedAt: testTime()}
+	visual := &protocol.ReferenceVisual{ImageID: testID('I'), Name: "photo.png", Alt: "Product photo"}
+	reference := protocolComponentReference(testID('C'), "Product photo", protocol.ComponentImage, resource, strings.Repeat("a", 64), visual)
+	content, err := messageContentToProvider(protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &reference}}})
+	require.NoError(t, err)
+	input := provider.ImageInput{ID: testID('I'), Name: "photo.png", MediaType: "image/png", Bytes: 4, Path: filepath.Join("/private/tmp", testID('I')+".png")}
+	descriptor := protocol.ImageDescriptor{ImageID: input.ID, Name: input.Name, MediaType: input.MediaType}
+	queue := NewQueue()
+	require.NoError(t, queue.Enqueue(QueuedTurn{TurnID: testID('T'), MessageID: testID('M'), Content: content, Images: []provider.ImageInput{input}, Descriptors: []protocol.ImageDescriptor{descriptor}}))
+
+	for name, mutate := range map[string]func(*protocol.ContextReference){
+		"anchor":  func(value *protocol.ContextReference) { value.Source.Anchor.HTML.Ordinal++ },
+		"excerpt": func(value *protocol.ContextReference) { value.Component.SourceExcerpt = "forged" },
+		"visual":  func(value *protocol.ContextReference) { value.Visual.Alt = "forged" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			forged := reference
+			forged.Source.Anchor.HTML = &protocol.HTMLReferenceAnchor{ElementID: reference.Source.Anchor.HTML.ElementID, Tag: reference.Source.Anchor.HTML.Tag, Ordinal: reference.Source.Anchor.HTML.Ordinal}
+			forged.Component = &protocol.ComponentReference{Type: reference.Component.Type, SourceExcerpt: reference.Component.SourceExcerpt}
+			forged.Visual = &protocol.ReferenceVisual{ImageID: reference.Visual.ImageID, Name: reference.Visual.Name, Alt: reference.Visual.Alt}
+			mutate(&forged)
+			edited, convertErr := messageContentToProvider(protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartReference, Reference: &forged}}})
+			require.NoError(t, convertErr)
+			require.ErrorIs(t, queue.Edit(testID('M'), edited), ErrQueueInvalid)
+		})
+	}
+	projected, err := messageContentFromProvider(queue.items[0].content, queue.items[0].descriptors)
+	require.NoError(t, err)
+	require.Equal(t, "Product photo", projected.Parts[0].Reference.Label)
+}
+
 func TestQueueEditReportsAndRemovesDeletedInlineVisual(t *testing.T) {
 	resource := protocol.Resource{Kind: protocol.ResourceMarkdown, ID: testID('R'), CreatedAt: testTime(), UpdatedAt: testTime()}
 	reference := protocol.ContextReference{
@@ -118,9 +200,23 @@ func protocolTextReference(id, label, quote string, resource protocol.Resource, 
 		ID: id, Kind: protocol.ReferenceText, Label: label, Quote: quote,
 		Source: protocol.ReferenceSource{
 			ResourceKind: resource.Kind, ResourceID: resource.ID, ResourceUpdatedAt: resource.UpdatedAt, ContextDigest: digest,
-			HeadingPath: []protocol.HeadingReference{{Level: 2, Title: "Details", Ordinal: 1}},
-			Start:       protocol.SourceAnchor{Block: 1, Line: 2, Offset: 0},
-			End:         protocol.SourceAnchor{Block: 1, Line: 2, Offset: len(quote)},
+			Anchor: protocol.ReferenceAnchor{Markdown: &protocol.MarkdownReferenceAnchor{
+				HeadingPath: []protocol.HeadingReference{{Level: 2, Title: "Details", Ordinal: 1}},
+				Start:       protocol.SourceAnchor{Block: 1, Line: 2, Offset: 0},
+				End:         protocol.SourceAnchor{Block: 1, Line: 2, Offset: len(quote)},
+			}},
 		},
+	}
+}
+
+func protocolComponentReference(id, label string, componentType protocol.ComponentType, resource protocol.Resource, digest string, visual *protocol.ReferenceVisual) protocol.ContextReference {
+	return protocol.ContextReference{
+		ID: id, Kind: protocol.ReferenceComponent, Label: label,
+		Source: protocol.ReferenceSource{
+			ResourceKind: resource.Kind, ResourceID: resource.ID, ResourceUpdatedAt: resource.UpdatedAt, ContextDigest: digest,
+			Anchor: protocol.ReferenceAnchor{HTML: &protocol.HTMLReferenceAnchor{ElementID: "revenue-chart", Tag: "figure", Ordinal: 2}},
+		},
+		Component: &protocol.ComponentReference{Type: componentType, SourceExcerpt: `<figure id="revenue-chart">Revenue</figure>`},
+		Visual:    visual,
 	}
 }

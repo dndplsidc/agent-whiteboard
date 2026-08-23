@@ -38,8 +38,9 @@ func TestEmbeddedAssetsMatchManifest(t *testing.T) {
 	}
 
 	assets := map[string][]byte{
-		"dist/viewer.min.js":  ViewerJS(),
-		"dist/viewer.min.css": ViewerCSS(),
+		"dist/viewer.min.js":      ViewerJS(),
+		"dist/viewer.min.css":     ViewerCSS(),
+		"dist/html-bridge.min.js": HTMLBridgeJS(),
 	}
 	for name, content := range assets {
 		if len(content) == 0 {
@@ -57,8 +58,9 @@ func TestEmbeddedAssetsHaveNoExternalRuntimeReferences(t *testing.T) {
 	t.Parallel()
 
 	for name, content := range map[string][]byte{
-		"viewer JavaScript": ViewerJS(),
-		"viewer CSS":        ViewerCSS(),
+		"viewer JavaScript":      ViewerJS(),
+		"HTML bridge JavaScript": HTMLBridgeJS(),
+		"viewer CSS":             ViewerCSS(),
 	} {
 		lower := bytes.ToLower(content)
 		for _, forbidden := range []string{"http://", "https://", "<script src"} {
@@ -75,8 +77,13 @@ func TestEmbeddedAssetsHaveNoExternalRuntimeReferences(t *testing.T) {
 func TestEmbeddedAssetsCannotTerminateViewerInlineElements(t *testing.T) {
 	t.Parallel()
 
-	if bytes.Contains(bytes.ToLower(ViewerJS()), []byte("</script")) {
-		t.Fatal("viewer JavaScript contains a closing script marker")
+	for name, content := range map[string][]byte{
+		"viewer JavaScript":      ViewerJS(),
+		"HTML bridge JavaScript": HTMLBridgeJS(),
+	} {
+		if bytes.Contains(bytes.ToLower(content), []byte("</script")) {
+			t.Fatalf("%s contains a closing script marker", name)
+		}
 	}
 	if bytes.Contains(bytes.ToLower(ViewerCSS()), []byte("</style")) {
 		t.Fatal("viewer CSS contains a closing style marker")
@@ -87,9 +94,10 @@ func TestEmbeddedAssetAccessorsReturnFreshCopies(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]func() []byte{
-		"JavaScript": ViewerJS,
-		"CSS":        ViewerCSS,
-		"manifest":   Manifest,
+		"JavaScript":  ViewerJS,
+		"HTML bridge": HTMLBridgeJS,
+		"CSS":         ViewerCSS,
+		"manifest":    Manifest,
 	}
 	for name, accessor := range tests {
 		t.Run(name, func(t *testing.T) {

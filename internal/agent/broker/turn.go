@@ -59,10 +59,12 @@ type turnWorkerResult struct {
 }
 
 func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struct{}, turnResults chan<- turnWorkerResult, command protocol.Command, payload protocol.SubmitPayload) (bool, protocol.BrowserErrorCode) {
-	// HTML source is intentionally opaque to Page Agent. Reject references
-	// before image claims, context preparation, queue mutation, or provider I/O.
-	if actor.identity.Kind == statepkg.ResourceHTML && messageContentHasReferences(payload.Content) {
+	content, err := messageContentToProvider(payload.Content)
+	if err != nil {
 		return false, protocol.ErrorInvalidCommand
+	}
+	if !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) {
+		return false, protocol.ErrorBoardRevisionUnavailable
 	}
 	if code := actor.validateSelectedSkills(payload.Content); code != "" {
 		if skills, ok := actor.session.session.(provider.SkillCatalogSession); ok {
@@ -107,7 +109,7 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 		}
 		return code
 	}
-	request, code := actor.convertSubmittedTurn(payload, images, settings)
+	request, code := actor.convertSubmittedTurn(payload, content, images, settings)
 	if code != "" {
 		return false, releaseOnFailure(code)
 	}
@@ -169,23 +171,7 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 	return false, ""
 }
 
-func messageContentHasReferences(content protocol.MessageContent) bool {
-	for _, part := range content.Parts {
-		if part.Type == protocol.MessagePartReference {
-			return true
-		}
-	}
-	return false
-}
-
-func (actor *conversation) convertSubmittedTurn(payload protocol.SubmitPayload, images []provider.ImageInput, settings *provider.ExecutionSettings) (provider.TurnRequest, protocol.BrowserErrorCode) {
-	content, err := messageContentToProvider(payload.Content)
-	if err != nil {
-		return provider.TurnRequest{}, protocol.ErrorInvalidCommand
-	}
-	if !referencesMatchCurrentPage(content, actor.resource, actor.contextDigest) {
-		return provider.TurnRequest{}, protocol.ErrorBoardRevisionUnavailable
-	}
+func (actor *conversation) convertSubmittedTurn(payload protocol.SubmitPayload, content provider.MessageContent, images []provider.ImageInput, settings *provider.ExecutionSettings) (provider.TurnRequest, protocol.BrowserErrorCode) {
 	contextOwned := (actor.active != nil && actor.active.request.Context != nil) || actor.queue.hasContext
 	if actor.contextState != protocol.ContextPending {
 		if payload.Context != nil {

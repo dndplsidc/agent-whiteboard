@@ -324,6 +324,9 @@ func messageContentFromProvider(content provider.MessageContent, descriptors []p
 	}
 	byID := make(map[string]protocol.ImageDescriptor, len(descriptors))
 	for _, descriptor := range descriptors {
+		if _, duplicate := byID[descriptor.ImageID]; duplicate {
+			return protocol.MessageContent{}, errors.New("duplicate inline image descriptor")
+		}
 		byID[descriptor.ImageID] = descriptor
 	}
 	converted := protocol.MessageContent{Parts: make([]protocol.MessagePart, len(content.Parts))}
@@ -359,16 +362,27 @@ func contextReferenceToProvider(reference protocol.ContextReference) (provider.C
 		Source: provider.ReferenceSource{
 			ResourceKind: provider.ResourceKind(reference.Source.ResourceKind), ResourceID: reference.Source.ResourceID,
 			ResourceUpdatedAt: reference.Source.ResourceUpdatedAt, ContextDigest: reference.Source.ContextDigest,
-			Start:       provider.SourceAnchor{Block: reference.Source.Start.Block, Line: reference.Source.Start.Line, Offset: reference.Source.Start.Offset},
-			End:         provider.SourceAnchor{Block: reference.Source.End.Block, Line: reference.Source.End.Line, Offset: reference.Source.End.Offset},
-			HeadingPath: make([]provider.HeadingReference, len(reference.Source.HeadingPath)),
 		},
 	}
-	for index, heading := range reference.Source.HeadingPath {
-		converted.Source.HeadingPath[index] = provider.HeadingReference{Level: heading.Level, Title: heading.Title, Ordinal: heading.Ordinal}
+	if anchor := reference.Source.Anchor.Markdown; anchor != nil {
+		convertedAnchor := &provider.MarkdownReferenceAnchor{
+			HeadingPath: make([]provider.HeadingReference, len(anchor.HeadingPath)),
+			Start:       provider.SourceAnchor{Block: anchor.Start.Block, Line: anchor.Start.Line, Offset: anchor.Start.Offset},
+			End:         provider.SourceAnchor{Block: anchor.End.Block, Line: anchor.End.Line, Offset: anchor.End.Offset},
+		}
+		for index, heading := range anchor.HeadingPath {
+			convertedAnchor.HeadingPath[index] = provider.HeadingReference{Level: heading.Level, Title: heading.Title, Ordinal: heading.Ordinal}
+		}
+		converted.Source.Anchor.Markdown = convertedAnchor
+	}
+	if anchor := reference.Source.Anchor.HTML; anchor != nil {
+		converted.Source.Anchor.HTML = &provider.HTMLReferenceAnchor{ElementID: anchor.ElementID, Tag: anchor.Tag, Ordinal: anchor.Ordinal}
 	}
 	if reference.SectionLines != nil {
 		converted.SectionLines = &provider.SourceLineRange{Start: reference.SectionLines.Start, End: reference.SectionLines.End}
+	}
+	if reference.Component != nil {
+		converted.Component = &provider.ComponentReference{Type: provider.ComponentType(reference.Component.Type), SourceExcerpt: reference.Component.SourceExcerpt}
 	}
 	if reference.Visual != nil {
 		converted.Visual = &provider.ReferenceVisual{ImageID: reference.Visual.ImageID, Name: reference.Visual.Name, Alt: reference.Visual.Alt}
@@ -382,16 +396,27 @@ func contextReferenceFromProvider(reference provider.ContextReference, descripto
 		Source: protocol.ReferenceSource{
 			ResourceKind: protocol.ResourceKind(reference.Source.ResourceKind), ResourceID: reference.Source.ResourceID,
 			ResourceUpdatedAt: reference.Source.ResourceUpdatedAt, ContextDigest: reference.Source.ContextDigest,
-			Start:       protocol.SourceAnchor{Block: reference.Source.Start.Block, Line: reference.Source.Start.Line, Offset: reference.Source.Start.Offset},
-			End:         protocol.SourceAnchor{Block: reference.Source.End.Block, Line: reference.Source.End.Line, Offset: reference.Source.End.Offset},
-			HeadingPath: make([]protocol.HeadingReference, len(reference.Source.HeadingPath)),
 		},
 	}
-	for index, heading := range reference.Source.HeadingPath {
-		converted.Source.HeadingPath[index] = protocol.HeadingReference{Level: heading.Level, Title: heading.Title, Ordinal: heading.Ordinal}
+	if anchor := reference.Source.Anchor.Markdown; anchor != nil {
+		convertedAnchor := &protocol.MarkdownReferenceAnchor{
+			HeadingPath: make([]protocol.HeadingReference, len(anchor.HeadingPath)),
+			Start:       protocol.SourceAnchor{Block: anchor.Start.Block, Line: anchor.Start.Line, Offset: anchor.Start.Offset},
+			End:         protocol.SourceAnchor{Block: anchor.End.Block, Line: anchor.End.Line, Offset: anchor.End.Offset},
+		}
+		for index, heading := range anchor.HeadingPath {
+			convertedAnchor.HeadingPath[index] = protocol.HeadingReference{Level: heading.Level, Title: heading.Title, Ordinal: heading.Ordinal}
+		}
+		converted.Source.Anchor.Markdown = convertedAnchor
+	}
+	if anchor := reference.Source.Anchor.HTML; anchor != nil {
+		converted.Source.Anchor.HTML = &protocol.HTMLReferenceAnchor{ElementID: anchor.ElementID, Tag: anchor.Tag, Ordinal: anchor.Ordinal}
 	}
 	if reference.SectionLines != nil {
 		converted.SectionLines = &protocol.SourceLineRange{Start: reference.SectionLines.Start, End: reference.SectionLines.End}
+	}
+	if reference.Component != nil {
+		converted.Component = &protocol.ComponentReference{Type: protocol.ComponentType(reference.Component.Type), SourceExcerpt: reference.Component.SourceExcerpt}
 	}
 	if reference.Visual != nil {
 		descriptor, exists := descriptors[reference.Visual.ImageID]
@@ -409,7 +434,7 @@ func referencesMatchCurrentPage(content provider.MessageContent, resource protoc
 			continue
 		}
 		source := part.Reference.Source
-		if source.ResourceKind != provider.ResourceMarkdown || source.ResourceID != resource.ID || source.ContextDigest != digest || !source.ResourceUpdatedAt.Equal(resource.UpdatedAt) {
+		if source.ResourceKind != provider.ResourceKind(resource.Kind) || source.ResourceID != resource.ID || source.ContextDigest != digest || !source.ResourceUpdatedAt.Equal(resource.UpdatedAt) {
 			return false
 		}
 	}

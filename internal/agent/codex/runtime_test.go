@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1223,6 +1224,61 @@ func TestHistoryProjectionPreservesMultipleAgentItemsPerTurn(t *testing.T) {
 	require.Equal(t, []string{"I will inspect it.", "Devflow is a workflow."}, []string{items[1].Text, items[2].Text})
 	require.NotEqual(t, items[1].MessageID, items[2].MessageID)
 	require.NoError(t, (provider.HistoryPage{Items: items}).Validate())
+}
+
+func TestHistoryProjectionPreservesCurrentComponentContent(t *testing.T) {
+	component := provider.ContextReference{
+		ID: testID(1143), Kind: provider.ReferenceComponent, Label: "Revenue chart",
+		Source: provider.ReferenceSource{
+			ResourceKind: provider.ResourceHTML, ResourceID: testID(1144), ResourceUpdatedAt: time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC), ContextDigest: strings.Repeat("b", 64),
+			Anchor: provider.ReferenceAnchor{HTML: &provider.HTMLReferenceAnchor{ElementID: "revenue-chart", Tag: "figure", Ordinal: 2}},
+		},
+		Component: &provider.ComponentReference{Type: provider.ComponentChart, SourceExcerpt: `<figure id="revenue-chart">Revenue</figure>`},
+	}
+	content := provider.MessageContent{Parts: []provider.MessagePart{{Kind: provider.MessagePartText, Text: "Explain "}, {Kind: provider.MessagePartReference, Reference: &component}}}
+	envelope, err := provider.Build(provider.TurnRequest{TurnID: testID(1145), MessageID: testID(1146), Content: content}, provider.PolicyConfigured)
+	require.NoError(t, err)
+	raw := mustJSON(t, map[string]any{"thread": map[string]any{"id": "native-thread", "turns": []any{map[string]any{
+		"id": "component-turn", "status": "completed", "startedAt": 10,
+		"items": []any{
+			map[string]any{"id": "component-user", "type": "userMessage", "content": []any{map[string]any{"type": "text", "text": string(envelope)}}},
+			map[string]any{"id": "component-answer", "type": "agentMessage", "text": "answer"},
+		},
+	}}}})
+
+	items, err := projectHistory(raw, "native-thread")
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	require.Equal(t, content, items[0].Content)
+}
+
+func TestHistoryProjectionReplaysImmutablePreV5ReferenceFixtures(t *testing.T) {
+	for _, fixture := range []string{"turn-v2-references.envelope", "turn-v3-references.envelope"} {
+		t.Run(fixture, func(t *testing.T) {
+			envelope, err := os.ReadFile("../provider/testdata/" + fixture)
+			require.NoError(t, err)
+			parsed, err := provider.Parse(envelope)
+			require.NoError(t, err)
+			raw := mustJSON(t, map[string]any{"thread": map[string]any{"id": "native-thread", "turns": []any{map[string]any{
+				"id": "historical-turn", "status": "completed", "startedAt": 10,
+				"items": []any{
+					map[string]any{"id": "historical-user", "type": "userMessage", "content": []any{map[string]any{"type": "text", "text": string(envelope)}}},
+					map[string]any{"id": "historical-answer", "type": "agentMessage", "text": "answer"},
+				},
+			}}}})
+
+			items, projectErr := projectHistory(raw, "native-thread")
+			require.NoError(t, projectErr)
+			require.Len(t, items, 2)
+			require.Equal(t, parsed.ReaderContent, items[0].Content)
+			for _, part := range items[0].Content.Parts {
+				if part.Reference != nil {
+					require.NotNil(t, part.Reference.Source.Anchor.Markdown)
+					require.Nil(t, part.Reference.Source.Anchor.HTML)
+				}
+			}
+		})
+	}
 }
 
 func TestHistoryProjectionBoundsNativeTextAndAggregateSize(t *testing.T) {
