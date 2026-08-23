@@ -205,25 +205,32 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
     }
   }
 
+  function contentFromNodes(nodes) {
+    const parts = [];
+    for (const node of nodes) {
+      if (node.nodeType === 1 && node.dataset?.referenceId && references.has(node.dataset.referenceId)) {
+        parts.push({ type: "reference", reference: references.get(node.dataset.referenceId) });
+      } else if (node.nodeType === 1 && node.dataset?.skillId && skills.has(node.dataset.skillId)) {
+        parts.push({ type: "skill", skill: skills.get(node.dataset.skillId) });
+      } else {
+        const text = node.textContent ?? "";
+        if (text) parts.push({ type: "text", text });
+      }
+    }
+    return normalizeMessageContent({ parts });
+  }
+
   function modelCaretFromSelection() {
     const selection = doc.getSelection?.();
     if (!selection || selection.rangeCount === 0 || !root.contains(selection.anchorNode)) return savedCaret;
     const range = selection.getRangeAt(0).cloneRange();
     range.setStart(root, 0);
-    const prefix = range.cloneContents();
-    let part = 0;
-    let offset = 0;
-    for (const node of prefix.childNodes) {
-      if (node.nodeType === 3) {
-        offset = [...node.textContent].length;
-      } else if (node.nodeType === 1 && (node.dataset?.referenceId || node.dataset?.skillId)) {
-        part += 1;
-        offset = 0;
-      } else {
-        offset += [...(node.textContent ?? "")].length;
-      }
-    }
-    return normalizedCaret(model, { part, offset });
+    const prefix = contentFromNodes(range.cloneContents().childNodes);
+    const trailing = prefix.parts.at(-1);
+    const caret = trailing?.type === "text"
+      ? { part: prefix.parts.length - 1, offset: [...trailing.text].length }
+      : { part: prefix.parts.length, offset: 0 };
+    return normalizedCaret(model, caret);
   }
 
   function restoreCaret(caret = savedCaret) {
@@ -244,18 +251,7 @@ export function createMessageEditor({ doc = document, content = { parts: [] }, p
   }
 
   function readDOM() {
-    const parts = [];
-    for (const node of root.childNodes) {
-      if (node.nodeType === 1 && node.dataset?.referenceId && references.has(node.dataset.referenceId)) {
-        parts.push({ type: "reference", reference: references.get(node.dataset.referenceId) });
-      } else if (node.nodeType === 1 && node.dataset?.skillId && skills.has(node.dataset.skillId)) {
-        parts.push({ type: "skill", skill: skills.get(node.dataset.skillId) });
-      } else {
-        const text = node.textContent ?? "";
-        if (text) parts.push({ type: "text", text });
-      }
-    }
-    model = normalizeMessageContent({ parts });
+    model = contentFromNodes(root.childNodes);
     savedCaret = modelCaretFromSelection();
     onChange(cloneMessageContent(model));
   }

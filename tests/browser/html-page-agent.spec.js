@@ -55,6 +55,9 @@ test("selects canonical HTML components through hover and the trusted chooser in
   const resource = await openHTMLPage({ context, page, fixture: localAgentSidebar, html, creatorContext: "Component integration context.\n" });
   const child = page.frameLocator("#agent-whiteboard-html-content");
   await expect(page.locator("#agent-whiteboard-html-content")).toHaveAttribute("src", /\/rendered$/u);
+  await connect(page, "pi");
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  await composer.pressSequentially("Compare ");
 
   await child.locator("#nested-table").hover();
   const add = page.locator(".agent-html-add");
@@ -81,10 +84,7 @@ test("selects canonical HTML components through hover and the trusted chooser in
   expect(await page.evaluate(() => window.__agentHTMLAddVisibilityChanges)).toBe(0);
   await add.click();
 
-  const composer = page.getByLabel("Message Pi about this whiteboard");
   await expect(composer.locator(".agent-message-reference")).toHaveCount(1);
-  await connect(page, "pi");
-  await composer.press("Control+End");
   await composer.pressSequentially(" then ");
 
   const chooser = page.locator(".agent-html-chooser");
@@ -102,7 +102,6 @@ test("selects canonical HTML components through hover and the trusted chooser in
   await expect(chooser).not.toContainText("Ignored section");
   await chooser.getByRole("button", { name: "Add image: Source photograph to message" }).click();
   await expect(composer.locator(".agent-message-reference")).toHaveCount(2);
-  await composer.press("Control+End");
   await composer.pressSequentially(" explain both.");
   await composer.press("Enter");
 
@@ -110,17 +109,19 @@ test("selects canonical HTML components through hover and the trusted chooser in
   const submit = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit");
   expect(submit.api_version).toBe("5");
   expect(submit.payload.content.parts.map(({ type }) => type)).toEqual(["text", "reference", "text", "reference", "text"]);
-  expect(submit.payload.content.parts.filter(({ type }) => type === "text").map(({ text }) => text).join(" ")).toContain("then");
-  expect(submit.payload.content.parts.filter(({ type }) => type === "text").map(({ text }) => text).join(" ")).toContain("explain both");
+  const text = submit.payload.content.parts.filter(({ type }) => type === "text").map(({ text }) => text).join(" ");
+  expect(text).toContain("Compare");
+  expect(text).toContain("then");
+  expect(text).toContain("explain both");
   const references = submit.payload.content.parts.filter(({ type }) => type === "reference").map(({ reference }) => reference);
   expect(references[0]).toMatchObject({
+    kind: "component", label: "Quarterly revenue", component: { type: "table" },
+    source: { resource_kind: "html", resource_id: resource.id, anchor: { html: { element_id: "nested-table", tag: "table", ordinal: 2 } } },
+  });
+  expect(references[1]).toMatchObject({
     kind: "component", label: "Source photograph", component: { type: "image" },
     source: { resource_kind: "html", resource_id: resource.id, anchor: { html: { element_id: "photo", tag: "figure" } } },
     visual: { image_id: expect.any(String), name: expect.stringMatching(/^component-\d+\.png$/u), alt: "Source photograph" },
-  });
-  expect(references[1]).toMatchObject({
-    kind: "component", label: "Quarterly revenue", component: { type: "table" },
-    source: { resource_kind: "html", resource_id: resource.id, anchor: { html: { element_id: "nested-table", tag: "table", ordinal: 2 } } },
   });
   expect(JSON.stringify(references)).not.toContain("Runtime forged overview");
   expect(localAgentSidebar.brokerRequests.some(({ method, url, status }) => method === "POST" && url === "/api/v1/agent/images" && status === 201)).toBe(true);

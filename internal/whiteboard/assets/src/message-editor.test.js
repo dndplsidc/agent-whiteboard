@@ -92,10 +92,10 @@ describe("message editor", () => {
   });
 
   test("inserts a later reference at the live caret after browser input", () => {
-    const editor = createMessageEditor({ doc: document });
+    const editor = createMessageEditor({ doc: document, content: { parts: [{ type: "text", text: "Compare " }] } });
     document.body.append(editor.element);
     editor.insertReference(reference("a", "First"));
-    editor.element.lastChild.textContent = " and ";
+    editor.element.lastChild.textContent = " then ";
     const text = editor.element.lastChild;
     const range = document.createRange();
     range.setStart(text, text.textContent.length);
@@ -106,7 +106,7 @@ describe("message editor", () => {
 
     editor.insertReference(reference("b", "Second"));
 
-    expect(editor.getContent().parts.map(({ type }) => type)).toEqual(["reference", "text", "reference", "text"]);
-    expect(messageContentText(editor.getContent())).toBe("[First] and [Second] ");
+    expect(editor.getContent().parts.map(({ type }) => type)).toEqual(["text", "reference", "text", "reference", "text"]);
+    expect(messageContentText(editor.getContent())).toBe("Compare [First] then [Second] ");
   });
 });
