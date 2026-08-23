@@ -162,6 +162,66 @@ describe("trusted parent HTML context controller", () => {
     controller.destroy();
   });
 
+  test("keeps the overlay stable while pointer ownership transfers to the trusted add button", async () => {
+    const { chooserHost, surface, frame } = shell();
+    const index = buildHTMLComponentIndex('<section id="main"><h2>Main</h2></section>');
+    const controller = createHTMLContextController({ doc: document, chooserHost, surface, frame, index, identity, idFactory: () => "I".repeat(32), epochFactory: () => "one", onAdd: vi.fn() });
+    window.dispatchEvent(new MessageEvent("message", { data: { version: 1, type: "candidate", epoch: "one", id: "main", rect: { x: 5, y: 6, width: 30, height: 20 } }, source: frame.contentWindow }));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const button = document.querySelector(".agent-html-add");
+    expect(button.hidden).toBe(false);
+
+    vi.useFakeTimers();
+    button.dispatchEvent(new PointerEvent("pointerenter"));
+    window.dispatchEvent(new MessageEvent("message", { data: { version: 1, type: "clear", epoch: "one" }, source: frame.contentWindow }));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(button.hidden).toBe(false);
+
+    button.dispatchEvent(new PointerEvent("pointerleave"));
+    window.dispatchEvent(new MessageEvent("message", { data: { version: 1, type: "candidate", epoch: "one", id: "main", rect: { x: 5, y: 6, width: 30, height: 20 } }, source: frame.contentWindow }));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(button.hidden).toBe(false);
+
+    button.dispatchEvent(new PointerEvent("pointerleave"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(button.hidden).toBe(true);
+    vi.useRealTimers();
+    controller.destroy();
+  });
+
+  test("dismisses a departed overlay after a slow activation failure", async () => {
+    const { chooserHost, surface, frame } = shell();
+    let rejectAdd;
+    const onAdd = vi.fn(() => new Promise((resolve, reject) => { rejectAdd = reject; }));
+    const index = buildHTMLComponentIndex('<section id="main"><h2>Main</h2></section>');
+    const controller = createHTMLContextController({ doc: document, chooserHost, surface, frame, index, identity, idFactory: () => "I".repeat(32), epochFactory: () => "one", onAdd });
+    window.dispatchEvent(new MessageEvent("message", { data: { version: 1, type: "candidate", epoch: "one", id: "main", rect: { x: 5, y: 6, width: 30, height: 20 } }, source: frame.contentWindow }));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const button = document.querySelector(".agent-html-add");
+
+    vi.useFakeTimers();
+    try {
+      button.dispatchEvent(new PointerEvent("pointerenter"));
+      button.click();
+      expect(onAdd).toHaveBeenCalledOnce();
+      button.dispatchEvent(new PointerEvent("pointerleave"));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(button.hidden).toBe(false);
+      expect(button.disabled).toBe(true);
+
+      rejectAdd(new Error("staging failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(button.disabled).toBe(false);
+      expect(button.dataset.state).toBe("error");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(button.hidden).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      controller.destroy();
+    }
+  });
+
   test("keeps an ordered chooser functional without bridge hints and inserts only on parent activation", async () => {
     const { chooserHost, surface, frame } = shell();
     const index = buildHTMLComponentIndex('<section id="parent"><h2>Parent</h2><table id="child"><caption>Child</caption></table></section>');

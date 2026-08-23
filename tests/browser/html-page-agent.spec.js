@@ -61,6 +61,20 @@ test("selects canonical HTML components through hover and the trusted chooser in
   await expect(add).toBeVisible();
   await expect(add).toHaveText("+ Add");
   await expect(add).toHaveAttribute("aria-label", "Add table: Quarterly revenue to message");
+  const addBox = await add.boundingBox();
+  expect(addBox).not.toBeNull();
+  await page.evaluate(() => {
+    const button = document.querySelector(".agent-html-add");
+    window.__agentHTMLAddVisibilityChanges = 0;
+    new MutationObserver((records) => {
+      window.__agentHTMLAddVisibilityChanges += records.filter(({ attributeName }) => attributeName === "hidden").length;
+    }).observe(button, { attributes: true, attributeFilter: ["hidden"] });
+  });
+  for (let index = 0; index < 12; index += 1) {
+    await page.mouse.move(addBox.x + addBox.width / 2 + index % 2, addBox.y + addBox.height / 2 + index % 3);
+  }
+  await expect(add).toBeVisible();
+  expect(await page.evaluate(() => window.__agentHTMLAddVisibilityChanges)).toBe(0);
   await add.click();
 
   const composer = page.getByLabel("Message Pi about this whiteboard");

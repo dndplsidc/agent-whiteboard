@@ -5,6 +5,7 @@ const TYPES = new Set(["section", "image", "chart", "table", "code", "quote", "c
 const EXCLUDED_SELECTOR = "nav,header,footer,form,input,button,select,textarea,option,fieldset,script,style,template,noscript,video,audio,[hidden],[inert]";
 const LABEL_BYTES = 256;
 const EXCERPT_BYTES = 48 * 1024;
+const ADD_TRANSFER_GRACE_MS = 80;
 const RASTER_PATTERN = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$/iu;
 const sourceIDCache = new WeakMap();
 
@@ -221,6 +222,8 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
   let pendingFrame = null;
   let destroyed = false;
   let timer = null;
+  let addTransferTimer = null;
+  let addPointerInside = false;
   let generation = 0;
   const feedbackTimers = new Set();
 
@@ -249,13 +252,29 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
     timer = null;
   }
 
+  function clearAddTransfer() {
+    if (addTransferTimer !== null) view.clearTimeout(addTransferTimer);
+    addTransferTimer = null;
+  }
+
   function dismiss() {
     clearPending();
+    clearAddTransfer();
+    addPointerInside = false;
     candidate = null;
     outline.hidden = true;
     addButton.hidden = true;
     addButton.disabled = false;
     addButton.dataset.state = "";
+  }
+
+  function scheduleAddTransferDismiss() {
+    clearAddTransfer();
+    if (destroyed || addButton.hidden) return;
+    addTransferTimer = view.setTimeout(() => {
+      addTransferTimer = null;
+      if (!addPointerInside && doc.activeElement !== addButton && !addButton.disabled) dismiss();
+    }, ADD_TRANSFER_GRACE_MS);
   }
 
   function post(frameValue) {
@@ -279,6 +298,7 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
   }
 
   function renderCandidate(component, rect) {
+    clearAddTransfer();
     const clipped = clippedRect(rect);
     if (!clipped) { dismiss(); return; }
     candidate = { component, rect };
@@ -312,7 +332,11 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
     let message;
     try { message = decodeChildBridgeFrame(event.data); } catch { dismiss(); return; }
     if (message.epoch !== epoch) return;
-    if (message.type === "clear") { dismiss(); return; }
+    if (message.type === "clear") {
+      clearPending();
+      if (!addPointerInside && doc.activeElement !== addButton) dismiss();
+      return;
+    }
     if (message.type === "ready") return;
     const component = index.byID.get(message.id);
     if (!component) { dismiss(); return; }
@@ -343,6 +367,7 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
       button.dataset.state = "error";
       if (component.raster) button.dataset.visualFailed = "true";
       announce(error?.message || "Unable to add this component.");
+      if (button === addButton) scheduleAddTransferDismiss();
     }
   }
 
@@ -350,6 +375,10 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
     if (candidate && !destroyed) renderCandidate(candidate.component, candidate.rect);
   }
 
+  addButton.addEventListener("pointerenter", () => { addPointerInside = true; clearAddTransfer(); });
+  addButton.addEventListener("pointerleave", () => { addPointerInside = false; scheduleAddTransferDismiss(); });
+  addButton.addEventListener("focus", clearAddTransfer);
+  addButton.addEventListener("blur", scheduleAddTransferDismiss);
   addButton.addEventListener("pointerdown", (event) => event.preventDefault());
   addButton.addEventListener("click", () => { if (candidate) void activate(candidate.component, addButton); });
   for (const component of index.components) {
@@ -390,6 +419,7 @@ export function createHTMLContextController({ doc = document, chooserHost, surfa
       if (destroyed) return;
       destroyed = true;
       clearPending();
+      clearAddTransfer();
       for (const feedbackTimer of feedbackTimers) view.clearTimeout(feedbackTimer);
       feedbackTimers.clear();
       frame.removeEventListener("load", reset);
