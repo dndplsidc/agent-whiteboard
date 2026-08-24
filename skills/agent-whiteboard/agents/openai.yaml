@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Whiteboard"
-  short_description: "Publish agent artifacts as capability URLs"
+  short_description: "Set up Agent Whiteboard and publish artifacts"
   default_prompt: "Use $agent-whiteboard to publish this artifact safely and return its public URL."
