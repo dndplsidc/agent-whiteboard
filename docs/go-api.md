@@ -99,7 +99,18 @@ The service methods are `CreateMarkdown`, `CreateHTML`, `GetWhiteboard`, `Update
 
 Every operation uses the caller's `context.Context`; cancellation/deadlines are propagated to the store and HTTP request. Do not replace a request context with a background context. The internally owned filesystem lifetime and bounded shutdown cleanup are the intentional exceptions.
 
-`Handler()` embeds the application in another HTTP server. `Serve(ctx, listener)` uses the supplied listener, `ListenAndServe(ctx)` uses the configured host/port, `Shutdown(ctx)` performs caller-bounded graceful shutdown, and `Close()` is idempotent and releases owned/custom stores. A listener can also be selected with `agentwb.WithListener(listener)`. `WithClock`, `WithIDGenerator`, `WithPort`, `WithDefaultExpiration`, and `WithViewerAssets` provide narrower dependency injection.
+`Handler()` embeds the application in another HTTP server. `Ready(ctx)` checks the whiteboard and image stores in dependency order with the exact caller context; it does not report whether an externally owned HTTP server is listening or draining. An embedding application should combine `Ready(ctx)` with its own traffic-admission state in its aggregate readiness endpoint.
+
+```go
+if !serverAccepting.Load() {
+    return errors.New("not accepting requests")
+}
+if err := service.Ready(ctx); err != nil {
+    return err
+}
+```
+
+The built-in `/readyz` endpoint continues to combine the library-owned server lifecycle with those same dependency checks. `Serve(ctx, listener)` uses the supplied listener, `ListenAndServe(ctx)` uses the configured host/port, `Shutdown(ctx)` performs caller-bounded graceful shutdown, and `Close()` is idempotent and releases owned/custom stores. A listener can also be selected with `agentwb.WithListener(listener)`. `WithClock`, `WithIDGenerator`, `WithPort`, `WithDefaultExpiration`, and `WithViewerAssets` provide narrower dependency injection.
 
 Errors expose stable codes:
 

@@ -1,6 +1,6 @@
 # HTTP API
 
-The API is versioned under `/api/v1`. Successful mutation responses contain paths, never server-generated absolute URLs. Build public URLs using the origin used for the request.
+The API is versioned under `/api/v1`. Successful mutation responses contain paths, never server-generated absolute URLs. Build public URLs using the origin used for the request. The built-in `/readyz` endpoint combines the library-owned server admission state with whiteboard and image store checks; Go applications embedding `Service.Handler()` can call `Service.Ready(ctx)` to perform the dependency checks as part of their own aggregate readiness.
 
 ## Routes
 

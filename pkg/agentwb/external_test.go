@@ -52,6 +52,9 @@ var (
 )
 
 func externalHandler(service *agentwb.Service) http.Handler { return service.Handler() }
+func externalReady(ctx context.Context, service *agentwb.Service) error {
+	return service.Ready(ctx)
+}
 
 func TestExternalConsumerCanUseCompleteFacade(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -85,6 +88,7 @@ func TestExternalConsumerCanUseCompleteFacade(t *testing.T) {
 	require.NotNil(t, externalHandler(service))
 
 	ctx := context.Background()
+	require.NoError(t, externalReady(ctx, service))
 	_, _ = service.CreateMarkdown(ctx, agentwb.CreateWhiteboardInput{
 		Source: []byte("# markdown"), Context: []byte("creator context"),
 	})
@@ -106,6 +110,7 @@ func TestExternalConsumerCanUseCompleteFacade(t *testing.T) {
 	_ = service.Close()
 
 	var lifecycle interface {
+		Ready(context.Context) error
 		ListenAndServe(context.Context) error
 		Serve(context.Context, net.Listener) error
 		Shutdown(context.Context) error

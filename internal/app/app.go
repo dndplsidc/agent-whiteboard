@@ -66,6 +66,10 @@ func (r *readiness) Ready(ctx context.Context) error {
 	if !r.accepting.Load() {
 		return errors.New("not accepting requests")
 	}
+	return r.dependenciesReady(ctx)
+}
+
+func (r *readiness) dependenciesReady(ctx context.Context) error {
 	for _, dependency := range r.dependencies {
 		if err := dependency.Ready(ctx); err != nil {
 			return err

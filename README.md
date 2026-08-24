@@ -414,6 +414,8 @@ pnpm run check:assets
 pnpm run test:browser
 ```
 
+See [Releasing Agent Whiteboard](docs/releasing.md) for the verified release checklist and annotated-tag helper.
+
 ## License
 
 Agent Whiteboard is available under the terms in [LICENSE](LICENSE).
