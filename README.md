@@ -90,7 +90,9 @@ npx skills add dndplsidc/agent-whiteboard --skill agent-whiteboard --global
 
 Once installed, ask your agent to publish Markdown, Mermaid, trusted standalone HTML, or images to Agent Whiteboard. The skill guides resource selection, creator-context handling, safe publication, and rendered-result verification.
 
-The skill teaches agents how to publish; **Page Agent** gives readers a page-aware Pi or Codex conversation inside the viewer.
+An agent can also follow the [Agent Whiteboard setup runbook](skills/agent-whiteboard/references/setup.md) to install the binary, choose the right local or remote setup mode, configure Page Agent, establish exact-origin trust, and verify the result.
+
+The skill teaches agents how to set up and publish; **Page Agent** gives readers a page-aware Pi or Codex conversation inside the viewer.
 
 ## Use Page Agent
 
@@ -368,13 +370,14 @@ Agent Whiteboard exposes several supported surfaces:
 - **CLI:** human-readable output and a stable [versioned JSON format](docs/cli-json.md)
 - **HTTP API:** publishing, retrieval, mutation, deletion, and health endpoints under [`/api/v1`](docs/http-api.md)
 - **Go API:** embeddable server construction through [`pkg/agentwb`](docs/go-api.md)
-- **Agent skill:** publishing guidance under [`skills/agent-whiteboard`](skills/agent-whiteboard/SKILL.md)
+- **Agent skill:** setup and publishing guidance under [`skills/agent-whiteboard`](skills/agent-whiteboard/SKILL.md)
 - **Filesystem storage:** documented layout and durability contracts in [Storage](docs/storage.md)
 
 ## Documentation
 
 ### Use Agent Whiteboard
 
+- [Agent setup runbook](skills/agent-whiteboard/references/setup.md)
 - [Configuration](docs/configuration.md)
 - [Security](docs/security.md)
 - [CLI JSON](docs/cli-json.md)
