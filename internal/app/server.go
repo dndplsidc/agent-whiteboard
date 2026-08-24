@@ -94,6 +94,10 @@ func (s *Server) Handler() http.Handler {
 	return s.app.Handler()
 }
 
+func (s *Server) dependenciesReady(ctx context.Context) error {
+	return s.app.readiness.dependenciesReady(ctx)
+}
+
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err := s.reserveServe(); err != nil {
 		return err

@@ -31,6 +31,7 @@ func (ids testIDs) NewID() (string, error) { return ids.id, nil }
 
 type recordingWhiteboardStore struct {
 	ctx       context.Context
+	readyCtx  context.Context
 	created   Whiteboard
 	replaced  Whiteboard
 	gotID     string
@@ -38,6 +39,7 @@ type recordingWhiteboardStore struct {
 	get       Whiteboard
 	close     int
 	createErr error
+	readyErr  error
 }
 
 func (store *recordingWhiteboardStore) Create(ctx context.Context, value Whiteboard) error {
@@ -61,7 +63,10 @@ func (store *recordingWhiteboardStore) Delete(ctx context.Context, id string) er
 	store.ctx, store.deletedID = ctx, id
 	return nil
 }
-func (*recordingWhiteboardStore) Ready(context.Context) error { return nil }
+func (store *recordingWhiteboardStore) Ready(ctx context.Context) error {
+	store.readyCtx = ctx
+	return store.readyErr
+}
 func (store *recordingWhiteboardStore) Close() error {
 	store.close++
 	return nil
@@ -69,12 +74,14 @@ func (store *recordingWhiteboardStore) Close() error {
 
 type recordingImageStore struct {
 	ctx       context.Context
+	readyCtx  context.Context
 	created   Image
 	replaced  Image
 	gotID     string
 	deletedID string
 	get       Image
 	close     int
+	readyErr  error
 }
 
 func (store *recordingImageStore) Create(ctx context.Context, value Image) error {
@@ -93,7 +100,10 @@ func (store *recordingImageStore) Delete(ctx context.Context, id string) error {
 	store.ctx, store.deletedID = ctx, id
 	return nil
 }
-func (*recordingImageStore) Ready(context.Context) error { return nil }
+func (store *recordingImageStore) Ready(ctx context.Context) error {
+	store.readyCtx = ctx
+	return store.readyErr
+}
 func (store *recordingImageStore) Close() error {
 	store.close++
 	return nil
@@ -372,6 +382,28 @@ func TestViewerAssetsAreCopiedAtOptionBoundary(t *testing.T) {
 	require.Contains(t, response.Body.String(), "copied-css")
 	require.Contains(t, response.Body.String(), "copied-js")
 	require.NotContains(t, response.Body.String(), "Xopied")
+}
+
+func TestReadyChecksDependenciesWithoutOwnedServerLifecycle(t *testing.T) {
+	ctx := context.WithValue(context.Background(), facadeContextKey{}, "sentinel")
+	whiteboards := &recordingWhiteboardStore{}
+	images := &recordingImageStore{}
+	service := newFacadeForStores(t, whiteboards, images, time.Unix(10, 0))
+	t.Cleanup(func() { require.NoError(t, service.Close()) })
+
+	response := httptest.NewRecorder()
+	service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	require.Equal(t, http.StatusServiceUnavailable, response.Code)
+
+	require.NoError(t, service.Ready(ctx))
+	require.Same(t, ctx, whiteboards.readyCtx)
+	require.Same(t, ctx, images.readyCtx)
+
+	dependencyErr := errors.New("whiteboard storage unavailable")
+	whiteboards.readyErr = dependencyErr
+	images.readyCtx = nil
+	require.ErrorIs(t, service.Ready(ctx), dependencyErr)
+	require.Nil(t, images.readyCtx, "readiness did not stop after the first dependency failure")
 }
 
 func TestCloseIsIdempotentAndClosesEachCustomViewOnce(t *testing.T) {

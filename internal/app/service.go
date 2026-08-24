@@ -163,6 +163,12 @@ func (service *Service) Handler() http.Handler {
 	return service.server.Handler()
 }
 
+// Ready checks whether the service dependencies can accept requests. It does
+// not report whether an externally owned HTTP server is listening or draining.
+func (service *Service) Ready(ctx context.Context) error {
+	return service.server.dependenciesReady(ctx)
+}
+
 func (service *Service) ListenAndServe(ctx context.Context) error {
 	return service.server.ListenAndServe(ctx)
 }
