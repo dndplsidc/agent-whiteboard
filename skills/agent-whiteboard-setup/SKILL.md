@@ -1,6 +1,6 @@
 ---
 name: agent-whiteboard-setup
-description: Install or update Agent Whiteboard; configure publishing servers; set up Page Agent, origin trust, the local broker, or the macOS daemon; and diagnose setup failures. Use agent-whiteboard to publish resources.
+description: Use when an agent needs to install or update Agent Whiteboard, configure publishing servers, set up Page Agent, origin trust, the local broker or macOS daemon, or diagnose setup failures. Use agent-whiteboard to publish resources.
 ---
 
 # Agent Whiteboard Setup

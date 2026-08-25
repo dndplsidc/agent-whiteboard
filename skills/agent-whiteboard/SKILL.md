@@ -1,6 +1,6 @@
 ---
 name: agent-whiteboard
-description: Publish, update, retrieve, or delete Markdown, Mermaid, trusted HTML, or raster images with Agent Whiteboard. Use for capability URLs; use agent-whiteboard-setup for installation, servers, Page Agent, trust, or daemons.
+description: Use when an agent needs to publish, update, retrieve, or delete Markdown, Mermaid, trusted HTML, or raster images with Agent Whiteboard. Use agent-whiteboard-setup for installation, servers, Page Agent, trust, or daemons.
 ---
 
 # Agent Whiteboard
