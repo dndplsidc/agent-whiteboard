@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Whiteboard Setup"
+  short_description: "Install and configure Agent Whiteboard"
+  default_prompt: "Use $agent-whiteboard-setup to prepare the requested Agent Whiteboard setup and verify it."

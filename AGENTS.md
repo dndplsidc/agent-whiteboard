@@ -13,7 +13,7 @@ The project includes a Go backend and CLI, bundled browser assets, filesystem st
 - `internal/` contains implementation packages organized by domain or responsibility.
 - `tests/integration` covers real-component and process workflows.
 - `tests/browser` contains Playwright end-to-end tests.
-- `docs/` and `skills/agent-whiteboard/` contain user- and agent-facing guidance.
+- `docs/` and `skills/` contain user- and agent-facing guidance.
 
 Place new code in the existing package that owns the behavior. Create a package only when it introduces a distinct, independently testable responsibility or dependency boundary.
 
