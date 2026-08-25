@@ -1,37 +1,29 @@
-# Security model
+# Publication safety
 
-Treat each ID and public URL as a bearer capability. Anyone who has the URL can read the resource, recover the ID used to update or delete it, and retrieve paired Markdown or HTML source and creator context. There is no login, authorization layer, private mode, or separate edit token.
+## Capability URLs
 
-Public responses ask crawlers not to index them, but `noindex` is not access control. Links can leak through chat, logs, browser history, screenshots, referrers, and forwarding. Delete a resource to revoke its URL; expiration limits its lifetime but does not make it private while live.
+A resource URL is a bearer capability, not a private link.
+Anyone holding it can view the resource, recover its ID, and use supported retrieval, update, or deletion operations.
+`noindex` reduces discovery but is not access control.
 
-Never publish credentials, tokens, secrets, personal or sensitive data, or private source. Avoid putting full capability IDs into logs or unrelated documents.
+Do not publish credentials, tokens, cookies, private source, personal data, regulated data, or anything that must remain confidential. Avoid copying full capability IDs into logs or unrelated documents.
 
-Creator context is not hidden reasoning or a private agent channel. It is stored beside source, shares the same capability and lifecycle, and is returned by `agent-whiteboard --json get markdown ID` or `get html ID` and the machine HTTP API. Keep it to concise goals, decisions, assumptions, and open questions. Exclude hidden reasoning, raw tool output, unrelated personal information, credentials, and all sensitive material.
+## Creator context
 
-Markdown is rendered in the browser and sanitized. Standalone HTML is trusted active content, but its capability URL serves an application wrapper around a credentialless `sandbox="allow-scripts"` iframe. `/content` remains exact. With Page Agent enabled, `/rendered` injects the bundled bridge just after the source `<head>` start; unsafe historical pre-head source falls back atomically to exact unbridged content and chooser-only behavior. Submitted scripts run with an opaque origin and restrictive network, framing, form, popup, download, and top-navigation policy. They can still navigate their own child frame to a publishing-origin destination allowed by the wrapper; credentials and referrers are stripped, but code can deliberately encode its capability into that navigation.
+Markdown and HTML context has the same capability exposure and lifecycle as its source.
+Keep it concise and useful.
+Never put hidden reasoning, raw tool output, credentials, sensitive data, or unrelated information in it.
 
-The bridge accepts only bounded, current-epoch candidate geometry hints from the current iframe `event.source` and rejects transferred `MessagePort`s. The parent builds the canonical component index from inert exact source and owns labels, excerpts, activation, ordering, and broker submission. It never reads the live child DOM or sends source, labels, context, broker data, credentials, or submission intent to the child. Publisher code can observe, suppress, or imitate hints and self-navigate, but cannot create or submit canonical references; the parent-owned chooser remains available. Publish HTML only when its entire source is trusted, and never embed Agent Whiteboard bridge code. Never upload SVG; use PNG, JPEG, GIF, or WebP.
+## Content types
 
-The CLI and server sanitize stable errors and do not echo source, context, request bodies, internal causes, or filesystem paths. A create error may still return a capability if rollback is uncertain; retain it privately and check or delete the possibly live resource.
+- Markdown is rendered and sanitized, but sanitization does not make secrets safe to publish.
+- Standalone HTML is active content. Publish only HTML you trust and keep it self-contained.
+- Images are limited to validated PNG, JPEG, GIF, and WebP. SVG is rejected.
 
-Trusted-origin configuration accepts exact HTTPS origins only. The foreground local broker reloads this allowlist for each new admission; existing accepted connections keep their original trust decision. Trust commands do not make whiteboard content private or authenticated.
+## Page Agent
 
-Canonical browser origins on literal `http://127.0.0.1`, with no port or a valid non-default port, are admitted automatically and do not appear in the configured trust list. `localhost`, other loopback addresses or spellings, IPv6, explicit port 80, and remote HTTP origins are rejected. Treat every page served by a local process on literal `127.0.0.1` as broker-authorized: it can call the broker directly without using the viewer's Connect control, so open only trusted local servers and content.
+Published source, creator context, and reader messages are untrusted model input.
+Page Agent uses the selected provider's existing tools, approval policy, sandbox, project trust, and configuration.
+It does not create a content-only execution boundary.
 
-The optional Page Agent for Markdown and HTML contacts only literal `127.0.0.1` at the reader-selected decimal port. Status is the only pre-consent request; provider selection and Connect carry no source or creator context. The first contextual message sends both complete artifacts, and reconnect never automatically resubmits an interrupted or uncertain turn. Pi and Codex keep independent conversations, queues, pending requests, and provider-specific archives. HTML component references carry parent-derived bounded exact-source excerpts and revision-bound anchors; they are untrusted reader content that supplements rather than replaces the complete exact HTML/context envelope. Multiple references preserve message order and navigate only while the revision matches.
-
-Only an HTML image component with one unambiguous exact-source embedded PNG/JPEG/GIF/WebP may add one optional loopback-private visual when model capability allows. The parent does not capture SVG/canvas, remote/blob/runtime pixels, responsive alternatives, video/audio, live state, or other component kinds. Browser preferences contain only theme, pane-open state, decimal port, a validated integer pane width from `360` through `720`, selected provider, and provider-scoped last-accepted bounded settings—never capability or resource metadata, consent, conversation IDs, messages, context, requests, decisions, output, credentials, or hidden reasoning.
-
-Page Agent image attachments are private loopback inputs, not public Whiteboard image capabilities. The authorized Origin/client/conversation may stage, preview, and remove opaque image IDs; bytes and filesystem paths never enter browser commands, replay, preferences, or the publishing server. Only configuration-validated PNG, JPEG, GIF, and WebP are accepted, with fixed limits of 8 images, 10 MiB each, 20 MiB per turn, and 512 MiB retained per conversation workspace. Unclaimed staging expires after 15 minutes. Claimed images remain for queue/history/native resume until release or conversation/archive deletion. Pi converts validated files to native base64 image content; Codex receives validated private `localImage` paths. Native model/image policy remains authoritative.
-
-The responding indicator is authoritative lifecycle UI, not model reasoning. Pi's sanitized blocked activity does not expose tool names, arguments, payloads, output, or hidden reasoning. Codex activity may show bounded commands, working directories, paths, diffs, tool names, arguments, output, results, and failures supplied by App Server; treat it as sensitive local information. Provider-native identifiers, raw App Server JSONL, credentials, and hidden reasoning never enter the browser protocol.
-
-Stable Codex command, file-change, and permission approvals and MCP elicitation become interactive Page Agent requests. The first valid response across attached tabs wins; other tabs become read-only for that request. Page Agent does not invent approval when the effective Codex policy does not request it. Experimental App Server `request_user_input` is not active because Agent Whiteboard keeps `experimentalApi` disabled.
-
-Managed daemon lifecycle is macOS-only. `agent serve --daemon` records absolute Agent Whiteboard/configuration paths, resolved Pi/Codex executable paths, and no copied provider configuration or credentials; `stop` retains the plist while `uninstall` removes it. Linux requires foreground `agent serve`. Authenticate through each provider's native login; Agent Whiteboard does not collect, store, or expose provider credentials.
-
-The Pi adapter sends the exact reader message and approved format-neutral source/context envelope while retaining the user's effective native tools, extensions, skills, project resources, approval paths, retry behavior, and other settings. Shared Model/Effort, one-skill, compaction, passive-notice, and interaction controls expose only bounded capability data. A Pi skill expansion may remove only the envelope's outer terminal LF, which the adapter restores before exact verification; HTML, creator context, and every framed field remain byte-exact. Provider-native session files remain owner-only, and broker state does not copy transcripts or model output.
-
-The Codex adapter sends the complete canonical context envelope as user-message content and uses the normal effective user Codex home, authentication, model, tools, MCP servers, apps, hooks, skills, project instructions, approval policy, sandbox, and other configuration unchanged. After explicit connection, only bounded safe metadata for enabled skills reaches the trusted browser origin; native paths, bodies, load errors, and dependencies remain private. `$` tokens invoke skills natively, and `/compact` uses native manual compaction. Codex admits no busy follow-up, preserves the local draft, and exposes Stop; Pi queue behavior remains unchanged. Agent Whiteboard never edits `~/.codex/config.toml`, creates a production `CODEX_HOME`, or adds per-turn configuration overrides. Whiteboard content is untrusted model input: prompt injection can cause tool activity or requests, and `approval_policy = "never"` can allow actions within the effective sandbox without a Page Agent prompt.
-
-Tool allowlists, content-only execution, per-whiteboard filesystem roots, experimental permission profiles, container or VM isolation, and a stronger cross-agent sandbox are explicitly deferred for this non-public deployment. They are not security guarantees. Use restrictive effective provider configuration appropriate for the content being opened.
+For deployment threat-model or implementation details, read the repository's `docs/security.md`; those details are not needed for ordinary publishing.

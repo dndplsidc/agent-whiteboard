@@ -1,0 +1,25 @@
+{
+  "skill_name": "agent-whiteboard-setup",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Set up Page Agent on my Mac for https://whiteboard.example/whiteboards/markdown/abc. Pi is already installed and authenticated. Use foreground mode for now.",
+      "expected_output": "Installs Agent Whiteboard only if missing, trusts exactly https://whiteboard.example, starts the broker in supervised foreground mode, verifies Page Agent without sending a model turn, and does not start a publishing server or modify Pi configuration."
+    },
+    {
+      "id": 2,
+      "prompt": "I only need a local Agent Whiteboard server for publishing Markdown. Page Agent is not needed.",
+      "expected_output": "Installs the CLI if needed, starts and verifies the publishing server, and does not inspect or configure providers, trust, broker, or daemon."
+    },
+    {
+      "id": 3,
+      "prompt": "Configure the CLI to publish to our existing server, but I don't remember its hostname. It may already be in my environment or Agent Whiteboard config.",
+      "expected_output": "Checks AGENT_WHITEBOARD_SERVER then client.server in the selected/default configuration, asks for the origin if neither exists, and never assumes or starts localhost."
+    },
+    {
+      "id": 4,
+      "prompt": "Install Agent Whiteboard. Go is not installed and I do not want you to install a toolchain.",
+      "expected_output": "Reports the Go prerequisite and stops without installing Go, editing shell files, or inventing another installation method."
+    }
+  ]
+}

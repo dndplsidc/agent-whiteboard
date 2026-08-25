@@ -1,0 +1,87 @@
+# Page Agent setup
+
+Use this only when the user wants to read a Whiteboard with Page Agent or run a local all-in-one setup.
+
+## 1. Check a provider
+
+```sh
+command -v pi || true
+command -v codex || true
+```
+
+At least one requested provider must be installed and authenticated through its own CLI. Agent Whiteboard has no provider login command. Do not edit provider credentials or native configuration.
+
+If an executable is outside `PATH`, pass its path when starting the broker:
+
+```sh
+agent-whiteboard agent serve \
+  --pi-executable /path/to/pi \
+  --codex-executable /path/to/codex
+```
+
+A missing provider does not block the other provider.
+
+## 2. Trust a remote origin
+
+For a remote Whiteboard, derive the exact HTTPS origin from its URL: scheme, hostname, and optional port only.
+
+```sh
+agent-whiteboard agent trust add https://whiteboard.example
+agent-whiteboard agent trust list
+```
+
+Use the same global `--config PATH` selected for the broker. Do not include a path, query, fragment, credentials, or wildcard.
+
+Literal `http://127.0.0.1` origins are admitted automatically. This does not include `localhost`, other loopback spellings, IPv6, or remote HTTP.
+
+## 3. Start the broker
+
+Prefer a supervised foreground process:
+
+```sh
+agent-whiteboard agent serve
+```
+
+Default broker address: `127.0.0.1:8568`.
+
+On macOS, install a managed daemon only when the user explicitly requests persistent operation:
+
+```sh
+agent-whiteboard agent serve --daemon
+agent-whiteboard agent daemon status
+```
+
+Linux supports foreground operation only.
+
+## 4. Verify without sending a model turn
+
+1. Open the Whiteboard URL.
+2. Confirm the Page Agent control is visible.
+3. Open it and confirm the broker and intended provider are available.
+4. Confirm Page Context can show source and creator context.
+5. Connect only if needed to verify authorization.
+
+Do not send a message merely to test setup. A model turn may incur usage and use provider tools according to native policy.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Page Agent control absent | Publishing server must enable `viewer.local_agent.enabled` and restart |
+| Broker unavailable | Start `agent-whiteboard agent serve`; check the displayed port |
+| Origin rejected | Add the exact HTTPS publishing origin using the same configuration |
+| Provider unavailable | Check executable path and native authentication |
+| Browser cannot reach loopback | Grant browser Local Network Access when prompted |
+| Daemon command fails on Linux | Use foreground `agent serve` |
+
+Do not clear broker or provider state as a generic fix.
+
+## Remove setup only when requested
+
+```sh
+agent-whiteboard agent trust remove https://whiteboard.example
+agent-whiteboard agent daemon stop
+agent-whiteboard agent daemon uninstall
+```
+
+Remove only trust or daemon state added for this setup. Preserve Whiteboards, configuration, conversations, and provider histories.
