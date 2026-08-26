@@ -1,8 +1,12 @@
 # Page Agent setup
 
-Use this only when the user wants to read a Whiteboard with Page Agent or run a local all-in-one setup.
+Use this only after the user has selected Page Agent for a remote Whiteboard or local all-in-one setup.
 
-## 1. Check a provider
+## 1. Select the broker lifecycle
+
+Page Agent requires the local broker, so do not ask whether to enable it again. Use supervised foreground operation when the user did not select a lifecycle. On macOS, select the managed daemon only when the user explicitly requests persistent operation. Linux supports foreground operation only.
+
+## 2. Check a provider
 
 ```sh
 command -v pi || true
@@ -21,7 +25,7 @@ agent-whiteboard agent serve \
 
 A missing provider does not block the other provider.
 
-## 2. Trust a remote origin
+## 3. Trust a remote origin
 
 For a remote Whiteboard, derive the exact HTTPS origin from its URL: scheme, hostname, and optional port only.
 
@@ -34,9 +38,9 @@ Use the same global `--config PATH` selected for the broker. Do not include a pa
 
 Literal `http://127.0.0.1` origins are admitted automatically. This does not include `localhost`, other loopback spellings, IPv6, or remote HTTP.
 
-## 3. Start the broker
+## 4. Start the broker
 
-Prefer a supervised foreground process:
+For foreground operation, run:
 
 ```sh
 agent-whiteboard agent serve
@@ -44,7 +48,7 @@ agent-whiteboard agent serve
 
 Default broker address: `127.0.0.1:8568`.
 
-On macOS, install a managed daemon only when the user explicitly requests persistent operation:
+For explicitly requested persistent operation on macOS, install the managed daemon:
 
 ```sh
 agent-whiteboard agent serve --daemon
@@ -53,7 +57,7 @@ agent-whiteboard agent daemon status
 
 Linux supports foreground operation only.
 
-## 4. Verify without sending a model turn
+## 5. Verify without sending a model turn
 
 1. Open the Whiteboard URL.
 2. Confirm the Page Agent control is visible.
