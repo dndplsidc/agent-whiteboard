@@ -394,6 +394,29 @@ func TestWaitRunsOnceAndReturnsOneStableResult(t *testing.T) {
 	require.Equal(t, 17, exitError.ExitCode())
 }
 
+func TestTreeWaitHelperStaysAliveUntilSignaled(t *testing.T) {
+	child, rootPID, grandchildPID := launchTree(t, "tree-wait")
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- child.Wait() }()
+
+	select {
+	case waitErr := <-waitDone:
+		t.Fatalf("process tree exited before it was signaled: %v", waitErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	requireProcessExists(t, rootPID)
+	requireProcessExists(t, grandchildPID)
+	require.NoError(t, child.Kill())
+	waitErr := child.Wait()
+	concurrentWaitErr := <-waitDone
+	if waitErr == nil {
+		require.NoError(t, concurrentWaitErr)
+	} else {
+		require.Same(t, waitErr, concurrentWaitErr)
+	}
+	requireProcessesGone(t, rootPID, grandchildPID)
+}
+
 func TestTerminateSignalsEntireIsolatedGroup(t *testing.T) {
 	testSignalEntireGroup(t, false)
 }
@@ -643,6 +666,10 @@ func launchTree(t *testing.T, mode string) (ManagedProcess, int, int) {
 	}
 	child, err := NewProcessGroupLauncher().Launch(context.Background(), helperRequest(t, mode, arguments...))
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = child.Kill()
+		_ = child.Wait()
+	})
 	scanner := bufio.NewScanner(child.Output())
 	wantedPIDs := 2
 	if mode == "tree-leader-exits" {
@@ -875,7 +902,7 @@ func TestProcessGroupHelper(t *testing.T) {
 func runCancellationTree(resultPath string) {
 	if os.Getenv("PROCESSGROUP_GRANDCHILD") == "1" {
 		_ = os.WriteFile(resultPath+".ready", []byte(strconv.Itoa(os.Getpid())), 0o600)
-		select {}
+		waitForTestSignal()
 	}
 	command := exec.Command(os.Args[0], "-test.run=^TestProcessGroupHelper$", "--", "cancel-tree", resultPath)
 	command.Env = []string{helperEnvironment, "PROCESSGROUP_GRANDCHILD=1"}
@@ -898,7 +925,7 @@ func runCancellationTree(resultPath string) {
 	if err := os.WriteFile(resultPath, []byte(contents), 0o600); err != nil {
 		os.Exit(96)
 	}
-	select {}
+	waitForTestSignal()
 }
 
 func runTreeHelper(mode string, arguments []string) {
@@ -923,10 +950,9 @@ func runTreeHelper(mode string, arguments []string) {
 			fmt.Printf("grandchild-group:%d\n", group)
 			if err := os.WriteFile(arguments[0], []byte("ready"), 0o600); err != nil {
 				os.Exit(97)
-				os.Exit(97)
 			}
 		}
-		select {}
+		waitForTestSignal()
 	}
 
 	commandArguments := append([]string{"-test.run=^TestProcessGroupHelper$", "--", mode}, arguments...)
@@ -963,4 +989,13 @@ func runTreeHelper(mode string, arguments []string) {
 	}
 	fmt.Printf("root:%d\n", os.Getpid())
 	_ = command.Wait()
+}
+
+// waitForTestSignal keeps a process helper alive without handling the
+// termination signals exercised by the process-group tests.
+func waitForTestSignal() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGUSR1)
+	for range signals {
+	}
 }
