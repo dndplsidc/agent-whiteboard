@@ -1,10 +1,12 @@
 package common
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 
 func pathsForHome(home string) servicePaths {
 	return servicePaths{
+		Home:      home,
 		Plist:     filepath.Join(home, "Library", "LaunchAgents", LaunchAgentLabel+".plist"),
 		StdoutLog: filepath.Join(home, ".agent-whiteboard", "logs", "agent.stdout.log"),
 		StderrLog: filepath.Join(home, ".agent-whiteboard", "logs", "agent.stderr.log"),
@@ -44,6 +47,7 @@ type normalizedConfig struct {
 	Executable          string
 	ConfigPath          string
 	ProviderExecutables map[string]string
+	EnvironmentPath     string
 }
 
 // GenerateLaunchAgentPlist validates and resolves all configured paths, then returns the
@@ -77,6 +81,7 @@ func normalizeConfig(config LaunchAgentConfig) (normalizedConfig, error) {
 		Executable:          executable,
 		ConfigPath:          configuration,
 		ProviderExecutables: providers,
+		EnvironmentPath:     config.EnvironmentPath,
 	}, nil
 }
 
@@ -244,15 +249,134 @@ func validAbsolutePath(path string) bool {
 	return true
 }
 
+func launchAgentPathEntries(environmentPath, home string) []string {
+	candidates := append(filepath.SplitList(environmentPath), []string{
+		filepath.Join(home, ".bun", "bin"),
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, "bin"),
+		filepath.Join(home, "go", "bin"),
+		filepath.Join(home, ".asdf", "shims"),
+		filepath.Join(home, ".local", "share", "mise", "shims"),
+		filepath.Join(home, ".volta", "bin"),
+		filepath.Join(home, ".nix-profile", "bin"),
+		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
+		"/usr/local/bin",
+		"/nix/var/nix/profiles/default/bin",
+		"/run/current-system/sw/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+	}...)
+	entries := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if !validAbsolutePath(candidate) {
+			continue
+		}
+		if _, duplicate := seen[candidate]; duplicate {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		entries = append(entries, candidate)
+	}
+	return entries
+}
+
+func validateProviderInterpreters(providers map[string]string, runtimePath []string) error {
+	for provider, executable := range providers {
+		interpreter, err := envShebangInterpreter(executable)
+		if err != nil {
+			return fmt.Errorf("validate %s provider interpreter: %w", providerDisplayName(provider), err)
+		}
+		if interpreter == "" {
+			continue
+		}
+		if !runtimePathContainsExecutable(runtimePath, interpreter) {
+			return fmt.Errorf("validate %s provider interpreter %q: executable not found in LaunchAgent PATH; activate its runtime and rerun 'agent-whiteboard agent serve --daemon'", providerDisplayName(provider), interpreter)
+		}
+	}
+	return nil
+}
+
+func envShebangInterpreter(executable string) (string, error) {
+	file, err := os.Open(executable)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(io.LimitReader(file, 4097))
+	line, readErr := reader.ReadString('\n')
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return "", readErr
+	}
+	if !strings.HasPrefix(line, "#!") {
+		return "", nil
+	}
+	if len(line) > 4096 {
+		return "", errors.New("shebang exceeds 4096 bytes")
+	}
+	line = strings.TrimRight(line, "\r\n")
+	fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "#!")))
+	if len(fields) == 0 {
+		return "", errors.New("shebang interpreter is missing")
+	}
+	if fields[0] != "/usr/bin/env" {
+		return "", nil
+	}
+	fields = fields[1:]
+	if len(fields) > 0 && fields[0] == "-S" {
+		fields = fields[1:]
+	}
+	for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.Contains(fields[0], "/") {
+		fields = fields[1:]
+	}
+	if len(fields) == 0 || strings.HasPrefix(fields[0], "-") {
+		return "", errors.New("/usr/bin/env shebang command is missing or unsupported")
+	}
+	return fields[0], nil
+}
+
+func runtimePathContainsExecutable(runtimePath []string, executable string) bool {
+	if strings.ContainsRune(executable, filepath.Separator) {
+		return false
+	}
+	for _, directory := range runtimePath {
+		candidate := filepath.Join(directory, executable)
+		if _, err := resolveRegularPath(candidate, true, false); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func providerDisplayName(provider string) string {
+	switch provider {
+	case LaunchAgentProviderPi:
+		return "Pi"
+	case LaunchAgentProviderCodex:
+		return "Codex"
+	default:
+		return provider
+	}
+}
+
 func marshalPlist(config normalizedConfig, paths servicePaths) ([]byte, error) {
-	for _, path := range []string{config.Executable, config.ConfigPath, paths.Plist, paths.StdoutLog, paths.StderrLog} {
+	for _, path := range []string{config.Executable, config.ConfigPath, paths.Home, paths.Plist, paths.StdoutLog, paths.StderrLog} {
 		if !validAbsolutePath(path) {
 			return nil, errors.New("plist contains an invalid path")
 		}
 	}
 
+	runtimePath := launchAgentPathEntries(config.EnvironmentPath, paths.Home)
+	if err := validateProviderInterpreters(config.ProviderExecutables, runtimePath); err != nil {
+		return nil, err
+	}
 	arguments := []string{config.Executable, "--config", config.ConfigPath, "agent", "serve"}
-	environment := make(map[string]string, len(config.ProviderExecutables))
+	environment := make(map[string]string, len(config.ProviderExecutables)+1)
+	environment[LaunchAgentPathEnvironment] = strings.Join(runtimePath, string(os.PathListSeparator))
 	for provider, path := range config.ProviderExecutables {
 		if (provider != LaunchAgentProviderPi && provider != LaunchAgentProviderCodex) || !validAbsolutePath(path) {
 			return nil, errors.New("plist contains an invalid provider executable")
@@ -268,7 +392,7 @@ func marshalPlist(config normalizedConfig, paths servicePaths) ([]byte, error) {
 	output.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
 	output.WriteString("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
 	output.WriteString("<plist version=\"1.0\">\n<dict>\n")
-	writePlistString(&output, "LaunchAgentLabel", LaunchAgentLabel, 1)
+	writePlistString(&output, "Label", LaunchAgentLabel, 1)
 	writePlistArray(&output, "ProgramArguments", arguments, 1)
 	writePlistBool(&output, "RunAtLoad", true, 1)
 	writePlistBool(&output, "KeepAlive", true, 1)

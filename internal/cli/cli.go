@@ -192,9 +192,8 @@ func isDaemonServeRequest(cmd *cobra.Command) bool {
 	return flag != nil && flag.Value.String() == "true"
 }
 
-// selectedProviderExecutableResolver records explicit provider selections without
-// copying any ambient environment into the LaunchAgent. Absolute selections
-// are returned as-is; names are resolved using the current PATH.
+// selectedProviderExecutableResolver records explicit provider selections.
+// Absolute selections are returned as-is; names are resolved using the current PATH.
 type selectedProviderExecutableResolver struct{ pi, codex string }
 
 func (resolver selectedProviderExecutableResolver) LookPath(name string) (string, error) {

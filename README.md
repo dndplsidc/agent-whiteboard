@@ -176,6 +176,8 @@ agent-whiteboard agent serve --daemon
 agent-whiteboard agent daemon status
 ```
 
+The installer writes a standalone runtime `PATH` into the LaunchAgent. It preserves safe absolute entries from the current shell and adds common system, Homebrew, Bun, asdf, mise, Volta, and Nix locations. It does not source `.zshrc` or another shell startup file. When using NVM, `nix develop`, or another version-specific environment, activate the intended runtime before installation. Rerun `agent-whiteboard agent serve --daemon` after changing or removing that runtime so the plist is regenerated and reloaded.
+
 Other daemon operations are:
 
 ```sh
@@ -213,7 +215,7 @@ Page Agent also exposes the provider's supported model and reasoning controls, n
 | --- | --- |
 | Broker unavailable | Start `agent-whiteboard agent serve` and verify the viewer's broker port, normally `8568`. |
 | Origin not trusted | Run the exact `agent-whiteboard agent trust add https://…` command for the publishing origin. |
-| Provider unavailable | Confirm `pi` or `codex` is on `PATH` and authenticated through its native CLI. |
+| Provider unavailable | Confirm `pi` or `codex` is on `PATH` and authenticated through its native CLI. For a managed daemon, activate the intended NVM/Nix environment and rerun `agent-whiteboard agent serve --daemon`. |
 | Browser cannot reach loopback | Allow Local Network Access when prompted by the browser. |
 | Incompatible local API | Update the publishing server and reader CLI together, then restart the broker. |
 

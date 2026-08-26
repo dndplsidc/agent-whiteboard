@@ -56,6 +56,7 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing
 	deps.Getenv = mapGetenv(map[string]string{
 		common.LaunchAgentPiExecutableEnvironment:    "/env/pi",
 		common.LaunchAgentCodexExecutableEnvironment: "/env/codex",
+		common.LaunchAgentPathEnvironment:            "/activated/nvm/bin:/usr/bin:/bin",
 	})
 	var foregroundCalls int
 	deps.NewAgentApplication = func(app.AgentServiceConfig) (Application, error) {
@@ -73,6 +74,7 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing
 
 	require.Equal(t, filepath.Join(mustWorkingDirectory(t), "bin", "agent-whiteboard"), manager.installConfig.Executable)
 	require.Equal(t, filepath.Join(mustWorkingDirectory(t), "relative", "config.yaml"), manager.installConfig.ConfigPath)
+	require.Equal(t, "/activated/nvm/bin:/usr/bin:/bin", manager.installConfig.EnvironmentPath)
 	require.Len(t, manager.installConfig.Providers, 2)
 	require.Equal(t, common.LaunchAgentProviderPi, manager.installConfig.Providers[0].ProviderName())
 	require.Equal(t, common.LaunchAgentProviderPi, manager.installConfig.Providers[0].ExecutableName())
