@@ -13,15 +13,15 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/attachment"
-	"github.com/edocsss/agent-whiteboard/internal/agent/broker"
-	"github.com/edocsss/agent-whiteboard/internal/agent/codex"
-	"github.com/edocsss/agent-whiteboard/internal/agent/pi"
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
-	"github.com/edocsss/agent-whiteboard/internal/agent/server"
-	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/attachment"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/broker"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/codex"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/pi"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/server"
+	statepkg "github.com/dndplsidc/agent-whiteboard/internal/agent/state"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	generalconfig "github.com/dndplsidc/agent-whiteboard/internal/config"
 )
 
 // AgentServiceConfig describes the foreground agent composition. Defaults for

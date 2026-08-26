@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent"
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 const (

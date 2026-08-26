@@ -11,9 +11,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent"
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	httpx "github.com/dndplsidc/agent-whiteboard/internal/webapi"
 	xhtml "golang.org/x/net/html"
 )
 

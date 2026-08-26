@@ -1,7 +1,7 @@
 package image
 
 import (
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 func DetectFormat(content []byte) (string, string, error) {

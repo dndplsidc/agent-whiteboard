@@ -17,7 +17,7 @@ Agent Whiteboard supports macOS and Linux with Go 1.25 or 1.26.
 ### 1. Install the CLI
 
 ```sh
-go install github.com/edocsss/agent-whiteboard/cmd/agent-whiteboard@latest
+go install github.com/dndplsidc/agent-whiteboard/cmd/agent-whiteboard@latest
 ```
 
 ### 2. Start the server

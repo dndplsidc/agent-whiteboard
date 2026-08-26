@@ -1,6 +1,6 @@
 # Go API
 
-Import `github.com/edocsss/agent-whiteboard/pkg/agentwb`. This stable public facade forwards to the internal application composition root, which assembles domain services, HTTP handlers, lifecycle, and default filesystem storage.
+Import `github.com/dndplsidc/agent-whiteboard/pkg/agentwb`. This stable public facade forwards to the internal application composition root, which assembles domain services, HTTP handlers, lifecycle, and default filesystem storage.
 
 ```go
 service, err := agentwb.New(agentwb.Config{

@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/broker"
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
-	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/broker"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	statepkg "github.com/dndplsidc/agent-whiteboard/internal/agent/state"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 	"github.com/stretchr/testify/require"
 )
 

@@ -5,7 +5,7 @@ package pi
 import (
 	"context"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
 )
 
 func (s *Session) Reconcile(ctx context.Context, reference provider.TurnReference) (provider.TurnState, error) {

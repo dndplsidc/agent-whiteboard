@@ -7,13 +7,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/edocsss/agent-whiteboard/internal/app"
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/image"
-	"github.com/edocsss/agent-whiteboard/internal/testutil"
+	"github.com/dndplsidc/agent-whiteboard/internal/app"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/image"
+	"github.com/dndplsidc/agent-whiteboard/internal/testutil"
 
-	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
+	httpx "github.com/dndplsidc/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/whiteboard"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	generalconfig "github.com/dndplsidc/agent-whiteboard/internal/config"
 	"github.com/spf13/cobra"
 )
 

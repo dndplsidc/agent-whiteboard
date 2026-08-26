@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/testutil"
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/testutil"
+	"github.com/dndplsidc/agent-whiteboard/internal/whiteboard"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"

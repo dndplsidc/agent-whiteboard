@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 )
 
 // BrowserConnection is one admitted browser attachment to a broker

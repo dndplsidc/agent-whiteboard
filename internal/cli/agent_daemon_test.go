@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/edocsss/agent-whiteboard/internal/app"
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
+	"github.com/dndplsidc/agent-whiteboard/internal/app"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	generalconfig "github.com/dndplsidc/agent-whiteboard/internal/config"
 	"github.com/stretchr/testify/require"
 )
 

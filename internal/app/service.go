@@ -7,9 +7,9 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/edocsss/agent-whiteboard/internal/image"
-	"github.com/edocsss/agent-whiteboard/internal/store"
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
+	"github.com/dndplsidc/agent-whiteboard/internal/image"
+	"github.com/dndplsidc/agent-whiteboard/internal/store"
+	"github.com/dndplsidc/agent-whiteboard/internal/whiteboard"
 )
 
 type Service struct {

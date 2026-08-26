@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/edocsss/agent-whiteboard/internal/config"
+	"github.com/dndplsidc/agent-whiteboard/internal/config"
 )
 
 var (

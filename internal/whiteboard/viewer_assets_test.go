@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
+	"github.com/dndplsidc/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
 )

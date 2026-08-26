@@ -3,7 +3,7 @@ package codex
 import (
 	"encoding/json"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
 )
 
 func (session *Session) handleSettingsUpdated(params json.RawMessage) {

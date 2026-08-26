@@ -3,8 +3,8 @@ package broker
 import (
 	"reflect"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
-	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
+	statepkg "github.com/dndplsidc/agent-whiteboard/internal/agent/state"
 )
 
 func (actor *conversation) observeAttach(resource protocol.Resource, digest string) (protocol.ContextState, bool, protocol.Event, error) {

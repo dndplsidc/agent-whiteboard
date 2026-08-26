@@ -3,7 +3,7 @@ package cli
 import (
 	"os"
 
-	"github.com/edocsss/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/webapi"
 	"github.com/spf13/cobra"
 )
 

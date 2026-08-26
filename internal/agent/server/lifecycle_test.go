@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/broker"
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/broker"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 )

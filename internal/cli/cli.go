@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/app"
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
-	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/app"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	generalconfig "github.com/dndplsidc/agent-whiteboard/internal/config"
+	httpx "github.com/dndplsidc/agent-whiteboard/internal/webapi"
 	"github.com/spf13/cobra"
 )
 

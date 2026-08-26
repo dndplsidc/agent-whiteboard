@@ -19,7 +19,7 @@ func TestCLIDoesNotImportPublicAgentWBFacade(t *testing.T) {
 		for _, imported := range parsed.Imports {
 			path, err := strconv.Unquote(imported.Path.Value)
 			require.NoError(t, err)
-			require.NotEqual(t, "github.com/edocsss/agent-whiteboard/pkg/agentwb", path, file)
+			require.NotEqual(t, "github.com/dndplsidc/agent-whiteboard/pkg/agentwb", path, file)
 		}
 	}
 }

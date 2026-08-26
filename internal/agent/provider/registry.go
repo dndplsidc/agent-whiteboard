@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 // Registry is an immutable, closed mapping from provider names to their

@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/attachment"
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/attachment"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 func (actor *conversation) claimTurnImages(command protocol.Command, payload protocol.SubmitPayload) ([]provider.ImageInput, []protocol.ImageDescriptor, protocol.BrowserErrorCode) {
