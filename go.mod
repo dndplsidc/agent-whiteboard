@@ -1,4 +1,4 @@
-module github.com/edocsss/agent-whiteboard
+module github.com/dndplsidc/agent-whiteboard
 
 go 1.25.0
 

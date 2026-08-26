@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/broker"
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/broker"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 type attachmentKey struct {

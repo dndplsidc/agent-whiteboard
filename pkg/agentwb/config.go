@@ -3,7 +3,7 @@ package agentwb
 import (
 	"net"
 
-	"github.com/edocsss/agent-whiteboard/internal/app"
+	"github.com/dndplsidc/agent-whiteboard/internal/app"
 )
 
 type Config = app.ServiceConfig

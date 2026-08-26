@@ -7,7 +7,7 @@ package testutil
 import (
 	"context"
 
-	"github.com/edocsss/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/webapi"
 	mock "github.com/stretchr/testify/mock"
 )
 

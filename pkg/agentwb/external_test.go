@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/pkg/agentwb"
+	"github.com/dndplsidc/agent-whiteboard/pkg/agentwb"
 	"github.com/stretchr/testify/require"
 )
 

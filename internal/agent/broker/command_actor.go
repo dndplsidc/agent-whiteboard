@@ -3,7 +3,7 @@ package broker
 import (
 	"errors"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 )
 
 func (actor *conversation) handleCommand(attachments map[*clientAttachment]struct{}, turnResults chan<- turnWorkerResult, historyResults chan<- historyWorkerResult, archiveResults chan<- archiveWorkerResult, handoffResults chan<- handoffResult, interactionResults chan<- interactionWorkerResult, request commandRequest) {

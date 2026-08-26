@@ -14,6 +14,7 @@ const (
 	LaunchAgentProviderCodex              = "codex"
 	LaunchAgentPiExecutableEnvironment    = "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE"
 	LaunchAgentCodexExecutableEnvironment = "AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE"
+	LaunchAgentPathEnvironment            = "PATH"
 	installedNotRunningGuidance           = "LaunchAgent is installed but not running"
 	notInstalledGuidance                  = "LaunchAgent is not installed"
 )
@@ -49,12 +50,14 @@ type pathResolver struct{}
 func (pathResolver) LookPath(name string) (string, error) { return exec.LookPath(name) }
 
 // LaunchAgentConfig contains the durable inputs recorded in the LaunchAgent. Paths must
-// be absolute and clean. ConfigPath may name an absent final file.
+// be absolute and clean. ConfigPath may name an absent final file. EnvironmentPath is the
+// installing process's runtime PATH; plist generation sanitizes and supplements it.
 type LaunchAgentConfig struct {
 	Executable         string
 	ConfigPath         string
 	Providers          []LaunchAgentProviderDescriptor
 	ExecutableResolver LaunchAgentExecutableResolver
+	EnvironmentPath    string
 }
 
 // LaunchAgentStatus intentionally excludes launch arguments, paths, environment, and raw
@@ -89,6 +92,7 @@ type LaunchAgentManager interface {
 }
 
 type servicePaths struct {
+	Home      string
 	Plist     string
 	StdoutLog string
 	StderrLog string

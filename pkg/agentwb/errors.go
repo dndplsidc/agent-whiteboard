@@ -1,6 +1,6 @@
 package agentwb
 
-import "github.com/edocsss/agent-whiteboard/internal/common"
+import "github.com/dndplsidc/agent-whiteboard/internal/common"
 
 type Error = common.Error
 type ErrorCode = common.ErrorCode

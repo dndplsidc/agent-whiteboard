@@ -7,7 +7,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
 )
 
 // failedSession transfers ownership of a child returned on a failed launch

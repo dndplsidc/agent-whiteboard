@@ -9,10 +9,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/edocsss/agent-whiteboard/internal/app"
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/testutil"
-	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/app"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/testutil"
+	httpx "github.com/dndplsidc/agent-whiteboard/internal/webapi"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )

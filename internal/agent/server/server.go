@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/attachment"
-	"github.com/edocsss/agent-whiteboard/internal/agent/broker"
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/attachment"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/broker"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 )
 
 const (

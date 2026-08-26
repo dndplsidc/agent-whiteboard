@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	generalconfig "github.com/dndplsidc/agent-whiteboard/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -127,6 +127,7 @@ func (factory commandFactory) installAgentDaemon(cmd *cobra.Command, piFlagValue
 		ConfigPath:         configuration,
 		Providers:          []common.LaunchAgentProviderDescriptor{piProviderDescriptor{}, codexProviderDescriptor{}},
 		ExecutableResolver: nil,
+		EnvironmentPath:    factory.deps.Getenv(common.LaunchAgentPathEnvironment),
 	}
 	if piSelected != "" || codexSelected != "" {
 		install.ExecutableResolver = selectedProviderExecutableResolver{pi: piSelected, codex: codexSelected}

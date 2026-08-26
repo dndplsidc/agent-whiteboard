@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 const (

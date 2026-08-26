@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 type launchConfig struct {

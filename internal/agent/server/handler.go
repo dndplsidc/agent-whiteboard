@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 )
 
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {

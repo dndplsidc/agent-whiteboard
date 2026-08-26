@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 const maxNativeRecordBytes = 64 << 10

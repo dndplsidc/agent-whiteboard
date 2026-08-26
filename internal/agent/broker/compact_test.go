@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent"
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
-	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	statepkg "github.com/dndplsidc/agent-whiteboard/internal/agent/state"
 	"github.com/stretchr/testify/require"
 )
 

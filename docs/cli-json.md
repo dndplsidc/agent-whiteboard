@@ -110,7 +110,7 @@ On macOS, `agent serve --daemon` install success and `agent daemon restart|stop|
 {"schema_version":1,"installed":true,"loaded":true,"running":true,"pid":1234}
 ```
 
-The daemon accepts `--pi-executable` and `--codex-executable`, but rejects the foreground-only `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` flags. Its provider-specific persisted values are resolved executable paths only; it does not copy provider configuration or credentials.
+The daemon accepts `--pi-executable` and `--codex-executable`, but rejects the foreground-only `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` flags. Its provider-specific persisted values are resolved executable paths only; it does not copy provider configuration or credentials. The generated LaunchAgent also receives a standalone runtime `PATH` built from safe absolute entries in the installing process plus common system and package-manager locations. It never sources shell startup files. Activate an NVM or Nix development environment before installation and rerun `agent-whiteboard agent serve --daemon` after changing that runtime.
 
 The browser protocol remains separate from CLI JSON. It is versioned and strictly validated, and identifies `pi` or `codex` conversations independently. Provider selection itself does not connect or send whiteboard content. The first contextual turn carries the complete canonical context envelope. Codex tool activity is normalized into bounded `tool_activity` events, while native App Server identifiers and raw JSONL never enter the browser protocol.
 

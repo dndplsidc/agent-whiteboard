@@ -5,9 +5,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
-	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	statepkg "github.com/dndplsidc/agent-whiteboard/internal/agent/state"
 )
 
 type archiveRemovalStore interface {

@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/webapi"
 )
 
 type jsonResource struct {

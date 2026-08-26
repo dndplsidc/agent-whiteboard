@@ -10,8 +10,8 @@ import (
 	"image/png"
 	"testing"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	imageDomain "github.com/edocsss/agent-whiteboard/internal/image"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	imageDomain "github.com/dndplsidc/agent-whiteboard/internal/image"
 	"github.com/stretchr/testify/require"
 )
 

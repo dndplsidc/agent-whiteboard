@@ -1,8 +1,8 @@
 package agentwb
 
 import (
-	"github.com/edocsss/agent-whiteboard/internal/image"
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
+	"github.com/dndplsidc/agent-whiteboard/internal/image"
+	"github.com/dndplsidc/agent-whiteboard/internal/whiteboard"
 )
 
 type WhiteboardStore = whiteboard.Store

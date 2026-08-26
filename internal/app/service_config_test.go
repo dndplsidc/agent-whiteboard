@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/image"
-	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
+	"github.com/dndplsidc/agent-whiteboard/internal/image"
+	httpx "github.com/dndplsidc/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/require"
 )
 

@@ -80,8 +80,10 @@ func TestInstallOmitsMissingRegisteredProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(plist), "EnvironmentVariables") || strings.Contains(string(plist), "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE") {
-		t.Fatal("missing registered provider was recorded in plist")
+	parsed := parsePlist(t, plist)
+	environment := parsed["EnvironmentVariables"].dictionary
+	if len(environment) != 1 || environment[LaunchAgentPathEnvironment].text == "" || strings.Contains(string(plist), "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE") {
+		t.Fatal("missing registered provider was recorded instead of only the runtime PATH")
 	}
 }
 

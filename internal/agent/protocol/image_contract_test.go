@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 	"github.com/stretchr/testify/require"
 )
 

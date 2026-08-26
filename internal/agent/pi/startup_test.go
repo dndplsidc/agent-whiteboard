@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
 	"github.com/stretchr/testify/require"
 )
 

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	imageDomain "github.com/edocsss/agent-whiteboard/internal/image"
-	"github.com/edocsss/agent-whiteboard/internal/testutil"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	imageDomain "github.com/dndplsidc/agent-whiteboard/internal/image"
+	"github.com/dndplsidc/agent-whiteboard/internal/testutil"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"

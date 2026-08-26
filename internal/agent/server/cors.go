@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 )
 
 var mutationHeaders = []string{"content-type", strings.ToLower(protocol.APIVersionHeader)}

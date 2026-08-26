@@ -2,7 +2,7 @@ template: testify
 formatter: goimports
 force-file-write: true
 packages:
-  github.com/edocsss/agent-whiteboard/internal/cli:
+  github.com/dndplsidc/agent-whiteboard/internal/cli:
     config:
       dir: internal/testutil
       pkgname: testutil
@@ -11,7 +11,7 @@ packages:
         config:
           filename: mock_client.go
           structname: MockClient
-  github.com/edocsss/agent-whiteboard/internal/app:
+  github.com/dndplsidc/agent-whiteboard/internal/app:
     config:
       dir: internal/testutil
       pkgname: testutil
@@ -20,7 +20,7 @@ packages:
         config:
           filename: mock_readiness.go
           structname: MockReadiness
-  github.com/edocsss/agent-whiteboard/internal/common:
+  github.com/dndplsidc/agent-whiteboard/internal/common:
     config:
       dir: internal/testutil
       pkgname: testutil
@@ -33,7 +33,7 @@ packages:
         config:
           filename: mock_id_generator.go
           structname: MockIDGenerator
-  github.com/edocsss/agent-whiteboard/internal/whiteboard:
+  github.com/dndplsidc/agent-whiteboard/internal/whiteboard:
     config:
       dir: internal/testutil
       pkgname: testutil
@@ -46,7 +46,7 @@ packages:
         config:
           filename: mock_whiteboard_store.go
           structname: MockWhiteboardStore
-  github.com/edocsss/agent-whiteboard/internal/image:
+  github.com/dndplsidc/agent-whiteboard/internal/image:
     config:
       dir: internal/testutil
       pkgname: testutil

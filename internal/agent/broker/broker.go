@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/attachment"
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
-	"github.com/edocsss/agent-whiteboard/internal/agent/provider"
-	statepkg "github.com/edocsss/agent-whiteboard/internal/agent/state"
-	"github.com/edocsss/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/attachment"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	statepkg "github.com/dndplsidc/agent-whiteboard/internal/agent/state"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 // StateStore is the complete durable surface needed by this broker phase.

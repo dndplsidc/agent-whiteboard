@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	generalconfig "github.com/edocsss/agent-whiteboard/internal/config"
-	"github.com/edocsss/agent-whiteboard/internal/image"
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	generalconfig "github.com/dndplsidc/agent-whiteboard/internal/config"
+	"github.com/dndplsidc/agent-whiteboard/internal/image"
+	"github.com/dndplsidc/agent-whiteboard/internal/whiteboard"
 )
 
 const (

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	"github.com/edocsss/agent-whiteboard/internal/testutil"
-	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
-	"github.com/edocsss/agent-whiteboard/internal/whiteboard"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	"github.com/dndplsidc/agent-whiteboard/internal/testutil"
+	httpx "github.com/dndplsidc/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/whiteboard"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )

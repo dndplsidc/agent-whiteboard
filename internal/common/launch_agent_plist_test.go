@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,9 @@ func TestExactContractLiterals(t *testing.T) {
 	}
 	if LaunchAgentCodexExecutableEnvironment != "AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE" {
 		t.Fatalf("Codex environment key = %q", LaunchAgentCodexExecutableEnvironment)
+	}
+	if LaunchAgentPathEnvironment != "PATH" {
+		t.Fatalf("PATH environment key = %q", LaunchAgentPathEnvironment)
 	}
 	if got := unsupportedGuidance("linux"); got != "managed agent daemon is unsupported on linux; run 'agent-whiteboard agent serve' in the foreground" {
 		t.Fatalf("Linux guidance = %q", got)
@@ -43,6 +47,7 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 			testProviderDescriptor{name: LaunchAgentProviderCodex, executable: LaunchAgentProviderCodex},
 		},
 		ExecutableResolver: testExecutableResolver{paths: map[string]string{LaunchAgentProviderPi: piProvider, LaunchAgentProviderCodex: codexProvider}},
+		EnvironmentPath:    filepath.Join(home, ".nvm", "versions", "node", "v22.0.0", "bin"),
 	}
 
 	normalized, err := normalizeConfig(config)
@@ -62,7 +67,10 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	}
 
 	parsed := parsePlist(t, first)
-	assertStringValue(t, parsed, "LaunchAgentLabel", LaunchAgentLabel)
+	assertStringValue(t, parsed, "Label", LaunchAgentLabel)
+	if _, exists := parsed["LaunchAgentLabel"]; exists {
+		t.Fatal("plist contains the invalid LaunchAgentLabel key")
+	}
 	assertStringArray(t, parsed, "ProgramArguments", []string{
 		normalized.Executable,
 		"--config",
@@ -77,10 +85,30 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	assertStringDictionary(t, parsed, "EnvironmentVariables", map[string]string{
 		LaunchAgentPiExecutableEnvironment:    normalized.ProviderExecutables[LaunchAgentProviderPi],
 		LaunchAgentCodexExecutableEnvironment: normalized.ProviderExecutables[LaunchAgentProviderCodex],
+		LaunchAgentPathEnvironment: strings.Join([]string{
+			filepath.Join(home, ".nvm", "versions", "node", "v22.0.0", "bin"),
+			filepath.Join(home, ".bun", "bin"),
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, "bin"),
+			filepath.Join(home, "go", "bin"),
+			filepath.Join(home, ".asdf", "shims"),
+			filepath.Join(home, ".local", "share", "mise", "shims"),
+			filepath.Join(home, ".volta", "bin"),
+			filepath.Join(home, ".nix-profile", "bin"),
+			"/opt/homebrew/bin",
+			"/opt/homebrew/sbin",
+			"/usr/local/bin",
+			"/nix/var/nix/profiles/default/bin",
+			"/run/current-system/sw/bin",
+			"/usr/bin",
+			"/bin",
+			"/usr/sbin",
+			"/sbin",
+		}, string(os.PathListSeparator)),
 	})
 
 	text := string(first)
-	for _, forbidden := range []string{"UserName", "<key>PATH</key>", "sudo", "socket", "TOKEN", "PASSWORD", "SECRET", "credential"} {
+	for _, forbidden := range []string{"UserName", "sudo", "socket", "TOKEN", "PASSWORD", "SECRET", "credential"} {
 		if strings.Contains(strings.ToLower(text), strings.ToLower(forbidden)) {
 			t.Fatalf("plist contains forbidden value %q", forbidden)
 		}
@@ -88,7 +116,7 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	if !strings.Contains(text, "&amp;") {
 		t.Fatal("plist paths were not XML-escaped")
 	}
-	orderedKeys := []string{"<key>LaunchAgentLabel</key>", "<key>ProgramArguments</key>", "<key>RunAtLoad</key>", "<key>KeepAlive</key>", "<key>StandardOutPath</key>", "<key>StandardErrorPath</key>", "<key>EnvironmentVariables</key>"}
+	orderedKeys := []string{"<key>Label</key>", "<key>ProgramArguments</key>", "<key>RunAtLoad</key>", "<key>KeepAlive</key>", "<key>StandardOutPath</key>", "<key>StandardErrorPath</key>", "<key>EnvironmentVariables</key>"}
 	previous := -1
 	for _, want := range orderedKeys {
 		position := strings.Index(text, want)
@@ -166,7 +194,7 @@ func TestNormalizeConfigResolvesRealPathsAndRejectsUnsafeInputs(t *testing.T) {
 	}
 }
 
-func TestPlistOmitsEnvironmentWhenNoProviderOverrideIsExplicit(t *testing.T) {
+func TestPlistAlwaysIncludesRuntimePathWithoutProviderOverrides(t *testing.T) {
 	t.Parallel()
 
 	home := t.TempDir()
@@ -182,9 +210,120 @@ func TestPlistOmitsEnvironmentWhenNoProviderOverrideIsExplicit(t *testing.T) {
 		t.Fatal(err)
 	}
 	parsed := parsePlist(t, contents)
-	if _, exists := parsed["EnvironmentVariables"]; exists {
-		t.Fatal("unexpected inherited or empty environment dictionary")
+	environment, exists := parsed["EnvironmentVariables"]
+	if !exists {
+		t.Fatal("runtime PATH environment dictionary is missing")
 	}
+	if len(environment.dictionary) != 1 || environment.dictionary[LaunchAgentPathEnvironment].text == "" {
+		t.Fatalf("environment = %#v, want only a non-empty PATH", environment.dictionary)
+	}
+}
+
+func TestLaunchAgentPathPreservesActivatedManagersAndAddsPortableDefaults(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	nvm := filepath.Join(home, ".nvm", "versions", "node", "v22.14.0", "bin")
+	nixStore := "/nix/store/example-node/bin"
+	ambient := strings.Join([]string{
+		nvm,
+		"relative/bin",
+		"",
+		nixStore,
+		nvm,
+		"/valid/../unclean",
+		"/contains\ncontrol",
+	}, string(os.PathListSeparator))
+
+	got := launchAgentPathEntries(ambient, home)
+	wantPrefix := []string{nvm, nixStore}
+	if len(got) < len(wantPrefix) || !reflect.DeepEqual(got[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("PATH prefix = %#v, want activated manager paths %#v", got, wantPrefix)
+	}
+	for _, want := range []string{
+		filepath.Join(home, ".bun", "bin"),
+		filepath.Join(home, ".nix-profile", "bin"),
+		"/opt/homebrew/bin",
+		"/nix/var/nix/profiles/default/bin",
+		"/run/current-system/sw/bin",
+		"/usr/bin",
+	} {
+		if !containsString(got, want) {
+			t.Fatalf("PATH does not contain default %q: %#v", want, got)
+		}
+	}
+	for _, forbidden := range []string{"relative/bin", "", "/valid/../unclean", "/contains\ncontrol"} {
+		if containsString(got, forbidden) {
+			t.Fatalf("PATH retained unsafe entry %q: %#v", forbidden, got)
+		}
+	}
+	if countString(got, nvm) != 1 {
+		t.Fatalf("PATH did not deduplicate %q: %#v", nvm, got)
+	}
+}
+
+func TestEnvShebangInterpreterIgnoresOrdinaryBinary(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "provider")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{0}, 5000), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	interpreter, err := envShebangInterpreter(path)
+	if err != nil {
+		t.Fatalf("inspect binary provider: %v", err)
+	}
+	if interpreter != "" {
+		t.Fatalf("binary provider interpreter = %q, want empty", interpreter)
+	}
+}
+
+func TestPlistValidatesEnvShebangInterpreterAgainstRuntimePath(t *testing.T) {
+	t.Parallel()
+
+	home := t.TempDir()
+	agent := testRegularFile(t, filepath.Join(home, "agent-whiteboard"), 0o700)
+	configuration := testRegularFile(t, filepath.Join(home, "config.yaml"), 0o600)
+	provider := testRegularFile(t, filepath.Join(home, "providers", "pi"), 0o700)
+	if err := os.WriteFile(provider, []byte("#!/usr/bin/env managed-node\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := LaunchAgentConfig{
+		Executable:         agent,
+		ConfigPath:         configuration,
+		Providers:          []LaunchAgentProviderDescriptor{testProviderDescriptor{name: "pi", executable: "pi"}},
+		ExecutableResolver: testExecutableResolver{paths: map[string]string{"pi": provider}},
+	}
+
+	if _, err := GenerateLaunchAgentPlist(config, home); err == nil || !strings.Contains(err.Error(), `Pi provider interpreter "managed-node"`) {
+		t.Fatalf("missing interpreter error = %v", err)
+	}
+
+	nvmBin := filepath.Join(home, ".nvm", "versions", "node", "v22.14.0", "bin")
+	testRegularFile(t, filepath.Join(nvmBin, "managed-node"), 0o700)
+	config.EnvironmentPath = nvmBin
+	contents, err := GenerateLaunchAgentPlist(config, home)
+	if err != nil {
+		t.Fatalf("generate plist with activated NVM interpreter: %v", err)
+	}
+	environment := parsePlist(t, contents)["EnvironmentVariables"].dictionary
+	if got := strings.Split(environment[LaunchAgentPathEnvironment].text, string(os.PathListSeparator))[0]; got != nvmBin {
+		t.Fatalf("first PATH entry = %q, want %q", got, nvmBin)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	return countString(values, want) > 0
+}
+
+func countString(values []string, want string) int {
+	count := 0
+	for _, value := range values {
+		if value == want {
+			count++
+		}
+	}
+	return count
 }
 
 func TestNormalizeConfigRejectsTypedNilProviderDescriptor(t *testing.T) {

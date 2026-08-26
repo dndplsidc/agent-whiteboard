@@ -47,7 +47,7 @@ If the first three are absent and localhost is not intended, ask for the publish
 Agent Whiteboard supports macOS and Linux with Go 1.25 or 1.26.
 
 ```sh
-go install github.com/edocsss/agent-whiteboard/cmd/agent-whiteboard@latest
+go install github.com/dndplsidc/agent-whiteboard/cmd/agent-whiteboard@latest
 command -v agent-whiteboard
 agent-whiteboard --help
 ```

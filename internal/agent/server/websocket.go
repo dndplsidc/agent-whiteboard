@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/edocsss/agent-whiteboard/internal/agent/protocol"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 	"github.com/gorilla/websocket"
 )
 

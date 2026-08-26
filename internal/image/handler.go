@@ -5,8 +5,8 @@ import (
 	"mime"
 	"net/http"
 
-	"github.com/edocsss/agent-whiteboard/internal/common"
-	httpx "github.com/edocsss/agent-whiteboard/internal/webapi"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
+	httpx "github.com/dndplsidc/agent-whiteboard/internal/webapi"
 )
 
 type Operations interface {
