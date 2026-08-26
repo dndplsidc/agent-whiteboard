@@ -410,8 +410,7 @@ func TestIgnoredTerminateCanBeEscalated(t *testing.T) {
 	requireProcessExists(t, grandchildPID)
 	require.NoError(t, child.Kill())
 	require.NoError(t, child.Kill())
-	require.Error(t, child.Wait())
-	requireProcessesGone(t, rootPID, grandchildPID)
+	_ = waitForProcessTreeExit(t, child, rootPID, grandchildPID)
 }
 
 func TestGracefulTerminateDoesNotRequireKill(t *testing.T) {
@@ -580,6 +579,7 @@ func TestConcurrentWaitTerminateKillIsRaceClean(t *testing.T) {
 	for iteration := 0; iteration < 5; iteration++ {
 		child, rootPID, grandchildPID := launchTree(t, "tree-ignore-term")
 		const callers = 24
+		results := make([]error, callers)
 		var waitGroup sync.WaitGroup
 		for caller := 0; caller < callers; caller++ {
 			waitGroup.Add(1)
@@ -587,17 +587,28 @@ func TestConcurrentWaitTerminateKillIsRaceClean(t *testing.T) {
 				defer waitGroup.Done()
 				switch operation % 3 {
 				case 0:
-					_ = child.Wait()
+					results[operation] = child.Wait()
 				case 1:
-					require.NoError(t, child.Terminate())
+					results[operation] = child.Terminate()
 				case 2:
-					require.NoError(t, child.Kill())
+					results[operation] = child.Kill()
 				}
 			}(caller)
 		}
 		waitGroup.Wait()
-		require.Error(t, child.Wait())
-		requireProcessesGone(t, rootPID, grandchildPID)
+
+		waitErr := waitForProcessTreeExit(t, child, rootPID, grandchildPID)
+		for operation, result := range results {
+			if operation%3 != 0 {
+				require.NoError(t, result)
+				continue
+			}
+			if waitErr == nil {
+				require.NoError(t, result)
+			} else {
+				require.Same(t, waitErr, result)
+			}
+		}
 	}
 }
 
@@ -611,11 +622,17 @@ func testSignalEntireGroup(t *testing.T, force bool) {
 		require.NoError(t, child.Terminate())
 		require.NoError(t, child.Terminate())
 	}
+	_ = waitForProcessTreeExit(t, child, rootPID, grandchildPID)
+}
+
+func waitForProcessTreeExit(t *testing.T, child ManagedProcess, rootPID, grandchildPID int) error {
+	t.Helper()
+	// A group signal can kill the grandchild first, allowing the leader to
+	// reap it and exit successfully before the same signal reaches the leader.
+	// Complete group removal, not the leader's exit status, is authoritative.
 	waitErr := child.Wait()
-	if force {
-		require.Error(t, waitErr)
-	}
 	requireProcessesGone(t, rootPID, grandchildPID)
+	return waitErr
 }
 
 func launchTree(t *testing.T, mode string) (ManagedProcess, int, int) {
