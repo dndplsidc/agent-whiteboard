@@ -18,6 +18,8 @@ Set up only the mode the user needs. Preserve existing configuration and provide
 
 Do not configure providers or a broker for publishing-only use. Do not start a publishing server for a reader using an existing remote deployment.
 
+When a general setup request does not make clear whether Page Agent is wanted, ask whether to include it before checking providers, changing origin trust, or starting the broker. Do not ask this for publishing-only requests. When the user explicitly requests Page Agent or a local all-in-one setup, the broker is required; do not ask whether to enable it again. Use supervised foreground operation by default, and install the macOS managed daemon only when the user explicitly requests persistent operation.
+
 ## Protect existing state
 
 Before durable changes, follow the active harness's approval requirements.
@@ -99,7 +101,7 @@ Binary: resolved path
 Configuration: selected path or default
 Mode: existing server | local server | remote Page Agent | local all-in-one
 Publishing server: verified URL or not required
-Page Agent: verified state or not required
+Page Agent broker: foreground | managed daemon | not started | not required
 Providers: available providers or not required
 Manual action remaining: exact action or none
 ```

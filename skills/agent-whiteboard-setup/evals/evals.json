@@ -20,6 +20,16 @@
       "id": 4,
       "prompt": "Install Agent Whiteboard. Go is not installed and I do not want you to install a toolchain.",
       "expected_output": "Reports the Go prerequisite and stops without installing Go, editing shell files, or inventing another installation method."
+    },
+    {
+      "id": 5,
+      "prompt": "Set up Agent Whiteboard for me on this Mac. I haven't decided whether I need Page Agent.",
+      "expected_output": "Asks whether Page Agent should be included before checking Pi or Codex, changing origin trust, or starting the broker. It does not install a managed daemon without an explicit request for persistent operation."
+    },
+    {
+      "id": 6,
+      "prompt": "Set up Page Agent for this local whiteboard on my Mac.",
+      "expected_output": "Treats the broker as required without asking whether to enable it again, uses supervised foreground operation by default, and does not install the managed daemon without an explicit request for persistent operation."
     }
   ]
 }
