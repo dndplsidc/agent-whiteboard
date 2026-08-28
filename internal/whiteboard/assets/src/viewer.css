@@ -1295,6 +1295,7 @@ body.agent-drawer-modal-open .agent-toast {
   display: grid;
   flex: 1 1 auto;
   gap: 1.05rem;
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
