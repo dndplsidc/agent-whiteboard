@@ -1501,3 +1501,35 @@ test("replays Codex interaction activity after reconnect and isolates an unavail
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
 });
+
+test("keeps the page context card and its inspect action inside a narrow drawer", async ({
+  context,
+  page,
+  localAgentSidebar,
+}) => {
+  // 360 matches the viewer's minimum drawer width, where a long nowrap page
+  // title used to push the whole card past the timeline's clip edge.
+  const markdown = "# Existing Home-Screen Guide \u2192 PWA Redirect \u2192 Android Launch Plan Appendix\n\nBody text.\n";
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown,
+    creatorContext: "Creator context.\n",
+    preferences: { [widthKey]: 360 },
+  });
+  await connectSidebar(page);
+
+  const card = page.locator(".agent-context-summary");
+  await expect(card).toBeVisible();
+  const timelineBox = await page.locator(".agent-timeline").boundingBox();
+  const cardBox = await card.boundingBox();
+  const inspectBox = await card.getByRole("button", { name: "Inspect context" }).boundingBox();
+  expect(timelineBox).not.toBeNull();
+  expect(cardBox).not.toBeNull();
+  expect(inspectBox).not.toBeNull();
+  const timelineRight = timelineBox.x + timelineBox.width;
+  expect(cardBox.x).toBeGreaterThanOrEqual(timelineBox.x - 1);
+  expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(timelineRight + 1);
+  expect(inspectBox.x + inspectBox.width).toBeLessThanOrEqual(timelineRight + 1);
+});

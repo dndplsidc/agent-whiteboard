@@ -286,6 +286,19 @@ table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
+  overflow-wrap: normal;
+  width: max-content;
+}
+
+thead th {
+  background: var(--awb-code-background);
+  border-bottom: 2px solid var(--awb-border);
+  white-space: nowrap;
+}
+
+td code,
+th code {
+  white-space: nowrap;
 }
 
 th,
@@ -1295,6 +1308,7 @@ body.agent-drawer-modal-open .agent-toast {
   display: grid;
   flex: 1 1 auto;
   gap: 1.05rem;
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
