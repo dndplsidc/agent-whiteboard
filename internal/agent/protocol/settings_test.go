@@ -28,7 +28,7 @@ func TestV5SettingsCommandsAreStrictCompleteAndProviderSpecific(t *testing.T) {
 	piConnect = strings.Replace(piConnect, `"settings":{"model":"gpt-5.6-sol","effort":"high","speed":"fast"}`, `"settings":null`, 1)
 	_, err = protocol.DecodeCommand([]byte(piConnect))
 	require.NoError(t, err)
-	_, err = protocol.DecodeCommand([]byte(strings.Replace(piConnect, `"settings":null`, `"settings":{"model":"gpt-5.6-sol","effort":"high","speed":"fast"}`, 1)))
+	_, err = protocol.DecodeCommand([]byte(strings.Replace(piConnect, `"settings":null`, `"settings":{"model":"gpt-5.6-sol","effort":"high","speed":"priority"}`, 1)))
 	require.ErrorIs(t, err, protocol.ErrInvalidMessage)
 
 	conversationID := idC
@@ -53,6 +53,38 @@ func TestV5SettingsCommandsAreStrictCompleteAndProviderSpecific(t *testing.T) {
 	standardBytes, err := protocol.EncodeCommand(standard)
 	require.NoError(t, err)
 	require.NotEqual(t, fastBytes, standardBytes, "canonical command bytes must distinguish captured settings for command fingerprints")
+}
+
+func TestV5ConnectAcceptsSettingsForEveryProvider(t *testing.T) {
+	// Regression: a persisted Pi settings preference made every Page Agent
+	// connect carry a settings tuple, which the frozen v5 connect contract
+	// rejected with invalid_command and permanently locked the browser out of
+	// the broker. Connect settings are provider-neutral: nullable, and when
+	// present the same strict semantic tuple already enforced on submit and
+	// new. Runtime and catalog semantics stay with the provider driver.
+	template := `{"api_version":"5","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":%q,"resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","settings":%s}}`
+	validSettings := `{"model":"gpt-5.6-sol","effort":"high","speed":"standard"}`
+	for _, name := range protocol.AllProviderNames() {
+		decoded, err := protocol.DecodeCommand([]byte(fmt.Sprintf(template, name, "null")))
+		require.NoError(t, err, "%s: null settings", name)
+		require.Nil(t, decoded.Payload.(protocol.ConnectPayload).Settings)
+
+		body := fmt.Sprintf(template, name, validSettings)
+		decoded, err = protocol.DecodeCommand([]byte(body))
+		require.NoError(t, err, "%s: valid settings", name)
+		connect := decoded.Payload.(protocol.ConnectPayload)
+		require.Equal(t, name, connect.Provider)
+		require.NotNil(t, connect.Settings)
+		require.Equal(t, protocol.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: protocol.SpeedStandard}, *connect.Settings)
+		encoded, err := protocol.EncodeCommand(decoded)
+		require.NoError(t, err, "%s: round trip", name)
+		require.JSONEq(t, body, string(encoded))
+
+		_, err = protocol.DecodeCommand([]byte(fmt.Sprintf(template, name, `{"model":"gpt-5.6-sol","effort":"high","speed":"priority"}`)))
+		require.ErrorIs(t, err, protocol.ErrInvalidMessage, "%s: native speed leak", name)
+		_, err = protocol.DecodeCommand([]byte(strings.Replace(body, `,"settings":`+validSettings, ``, 1)))
+		require.ErrorIs(t, err, protocol.ErrInvalidMessage, "%s: missing settings key", name)
+	}
 }
 
 func TestV5SettingsCommandsRejectMissingPartialDuplicateNullAndNativeValues(t *testing.T) {

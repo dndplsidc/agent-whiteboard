@@ -574,3 +574,63 @@ func TestDriverCreateInspectShutdownAndDelete(t *testing.T) {
 	require.NoError(t, <-shutdown)
 	require.NoError(t, driver.Delete(context.Background(), provider.DeleteRequest{Provider: provider.NamePi, NativeSession: inspected.Ref}))
 }
+
+func TestDriverCreateAppliesRequestSettings(t *testing.T) {
+	// Regression: a persisted Pi settings preference makes every Page Agent
+	// connect carry a settings tuple. Driver.Create must apply it to the new
+	// session instead of leaving the broker connect rejected at the protocol
+	// layer.
+	root := canonicalTempDir(t)
+	providerRoot := filepath.Join(root, "provider")
+	workspace := filepath.Join(root, "workspace")
+	executable := filepath.Join(root, "pi")
+	require.NoError(t, os.Mkdir(providerRoot, 0o700))
+	require.NoError(t, os.Mkdir(workspace, 0o700))
+	require.NoError(t, os.WriteFile(executable, []byte("binary"), 0o700))
+	child := newRPCFakeChild()
+	launcher := &recordingLauncher{child: child, requests: make(chan provider.LaunchRequest, 1)}
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	driver, err := NewDriver(Config{Executable: executable, Environment: []string{"HOME=/isolated"}, ProviderRoot: providerRoot, Launcher: launcher, IDs: fixedIDs{value: behaviorID(81)}, Clock: fixedClock{value: now}})
+	require.NoError(t, err)
+	requested := provider.ExecutionSettings{Model: "model-provider/next", Effort: "high", Speed: provider.SpeedStandard}
+	result := make(chan struct {
+		session provider.Session
+		err     error
+	}, 1)
+	go func() {
+		session, createErr := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace, Settings: &requested})
+		result <- struct {
+			session provider.Session
+			err     error
+		}{session, createErr}
+	}()
+	launch := <-launcher.requests
+	sessionFile := launch.Arguments[len(launch.Arguments)-1]
+	writeStartupHeader(t, sessionFile, "native-session", workspace)
+	startup := child.readCommand(t)
+	require.Equal(t, "get_state", startup["type"])
+	child.writeRecord(t, responseRecord(startup, map[string]any{"model": map[string]any{"provider": "model-provider", "id": "model-id", "contextWindow": 32768, "maxTokens": 1024}, "isStreaming": false, "isCompacting": false, "pendingMessageCount": 0, "sessionFile": sessionFile, "sessionId": "native-session"}))
+	respondPiSettingsCatalog(t, child)
+	setModel := child.readCommand(t)
+	require.Equal(t, "set_model", setModel["type"])
+	child.writeRecord(t, responseRecord(setModel, map[string]any{}))
+	setEffort := child.readCommand(t)
+	require.Equal(t, "set_thinking_level", setEffort["type"])
+	child.writeRecord(t, responseRecord(setEffort, nil))
+	effective := child.readCommand(t)
+	require.Equal(t, "get_state", effective["type"])
+	child.writeRecord(t, responseRecord(effective, map[string]any{"model": map[string]any{"provider": "model-provider", "id": "next", "name": "Next", "contextWindow": 32768, "maxTokens": 1024, "input": []string{"text"}}, "thinkingLevel": "high", "isStreaming": false, "isCompacting": false, "pendingMessageCount": 0, "sessionFile": sessionFile, "sessionId": "native-session"}))
+	created := <-result
+	require.NoError(t, created.err)
+	require.NoError(t, created.session.NativeSession().Validate())
+	inspected, err := driver.Inspect(context.Background(), provider.InspectRequest{Provider: provider.NamePi, NativeSession: created.session.NativeSession().Ref})
+	require.NoError(t, err)
+	require.Equal(t, requested, *inspected.Settings)
+	deleteRequest := provider.DeleteRequest{Provider: provider.NamePi, NativeSession: inspected.Ref}
+	assertProviderCode(t, driver.Delete(context.Background(), deleteRequest), provider.ErrorProtocolFailure)
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- created.session.Shutdown(context.Background()) }()
+	child.closeOutput()
+	require.NoError(t, <-shutdown)
+	require.NoError(t, driver.Delete(context.Background(), deleteRequest))
+}

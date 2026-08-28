@@ -234,6 +234,14 @@ func lifecycleProviderConnect(client, resource string, name protocol.ProviderNam
 	return protocol.Command{APIVersion: protocol.APIVersion, CommandID: sequenceID(1), ClientID: client, Type: protocol.CommandConnect, Payload: payload}
 }
 
+func lifecycleProviderConnectWithSettings(client, resource string, name protocol.ProviderName, settings *protocol.ExecutionSettings) protocol.Command {
+	command := lifecycleProviderConnect(client, resource, name)
+	payload := command.Payload.(protocol.ConnectPayload)
+	payload.Settings = settings
+	command.Payload = payload
+	return command
+}
+
 func TestRegistryRoutesSameWhiteboardToIndependentProviderDrivers(t *testing.T) {
 	state := &lifecycleState{mappings: make(map[statepkg.Identity]statepkg.Mapping)}
 	piDriver := &lifecycleDriver{name: provider.NamePi}
@@ -259,6 +267,46 @@ func TestRegistryRoutesSameWhiteboardToIndependentProviderDrivers(t *testing.T) 
 	piDriver.mu.Unlock()
 	codexDriver.mu.Lock()
 	require.Equal(t, []provider.CreateRequest{{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: "/tmp/agent-whiteboard-test/" + codexConnection.ConversationID()}}, codexDriver.creates)
+	codexDriver.mu.Unlock()
+	require.NoError(t, broker.Close(context.Background()))
+}
+
+func TestConnectAppliesBrowserSettingsToProviderCreate(t *testing.T) {
+	// Regression: a persisted Pi settings preference makes every browser
+	// connect carry a settings tuple. The broker must forward it to the
+	// provider driver for every provider instead of dropping the connect at
+	// the protocol layer; catalog semantics stay with the driver.
+	state := &lifecycleState{mappings: make(map[statepkg.Identity]statepkg.Mapping)}
+	piDriver := &lifecycleDriver{name: provider.NamePi}
+	codexDriver := &lifecycleDriver{name: provider.NameCodex}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{
+		provider.NamePi: piDriver, provider.NameCodex: codexDriver,
+	})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: 260})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+
+	settings := protocol.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: protocol.SpeedStandard}
+	resourceID := sequenceID(261)
+	piConnection, err := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnectWithSettings(sequenceID(262), resourceID, protocol.ProviderPi, &settings))
+	require.NoError(t, err)
+	codexSettings := settings
+	codexSettings.Speed = protocol.SpeedFast
+	codexConnection, err := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnectWithSettings(sequenceID(263), resourceID, protocol.ProviderCodex, &codexSettings))
+	require.NoError(t, err)
+	require.NotEqual(t, piConnection.ConversationID(), codexConnection.ConversationID())
+
+	piDriver.mu.Lock()
+	require.Len(t, piDriver.creates, 1)
+	require.NotNil(t, piDriver.creates[0].Settings)
+	require.Equal(t, provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: provider.SpeedStandard}, *piDriver.creates[0].Settings)
+	piDriver.mu.Unlock()
+	codexDriver.mu.Lock()
+	require.Len(t, codexDriver.creates, 1)
+	require.NotNil(t, codexDriver.creates[0].Settings)
+	require.Equal(t, provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: provider.SpeedFast}, *codexDriver.creates[0].Settings)
 	codexDriver.mu.Unlock()
 	require.NoError(t, broker.Close(context.Background()))
 }
