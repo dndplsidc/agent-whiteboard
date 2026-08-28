@@ -159,17 +159,26 @@ Remove an origin when it is no longer needed:
 agent-whiteboard agent trust remove https://whiteboard.example
 ```
 
-### Start the reader's local broker
+### Reuse or start the reader's local broker
 
-Run the broker in the foreground:
+Before starting a broker, check for an existing foreground process or macOS managed daemon. Resolve `agent.port` from the selected configuration, or use its default `8568`. On macOS:
+
+```sh
+agent-whiteboard agent daemon status
+lsof -nP -a -p PID -iTCP -sTCP:LISTEN
+```
+
+When the reported daemon PID owns the expected `127.0.0.1` listener, reuse it. Do not probe `/healthz` or `/readyz` on port `8568`; those routes belong to the publishing server and do not report broker readiness.
+
+If no broker exists, run it in the foreground:
 
 ```sh
 agent-whiteboard agent serve
 ```
 
-It listens on literal IPv4 loopback, uses port `8568` by default, and resolves Pi and Codex independently from `PATH`.
+It listens on literal IPv4 loopback and resolves Pi and Codex independently from `PATH`.
 
-On macOS, install and start it as a managed per-user LaunchAgent instead:
+On macOS, install and start it as a managed per-user LaunchAgent instead only when persistent operation is wanted:
 
 ```sh
 agent-whiteboard agent serve --daemon
@@ -213,7 +222,7 @@ Page Agent also exposes the provider's supported model and reasoning controls, n
 
 | Symptom | What to check |
 | --- | --- |
-| Broker unavailable | Start `agent-whiteboard agent serve` and verify the viewer's broker port, normally `8568`. |
+| Broker unavailable | Check existing daemon/foreground state and verify that the `agent-whiteboard` process owns the configured loopback listener before starting another broker. Do not use publishing `/healthz` or `/readyz` routes on port `8568`. |
 | Origin not trusted | Run the exact `agent-whiteboard agent trust add https://…` command for the publishing origin. |
 | Provider unavailable | Confirm `pi` or `codex` is on `PATH` and authenticated through its native CLI. For a managed daemon, activate the intended NVM/Nix environment and rerun `agent-whiteboard agent serve --daemon`. |
 | Browser cannot reach loopback | Allow Local Network Access when prompted by the browser. |

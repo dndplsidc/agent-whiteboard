@@ -30,6 +30,11 @@
       "id": 6,
       "prompt": "Set up Page Agent for this local whiteboard on my Mac.",
       "expected_output": "Treats the broker as required without asking whether to enable it again, uses supervised foreground operation by default, and does not install the managed daemon without an explicit request for persistent operation."
+    },
+    {
+      "id": 7,
+      "prompt": "Publish this Markdown to our remote Whiteboard. Page Agent should already be running as a managed daemon on my Mac, so verify and reuse it instead of starting another broker.",
+      "expected_output": "Checks managed-daemon state and confirms that its reported process owns the configured loopback listener before reusing it; verifies exact-origin trust and Page Agent through the Whiteboard UI; does not probe publishing-server health routes on broker port 8568, misclassify failed HTTP probes as broker failure, or start a duplicate foreground broker."
     }
   ]
 }
