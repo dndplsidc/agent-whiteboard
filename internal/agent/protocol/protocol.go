@@ -400,8 +400,11 @@ func validateCommand(command Command) error {
 	}
 	switch payload := command.Payload.(type) {
 	case ConnectPayload:
+		// Connect settings are provider-neutral: every provider carries a nullable
+		// strict settings tuple. Runtime and catalog semantics are enforced by the
+		// provider driver when the session is created, matching submit and new.
 		if command.Type != CommandConnect || !payload.Provider.Valid() || validateResource(payload.Resource) != nil || !validDigest(payload.ContextDigest) || (payload.ReplayAfter != "" && !validID(payload.ReplayAfter)) ||
-			(payload.Provider == ProviderPi && payload.Settings != nil) || (payload.Settings != nil && payload.Settings.Validate() != nil) {
+			(payload.Settings != nil && payload.Settings.Validate() != nil) {
 			return invalid(nil)
 		}
 	case SubmitPayload:
