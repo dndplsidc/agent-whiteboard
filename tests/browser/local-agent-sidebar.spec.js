@@ -140,6 +140,54 @@ test("adds multiple document selections inline with surrounding message text", a
     .toMatch(/and\s+explain the relationship\./u);
 });
 
+test("adds exact Mermaid source as existing section context", async ({ context, page, localAgentSidebar }) => {
+  const diagram = "```mermaid\nflowchart LR\n  Browser --> Broker\n```";
+  await page.setViewportSize({ width: 360, height: 800 });
+  await openSidebarPage({
+    context,
+    page,
+    fixture: localAgentSidebar,
+    markdown: `# Architecture\n\nThis diagram shows how Page Agent passes context.\n\n${diagram}\n\nThe diagram shows the Page Agent path.\n`,
+    creatorContext: "Mermaid component context.\n",
+  });
+
+  const source = page.locator(".agent-source-diagram");
+  await source.hover();
+  const addDiagram = source.getByRole("button", { name: "Add diagram: Architecture — Mermaid diagram 1" });
+  const [introBox, buttonBox, diagramBox] = await Promise.all([
+    page.locator("#agent-whiteboard-content > p").first().boundingBox(),
+    addDiagram.boundingBox(),
+    source.locator(".mermaid-placeholder").boundingBox(),
+  ]);
+  expect(introBox.y + introBox.height).toBeLessThanOrEqual(buttonBox.y);
+  expect(buttonBox.y + buttonBox.height).toBeLessThanOrEqual(diagramBox.y);
+  await page.mouse.move(1, 1);
+  await addDiagram.focus();
+  await expect.poll(() => addDiagram.evaluate((element) => getComputedStyle(element).opacity)).toBe("1");
+  await addDiagram.click();
+  const composer = page.getByLabel("Message Pi about this whiteboard");
+  const token = composer.locator('[data-reference-kind="section"]');
+  await expect(token).toHaveText("Architecture — Mermaid diagram 1");
+  await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
+  await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
+  await composer.press("End");
+  await composer.pressSequentially(" explain this flow.");
+  await composer.press("Enter");
+
+  const sent = page.locator(".agent-message-user").last();
+  await expect(sent.locator('[data-reference-kind="section"]')).toHaveText("Architecture — Mermaid diagram 1");
+  const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
+  const submittedReference = submit.payload.content.parts.find((part) => part.type === "reference").reference;
+  expect(submittedReference).toMatchObject({
+    kind: "section",
+    label: "Architecture — Mermaid diagram 1",
+    markdown: diagram,
+    section_lines: { start: 5, end: 9 },
+    source: { resource_kind: "markdown", anchor: { markdown: { start: { line: 5 }, end: { line: 9 } } } },
+  });
+  expect(localAgentSidebar.brokerRequests.some((request) => request.url === "/api/v1/agent/images")).toBe(false);
+});
+
 test("ellipsizes a long page reference inside the composer", async ({ context, page, localAgentSidebar }) => {
   const title = "A deliberately long whiteboard heading that must stay inside the compact message composer";
   await openSidebarPage({

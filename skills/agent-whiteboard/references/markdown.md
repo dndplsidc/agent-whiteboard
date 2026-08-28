@@ -26,7 +26,7 @@ Only PNG, JPEG, GIF, and WebP are supported. Never upload SVG. Use the same inte
 
 ## Mermaid
 
-Use an ordinary fenced `mermaid` block. Read [Mermaid guidance](mermaid.md) before publishing a diagram.
+Use an ordinary fenced `mermaid` block. Read [Mermaid guidance](mermaid.md) before publishing a diagram. When Page Agent is enabled, readers can use **Add diagram** to include the exact fenced Mermaid source in their message without sending rendered pixels.
 
 ## Verification
 

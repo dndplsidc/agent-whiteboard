@@ -7,7 +7,7 @@ Agent Whiteboard is a self-hosted Go server and CLI for publishing Markdown, Mer
 - **Built for agent workflows:** publish, update, retrieve, and delete without opening a browser.
 - **Self-hosted:** one Go binary, filesystem storage, and no CDN dependency.
 - **Made for rich results:** sanitized Markdown, syntax highlighting, Mermaid, trusted active HTML, and images.
-- **Page-aware conversations:** send exact source, creator context, selected sections, components, code, or images to a local Pi or Codex session.
+- **Page-aware conversations:** send exact source, creator context, selected sections, Mermaid diagrams, components, code, or images to a local Pi or Codex session.
 - **Explicit lifecycle:** use expiring or permanent capability URLs and replace content in place.
 
 ## Quick start
@@ -212,6 +212,7 @@ Readers can add more precise context without copying and pasting:
 
 - Select rendered Markdown text and choose **Add to message**.
 - Add a heading-defined Markdown section or the complete page.
+- Add the exact fenced source for a rendered Mermaid diagram.
 - Add supported rendered raster images.
 - In trusted HTML, use **+ Add** or the **Components** chooser for eligible sections, images, charts, tables, code, quotes, and explicitly declared components.
 - Add private PNG, JPEG, GIF, or WebP attachments from the composer.
@@ -243,7 +244,7 @@ Agent Whiteboard closes that gap:
 
 ### Markdown and Mermaid
 
-Markdown is rendered in the browser with bundled markdown-it, DOMPurify, highlight.js, and Mermaid assets. Use ordinary fenced `mermaid` blocks for diagrams.
+Markdown is rendered in the browser with bundled markdown-it, DOMPurify, highlight.js, and Mermaid assets. Use ordinary fenced `mermaid` blocks for diagrams. When Page Agent is enabled, readers can choose **Add diagram** to place the exact fenced Mermaid source in their message.
 
 ### Trusted standalone HTML
 

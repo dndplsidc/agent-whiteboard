@@ -90,7 +90,10 @@ function createMarkdownRenderer(diagramSources, { mermaidEnabled = true } = {}) 
     }
 
     const sourceIndex = diagramSources.push(token.content) - 1;
-    return `<div class="mermaid-placeholder" data-index="${sourceIndex}"></div>`;
+    const block = token.attrGet("data-agent-block");
+    const diagram = token.attrGet("data-agent-diagram");
+    const contextAttributes = block === null || diagram === null ? "" : ` data-agent-block="${block}" data-agent-diagram="${diagram}"`;
+    return `<div class="mermaid-placeholder" data-index="${sourceIndex}"${contextAttributes}></div>`;
   };
 
   return markdown;

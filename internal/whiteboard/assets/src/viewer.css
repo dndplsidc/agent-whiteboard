@@ -2115,7 +2115,8 @@ body.agent-drawer-modal-open .agent-toast {
 }
 
 .agent-source-heading,
-.agent-source-image {
+.agent-source-image,
+.agent-source-diagram {
   position: relative;
 }
 
@@ -2134,7 +2135,8 @@ body.agent-drawer-modal-open .agent-toast {
 }
 
 .agent-section-action,
-.agent-image-source-action {
+.agent-image-source-action,
+.agent-diagram-source-action {
   opacity: 0;
   position: absolute;
   right: 0;
@@ -2146,13 +2148,28 @@ body.agent-drawer-modal-open .agent-toast {
 .agent-source-heading:hover > .agent-section-action,
 .agent-section-action:focus-visible,
 .agent-source-image:hover > .agent-image-source-action,
-.agent-image-source-action:focus-visible {
+.agent-image-source-action:focus-visible,
+.agent-source-diagram:hover > .agent-diagram-source-action,
+.agent-diagram-source-action:focus-visible {
   opacity: 1;
 }
 
 .agent-source-image {
   display: inline-block;
   max-width: 100%;
+}
+
+.agent-source-diagram {
+  margin: 2.5rem 0 1.5rem;
+}
+
+.agent-source-diagram > .mermaid-placeholder {
+  margin: 0;
+}
+
+.agent-diagram-source-action {
+  top: 0;
+  transform: translateY(calc(-100% - 0.35rem));
 }
 
 .agent-selection-action {
@@ -2280,7 +2297,8 @@ body.agent-drawer-modal-open .agent-toast {
 
 @media (hover: none), (pointer: coarse) {
   .agent-section-action,
-  .agent-image-source-action {
+  .agent-image-source-action,
+  .agent-diagram-source-action {
     opacity: 1;
     position: static;
     transform: none;
@@ -2292,6 +2310,7 @@ body.agent-drawer-modal-open .agent-toast {
   .agent-source-added { animation: none; }
   .agent-section-action,
   .agent-image-source-action,
+  .agent-diagram-source-action,
   .agent-html-add,
   .agent-html-outline { transition: none; }
 }
