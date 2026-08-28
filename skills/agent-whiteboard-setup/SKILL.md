@@ -41,6 +41,8 @@ go version || true
 
 Check `pi` or `codex` only when Page Agent is required.
 
+Before offering to start a Page Agent broker, inspect any existing foreground broker or macOS managed daemon and confirm that its process owns a loopback listening socket on the configured `agent.port` (default `8568`). Read [Page Agent setup](references/page-agent.md) for the exact lifecycle and listener checks. Do not send publishing-server `/healthz` or `/readyz` probes to the broker port: those routes belong to the publishing server, not the broker, and their failure does not mean the broker is stopped.
+
 For publishing, resolve the target in this order: explicit `--server`, `AGENT_WHITEBOARD_SERVER`, YAML `client.server`, then built-in localhost.
 If the first three are absent and localhost is not intended, ask for the publishing origin instead of guessing.
 
@@ -90,7 +92,7 @@ Process existence is not readiness. If configuration is required, read [Configur
 
 ## Set up Page Agent
 
-Read [Page Agent setup](references/page-agent.md) only when the user needs Page Agent, origin trust, providers, the broker, or daemon management.
+Read [Page Agent setup](references/page-agent.md) only when the user needs Page Agent, origin trust, providers, the broker, or daemon management. Reuse a verified existing broker; do not ask to start another broker merely because undocumented HTTP probes against port `8568` fail.
 
 ## Verify and report
 
