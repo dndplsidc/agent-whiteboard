@@ -9,6 +9,6 @@
   "sha256": {
     "dist/viewer.min.js": "0ce4e14b65bd316f842de5f3d3aa96ed8f3c3fad7028a66bbbeec8307ed32e63",
     "dist/html-bridge.min.js": "6ade699cc816b8014971920f62825f9c8d0fc32501a65bb0b5de8236526e4810",
-    "dist/viewer.min.css": "2818b327aaf63a759d8c85c84f199195ed0a1e6fe36b104679c6cbb8a0ec111b"
+    "dist/viewer.min.css": "5dc8b71f6ab6715a12a2d3ecd856f4d091ef64e1be86b1a35c14b25063dee4ae"
   }
 }

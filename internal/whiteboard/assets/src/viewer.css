@@ -286,6 +286,19 @@ table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
+  overflow-wrap: normal;
+  width: max-content;
+}
+
+thead th {
+  background: var(--awb-code-background);
+  border-bottom: 2px solid var(--awb-border);
+  white-space: nowrap;
+}
+
+td code,
+th code {
+  white-space: nowrap;
 }
 
 th,

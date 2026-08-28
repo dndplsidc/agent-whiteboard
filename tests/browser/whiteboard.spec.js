@@ -144,3 +144,43 @@ test("isolates an invalid Mermaid diagram from a valid diagram", async ({ page, 
   await expect(page.locator(".mermaid-error")).toHaveCount(1);
   await expect(placeholders.nth(1)).not.toContainText("parse");
 });
+
+test("renders wide markdown tables with natural columns and horizontal scrolling", async ({
+  page,
+  publish,
+}) => {
+  const header = [
+    "Case", "Kind", "RPS", "N", "Min ms", "Avg ms", "P50 ms", "P75 ms", "P90 ms", "P95 ms", "P99 ms", "P999 ms", "Max ms", "Rate rps", "Drain ms", "Result", "Sampling",
+  ];
+  const row = (n) => [
+    `\`capacity-64-Throughput-Exploratory-rep-${n}\``, "capacity", "64", "600", "0.911", "2.445", "2.492", "3.004", "3.312", "3.395", "3.414", "5.207", "3.414", "213.7", "0", "PASS", "none",
+  ];
+  const markdown = [
+    "| " + header.join(" | ") + " |",
+    "| " + header.map(() => "---").join(" | ") + " |",
+    ...[0, 1].map((n) => "| " + row(n).join(" | ") + " |"),
+  ].join("\n");
+  const resource = await publish(markdown);
+  await page.goto(resource.url);
+
+  const table = page.locator("#agent-whiteboard-content table");
+  await expect(table).toBeVisible();
+  const metrics = await table.evaluate((element) => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+    headerHeights: [...element.querySelectorAll("thead th")].map((th) => th.getBoundingClientRect().height),
+    codeCellHeight: element.querySelector("tbody td code").getBoundingClientRect().height,
+    headerBackground: getComputedStyle(element.querySelector("thead th")).backgroundColor,
+  }));
+  // Natural column widths make the table wider than the content column, so the
+  // table scrolls horizontally instead of squeezing cells mid-word.
+  expect(metrics.clientWidth).toBeLessThan(metrics.scrollWidth);
+  expect(metrics.scrollWidth).toBeGreaterThan(900);
+  // Inline code identifiers are single unbreakable tokens.
+  expect(metrics.codeCellHeight).toBeLessThan(40);
+  // Uniform header heights prove every header renders on a single line.
+  const shortestHeader = Math.min(...metrics.headerHeights);
+  const tallestHeader = Math.max(...metrics.headerHeights);
+  expect(tallestHeader).toBeLessThan(shortestHeader * 1.35);
+  expect(metrics.headerBackground).not.toBe("rgba(0, 0, 0, 0)");
+});
