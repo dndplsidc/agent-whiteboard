@@ -726,7 +726,7 @@ describe("local agent transport and event state", () => {
     const png = new File([new Uint8Array([137, 80, 78, 71])], "board.png", { type: "image/png" });
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ image_id: agentIDs.archive, media_type: "image/png", bytes: png.size }), { status: 201, headers: { "Content-Type": "application/json" } }))
-      .mockResolvedValueOnce(new Response(png, { status: 200, headers: { "Content-Type": "image/png" } }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([137, 80, 78, 71]), { status: 200, headers: { "Content-Type": "image/png" } }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const transport = createAgentTransport({ payload: agentPayload(), provider: "codex", port: 9123, clientID: agentIDs.message, fetchImpl, WebSocketImpl: undefined, idFactory: fixedIDFactory });
     transport.acceptConversationForTest?.(agentIDs.conversation);
@@ -741,7 +741,7 @@ describe("local agent transport and event state", () => {
       "X-Agent-Whiteboard-Conversation-ID": agentIDs.conversation,
       "X-Agent-Whiteboard-Provider": "codex",
     });
-    await expect(transport.readImage(agentIDs.archive, agentIDs.conversation)).resolves.toBeInstanceOf(Blob);
+    await expect(transport.readImage(agentIDs.archive, agentIDs.conversation)).resolves.toEqual(expect.objectContaining({ size: png.size, type: "image/png" }));
     await expect(transport.deleteImage(agentIDs.archive, agentIDs.conversation)).resolves.toBeUndefined();
     expect(fetchImpl.mock.calls[1][1].headers).not.toHaveProperty("X-Agent-Whiteboard-Provider");
     expect(fetchImpl.mock.calls[2][1].method).toBe("DELETE");
