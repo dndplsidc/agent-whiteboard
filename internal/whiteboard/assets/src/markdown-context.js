@@ -11,10 +11,12 @@ export function indexMarkdownTokens(tokens, source) {
   const blocks = new Map();
   const headings = new Map();
   const images = new Map();
+  const diagrams = new Map();
   const headingStack = [];
   const siblingCounts = new Map();
   let blockOrdinal = 0;
   let imageOrdinal = 0;
+  let diagramOrdinal = 0;
   let currentBlock = null;
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -43,6 +45,21 @@ export function indexMarkdownTokens(tokens, source) {
       blocks.get(id).headingPath = path;
       currentBlock = blocks.get(id);
     }
+    if (token.type === "fence" && token.map && token.info.trim().split(/\s+/u, 1)[0].toLowerCase() === "mermaid") {
+      const key = String(diagramOrdinal++);
+      const ordinal = diagramOrdinal;
+      const nearestHeading = headingStack.at(-1)?.title;
+      token.attrSet("data-agent-diagram", key);
+      diagrams.set(key, {
+        id: currentBlock.id,
+        ordinal,
+        label: nearestHeading ? `${nearestHeading} — Mermaid diagram ${ordinal}` : `Mermaid diagram ${ordinal}`,
+        markdown: lines.slice(token.map[0], token.map[1]).join("\n"),
+        startLine: token.map[0] + 1,
+        endLine: token.map[1] + 1,
+        headingPath: cloneHeadingPath(headingStack),
+      });
+    }
     if (token.type === "inline") {
       const containing = currentBlock;
       for (const child of token.children ?? []) {
@@ -62,7 +79,7 @@ export function indexMarkdownTokens(tokens, source) {
     heading.sectionEndLine = next?.startLine ?? lines.length + 1;
     heading.markdown = lines.slice(heading.startLine - 1, heading.sectionEndLine - 1).join("\n");
   }
-  return { blocks, headings, images, lineCount: lines.length };
+  return { blocks, headings, images, diagrams, lineCount: lines.length };
 }
 
 function scalarLength(value) { return [...value].length; }
@@ -138,6 +155,14 @@ export function imageReference(metadata, identity, id, imageID, name) {
     id, kind: "image", label: metadata.alt || `Image ${metadata.ordinal}`,
     source: sourceBase(identity, metadata),
     visual: { image_id: imageID, name, alt: metadata.alt },
+  };
+}
+
+export function diagramReference(metadata, identity, id) {
+  return {
+    id, kind: "section", label: metadata.label, markdown: metadata.markdown,
+    section_lines: { start: metadata.startLine, end: metadata.endLine },
+    source: sourceBase(identity, metadata),
   };
 }
 
@@ -226,6 +251,24 @@ export function createMarkdownContextController({ doc = document, container, ind
       if (typeof onImageAdd !== "function") return;
       try { await onImageAdd({ ...metadata, element: image, identity, referenceID: idFactory() }); pulse(wrapper); }
       catch (error) { announce(error?.message || "Unable to add this image."); }
+    });
+    wrapper.append(button);
+    installed.push(button);
+  }
+
+  for (const [id, metadata] of index.diagrams) {
+    const diagram = container.querySelector(`[data-agent-diagram="${id}"]`);
+    if (!diagram) continue;
+    const wrapper = doc.createElement("div");
+    wrapper.className = "agent-source-diagram";
+    diagram.replaceWith(wrapper);
+    wrapper.append(diagram);
+    const button = actionButton(doc, "Add diagram", `Add diagram: ${metadata.label}`);
+    button.classList.add("agent-diagram-source-action");
+    button.addEventListener("click", () => {
+      onAdd(diagramReference(metadata, identity, idFactory()));
+      pulse(wrapper);
+      announce(`Added ${metadata.label} to the message.`);
     });
     wrapper.append(button);
     installed.push(button);
