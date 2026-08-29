@@ -1509,6 +1509,62 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.value = "/co";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
     expect(drawer.elements.completionMenu.textContent).toContain("/compact");
+    drawer.elements.message.value = "/n";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(drawer.elements.completionMenu.textContent).toContain("/new");
+    drawer.destroy();
+  });
+
+  test.each([
+    ["pi", piSnapshotEvent, { model: piSettings.model, effort: "high", speed: "standard" }],
+    ["codex", codexSnapshotEvent, { model: "gpt-5.6-sol", effort: "high", speed: "fast" }],
+  ])("confirms exact /new and starts a fresh %s conversation", async (provider, snapshotFactory, expectedSettings) => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
+    let options;
+    const sent = [];
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(),
+      send: vi.fn(async (command) => { sent.push(command); }),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(snapshotFactory());
+
+    drawer.elements.message.value = "/n";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    drawer.elements.message.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(drawer.elements.message.value).toBe("/new");
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    const dialog = drawer.elements.drawer.querySelector(".agent-confirmation-dialog");
+    expect(dialog?.hidden).toBe(false);
+    expect(dialog?.querySelector("h3")?.textContent).toBe("Start a new conversation?");
+    expect(sent.filter(({ type }) => type === "new")).toHaveLength(0);
+
+    drawer.elements.drawer.querySelector(".agent-confirmation-actions button").click();
+    expect(drawer.elements.message.value).toBe("/new");
+    expect(sent.filter(({ type }) => type === "new")).toHaveLength(0);
+    drawer.elements.message.value = "/new   ";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
+    await vi.waitFor(() => expect(sent.filter(({ type }) => type === "new")).toHaveLength(1));
+    expect(sent.find(({ type }) => type === "new")).toMatchObject({ payload: { settings: expectedSettings } });
+    drawer.destroy();
+  });
+
+  test("submits /new with arguments as an ordinary message", async () => {
+    let options;
+    const sent = [];
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(),
+      send: vi.fn(async (command) => { sent.push(command); }),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(piSnapshotEvent());
+    drawer.elements.message.value = "/new with context";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({ type: "submit", payload: { content: { parts: [{ type: "text", text: "/new with context" }] } } });
     drawer.destroy();
   });
 
