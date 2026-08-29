@@ -2987,6 +2987,21 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     return content.parts.length === 1 && content.parts[0].type === "text" && /^\/compact\s*$/u.test(content.parts[0].text);
   }
 
+  function exactNewDraft(content = messageEditor.getContent()) {
+    return content.parts.length === 1 && content.parts[0].type === "text" && /^\/new\s*$/u.test(content.parts[0].text);
+  }
+
+  function availableSlashCommands() {
+    const commands = [];
+    if (state.composerAdmission === "submit" && (!settingsRequired() || currentSettings() !== null)) {
+      commands.push({ id: "new", name: "/new", display_name: "/new", description: "Archive this conversation and start a fresh session." });
+    }
+    if (state.supportsCompact) {
+      commands.push({ id: "compact", name: "/compact", display_name: "/compact", description: "Summarize the conversation to prevent hitting the context limit." });
+    }
+    return commands;
+  }
+
   function closeCompletionMenu() {
     completionMode = null;
     completionItems = [];
@@ -3004,14 +3019,14 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     const skill = /(?:^|\s)\$([\p{L}\p{N}_.-]*)$/u.exec(text);
     if (skill && state.skillsState === "ready" && Number.isInteger(state.maxSelectedSkills) && content.parts.filter((part) => part.type === "skill").length < state.maxSelectedSkills) return { mode: "skill", query: skill[1].toLocaleLowerCase(), replacement: `$${skill[1]}` };
     const slash = content.parts.length === 1 ? /^\/([a-z]*)$/u.exec(text) : null;
-    if (slash && text !== "/compact" && state.supportsCompact) return { mode: "slash", query: slash[1] };
+    if (slash && !availableSlashCommands().some((command) => command.name === text)) return { mode: "slash", query: slash[1] };
     return null;
   }
 
   function chooseCompletion(index = completionIndex) {
     const item = completionItems[index];
     if (!item) return false;
-    if (completionMode === "slash") messageEditor.setContent({ parts: [{ type: "text", text: "/compact" }] });
+    if (completionMode === "slash") messageEditor.setContent({ parts: [{ type: "text", text: item.name }] });
     else {
       const match = completionQuery();
       const content = messageEditor.getContent();
@@ -3032,7 +3047,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (!match) { closeCompletionMenu(); return; }
     completionMode = match.mode;
     completionItems = match.mode === "slash"
-      ? [{ id: "compact", name: "/compact", display_name: "/compact", description: "Summarize the conversation to prevent hitting the context limit." }].filter((command) => command.name.slice(1).startsWith(match.query))
+      ? availableSlashCommands().filter((command) => command.name.slice(1).startsWith(match.query))
       : state.skills.filter((skill) => skill.name.toLocaleLowerCase().includes(match.query) || (skill.display_name ?? "").toLocaleLowerCase().includes(match.query)).filter((skill) => !messageEditor.getContent().parts.some((part) => part.type === "skill" && part.skill.id === skill.id));
     if (completionItems.length === 0) { closeCompletionMenu(); return; }
     completionIndex = Math.min(completionIndex, completionItems.length - 1);
@@ -4185,6 +4200,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     event.preventDefault();
     const content = messageEditor.getContent();
     if (!["submit", "queue"].includes(state.composerAdmission)) return;
+    if (exactNewDraft(content)) {
+      if (state.composerAdmission !== "submit" || draftAttachments.length > 0 || draftInlineVisuals.size > 0) return;
+      openNewConversationConfirmation(message);
+      return;
+    }
     if (exactCompactDraft(content)) {
       if (state.composerAdmission !== "submit" || !state.supportsCompact || draftAttachments.length > 0 || draftInlineVisuals.size > 0) return;
       const target = controller;
@@ -4280,8 +4300,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     render();
     scheduleReconnect();
   });
-  newButton.addEventListener("click", () => {
-    const invoker = doc.activeElement;
+  function openNewConversationConfirmation(invoker = doc.activeElement) {
     const executionSettings = settingsRequired() ? currentSettings() : null;
     if (settingsRequired() && executionSettings === null) {
       showTransientStatus("Model options unavailable", "New conversation not started", "Choose settings supported by the live provider catalog.");
@@ -4301,7 +4320,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         await forcedConversationCommand("new", { settings: executionSettings });
       },
     });
-  });
+  }
+  newButton.addEventListener("click", () => openNewConversationConfirmation());
   historyButton.addEventListener("click", () => { showView("archives"); });
   function onOverflowOutsidePointerDown(event) {
     if (!overflow.contains(event.target)) {

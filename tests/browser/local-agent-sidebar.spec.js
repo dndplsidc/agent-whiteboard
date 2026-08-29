@@ -352,6 +352,40 @@ test("invokes Codex skills and compacts without queueing a busy draft", async ({
   expect(parsedCommands(localAgentSidebar.brokerRequests).at(-1)).toMatchObject({ type: "interrupt" });
 });
 
+for (const provider of ["pi", "codex"]) {
+  test(`starts a fresh ${provider} conversation with exact /new`, async ({ context, page, localAgentSidebar }) => {
+    await openSidebarPage({
+      context,
+      page,
+      fixture: localAgentSidebar,
+      markdown: `# ${provider} new command\n`,
+      creatorContext: `${provider} new-command context.\n`,
+      preferences: { "agent-whiteboard-agent-provider": provider },
+    });
+    await connectSidebar(page, provider);
+    const composer = page.getByLabel(`Message ${provider === "codex" ? "Codex" : "Pi"} about this whiteboard`);
+    const suggestions = page.getByRole("listbox", { name: "Composer suggestions" });
+
+    await composer.fill("/n");
+    await expect(suggestions).toContainText("/new");
+    await composer.press("Enter");
+    await expect(composer).toHaveText("/new");
+    await composer.press("Enter");
+    let confirmation = page.getByRole("dialog", { name: "Start a new conversation?" });
+    await expect(confirmation.getByRole("button", { name: "Cancel" })).toBeFocused();
+    expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
+
+    await confirmation.getByRole("button", { name: "Cancel" }).click();
+    await expect(composer).toHaveText("/new");
+    await composer.press("Enter");
+    confirmation = page.getByRole("dialog", { name: "Start a new conversation?" });
+    await confirmation.getByRole("button", { name: "Start new" }).click();
+    await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(1);
+    await expect(page.locator(".agent-live-status")).toHaveText("Connected", { timeout: 5_000 });
+    await expect(page.locator(".agent-message-user")).toHaveCount(0);
+  });
+}
+
 test("keeps Codex command activity at its native transcript position", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Stable skill stream\n", creatorContext: "Stable stream context.\n" });
   localAgentSidebar.setSkills([{ id: "W7W7W7W7W7W7W7W7W7W7W7W7W7W7W7W7", name: "devflow", display_name: "devflow", description: "Software change workflow.", scope: "user" }]);
