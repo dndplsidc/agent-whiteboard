@@ -138,9 +138,9 @@ func (session Session) validateForProvider(name provider.Name) error {
 	switch name {
 	case provider.NamePi:
 		// Nil settings are retained solely for legacy durable Pi mappings.
-	case provider.NameCodex:
+	case provider.NameCodex, provider.NameCursor:
 		if session.Settings == nil || session.Presentation == nil {
-			return errors.New("Codex session lacks execution settings")
+			return errors.New("provider session lacks execution settings")
 		}
 	default:
 		return errors.New("invalid session provider")

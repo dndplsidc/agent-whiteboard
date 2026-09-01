@@ -48,6 +48,7 @@ const (
 	ErrorImageStorageFailure          BrowserErrorCode = "image_storage_failure"
 	ErrorSkillUnavailable             BrowserErrorCode = "skill_unavailable"
 	ErrorCompactUnsupported           BrowserErrorCode = "compact_unsupported"
+	ErrorArchiveDeleteUnsupported     BrowserErrorCode = "archive_delete_unsupported"
 
 	// Compatibility names describe the same frozen wire outcomes.
 	ErrorActiveTurnBusy      = ErrorActiveTurnConflict
@@ -125,6 +126,7 @@ var browserErrorDefinitions = map[BrowserErrorCode]browserErrorDefinition{
 	ErrorImageStorageFailure:          {"The selected image could not be stored safely.", ActionTryAgain},
 	ErrorSkillUnavailable:             {"A selected skill is no longer available. Refresh the skill list and try again.", ActionRefreshState},
 	ErrorCompactUnsupported:           {"Manual context compaction is unavailable for this provider runtime.", ActionRefreshState},
+	ErrorArchiveDeleteUnsupported:     {"Native archive deletion is unavailable for this provider.", ActionNone},
 }
 
 type BrowserError struct{ code BrowserErrorCode }
@@ -151,6 +153,7 @@ func AllBrowserErrorCodes() []BrowserErrorCode {
 		ErrorBrokerShuttingDown, ErrorProviderProtocolFailure, ErrorProviderMalformedStream, ErrorAcceptanceOutcomeUnknown,
 		ErrorInvalidModelConfiguration, ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
 		ErrorImageWorkspaceLimit, ErrorImageMissing, ErrorImageStorageFailure, ErrorSkillUnavailable, ErrorCompactUnsupported,
+		ErrorArchiveDeleteUnsupported,
 	}
 }
 

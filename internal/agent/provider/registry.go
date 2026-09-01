@@ -41,10 +41,14 @@ func (registry Registry) Names() []Name {
 	}
 	sort.Slice(names, func(i, j int) bool {
 		order := func(name Name) int {
-			if name == NamePi {
+			switch name {
+			case NamePi:
 				return 0
+			case NameCodex:
+				return 1
+			default:
+				return 2
 			}
-			return 1
 		}
 		return order(names[i]) < order(names[j])
 	})

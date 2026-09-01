@@ -193,9 +193,9 @@ func (session *Session) Preflight(_ context.Context, request provider.PreflightR
 	if len(request.Turn.Images) != 0 && !capabilities.Images {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorImageInputUnsupported)
 	}
-	// App Server owns compaction and capacity enforcement. These values satisfy
-	// the neutral contract without estimating a Codex context window.
-	return provider.PreflightResult{ResolvedModel: settings.Model, EstimatedInputTokens: 1, EffectiveCapacityTokens: int(^uint(0) >> 1), SafetyMarginTokens: 0}, nil
+	// App Server owns compaction and capacity enforcement; Codex does not
+	// fabricate a context-window estimate.
+	return provider.PreflightResult{CapacityMode: provider.CapacityProviderEnforced, ResolvedModel: settings.Model}, nil
 }
 
 func (session *Session) Submit(ctx context.Context, request provider.TurnRequest) (provider.AcceptedTurn, error) {
