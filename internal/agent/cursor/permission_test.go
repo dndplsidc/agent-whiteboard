@@ -60,9 +60,77 @@ func TestPermissionUsesSafeIDsAndAcknowledgedFirstResponseWins(t *testing.T) {
 	if err := session.Respond(context.Background(), response); err == nil {
 		t.Fatal("second response unexpectedly won")
 	}
-	resolved := <-session.events
-	if resolved.Kind != provider.EventInteractionResolved || resolved.Resolution.RequestID != interaction.ID || resolved.Resolution.Kind != interaction.Kind || resolved.Resolution.OptionID != "allowOnce" {
-		t.Fatalf("resolution = %#v", resolved)
+	select {
+	case event := <-session.events:
+		t.Fatalf("unexpected event after browser response = %#v", event)
+	default:
+	}
+	_ = session.Shutdown(context.Background())
+}
+
+func TestBrowserPermissionDeliveryOutcomesDoNotEmitNativeResolution(t *testing.T) {
+	for _, delivery := range []acp.Delivery{acp.Complete, acp.NotWritten, acp.Indeterminate} {
+		t.Run(string(delivery), func(t *testing.T) {
+			id := safeID("permission", turnID+"\x00tool")
+			pending := &pendingPermission{
+				request:        provider.InteractionRequest{ID: id, TurnID: turnID, Kind: provider.InteractionCommandApproval, Title: "Permission", Options: []provider.InteractionOption{{ID: "allowOnce", Label: "Allow"}}},
+				optionID:       "allowOnce",
+				browserClaimed: true,
+				published:      true,
+				state:          permissionWriting,
+				changed:        make(chan struct{}),
+			}
+			session := &Session{events: make(chan provider.Event, 1), permissions: map[string]*pendingPermission{id: pending}, permissionOutcomes: make(map[string]acp.Delivery)}
+			failed := session.recordPermissionOutcomeLocked(id, pending, delivery)
+			if failed != (delivery != acp.Complete) {
+				t.Fatalf("failed = %v for delivery %s", failed, delivery)
+			}
+			select {
+			case event := <-session.events:
+				t.Fatalf("browser-owned %s delivery emitted native resolution = %#v", delivery, event)
+			default:
+			}
+		})
+	}
+}
+
+func TestNotWrittenBrowserClaimRetainsResolutionOwnershipThroughCancel(t *testing.T) {
+	driver, launcher, root := testDriver(t)
+	opened, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := opened.(*Session)
+	turn := &activePrompt{request: provider.TurnRequest{TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("reader")}, accepted: make(chan struct{}), done: make(chan error, 1), result: make(chan promptResult, 1), assistantID: safeID("assistant", turnID), permissionGateOpen: true, tools: make(map[string]cachedTool)}
+	session.mu.Lock()
+	session.active = turn
+	nativeSession := session.native.Ref.Value()
+	session.mu.Unlock()
+	launcher.mu.Lock()
+	child := launcher.children[0]
+	launcher.mu.Unlock()
+	child.send(t, map[string]any{"jsonrpc": "2.0", "id": 100, "method": "session/request_permission", "params": map[string]any{"sessionId": nativeSession, "toolCall": map[string]any{"toolCallId": "native-tool", "title": "Run command", "kind": "execute"}, "options": []any{map[string]any{"optionId": "native-allow", "name": "Allow once", "kind": "allow_once"}}}})
+	var interaction provider.InteractionRequest
+	for interaction.ID == "" {
+		event := <-session.events
+		if event.Kind == provider.EventInteractionRequest {
+			interaction = *event.Interaction
+		}
+	}
+	response := provider.InteractionResponse{RequestID: interaction.ID, Kind: interaction.Kind, OptionID: "allowOnce"}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := session.Respond(cancelled, response); err == nil {
+		t.Fatal("cancelled NotWritten response reported success")
+	}
+	if err := session.CancelInteraction(context.Background(), interaction.ID); err != nil {
+		t.Fatal(err)
+	}
+	<-child.responses
+	select {
+	case event := <-session.events:
+		t.Fatalf("browser-owned NotWritten claim emitted native resolution after cancellation = %#v", event)
+	default:
 	}
 	_ = session.Shutdown(context.Background())
 }

@@ -523,9 +523,12 @@ func (s *Session) recordPermissionOutcomeLocked(id string, pending *pendingPermi
 	pending.mu.Lock()
 	pending.state = permissionSettled
 	optionID := pending.optionID
+	browserClaimed := pending.browserClaimed
 	pending.signalLocked()
 	pending.mu.Unlock()
-	if pending.published {
+	// The broker resolves browser-owned claims for every delivery outcome; this
+	// event is only for native resolution or expiry without a browser response.
+	if pending.published && !browserClaimed {
 		s.publishLocked(provider.NewInteractionResolvedEvent(provider.InteractionResolution{RequestID: id, Kind: pending.request.Kind, OptionID: optionID}))
 	}
 	return delivery != acp.Complete
@@ -598,7 +601,7 @@ type permissionClaim struct {
 	pending *pendingPermission
 }
 
-func claimPermissionLocked(pending *pendingPermission, optionID string) bool {
+func claimPermissionLocked(pending *pendingPermission, optionID string, browser bool) bool {
 	pending.mu.Lock()
 	defer pending.mu.Unlock()
 	if pending.state != permissionOpen {
@@ -606,6 +609,7 @@ func claimPermissionLocked(pending *pendingPermission, optionID string) bool {
 	}
 	pending.state = permissionWriting
 	pending.optionID = optionID
+	pending.browserClaimed = pending.browserClaimed || browser
 	pending.signalLocked()
 	return true
 }
@@ -639,7 +643,7 @@ func (s *Session) Respond(ctx context.Context, response provider.InteractionResp
 		return provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
 	native, ok := pending.native[response.OptionID]
-	if !ok || !claimPermissionLocked(pending, response.OptionID) {
+	if !ok || !claimPermissionLocked(pending, response.OptionID, true) {
 		s.mu.Unlock()
 		return provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
@@ -665,7 +669,7 @@ func (s *Session) CancelInteraction(ctx context.Context, id string) error {
 		}
 		return nil
 	}
-	if s.active == nil || !s.active.permissionGateOpen || !claimPermissionLocked(pending, "") {
+	if s.active == nil || !s.active.permissionGateOpen || !claimPermissionLocked(pending, "", false) {
 		s.mu.Unlock()
 		return provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
@@ -685,7 +689,7 @@ func (s *Session) settlePermissions(ctx context.Context, turn *activePrompt) err
 			if pending == nil {
 				continue
 			}
-			if claimPermissionLocked(pending, "") {
+			if claimPermissionLocked(pending, "", false) {
 				claims = append(claims, permissionClaim{id, pending})
 				continue
 			}

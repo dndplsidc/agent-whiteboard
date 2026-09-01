@@ -72,14 +72,15 @@ const (
 )
 
 type pendingPermission struct {
-	mu        sync.Mutex
-	responder *acp.Responder
-	native    map[string]string
-	request   provider.InteractionRequest
-	optionID  string
-	published bool
-	state     permissionState
-	changed   chan struct{}
+	mu             sync.Mutex
+	responder      *acp.Responder
+	native         map[string]string
+	request        provider.InteractionRequest
+	optionID       string
+	browserClaimed bool
+	published      bool
+	state          permissionState
+	changed        chan struct{}
 }
 
 func (p *pendingPermission) signalLocked() {
