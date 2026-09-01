@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/acp"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/acp/acptest"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
 	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
@@ -330,6 +332,83 @@ func testDriver(t *testing.T) (*Driver, *scriptLauncher, string) {
 	}
 	return driver, launcher, root
 }
+
+type fixedProcessLauncher struct{ process common.ManagedProcess }
+
+func (launcher fixedProcessLauncher) Launch(context.Context, common.ProcessRequest) (common.ManagedProcess, error) {
+	return launcher.process, nil
+}
+
+func TestLargeIdleTimeoutDoesNotControlProcessTeardown(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "cursor-agent")
+	if err := os.WriteFile(executable, []byte("fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	process := acptest.NewProcess()
+	driver, err := NewDriver(Config{
+		Executable: executable, Environment: []string{"HOME=" + root}, ProviderRoot: root,
+		Launcher: fixedProcessLauncher{process: process}, IDs: fixedIDs{}, Clock: fixedClock{time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)},
+		IdleTimeout: 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		<-process.Stdin.Changed
+		var request struct {
+			ID json.RawMessage `json:"id"`
+		}
+		line, _, _ := bytes.Cut(process.Stdin.Bytes(), []byte{'\n'})
+		_ = json.Unmarshal(line, &request)
+		response, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": request.ID,
+			"result": map[string]any{
+				"protocolVersion": 1,
+				"agentCapabilities": map[string]any{
+					"loadSession":         true,
+					"sessionCapabilities": map[string]any{"list": map[string]any{}},
+				},
+			},
+		})
+		_, _ = process.OutputWriter.Write(append(response, '\n'))
+		<-process.KillCalled
+		process.Complete(nil)
+	}()
+
+	runtime, err := driver.launch(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- runtime.close(context.Background()) }()
+
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for _, phase := range []struct {
+		name   string
+		signal <-chan struct{}
+	}{
+		{name: "terminate", signal: process.TerminateCalled},
+		{name: "kill", signal: process.KillCalled},
+	} {
+		select {
+		case <-phase.signal:
+		case <-deadline.C:
+			t.Fatalf("%s was delayed by Cursor idle timeout", phase.name)
+		}
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close after kill/reap: %v", err)
+		}
+	case <-deadline.C:
+		t.Fatal("Cursor process was not reaped within bounded ACP teardown defaults")
+	}
+}
+
 func TestReadinessRejectsSymlinkedExecutableAndUnsafeMode(t *testing.T) {
 	d, _, root := testDriver(t)
 	executable := d.config.Executable

@@ -99,7 +99,10 @@ func resolveProviderExecutables(descriptors []LaunchAgentProviderDescriptor, res
 			return nil, errors.New("provider descriptor is required")
 		}
 		name, executableName := descriptor.ProviderName(), descriptor.ExecutableName()
-		if (name != LaunchAgentProviderPi && name != LaunchAgentProviderCodex) || executableName != name {
+		validDescriptor := (name == LaunchAgentProviderPi && executableName == LaunchAgentProviderPi) ||
+			(name == LaunchAgentProviderCodex && executableName == LaunchAgentProviderCodex) ||
+			(name == LaunchAgentProviderCursor && executableName == LaunchAgentCursorExecutableName)
+		if !validDescriptor {
 			return nil, fmt.Errorf("unsupported provider executable descriptor %q", name)
 		}
 		if _, duplicate := seen[name]; duplicate {
@@ -358,6 +361,8 @@ func providerDisplayName(provider string) string {
 		return "Pi"
 	case LaunchAgentProviderCodex:
 		return "Codex"
+	case LaunchAgentProviderCursor:
+		return "Cursor"
 	default:
 		return provider
 	}
@@ -378,12 +383,19 @@ func marshalPlist(config normalizedConfig, paths servicePaths) ([]byte, error) {
 	environment := make(map[string]string, len(config.ProviderExecutables)+1)
 	environment[LaunchAgentPathEnvironment] = strings.Join(runtimePath, string(os.PathListSeparator))
 	for provider, path := range config.ProviderExecutables {
-		if (provider != LaunchAgentProviderPi && provider != LaunchAgentProviderCodex) || !validAbsolutePath(path) {
+		if !validAbsolutePath(path) {
 			return nil, errors.New("plist contains an invalid provider executable")
 		}
-		key := LaunchAgentPiExecutableEnvironment
-		if provider == LaunchAgentProviderCodex {
+		key := ""
+		switch provider {
+		case LaunchAgentProviderPi:
+			key = LaunchAgentPiExecutableEnvironment
+		case LaunchAgentProviderCodex:
 			key = LaunchAgentCodexExecutableEnvironment
+		case LaunchAgentProviderCursor:
+			key = LaunchAgentCursorExecutableEnvironment
+		default:
+			return nil, errors.New("plist contains an invalid provider executable")
 		}
 		environment[key] = path
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/attachment"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/broker"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/codex"
+	"github.com/dndplsidc/agent-whiteboard/internal/agent/cursor"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/pi"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/server"
@@ -34,8 +35,10 @@ type AgentServiceConfig struct {
 	Port                int
 	PiExecutable        string
 	CodexExecutable     string
+	CursorExecutable    string
 	ProviderEnvironment []string
 	CodexEnvironment    []string
+	CursorEnvironment   []string
 	IdleTimeout         time.Duration
 	ShutdownTimeout     time.Duration
 
@@ -46,20 +49,24 @@ type AgentServiceConfig struct {
 }
 
 type providerRegistryConfig struct {
-	state            *statepkg.Store
-	piExecutable     string
-	piEnvironment    []string
-	piAvailable      bool
-	codexExecutable  string
-	codexEnvironment []string
-	codexAvailable   bool
-	launcher         provider.Launcher
-	ids              common.IDGenerator
-	clock            common.Clock
-	idleTimeout      time.Duration
+	state             *statepkg.Store
+	piExecutable      string
+	piEnvironment     []string
+	piAvailable       bool
+	codexExecutable   string
+	codexEnvironment  []string
+	codexAvailable    bool
+	cursorExecutable  string
+	cursorEnvironment []string
+	cursorAvailable   bool
+	launcher          provider.Launcher
+	ids               common.IDGenerator
+	clock             common.Clock
+	idleTimeout       time.Duration
 }
 
 type unavailableProviderDriver struct{ name provider.Name }
+type unavailableDeletingProviderDriver struct{ unavailableProviderDriver }
 
 type serializedAgentIDs struct {
 	mu  sync.Mutex
@@ -91,7 +98,7 @@ func (unavailableProviderDriver) Inspect(context.Context, provider.InspectReques
 	return provider.NativeSession{}, provider.NewProviderError(provider.ErrorMissingExecutable)
 }
 
-func (unavailableProviderDriver) Delete(context.Context, provider.DeleteRequest) error {
+func (unavailableDeletingProviderDriver) Delete(context.Context, provider.DeleteRequest) error {
 	return provider.NewProviderError(provider.ErrorMissingExecutable)
 }
 
@@ -153,6 +160,14 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 	if err != nil {
 		return nil, err
 	}
+	cursorExecutable, cursorAvailable, err := resolveCursorExecutable(config.CursorExecutable)
+	if err != nil {
+		return nil, err
+	}
+	cursorEnvironment, err := defaultCursorEnvironment(config.CursorEnvironment)
+	if err != nil {
+		return nil, err
+	}
 
 	state, err := statepkg.Open(config.Home)
 	if err != nil {
@@ -164,6 +179,7 @@ func NewAgentService(config AgentServiceConfig) (*AgentService, error) {
 	registry, err := newProviderRegistry(providerRegistryConfig{
 		state: state, piExecutable: piExecutable, piEnvironment: piEnvironment, piAvailable: piAvailable,
 		codexExecutable: codexExecutable, codexEnvironment: codexEnvironment, codexAvailable: codexAvailable,
+		cursorExecutable: cursorExecutable, cursorEnvironment: cursorEnvironment, cursorAvailable: cursorAvailable,
 		launcher: launcher, ids: ids, clock: clock, idleTimeout: config.IdleTimeout,
 	})
 	if err != nil {
@@ -213,7 +229,7 @@ func newProviderRegistry(config providerRegistryConfig) (provider.Registry, erro
 		}
 		drivers[provider.NamePi] = piDriver
 	} else {
-		drivers[provider.NamePi] = unavailableProviderDriver{name: provider.NamePi}
+		drivers[provider.NamePi] = unavailableDeletingProviderDriver{unavailableProviderDriver{name: provider.NamePi}}
 	}
 	if config.codexAvailable {
 		codexRoot, rootErr := config.state.EnsureProviderDirectory(provider.NameCodex)
@@ -229,7 +245,23 @@ func newProviderRegistry(config providerRegistryConfig) (provider.Registry, erro
 		}
 		drivers[provider.NameCodex] = codexDriver
 	} else {
-		drivers[provider.NameCodex] = unavailableProviderDriver{name: provider.NameCodex}
+		drivers[provider.NameCodex] = unavailableDeletingProviderDriver{unavailableProviderDriver{name: provider.NameCodex}}
+	}
+	if config.cursorAvailable {
+		cursorRoot, rootErr := config.state.EnsureProviderDirectory(provider.NameCursor)
+		if rootErr != nil {
+			return provider.Registry{}, fmt.Errorf("ensure Cursor provider directory: %w", rootErr)
+		}
+		cursorDriver, driverErr := cursor.NewDriver(cursor.Config{
+			Executable: config.cursorExecutable, Environment: config.cursorEnvironment, ProviderRoot: cursorRoot,
+			Launcher: config.launcher, IDs: config.ids, Clock: config.clock, IdleTimeout: config.idleTimeout,
+		})
+		if driverErr != nil {
+			return provider.Registry{}, fmt.Errorf("create Cursor driver: %w", driverErr)
+		}
+		drivers[provider.NameCursor] = cursorDriver
+	} else {
+		drivers[provider.NameCursor] = unavailableProviderDriver{name: provider.NameCursor}
 	}
 	registry, err := provider.NewRegistry(drivers)
 	if err != nil {
@@ -347,6 +379,28 @@ func resolvePiExecutable(value string) (string, bool, error) {
 	return filepath.Clean(absolute), true, nil
 }
 
+func resolveCursorExecutable(value string) (string, bool, error) {
+	resolved := ""
+	if value == "" {
+		var err error
+		resolved, err = exec.LookPath("cursor-agent")
+		if err != nil {
+			return "", false, nil
+		}
+	} else {
+		var err error
+		resolved, err = exec.LookPath(value)
+		if err != nil {
+			return "", false, fmt.Errorf("resolve Cursor executable: %w", err)
+		}
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve Cursor executable path: %w", err)
+	}
+	return filepath.Clean(absolute), true, nil
+}
+
 func resolveCodexExecutable(value string) (string, bool, error) {
 	resolved := ""
 	if value == "" {
@@ -374,6 +428,17 @@ func resolveCodexExecutable(value string) (string, bool, error) {
 // inject configuration overrides, so App Server resolves the user's normal
 // Codex configuration and authentication state.
 func defaultCodexEnvironment(override []string) ([]string, error) {
+	return nativeProviderEnvironment(override)
+}
+
+// defaultCursorEnvironment inherits the native Cursor user's ambient
+// configuration and authentication unchanged. Explicit test/composition
+// overrides are cloned and validated before being passed to the driver.
+func defaultCursorEnvironment(override []string) ([]string, error) {
+	return nativeProviderEnvironment(override)
+}
+
+func nativeProviderEnvironment(override []string) ([]string, error) {
 	environment := override
 	if environment == nil {
 		environment = os.Environ()

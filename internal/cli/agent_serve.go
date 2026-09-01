@@ -11,8 +11,8 @@ import (
 )
 
 type agentServeFlagValues struct {
-	port, providerIdleTimeout, shutdownTimeout, piExecutable, codexExecutable string
-	daemon                                                                    bool
+	port, providerIdleTimeout, shutdownTimeout, piExecutable, codexExecutable, cursorExecutable string
+	daemon                                                                                      bool
 }
 
 type resolvedAgentSettings struct {
@@ -21,6 +21,7 @@ type resolvedAgentSettings struct {
 	shutdownTimeout     time.Duration
 	piExecutable        string
 	codexExecutable     string
+	cursorExecutable    string
 }
 
 func (factory commandFactory) newAgentServeCommand() *cobra.Command {
@@ -38,6 +39,7 @@ func (factory commandFactory) newAgentServeCommand() *cobra.Command {
 	flags.StringVar(&values.shutdownTimeout, "shutdown-timeout", "", "shutdown timeout")
 	flags.StringVar(&values.piExecutable, "pi-executable", "", "Pi executable")
 	flags.StringVar(&values.codexExecutable, "codex-executable", "", "Codex executable")
+	flags.StringVar(&values.cursorExecutable, "cursor-executable", "", "Cursor executable")
 	flags.BoolVar(&values.daemon, "daemon", false, "install and start the managed daemon")
 	return command
 }
@@ -94,9 +96,16 @@ func (factory commandFactory) resolveAgentSettings(cmd *cobra.Command, flags *ag
 	} else {
 		codexExecutable = factory.deps.Getenv("AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE")
 	}
+	cursorExecutable := ""
+	if cmd.Flags().Changed("cursor-executable") {
+		cursorExecutable = flags.cursorExecutable
+	} else {
+		cursorExecutable = factory.deps.Getenv("AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE")
+	}
 	return resolvedAgentSettings{
 		port: parsedPort, providerIdleTimeout: providerIdleTimeout,
 		shutdownTimeout: shutdownTimeout, piExecutable: piExecutable, codexExecutable: codexExecutable,
+		cursorExecutable: cursorExecutable,
 	}, nil
 }
 
@@ -111,7 +120,10 @@ func (factory commandFactory) runAgentServe(cmd *cobra.Command, flags *agentServ
 		if cmd.Flags().Changed("codex-executable") && flags.codexExecutable == "" {
 			return invalidCommand("Codex executable must not be empty")
 		}
-		if err := factory.installAgentDaemon(cmd, flags.piExecutable, cmd.Flags().Changed("pi-executable"), flags.codexExecutable, cmd.Flags().Changed("codex-executable")); err != nil {
+		if cmd.Flags().Changed("cursor-executable") && flags.cursorExecutable == "" {
+			return invalidCommand("Cursor executable must not be empty")
+		}
+		if err := factory.installAgentDaemon(cmd, flags.piExecutable, cmd.Flags().Changed("pi-executable"), flags.codexExecutable, cmd.Flags().Changed("codex-executable"), flags.cursorExecutable, cmd.Flags().Changed("cursor-executable")); err != nil {
 			return err
 		}
 		return writeDeleteSuccess(factory.deps.Stdout, factory.root.json)
@@ -123,17 +135,21 @@ func (factory commandFactory) runAgentServe(cmd *cobra.Command, flags *agentServ
 	if cmd.Flags().Changed("codex-executable") && flags.codexExecutable == "" {
 		return invalidCommand("Codex executable must not be empty")
 	}
+	if cmd.Flags().Changed("cursor-executable") && flags.cursorExecutable == "" {
+		return invalidCommand("Cursor executable must not be empty")
+	}
 	settings, err := factory.resolveAgentSettings(cmd, flags)
 	if err != nil {
 		return err
 	}
 	application, err := factory.deps.NewAgentApplication(app.AgentServiceConfig{
-		ConfigPath:      factory.root.configPath,
-		Port:            settings.port,
-		PiExecutable:    settings.piExecutable,
-		CodexExecutable: settings.codexExecutable,
-		IdleTimeout:     settings.providerIdleTimeout,
-		ShutdownTimeout: settings.shutdownTimeout,
+		ConfigPath:       factory.root.configPath,
+		Port:             settings.port,
+		PiExecutable:     settings.piExecutable,
+		CodexExecutable:  settings.codexExecutable,
+		CursorExecutable: settings.cursorExecutable,
+		IdleTimeout:      settings.providerIdleTimeout,
+		ShutdownTimeout:  settings.shutdownTimeout,
 	})
 	if err != nil {
 		return err

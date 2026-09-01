@@ -247,11 +247,7 @@ func (d *Driver) launch(ctx context.Context, cwd string, handler acp.RequestHand
 		MaxInboundFrameBytes:  acp.SupportedMaxFrameBytes,
 		MaxOutboundFrameBytes: acp.SupportedMaxFrameBytes,
 		MaxRetainedBytes:      acp.SupportedMaxRetainedBytes,
-		GracePeriod:           d.config.IdleTimeout,
-		TerminatePeriod:       d.config.IdleTimeout,
 		HandlerTimeout:        30 * time.Second,
-		FinalPeriod:           d.config.IdleTimeout,
-		DrainPeriod:           d.config.IdleTimeout,
 		MaxHandlerConcurrency: 1,
 	})
 	if err != nil {

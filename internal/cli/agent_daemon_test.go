@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -54,9 +55,10 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing
 	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	deps.ExecutablePath = func() (string, error) { return "bin/agent-whiteboard", nil }
 	deps.Getenv = mapGetenv(map[string]string{
-		common.LaunchAgentPiExecutableEnvironment:    "/env/pi",
-		common.LaunchAgentCodexExecutableEnvironment: "/env/codex",
-		common.LaunchAgentPathEnvironment:            "/activated/nvm/bin:/usr/bin:/bin",
+		common.LaunchAgentPiExecutableEnvironment:     "/env/pi",
+		common.LaunchAgentCodexExecutableEnvironment:  "/env/codex",
+		common.LaunchAgentCursorExecutableEnvironment: "/env/cursor-agent",
+		common.LaunchAgentPathEnvironment:             "/activated/nvm/bin:/usr/bin:/bin",
 	})
 	var foregroundCalls int
 	deps.NewAgentApplication = func(app.AgentServiceConfig) (Application, error) {
@@ -68,18 +70,20 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing
 	ctx := context.WithValue(context.Background(), struct{}{}, "daemon")
 	root.SetArgs([]string{
 		"--config", "relative/config.yaml", "agent", "serve", "--daemon",
-		"--pi-executable", "/flag/pi", "--codex-executable", "/flag/codex",
+		"--pi-executable", "/flag/pi", "--codex-executable", "/flag/codex", "--cursor-executable", "/flag/cursor-agent",
 	})
 	require.NoError(t, root.ExecuteContext(ctx))
 
 	require.Equal(t, filepath.Join(mustWorkingDirectory(t), "bin", "agent-whiteboard"), manager.installConfig.Executable)
 	require.Equal(t, filepath.Join(mustWorkingDirectory(t), "relative", "config.yaml"), manager.installConfig.ConfigPath)
 	require.Equal(t, "/activated/nvm/bin:/usr/bin:/bin", manager.installConfig.EnvironmentPath)
-	require.Len(t, manager.installConfig.Providers, 2)
+	require.Len(t, manager.installConfig.Providers, 3)
 	require.Equal(t, common.LaunchAgentProviderPi, manager.installConfig.Providers[0].ProviderName())
 	require.Equal(t, common.LaunchAgentProviderPi, manager.installConfig.Providers[0].ExecutableName())
 	require.Equal(t, common.LaunchAgentProviderCodex, manager.installConfig.Providers[1].ProviderName())
 	require.Equal(t, common.LaunchAgentProviderCodex, manager.installConfig.Providers[1].ExecutableName())
+	require.Equal(t, common.LaunchAgentProviderCursor, manager.installConfig.Providers[2].ProviderName())
+	require.Equal(t, common.LaunchAgentCursorExecutableName, manager.installConfig.Providers[2].ExecutableName())
 	require.NotNil(t, manager.installConfig.ExecutableResolver)
 	resolved, err := manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentProviderPi)
 	require.NoError(t, err)
@@ -87,6 +91,9 @@ func TestAgentDaemonInstallCapturesAbsoluteInputsAndProviderOverrides(t *testing
 	resolved, err = manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentProviderCodex)
 	require.NoError(t, err)
 	require.Equal(t, "/flag/codex", resolved)
+	resolved, err = manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentCursorExecutableName)
+	require.NoError(t, err)
+	require.Equal(t, "/flag/cursor-agent", resolved)
 	require.Same(t, ctx, manager.installCtx)
 	require.Zero(t, foregroundCalls)
 }
@@ -113,8 +120,9 @@ func TestAgentDaemonInstallUsesEnvironmentProviderOverridesAndDefaultConfig(t *t
 	deps.NewLaunchAgentManager = func() (common.LaunchAgentManager, error) { return manager, nil }
 	deps.ExecutablePath = func() (string, error) { return "/agent-whiteboard", nil }
 	deps.Getenv = mapGetenv(map[string]string{
-		common.LaunchAgentPiExecutableEnvironment:    "/env/pi",
-		common.LaunchAgentCodexExecutableEnvironment: "/env/codex",
+		common.LaunchAgentPiExecutableEnvironment:     "/env/pi",
+		common.LaunchAgentCodexExecutableEnvironment:  "/env/codex",
+		common.LaunchAgentCursorExecutableEnvironment: "/env/cursor-agent",
 	})
 	root, err := NewRoot(deps)
 	require.NoError(t, err)
@@ -127,6 +135,9 @@ func TestAgentDaemonInstallUsesEnvironmentProviderOverridesAndDefaultConfig(t *t
 	resolved, err = manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentProviderCodex)
 	require.NoError(t, err)
 	require.Equal(t, "/env/codex", resolved)
+	resolved, err = manager.installConfig.ExecutableResolver.LookPath(common.LaunchAgentCursorExecutableName)
+	require.NoError(t, err)
+	require.Equal(t, "/env/cursor-agent", resolved)
 }
 
 func TestAgentDaemonInstallWithoutOverrideUsesOrdinaryResolver(t *testing.T) {
@@ -139,7 +150,7 @@ func TestAgentDaemonInstallWithoutOverrideUsesOrdinaryResolver(t *testing.T) {
 	root.SetArgs([]string{"agent", "serve", "--daemon"})
 	require.NoError(t, root.ExecuteContext(context.Background()))
 	require.Nil(t, manager.installConfig.ExecutableResolver)
-	require.Len(t, manager.installConfig.Providers, 2)
+	require.Len(t, manager.installConfig.Providers, 3)
 }
 
 func TestAgentDaemonStatusRedactsLaunchAgentDetails(t *testing.T) {
@@ -212,6 +223,8 @@ func TestAgentServeRejectsExplicitEmptyProviderExecutable(t *testing.T) {
 		{name: "daemon Pi", args: []string{"agent", "serve", "--daemon", "--pi-executable="}, want: "Pi executable must not be empty"},
 		{name: "foreground Codex", args: []string{"agent", "serve", "--codex-executable="}, want: "Codex executable must not be empty"},
 		{name: "daemon Codex", args: []string{"agent", "serve", "--daemon", "--codex-executable="}, want: "Codex executable must not be empty"},
+		{name: "foreground Cursor", args: []string{"agent", "serve", "--cursor-executable="}, want: "Cursor executable must not be empty"},
+		{name: "daemon Cursor", args: []string{"agent", "serve", "--daemon", "--cursor-executable="}, want: "Cursor executable must not be empty"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			deps := validDependencies()
@@ -223,14 +236,57 @@ func TestAgentServeRejectsExplicitEmptyProviderExecutable(t *testing.T) {
 	}
 }
 
+func TestSelectedProviderExecutableResolverDefaultsCursorAgentWithoutGenericDiscovery(t *testing.T) {
+	directory := t.TempDir()
+	generic := filepath.Join(directory, "agent")
+	require.NoError(t, os.WriteFile(generic, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", directory)
+	resolver := selectedProviderExecutableResolver{}
+
+	_, err := resolver.LookPath(common.LaunchAgentCursorExecutableName)
+	require.ErrorIs(t, err, exec.ErrNotFound)
+	cursorAgent := filepath.Join(directory, common.LaunchAgentCursorExecutableName)
+	require.NoError(t, os.WriteFile(cursorAgent, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	resolved, err := resolver.LookPath(common.LaunchAgentCursorExecutableName)
+	require.NoError(t, err)
+	require.Equal(t, cursorAgent, resolved)
+}
+
+func TestSelectedProviderExecutableResolverMatchesCommonDescriptorCallPath(t *testing.T) {
+	home := t.TempDir()
+	agent := filepath.Join(home, "agent-whiteboard")
+	cursorAgent := filepath.Join(home, "explicit-agent")
+	require.NoError(t, os.WriteFile(agent, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	require.NoError(t, os.WriteFile(cursorAgent, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+
+	plist, err := common.GenerateLaunchAgentPlist(common.LaunchAgentConfig{
+		Executable: agent,
+		ConfigPath: filepath.Join(home, "config.yaml"),
+		Providers: []common.LaunchAgentProviderDescriptor{
+			cursorProviderDescriptor{},
+		},
+		ExecutableResolver: selectedProviderExecutableResolver{cursor: cursorAgent},
+	}, home)
+	require.NoError(t, err)
+	require.Contains(t, string(plist), "<key>"+common.LaunchAgentCursorExecutableEnvironment+"</key>")
+	resolvedCursorAgent, err := filepath.EvalSymlinks(cursorAgent)
+	require.NoError(t, err)
+	require.Contains(t, string(plist), "<string>"+resolvedCursorAgent+"</string>")
+}
+
 func TestSelectedProviderExecutableResolverRejectsMissingExplicitSelection(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	resolver := selectedProviderExecutableResolver{codex: "missing-codex-selection"}
+	resolver := selectedProviderExecutableResolver{codex: "missing-codex-selection", cursor: "missing-cursor-selection"}
 
 	_, err := resolver.LookPath(common.LaunchAgentProviderCodex)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, exec.ErrNotFound)
 	require.ErrorContains(t, err, "missing-codex-selection")
+
+	_, err = resolver.LookPath(common.LaunchAgentCursorExecutableName)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, exec.ErrNotFound)
+	require.ErrorContains(t, err, "missing-cursor-selection")
 
 	_, err = resolver.LookPath(common.LaunchAgentProviderPi)
 	require.ErrorIs(t, err, exec.ErrNotFound)
