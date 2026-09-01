@@ -168,6 +168,7 @@ func (store *archiveTestStore) operationSnapshot() []string {
 
 type archiveTestDriver struct {
 	mu                  sync.Mutex
+	name                provider.Name
 	session             provider.Session
 	resumeSessions      []provider.Session
 	createSessions      []provider.Session
@@ -185,8 +186,12 @@ type archiveTestDriver struct {
 	store               *archiveTestStore
 }
 
-func (*archiveTestDriver) Readiness(context.Context) provider.Readiness {
-	return provider.Readiness{State: provider.Ready, Provider: provider.NamePi, Model: "model"}
+func (driver *archiveTestDriver) Readiness(context.Context) provider.Readiness {
+	name := driver.name
+	if name == "" {
+		name = provider.NamePi
+	}
+	return provider.Readiness{State: provider.Ready, Provider: name, Model: "model"}
 }
 func (driver *archiveTestDriver) Create(ctx context.Context, request provider.CreateRequest) (provider.Session, error) {
 	driver.mu.Lock()
@@ -265,29 +270,61 @@ func archiveFixture(t *testing.T, base uint64) (*Broker, *archiveTestStore, *arc
 }
 
 func archiveFixtureWithMapping(t *testing.T, base uint64, mutate func(*statepkg.Mapping)) (*Broker, *archiveTestStore, *archiveTestDriver, *Connection, statepkg.Identity) {
+	return archiveFixtureForProvider(t, base, provider.NamePi, mutate)
+}
+
+func archiveFixtureForProvider(t *testing.T, base uint64, name provider.Name, mutate func(*statepkg.Mapping)) (*Broker, *archiveTestStore, *archiveTestDriver, *Connection, statepkg.Identity) {
 	t.Helper()
 	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(base))
+	identity.Provider = name
+	mapping.Identity = identity
 	firstRef, err := statepkg.NativeSessionRef("sessions/archive-one")
 	require.NoError(t, err)
 	secondRef, err := statepkg.NativeSessionRef("sessions/archive-two")
 	require.NoError(t, err)
+	label := string(name)
+	mapping.Current.ProviderLabel = label
+	var archivedSettings *provider.ExecutionSettings
+	var archivedPresentation *provider.ModelPresentation
+	olderModel, newerModel := "older", "newer"
+	if name == provider.NameCursor {
+		settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+		presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: false}
+		mapping.Current.Settings = &settings
+		mapping.Current.Presentation = &presentation
+		mapping.Current.ModelLabel = presentation.ModelDisplayName
+		archivedSettings = &settings
+		archivedPresentation = &presentation
+		olderModel, newerModel = presentation.ModelDisplayName, presentation.ModelDisplayName
+	}
 	mapping.Archives = []statepkg.Session{
-		{ConversationID: sequenceID(base + 1), NativeSession: firstRef, CreatedAt: testTime().Add(-4 * time.Hour), UpdatedAt: testTime().Add(-3 * time.Hour), ProviderLabel: "pi", ModelLabel: "older"},
-		{ConversationID: sequenceID(base + 2), NativeSession: secondRef, CreatedAt: testTime().Add(-2 * time.Hour), UpdatedAt: testTime().Add(-time.Hour), ProviderLabel: "pi", ModelLabel: "newer"},
+		{ConversationID: sequenceID(base + 1), NativeSession: firstRef, CreatedAt: testTime().Add(-4 * time.Hour), UpdatedAt: testTime().Add(-3 * time.Hour), ProviderLabel: label, ModelLabel: olderModel, Settings: archivedSettings, Presentation: archivedPresentation},
+		{ConversationID: sequenceID(base + 2), NativeSession: secondRef, CreatedAt: testTime().Add(-2 * time.Hour), UpdatedAt: testTime().Add(-time.Hour), ProviderLabel: label, ModelLabel: newerModel, Settings: archivedSettings, Presentation: archivedPresentation},
 	}
 	if mutate != nil {
 		mutate(&mapping)
 	}
 	state := &archiveTestStore{repairState: &repairState{mapping: &mapping}}
 	session := newTurnSession(mapping.Current.NativeSession.Value())
-	driver := &archiveTestDriver{session: session, store: state}
-	broker, err := New(validLifecycleConfig(state, driver, &lockedIDs{next: base + 20}))
+	session.native.Provider = name
+	driver := &archiveTestDriver{name: name, session: session, store: state}
+	config := validLifecycleConfig(state, driver, &lockedIDs{next: base + 20})
+	wireName := protocol.ProviderPi
+	if name == provider.NameCursor {
+		registry, registryErr := provider.NewRegistry(map[provider.Name]provider.Driver{name: driver})
+		require.NoError(t, registryErr)
+		config.Driver = nil
+		config.Drivers = registry
+		wireName = protocol.ProviderCursor
+	}
+	broker, err := New(config)
 	require.NoError(t, err)
-	connected, err := broker.Connect(context.Background(), identity.Origin, lifecycleConnect(sequenceID(base+10), identity.CapabilityID))
+	connected, err := broker.Connect(context.Background(), identity.Origin, lifecycleProviderConnect(sequenceID(base+10), identity.CapabilityID, wireName))
 	require.NoError(t, err)
 	connection := connected.(*Connection)
 	snapshot := receiveLifecycle(t, connection.Events()).Payload.(protocol.SnapshotPayload)
 	require.True(t, snapshot.SupportsArchiveDelete)
+	require.Equal(t, name, connection.actor.identity.Provider)
 	state.resetOperations()
 	return broker, state, driver, connection, identity
 }
