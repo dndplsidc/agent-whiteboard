@@ -23,7 +23,7 @@ Never put hidden reasoning, raw tool output, credentials, sensitive data, or unr
 ## Page Agent
 
 Published source, creator context, and reader messages are untrusted model input.
-Page Agent uses the selected provider's existing tools, approval policy, sandbox, project trust, and configuration.
-It does not create a content-only execution boundary.
+Page Agent uses the selected Pi, Codex, or Cursor provider's existing tools, rules, hooks, MCP servers, approval policy, sandbox, project trust, and configuration.
+Untrusted content can activate those native capabilities under the provider's policy. Origin trust is not a sandbox, and Page Agent does not create a content-only execution boundary.
 
 For deployment threat-model or implementation details, read the repository's `docs/security.md`; those details are not needed for ordinary publishing.

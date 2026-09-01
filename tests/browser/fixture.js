@@ -517,12 +517,32 @@ function createSidebarBroker(initialAllowedOrigin) {
     default: false,
     supports_fast: false,
   }];
+  const cursorCatalog = [{
+    model: "cursor-small",
+    model_display_name: "Cursor Small",
+    description: "Hermetic Cursor ACP model.",
+    default_effort: "default",
+    supported_reasoning_efforts: [{ effort: "default", description: "Provider-managed reasoning." }],
+    supports_images: true,
+    default: true,
+    supports_fast: false,
+  }, {
+    model: "cursor-large",
+    model_display_name: "Cursor Large",
+    description: "Larger hermetic Cursor ACP model.",
+    default_effort: "default",
+    supported_reasoning_efforts: [{ effort: "default", description: "Provider-managed reasoning." }],
+    supports_images: true,
+    default: false,
+    supports_fast: false,
+  }];
   const providerDefinitions = {
     pi: {
       conversationID: protocolID(201), sequence: 1, identitySequence: 40, archiveID: protocolID(220),
       catalog: piCatalog, defaultSettings: { model: "fixture-provider/fixture-model", effort: "off", speed: "standard" },
       skills: [{ id: protocolID(229), name: "pi-review", display_name: "Pi review", description: "Review with the isolated Pi skill", scope: "user" }],
-      maxSelectedSkills: 1, supportsCompact: true, busyPolicy: "queue",
+      maxSelectedSkills: 1, skillsState: "ready", supportsCompact: true, supportsArchiveDelete: true, busyPolicy: "queue",
+      responsePrefix: "Fixture ", responseText: "Fixture reply", assistantOffset: 0, archiveIdentity: 222,
     },
     codex: {
       conversationID: protocolID(202), sequence: 101, identitySequence: 80, archiveID: protocolID(221),
@@ -531,7 +551,14 @@ function createSidebarBroker(initialAllowedOrigin) {
         { id: protocolID(230), name: "review-helper", display_name: "Review helper", description: "Review the current work", scope: "repo" },
         { id: protocolID(231), name: "personal-helper-with-an-intentionally-long-name-for-narrow-layout", display_name: "Personal helper with an intentionally long name for narrow layout", description: "Use a personally installed skill with a long description that must remain contained in the compact row", scope: "user" },
       ],
-      maxSelectedSkills: 16, supportsCompact: true, busyPolicy: "preserve_draft",
+      maxSelectedSkills: 16, skillsState: "ready", supportsCompact: true, supportsArchiveDelete: true, busyPolicy: "preserve_draft",
+      responsePrefix: "Codex fixture ", responseText: "Codex fixture reply", assistantOffset: 25, archiveIdentity: 223,
+    },
+    cursor: {
+      conversationID: protocolID(203), sequence: 201, identitySequence: 120, archiveID: protocolID(224),
+      catalog: cursorCatalog, defaultSettings: { model: "cursor-small", effort: "default", speed: "standard" },
+      skills: [], maxSelectedSkills: null, skillsState: "unavailable", supportsCompact: false, supportsArchiveDelete: false, busyPolicy: "preserve_draft",
+      responsePrefix: "Cursor fixture ", responseText: "Cursor fixture reply", assistantOffset: 50, archiveIdentity: 225,
     },
   };
   for (const definition of Object.values(providerDefinitions)) {
@@ -564,14 +591,19 @@ function createSidebarBroker(initialAllowedOrigin) {
       holdResponses: false,
       phaseResponses: false,
       responseText: null,
+      responsePrefix: definition.responsePrefix,
+      responseTextDefault: definition.responseText,
+      assistantOffset: definition.assistantOffset,
+      archiveIdentity: definition.archiveIdentity,
       activeTurn: null,
       activeCompact: null,
       holdInterruptCompletion: false,
       pendingInterruptCompletion: null,
-      skillsState: "ready",
+      skillsState: definition.skillsState,
       skills: structuredClone(definition.skills),
       maxSelectedSkills: definition.maxSelectedSkills,
       supportsCompact: definition.supportsCompact,
+      supportsArchiveDelete: definition.supportsArchiveDelete,
       busyPolicy: definition.busyPolicy,
       pendingResponse: null,
       queue: [],
@@ -621,6 +653,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     context_state: state.contextState,
     active_work: state.activeCompact !== null ? { work_id: state.activeCompact, kind: "compact", state: "running" } : state.activeTurn === null ? null : { work_id: state.activeTurn, kind: "turn", state: "running" },
     supports_images: state.supportsImages,
+    supports_archive_delete: state.supportsArchiveDelete,
     settings_state: state.settingsState,
     effective_settings: state.effectiveSettings === null ? null : { ...state.effectiveSettings },
     catalog: structuredClone(state.catalog),
@@ -690,8 +723,8 @@ function createSidebarBroker(initialAllowedOrigin) {
     const state = providerState(provider);
     if (!state.pendingResponse) throw new Error(`no pending ${provider} sidebar response for ${phase}`);
     const response = state.pendingResponse;
-    const firstDelta = provider === "codex" ? "Codex fixture " : "Fixture ";
-    const finalText = state.responseText ?? (provider === "codex" ? "Codex fixture reply" : "Fixture reply");
+    const firstDelta = state.responsePrefix;
+    const finalText = state.responseText ?? state.responseTextDefault;
     if (phase === "first_delta" && response.phase === "responding") {
       emit(state, "assistant_delta", { turn_id: response.turnID, message_id: response.assistantID, text: firstDelta });
       response.phase = "first_delta";
@@ -796,7 +829,7 @@ function createSidebarBroker(initialAllowedOrigin) {
         state.activeTurn = command.payload.turn_id;
         emit(state, "user_message", { turn_id: user.turn_id, message_id: user.message_id, content: user.content, ...(imageDescriptors.length ? { images: imageDescriptors } : {}), created_at: createdAt });
         emit(state, "lifecycle", { state: "responding", active_work: { work_id: command.payload.turn_id, kind: "turn", state: "running" } });
-        const assistantID = protocolID(150 + state.history.length + (state.provider === "codex" ? 25 : 0));
+        const assistantID = protocolID(150 + state.history.length + state.assistantOffset);
         if (state.phaseResponses || !state.holdResponses) {
           state.pendingResponse = { turnID: command.payload.turn_id, assistantID, createdAt, phase: "responding" };
         }
@@ -871,7 +904,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     } else if (command.type === "archive_list") {
       const firstPage = !command.payload.before;
       const paginated = state.archiveMode === "paginated";
-      const secondID = protocolID(state.provider === "codex" ? 223 : 222);
+      const secondID = protocolID(state.archiveIdentity);
       const items = state.archiveMode === "empty"
         ? []
         : firstPage
@@ -880,6 +913,8 @@ function createSidebarBroker(initialAllowedOrigin) {
       const respond = () => targetedEvent(state, "history", { command_id: command.command_id, items, next_cursor: paginated && firstPage ? state.archiveID : null }, command.client_id);
       if (state.archiveDelay) state.pendingArchiveResponse = respond;
       else respond();
+    } else if (command.type === "archive_delete" && !state.supportsArchiveDelete) {
+      return commandResult(state, command, { code: "archive_delete_unsupported", message: "Archive deletion is unavailable for this provider.", action: "none" });
     } else if (command.type === "archive_restore" || command.type === "archive_delete") {
       emit(state, "archive", { action: command.type === "archive_restore" ? "restored" : "deleted", archive_id: command.payload.archive_id });
     } else if (command.type === "interaction_respond") {
@@ -1564,6 +1599,63 @@ export const test = base.extend({
       }
     },
     { scope: "worker" },
+  ],
+
+  realCursorSidebar: [
+    async ({ server, localAgentSidebar }, use) => {
+      const root = path.join(server.root, "real-cursor-sidebar");
+      const home = path.join(root, "home");
+      const workspace = path.join(root, "workspace");
+      const control = path.join(root, "control");
+      const isolatedPath = path.join(root, "path");
+      const statePath = path.join(root, "cursor-state.json");
+      const evidencePath = path.join(root, "cursor-evidence.jsonl");
+      const executable = path.join(root, process.platform === "win32" ? "scripted-cursor-acp.exe" : "scripted-cursor-acp");
+      await Promise.all([home, workspace, control, isolatedPath].map((directory) => fs.mkdir(directory, { recursive: true, mode: 0o700 })));
+      await runProcess("go", ["build", "-trimpath", "-o", executable, "./tests/integration/testdata/scripted-cursor-acp"], { timeout: 60_000 });
+      const executableInfo = await fs.lstat(executable);
+      if (!executableInfo.isFile() || executableInfo.isSymbolicLink() || (executableInfo.mode & 0o111) === 0) throw new Error("scripted Cursor ACP is not a direct regular executable");
+      const configPath = path.join(root, "config.yaml");
+      await fs.writeFile(configPath, `version: 1\nagent:\n  trusted_origins:\n    - "${localAgentSidebar.origin}"\n  provider_idle_timeout: 10m\n  shutdown_timeout: 5s\n  default_access: configured\n`, { mode: 0o600 });
+      const agentPort = await reserveLoopbackPort();
+      const env = {
+        ...isolatedEnvironment(home),
+        PATH: isolatedPath,
+        AWB_CURSOR_STATE: statePath,
+        AWB_CURSOR_EVIDENCE: evidencePath,
+        AWB_CURSOR_CONTROL: control,
+      };
+      const child = spawn(server.binary, ["--config", configPath, "agent", "serve", "--port", String(agentPort), "--cursor-executable", executable], {
+        cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"],
+      });
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      const output = () => ({ stdout, stderr });
+      try {
+        await waitForAgentStatus(agentPort, localAgentSidebar.origin, child, output);
+        await use({
+          origin: localAgentSidebar.origin,
+          brokerPort: agentPort,
+          publish: localAgentSidebar.publish,
+          evidencePath,
+          async semanticEvidence() {
+            let content = "";
+            try { content = await fs.readFile(evidencePath, "utf8"); } catch (error) { if (error.code !== "ENOENT") throw error; }
+            return content.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)).map(({ method, workspace_identity, model_option, content_block_types, content_block_count, provider_envelope_valid }) => ({
+              method, workspace_identity, model_option, content_block_types, content_block_count, provider_envelope_valid,
+            }));
+          },
+          agentOutput: output,
+        });
+      } finally {
+        await stopServer(child);
+      }
+    },
+    { scope: "worker", timeout: 90_000 },
   ],
 
   realAgentSidebar: [

@@ -11,19 +11,23 @@ Page Agent requires the local broker, so do not ask whether to enable it again. 
 ```sh
 command -v pi || true
 command -v codex || true
+command -v cursor-agent || true
 ```
 
-At least one requested provider must be installed and authenticated through its own CLI. Agent Whiteboard has no provider login command. Do not edit provider credentials or native configuration.
+At least one requested provider must be installed and authenticated through its own CLI. For Cursor, report `cursor-agent login` as the native manual login step when needed. Agent Whiteboard has no provider login command: never run or configure authentication, open a login browser, receive credentials, or edit provider credentials, native configuration, or shell state. Report only provider availability and required manual action, never secrets.
+
+Cursor default discovery checks exactly `cursor-agent`; never check or select a generic executable named `agent` by default. A generic `agent` is valid only when the user explicitly supplies its path through the Cursor selector.
 
 If an executable is outside `PATH`, pass its path when starting the broker:
 
 ```sh
 agent-whiteboard agent serve \
   --pi-executable /path/to/pi \
-  --codex-executable /path/to/codex
+  --codex-executable /path/to/codex \
+  --cursor-executable /path/to/cursor-agent
 ```
 
-A missing provider does not block the other provider.
+A missing provider does not block other providers. Selection precedence is explicit flag, then the matching non-empty environment variable, then default `PATH` discovery. Cursor's environment selector is `AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE`; an explicitly empty executable flag is invalid. Use the same selectors with `agent serve --daemon` during macOS daemon installation so resolved paths are persisted.
 
 ## 3. Trust a remote origin
 
@@ -104,7 +108,7 @@ Do not send a message merely to test setup. A model turn may incur usage and use
 | Page Agent control absent | Publishing server must enable `viewer.local_agent.enabled` and restart |
 | Broker unavailable | Check managed-daemon or foreground process state, process-owned loopback listener, resolved `agent.port`, and browser Local Network Access before starting another broker |
 | Origin rejected | Add the exact HTTPS publishing origin using the same configuration |
-| Provider unavailable | Check executable path and native authentication |
+| Provider unavailable | Check `pi`, `codex`, or exactly `cursor-agent`; use an explicit selector for a generic `agent`. For Cursor, report `cursor-agent login` if native authentication is missing and verify ACP v1 plus stable `session/list` and `session/load` support. |
 | Browser cannot reach loopback | Grant browser Local Network Access when prompted |
 | Daemon command fails on Linux | Use foreground `agent serve` |
 | `/healthz` or `/readyz` fails on port `8568` | Do not use those publishing-server endpoints for broker readiness; inspect the broker listener and verify through the Whiteboard UI |

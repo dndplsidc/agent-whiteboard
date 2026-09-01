@@ -52,7 +52,7 @@ func main() {
 	}
 	a := &agent{out: bufio.NewWriter(os.Stdout), statePath: os.Getenv("AWB_CURSOR_STATE"), evidencePath: os.Getenv("AWB_CURSOR_EVIDENCE"), control: os.Getenv("AWB_CURSOR_CONTROL"), scenario: os.Getenv("AWB_CURSOR_SCENARIO"), pending: map[string]chan request{}}
 	_ = readJSON(a.statePath, &a.state)
-	a.record(map[string]any{"method": "process_start", "pid": os.Getpid(), "process_ordinal": a.ordinal(), "workspace_identity": digest(mustGetwd())})
+	a.record(map[string]any{"method": "process_start", "process_ordinal": a.ordinal(), "workspace_identity": digest(mustGetwd())})
 	s := bufio.NewScanner(os.Stdin)
 	s.Buffer(make([]byte, 64<<10), 128<<20)
 	for s.Scan() {
@@ -193,7 +193,7 @@ func params(raw json.RawMessage) map[string]any {
 }
 func (a *agent) handle(r request) {
 	p := params(r.Params)
-	a.record(map[string]any{"method": r.Method, "pid": os.Getpid(), "workspace_identity": digest(mustGetwd())})
+	a.record(map[string]any{"method": r.Method, "workspace_identity": digest(mustGetwd())})
 	switch r.Method {
 	case "initialize":
 		if a.scenario == "auth" {
@@ -289,7 +289,7 @@ func (a *agent) prompt(r request, p map[string]any) {
 	types := []string{}
 	imageType := ""
 	imageBytes := 0
-	turnID := ""
+	envelopeValid := false
 	for _, raw := range blocks {
 		b, _ := raw.(map[string]any)
 		typ, _ := b["type"].(string)
@@ -302,12 +302,12 @@ func (a *agent) prompt(r request, p map[string]any) {
 		}
 		if typ == "text" {
 			text, _ := b["text"].(string)
-			if envelope, err := provider.Parse([]byte(text)); err == nil {
-				turnID = envelope.TurnID
+			if _, err := provider.Parse([]byte(text)); err == nil {
+				envelopeValid = true
 			}
 		}
 	}
-	a.record(map[string]any{"method": "session/prompt.semantic", "content_block_types": types, "content_block_count": len(blocks), "image_media_type": imageType, "image_decoded_byte_count": imageBytes, "broker_turn_id": turnID})
+	a.record(map[string]any{"method": "session/prompt.semantic", "workspace_identity": digest(mustGetwd()), "content_block_types": types, "content_block_count": len(blocks), "image_media_type": imageType, "image_decoded_byte_count": imageBytes, "provider_envelope_valid": envelopeValid})
 	if a.scenario == "crash_prompt" {
 		a.barrier("crash")
 		os.Exit(17)

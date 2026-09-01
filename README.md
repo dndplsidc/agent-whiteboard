@@ -2,12 +2,12 @@
 
 Publish agent work as pages people can inspect, share, and discuss.
 
-Agent Whiteboard is a self-hosted Go server and CLI for publishing Markdown, Mermaid diagrams, trusted standalone HTML, and raster images at capability URLs. Agents can publish from the shell; readers get a polished browser view and can optionally discuss the page with Pi or Codex through **Page Agent**.
+Agent Whiteboard is a self-hosted Go server and CLI for publishing Markdown, Mermaid diagrams, trusted standalone HTML, and raster images at capability URLs. Agents can publish from the shell; readers get a polished browser view and can optionally discuss the page with Pi, Codex, or Cursor through **Page Agent**.
 
 - **Built for agent workflows:** publish, update, retrieve, and delete without opening a browser.
 - **Self-hosted:** one Go binary, filesystem storage, and no CDN dependency.
 - **Made for rich results:** sanitized Markdown, syntax highlighting, Mermaid, trusted active HTML, and images.
-- **Page-aware conversations:** send exact source, creator context, selected sections, Mermaid diagrams, components, code, or images to a local Pi or Codex session.
+- **Page-aware conversations:** send exact source, creator context, selected sections, Mermaid diagrams, components, code, or images to a local Pi, Codex, or Cursor session.
 - **Explicit lifecycle:** use expiring or permanent capability URLs and replace content in place.
 
 ## Quick start
@@ -100,7 +100,7 @@ The publishing and setup skills stay separate so each invocation loads only the 
 
 ## Use Page Agent
 
-Page Agent lets a reader discuss the current whiteboard with a locally running Pi or Codex provider. The reader explicitly connects, reviews what will be shared, and keeps the provider's normal model, tools, skills, approval policy, sandbox, and project configuration.
+Page Agent lets a reader discuss the current whiteboard with a locally running Pi, Codex, or Cursor provider. The reader explicitly connects, reviews what will be shared, and keeps the provider's normal model, tools, approval policy, sandbox, and project configuration. Provider-specific features remain provider-specific; Cursor does not expose a native skill catalog or manual compaction.
 
 Setup has two sides: the publishing server must expose Page Agent, and each reader must run and authorize their own local broker.
 
@@ -125,20 +125,21 @@ See [configuration](docs/configuration.md) for the complete schema and configura
 Each reader needs:
 
 1. The `agent-whiteboard` CLI installed.
-2. Pi, Codex, or both available on `PATH`.
-3. Authentication completed through each provider's own CLI.
+2. Any requested providers available on `PATH`: `pi`, `codex`, and/or `cursor-agent`.
+3. Authentication completed through each provider's own CLI. For Cursor, run `cursor-agent login`.
 
-Agent Whiteboard does not accept or store provider credentials. Pi and Codex use their effective native user configuration unchanged.
+Agent Whiteboard does not accept or store provider credentials. Providers use their effective native user configuration unchanged. For Cursor, Agent Whiteboard never invokes ACP authentication, opens a login browser, receives credentials, or copies or edits Cursor authentication, configuration, or shell state.
 
-If provider executables are installed elsewhere, pass one or both paths when starting the broker:
+If provider executables are installed elsewhere, pass their paths when starting the broker:
 
 ```sh
 agent-whiteboard agent serve \
   --pi-executable /path/to/pi \
-  --codex-executable /path/to/codex
+  --codex-executable /path/to/codex \
+  --cursor-executable /path/to/cursor-agent
 ```
 
-A missing provider does not stop the broker or the other provider from working.
+Each selector uses its explicit flag first, then its matching non-empty environment variable, then default `PATH` discovery. Cursor's default executable is exactly `cursor-agent`; a generic executable named `agent` is accepted only through `--cursor-executable` or `AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE`. An explicitly supplied empty executable flag is invalid. A missing provider does not stop the broker or other providers from working.
 
 ### Trust the publishing origin
 
@@ -176,7 +177,7 @@ If no broker exists, run it in the foreground:
 agent-whiteboard agent serve
 ```
 
-It listens on literal IPv4 loopback and resolves Pi and Codex independently from `PATH`.
+It listens on literal IPv4 loopback and independently resolves `pi`, `codex`, and exactly `cursor-agent` from `PATH`.
 
 On macOS, install and start it as a managed per-user LaunchAgent instead only when persistent operation is wanted:
 
@@ -185,7 +186,7 @@ agent-whiteboard agent serve --daemon
 agent-whiteboard agent daemon status
 ```
 
-The installer writes a standalone runtime `PATH` into the LaunchAgent. It preserves safe absolute entries from the current shell and adds common system, Homebrew, Bun, asdf, mise, Volta, and Nix locations. It does not source `.zshrc` or another shell startup file. When using NVM, `nix develop`, or another version-specific environment, activate the intended runtime before installation. Rerun `agent-whiteboard agent serve --daemon` after changing or removing that runtime so the plist is regenerated and reloaded.
+The installer records resolved Pi, Codex, and Cursor executable paths plus a standalone runtime `PATH` in the LaunchAgent; it does not persist provider credentials or configuration. The `PATH` preserves safe absolute entries from the current shell and adds common system, Homebrew, Bun, asdf, mise, Volta, and Nix locations. It does not source `.zshrc` or another shell startup file. When using NVM, `nix develop`, or another version-specific environment, activate the intended runtime before installation. Rerun `agent-whiteboard agent serve --daemon` after changing or removing that runtime so the plist is regenerated and reloaded.
 
 Other daemon operations are:
 
@@ -201,7 +202,7 @@ Managed daemon operations are not available on Linux; keep `agent serve` running
 
 1. Open an Agent Whiteboard capability URL.
 2. Open **Page Agent**.
-3. Select Pi or Codex.
+3. Select Pi, Codex, or Cursor.
 4. Review the page context disclosed by the viewer.
 5. Choose **Connect**.
 6. Write a message or add page content to the composer, then send it.
@@ -217,7 +218,7 @@ Readers can add more precise context without copying and pasting:
 - In trusted HTML, use **+ Add** or the **Components** chooser for eligible sections, images, charts, tables, code, quotes, and explicitly declared components.
 - Add private PNG, JPEG, GIF, or WebP attachments from the composer.
 
-Page Agent also exposes the provider's supported model and reasoning controls, native skills through `$`, manual `/compact`, streaming activity, interruption, archives, and supported approval or elicitation requests. Pi and Codex keep independent conversations for the same whiteboard.
+Page Agent exposes each provider's supported subset of model and reasoning controls, streaming activity, interruption, archives, and approval or elicitation requests. Pi and Codex may also expose native skills and manual `/compact`; Cursor does not. Cursor projects Model from standard ACP configuration options, fixes Effort to Default and Speed to Standard, and derives image availability from ACP. Cursor archives can be listed and restored, but native archive deletion is unavailable. All three providers keep independent conversations for the same whiteboard.
 
 ### Troubleshoot reader setup
 
@@ -225,7 +226,7 @@ Page Agent also exposes the provider's supported model and reasoning controls, n
 | --- | --- |
 | Broker unavailable | Check existing daemon/foreground state and verify that the `agent-whiteboard` process owns the configured loopback listener before starting another broker. Do not use publishing `/healthz` or `/readyz` routes on port `8568`. |
 | Origin not trusted | Run the exact `agent-whiteboard agent trust add https://…` command for the publishing origin. |
-| Provider unavailable | Confirm `pi` or `codex` is on `PATH` and authenticated through its native CLI. For a managed daemon, activate the intended NVM/Nix environment and rerun `agent-whiteboard agent serve --daemon`. |
+| Provider unavailable | Confirm `pi`, `codex`, or exactly `cursor-agent` is on `PATH` and authenticated through its native CLI (`cursor-agent login` for Cursor). Cursor also requires negotiated ACP v1 with stable `session/list` and `session/load`; missing or incompatible capabilities fail closed. For a generic `agent` executable, configure `--cursor-executable` explicitly. For a managed daemon, activate the intended NVM/Nix environment and rerun `agent-whiteboard agent serve --daemon`. |
 | Browser cannot reach loopback | Allow Local Network Access when prompted by the browser. |
 | Incompatible local API | Update the publishing server and reader CLI together, then restart the broker. |
 
@@ -238,7 +239,7 @@ Agent Whiteboard closes that gap:
 1. An agent publishes from the CLI or HTTP API.
 2. The server returns a capability URL with an explicit lifetime.
 3. A reader opens a bundled, self-contained viewer.
-4. If Page Agent is enabled, the reader can continue the work with a local Pi or Codex session using exact page context.
+4. If Page Agent is enabled, the reader can continue the work with a local Pi, Codex, or Cursor session using exact page context.
 
 ## What you can publish
 
@@ -279,9 +280,9 @@ Agent Whiteboard server ── capability URL ──► Browser viewer
                                                    │ explicit reader consent
                                                    ▼
                                           Local Page Agent broker
-                                               │         │
-                                               ▼         ▼
-                                              Pi       Codex
+                                             │      │       │
+                                             ▼      ▼       ▼
+                                            Pi    Codex   Cursor
 ```
 
 Public resources live on the self-hosted server. The optional Page Agent broker lives only on the reader's machine and accepts authorized browser origins over literal loopback. Published content and creator context remain untrusted provider input; each provider's native tools, approvals, and sandbox remain authoritative.
@@ -350,7 +351,7 @@ Keep these boundaries in mind:
 - Creator context is visible to anyone holding the capability and is not a hidden channel.
 - Markdown is sanitized; standalone HTML is trusted active content with a stricter sandboxed delivery model.
 - A local `127.0.0.1` publishing origin is deliberately trusted by the Page Agent broker without an explicit trust-list entry.
-- Whiteboard content is untrusted model input. Native provider tools, approval settings, sandbox, project trust, and extensions remain authoritative.
+- Whiteboard content is untrusted model input. Native provider tools, approval settings, sandbox, project trust, and extensions remain authoritative; origin trust is not a provider sandbox.
 - Agent Whiteboard does not provide a content-only provider sandbox or per-whiteboard filesystem boundary.
 
 Read [Security](docs/security.md) for the complete browser, capability, HTML, Page Agent, and provider threat model.

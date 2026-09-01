@@ -24,7 +24,9 @@ import {
   THEME_STORAGE_KEY,
   agentDrawerLayoutMode,
   applyAgentEvent,
+  actionGuidance,
   bootViewer,
+  browserErrorText,
   clampAgentDrawerWidth,
   createAgentCommand,
   createAgentDrawer,
@@ -449,7 +451,7 @@ const cursorSettings = { model: "cursor-standard", effort: "default", speed: "st
 
 function piSnapshotEvent({ event = {}, payload = {} } = {}) {
   return agentEvent("snapshot", {
-    lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true,
+    lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true, supports_archive_delete: true,
     settings_state: "verified", effective_settings: piSettings, catalog: piCatalog,
     skills_state: "ready", skills: [], max_selected_skills: 1, supports_compact: true,
     busy_policy: "queue", composer_admission: "submit", ...payload,
@@ -464,6 +466,7 @@ function codexSnapshotEvent({ settings = codexSolSettings, event = {}, payload =
     context_state: "accepted",
     active_work: null,
     supports_images: model?.supports_images ?? false,
+    supports_archive_delete: true,
     settings_state: "verified",
     effective_settings: settings,
     catalog: codexCatalog,
@@ -515,6 +518,19 @@ describe("local agent source and commands", () => {
     const id = generateAgentID(cryptoObject);
     expect(id).toMatch(/^[A-Za-z0-9_-]{32}$/u);
     expect(cryptoObject.getRandomValues.mock.calls[0][0]).toHaveLength(24);
+  });
+
+  test("uses provider-specific authentication guidance without changing generic provider behavior", () => {
+    const cursorGuidance = actionGuidance("provider_login", document, "cursor");
+    expect(cursorGuidance).toContain("cursor-agent login");
+    expect(cursorGuidance).toMatch(/terminal/iu);
+    expect(browserErrorText("authentication_required", document, "fallback", "cursor")).toContain(cursorGuidance);
+
+    for (const provider of ["pi", "codex"]) {
+      const guidance = actionGuidance("provider_login", document, provider);
+      expect(guidance).toContain("provider-native login");
+      expect(guidance).not.toContain("cursor-agent");
+    }
   });
 
   test.each([

@@ -249,7 +249,8 @@ func TestCursorRealComponentWorkflowPromptModelAndNewHandoff(t *testing.T) {
 	require.NotContains(t, evidence, creator)
 	require.NotContains(t, evidence, "fixture-")
 	require.Contains(t, evidence, `"model_option":"cursor-large"`)
-	require.Contains(t, evidence, `"broker_turn_id":"`+turnID+`"`)
+	require.Contains(t, evidence, `"provider_envelope_valid":true`)
+	require.NotContains(t, evidence, turnID)
 }
 
 func TestCursorPermissionResponseThroughAppWebSocket(t *testing.T) {

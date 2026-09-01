@@ -547,6 +547,7 @@ const ERROR_DEFINITIONS = {
   replay_window_unavailable: ["The requested replay window is no longer available.", "reload_conversation"],
   state_repair_failed: ["The broker could not repair the saved conversation state.", "try_again"],
   archive_delete_retained: ["The archive was retained because provider deletion did not complete.", "retry_archive_delete"],
+  archive_delete_unsupported: ["Archive deletion is unavailable for this provider.", "none"],
   broker_shutting_down: ["The local agent broker is shutting down.", "retry_connection"],
   provider_protocol_failure: ["The provider protocol operation failed.", "restart_provider"],
   provider_malformed_stream: ["The provider returned a malformed event stream.", "restart_provider"],
@@ -1772,7 +1773,7 @@ export function createAgentTransport({
   };
 }
 
-function actionGuidance(action, doc) {
+export function actionGuidance(action, doc, selectedProvider = "pi") {
   const origin = doc.location?.origin ?? "this HTTPS origin";
   const guidance = {
     none: "",
@@ -1782,7 +1783,9 @@ function actionGuidance(action, doc) {
     trust_origin: `Trust this exact origin with: agent-whiteboard agent trust add ${origin}`,
     update_broker: "Update agent-whiteboard so the browser and broker API versions match.",
     install_provider: "Install the selected provider executable, then restart the broker.",
-    provider_login: "Complete provider-native login in a terminal, then try again.",
+    provider_login: selectedProvider === "cursor"
+      ? "Run cursor-agent login in a terminal, then try again."
+      : "Complete provider-native login in a terminal, then try again.",
     configure_model: "Configure a usable default model for the selected provider, then try again.",
     try_again: "Try the operation again; if it still fails, restart the broker.",
     restart_provider: "Restart the local agent broker before trying again.",
@@ -1799,10 +1802,10 @@ function actionGuidance(action, doc) {
   return guidance[action] ?? "";
 }
 
-function browserErrorText(code, doc, fallback) {
+export function browserErrorText(code, doc, fallback, selectedProvider = "pi") {
   const definition = ERROR_DEFINITIONS[code];
   if (!definition) return fallback;
-  const guidance = actionGuidance(definition[1], doc);
+  const guidance = actionGuidance(definition[1], doc, selectedProvider);
   return guidance ? `${definition[0]} ${guidance}` : definition[0];
 }
 
@@ -3360,7 +3363,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     } catch (error) {
       if (!stillOwned()) return;
       item.status = "failed";
-      item.error = browserErrorText(error?.code, doc, "Could not prepare this image.");
+      item.error = browserErrorText(error?.code, doc, "Could not prepare this image.", selectedProvider);
       item.retryable = error?.code === "image_storage_failure" || !error?.code;
     }
     if (owner === controller) renderDraftAttachments();
@@ -3729,7 +3732,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           error: "Something went wrong",
         };
         const title = item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
-        const guidanceText = actionGuidance(item.action, doc);
+        const guidanceText = actionGuidance(item.action, doc, selectedProvider);
         const text = guidanceText ? `${item.text} ${guidanceText}` : item.text;
         const tone = item.activity === "error" ? "error" : item.activity === "blocked" ? "warning" : "neutral";
         const icon = item.activity === "error" ? "error" : item.activity === "blocked" ? "blocked" : item.activity === "retry" ? "retry" : "info";
@@ -3752,7 +3755,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         const activityLabel = item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
         const summary = doc.createElement("summary"); summary.textContent = activityLabel ?? "Activity";
         const content = doc.createElement("p");
-        const guidanceText = actionGuidance(item.action, doc);
+        const guidanceText = actionGuidance(item.action, doc, selectedProvider);
         content.textContent = guidanceText ? `${item.text} ${guidanceText}` : item.text;
         details.append(summary, content); timeline.append(details);
       }
@@ -3995,7 +3998,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       if (target.handoffCommandID === command.command_id) target.handoffCommandID = null;
       if (target === controller) {
         loadController(target);
-        showTransientStatus("Action failed", "Retry", browserErrorText(error.code, doc, "The local broker is unavailable."));
+        showTransientStatus("Action failed", "Retry", browserErrorText(error.code, doc, "The local broker is unavailable.", selectedProvider));
       }
     }
     return command;
@@ -4008,7 +4011,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       await target.transport.send(command);
     } catch (error) {
       if (error?.code) target.state.pendingCommandIDs.delete(command.command_id);
-      if (target === controller) showTransientStatus("Action failed", "Retry", browserErrorText(error.code, doc, "The local broker is unavailable."));
+      if (target === controller) showTransientStatus("Action failed", "Retry", browserErrorText(error.code, doc, "The local broker is unavailable.", selectedProvider));
     }
     return command;
   }
@@ -4038,7 +4041,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       }
       if (target === controller) {
         loadController(target);
-        showTransientStatus("Response failed", "Retry", browserErrorText(error.code, doc, "The response outcome is unknown; reconnect before responding again."));
+        showTransientStatus("Response failed", "Retry", browserErrorText(error.code, doc, "The response outcome is unknown; reconnect before responding again.", selectedProvider));
       }
     }
     if (target === controller) render();
@@ -4171,7 +4174,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       if (target === controller) {
         brokerState = "offline";
         brokerCode = error?.code ?? "broker_unavailable";
-        brokerGuidance = `Unable to connect: ${browserErrorText(error.code, doc, "check the broker, port, Local Network Access, and trust.")} No page content has been shared.`;
+        brokerGuidance = `Unable to connect: ${browserErrorText(error.code, doc, "check the broker, port, Local Network Access, and trust.", selectedProvider)} No page content has been shared.`;
         render();
       }
     }
@@ -4300,7 +4303,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       if (target === controller) {
         loadController(target);
         render();
-        showTransientStatus("Send failed", "Retry", browserErrorText(error.code, doc, "the delivery outcome is unknown; reconnect before trying again."));
+        showTransientStatus("Send failed", "Retry", browserErrorText(error.code, doc, "the delivery outcome is unknown; reconnect before trying again.", selectedProvider));
       }
     }
   });
