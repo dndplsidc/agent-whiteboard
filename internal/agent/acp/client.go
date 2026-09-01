@@ -102,36 +102,47 @@ type result struct {
 	value json.RawMessage
 	err   error
 }
-type handlerJob struct {
-	request   Request
-	responder *Responder
-	retained  int
+type wireItem struct {
+	msg      envelope
+	err      error
+	retained int
+	deadline time.Time
+}
+
+type handlerBarrier struct {
+	client   *Client
+	deadline time.Time
+	done     chan struct{}
+	mu       sync.Mutex
+	settled  bool
+	onExpiry func()
+	onSettle func()
 }
 
 type Client struct {
-	child             common.ManagedProcess
-	input             io.WriteCloser
-	opts              Options
-	writeToken        chan struct{}
-	mu                sync.Mutex
-	nextID            int64
-	pending           map[int64]chan result
-	pendingBytes      int
-	inbound           map[string]*Responder
-	closed            bool
-	terminal          error
-	done              chan struct{}
-	waitResult        chan error
-	stdoutDone        chan struct{}
-	stderrDone        chan struct{}
-	termOnce          sync.Once
-	termDone          chan struct{}
-	termErr           error
-	handlerCtx        context.Context
-	cancelHandlers    context.CancelFunc
-	handlerSlots      chan struct{}
-	notificationQueue chan handlerJob
-	requestQueue      chan handlerJob
+	child            common.ManagedProcess
+	input            io.WriteCloser
+	opts             Options
+	writeToken       chan struct{}
+	mu               sync.Mutex
+	nextID           int64
+	pending          map[int64]chan result
+	pendingBytes     int
+	inbound          map[string]*Responder
+	closed           bool
+	terminal         error
+	done             chan struct{}
+	waitResult       chan error
+	stdoutDone       chan struct{}
+	stderrDone       chan struct{}
+	termOnce         sync.Once
+	termDone         chan struct{}
+	termErr          error
+	handlerCtx       context.Context
+	cancelHandlers   context.CancelFunc
+	wireQueue        chan wireItem
+	handlerSlots     chan struct{}
+	handlerAdmission chan struct{}
 }
 
 type responderState uint8
@@ -142,15 +153,24 @@ const (
 	responderSettled
 )
 
+type ResponderOutcome struct {
+	Delivery Delivery
+	Expired  bool
+	Settled  bool
+}
+
 type Responder struct {
-	client       *Client
-	id           json.RawMessage
-	key          string
-	retained     int
-	mu           sync.Mutex
-	state        responderState
-	stateChanged chan struct{}
-	done         chan struct{}
+	client        *Client
+	id            json.RawMessage
+	key           string
+	retained      int
+	mu            sync.Mutex
+	state         responderState
+	stateChanged  chan struct{}
+	done          chan struct{}
+	outcome       ResponderOutcome
+	deadline      time.Time
+	expiryClaimed bool
 }
 
 func New(child common.ManagedProcess, o Options) (*Client, error) {
@@ -203,15 +223,14 @@ func New(child common.ManagedProcess, o Options) (*Client, error) {
 		return nil, errors.New("invalid ACP options")
 	}
 	handlerCtx, cancelHandlers := context.WithCancel(context.Background())
-	c := &Client{child: child, input: child.Input(), opts: o, writeToken: make(chan struct{}, 1), pending: map[int64]chan result{}, inbound: map[string]*Responder{}, done: make(chan struct{}), waitResult: make(chan error, 1), stdoutDone: make(chan struct{}), stderrDone: make(chan struct{}), termDone: make(chan struct{}), handlerCtx: handlerCtx, cancelHandlers: cancelHandlers, handlerSlots: make(chan struct{}, o.MaxHandlerConcurrency), notificationQueue: make(chan handlerJob, o.MaxHandlerQueue), requestQueue: make(chan handlerJob, o.MaxHandlerQueue)}
+	c := &Client{child: child, input: child.Input(), opts: o, writeToken: make(chan struct{}, 1), pending: map[int64]chan result{}, inbound: map[string]*Responder{}, done: make(chan struct{}), waitResult: make(chan error, 1), stdoutDone: make(chan struct{}), stderrDone: make(chan struct{}), termDone: make(chan struct{}), handlerCtx: handlerCtx, cancelHandlers: cancelHandlers, wireQueue: make(chan wireItem, o.MaxHandlerQueue), handlerSlots: make(chan struct{}, o.MaxHandlerConcurrency)}
+	c.handlerAdmission = make(chan struct{})
+	close(c.handlerAdmission)
 	c.writeToken <- struct{}{}
 	go func() { defer close(c.stdoutDone); c.readLoop(child.Output()) }()
 	go func() { defer close(c.stderrDone); _, _ = io.Copy(io.Discard, child.Errors()) }()
 	go func() { err := child.Wait(); c.waitResult <- err; c.fail(ErrChildExited) }()
-	go c.notificationWorker()
-	for i := 0; i < o.MaxHandlerConcurrency; i++ {
-		go c.requestWorker()
-	}
+	go c.coordinateWire()
 	return c, nil
 }
 
@@ -344,8 +363,12 @@ func (c *Client) writeFrame(ctx context.Context, frame []byte) (Delivery, error)
 	case got := <-ch:
 		d := classify(got.n)
 		if got.err != nil {
-			c.fail(got.err)
-			return d, got.err
+			cause := got.err
+			if ctx.Err() != nil {
+				cause = ctx.Err()
+			}
+			c.fail(cause)
+			return d, cause
 		}
 		return d, nil
 	case <-ctx.Done():
@@ -380,44 +403,233 @@ func (c *Client) readLoop(reader io.Reader) {
 			}
 			return
 		}
+		item := wireItem{retained: len(line), deadline: time.Now().Add(c.opts.HandlerTimeout)}
 		if len(line) == 0 || !json.Valid(line) || duplicateJSONKey(line) {
-			c.fail(ErrMalformed)
-			return
+			item.err = ErrMalformed
+		} else if json.Unmarshal(line, &item.msg) != nil || item.msg.JSONRPC != "2.0" || len(item.msg.Method) > c.opts.MaxMethodBytes || len(item.msg.ID) > c.opts.MaxIDBytes {
+			item.err = ErrMalformed
 		}
-		var msg envelope
-		if json.Unmarshal(line, &msg) != nil || msg.JSONRPC != "2.0" || len(msg.Method) > c.opts.MaxMethodBytes || len(msg.ID) > c.opts.MaxIDBytes {
-			c.fail(ErrMalformed)
-			return
-		}
-		switch {
-		case msg.Method != "" && len(msg.ID) > 0:
-			if msg.Result != nil || msg.Error != nil || !c.dispatchRequest(msg, len(line)) {
-				if msg.Result != nil || msg.Error != nil {
-					c.fail(ErrMalformed)
-				}
-				return
-			}
-		case msg.Method != "" && len(msg.ID) == 0:
-			if msg.Result != nil || msg.Error != nil {
-				c.fail(ErrMalformed)
-				return
-			}
-			if !c.dispatchNotification(msg, len(line)) {
-				return
-			}
-		case msg.Method == "" && len(msg.ID) > 0:
-			if msg.Params != nil {
-				c.fail(ErrMalformed)
-				return
-			}
-			if !c.handleResponse(msg) {
-				return
-			}
-		default:
-			c.fail(ErrMalformed)
+		if !c.enqueueWire(item) {
 			return
 		}
 	}
+}
+
+func (c *Client) enqueueWire(item wireItem) bool {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return false
+	}
+	if c.pendingBytes+item.retained > c.opts.MaxRetainedBytes {
+		c.mu.Unlock()
+		c.fail(ErrRetainedLimit)
+		return false
+	}
+	c.pendingBytes += item.retained
+	c.mu.Unlock()
+	select {
+	case c.wireQueue <- item:
+		return true
+	default:
+		c.releaseHandlerBytes(item.retained)
+		c.fail(ErrPendingLimit)
+		return false
+	}
+}
+
+func (c *Client) coordinateWire() {
+	barriers := make([]*handlerBarrier, 0, c.opts.MaxHandlerQueue)
+	var notificationTail *handlerBarrier
+	for {
+		barriers = pruneBarriers(barriers)
+		if len(barriers) >= c.opts.MaxHandlerQueue {
+			if !c.waitBarrier(barriers[0]) {
+				return
+			}
+			continue
+		}
+		select {
+		case <-c.done:
+			return
+		case item := <-c.wireQueue:
+			if item.err != nil {
+				if !c.waitBarriers(barriers) {
+					return
+				}
+				c.releaseHandlerBytes(item.retained)
+				c.fail(item.err)
+				return
+			}
+			msg := item.msg
+			switch {
+			case msg.Method != "" && len(msg.ID) > 0:
+				if msg.Result != nil || msg.Error != nil {
+					if !c.waitBarriers(barriers) {
+						return
+					}
+					c.releaseHandlerBytes(item.retained)
+					c.fail(ErrMalformed)
+					return
+				}
+				barrier, ok := c.dispatchRequest(msg, item.retained, item.deadline)
+				if !ok {
+					return
+				}
+				barriers = append(barriers, barrier)
+			case msg.Method != "" && len(msg.ID) == 0:
+				if msg.Result != nil || msg.Error != nil {
+					if !c.waitBarriers(barriers) {
+						return
+					}
+					c.releaseHandlerBytes(item.retained)
+					c.fail(ErrMalformed)
+					return
+				}
+				barrier := c.dispatchNotification(msg, item.retained, item.deadline, notificationTail)
+				notificationTail = barrier
+				barriers = append(barriers, barrier)
+			case msg.Method == "" && len(msg.ID) > 0:
+				if !c.waitBarriers(barriers) {
+					return
+				}
+				barriers = barriers[:0]
+				if msg.Params != nil {
+					c.releaseHandlerBytes(item.retained)
+					c.fail(ErrMalformed)
+					return
+				}
+				ok := c.handleResponse(msg)
+				c.releaseHandlerBytes(item.retained)
+				if !ok {
+					return
+				}
+			default:
+				if !c.waitBarriers(barriers) {
+					return
+				}
+				c.releaseHandlerBytes(item.retained)
+				c.fail(ErrMalformed)
+				return
+			}
+		}
+	}
+}
+
+func pruneBarriers(barriers []*handlerBarrier) []*handlerBarrier {
+	for len(barriers) > 0 {
+		select {
+		case <-barriers[0].done:
+			barriers = barriers[1:]
+		default:
+			return barriers
+		}
+	}
+	return barriers
+}
+
+func (c *Client) waitBarrier(barrier *handlerBarrier) bool {
+	select {
+	case <-barrier.done:
+		select {
+		case <-c.done:
+			return false
+		default:
+			return true
+		}
+	case <-c.done:
+		return false
+	}
+}
+func (c *Client) waitBarriers(barriers []*handlerBarrier) bool {
+	for _, barrier := range barriers {
+		if !c.waitBarrier(barrier) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) newBarrier(deadline time.Time, onExpiry, onSettle func()) *handlerBarrier {
+	b := &handlerBarrier{client: c, deadline: deadline, done: make(chan struct{}), onExpiry: onExpiry, onSettle: onSettle}
+	go func() {
+		t := time.NewTimer(time.Until(deadline))
+		defer t.Stop()
+		select {
+		case <-t.C:
+			b.finish(time.Time{})
+		case <-b.done:
+		case <-c.done:
+		}
+	}()
+	return b
+}
+
+func (b *handlerBarrier) returned() { b.finish(time.Now()) }
+func (b *handlerBarrier) finish(completedAt time.Time) {
+	b.mu.Lock()
+	if b.settled {
+		b.mu.Unlock()
+		return
+	}
+	onTime := !completedAt.IsZero() && completedAt.Before(b.deadline)
+	b.settled = true
+	onExpiry, onSettle := b.onExpiry, b.onSettle
+	if onTime {
+		close(b.done)
+	}
+	b.mu.Unlock()
+	if onSettle != nil {
+		onSettle()
+	}
+	if !onTime {
+		if onExpiry != nil {
+			onExpiry()
+		}
+		b.client.fail(context.DeadlineExceeded)
+		close(b.done)
+	}
+}
+
+func (c *Client) runHandler(barrier *handlerBarrier, previous *handlerBarrier, request Request) {
+	previousAdmission := c.handlerAdmission
+	admitted := make(chan struct{})
+	c.handlerAdmission = admitted
+	go func() {
+		<-previousAdmission
+		if previous != nil && !c.waitBarrier(previous) {
+			close(admitted)
+			return
+		}
+		select {
+		case c.handlerSlots <- struct{}{}:
+			close(admitted)
+		case <-barrier.done:
+			close(admitted)
+			return
+		case <-c.done:
+			close(admitted)
+			return
+		}
+		select {
+		case <-barrier.done:
+			<-c.handlerSlots
+			return
+		default:
+		}
+		if !time.Now().Before(barrier.deadline) {
+			<-c.handlerSlots
+			barrier.finish(time.Time{})
+			return
+		}
+		ctx, cancel := context.WithDeadline(c.handlerCtx, barrier.deadline)
+		func() {
+			defer barrier.returned()
+			c.opts.Handler(ctx, request)
+		}()
+		cancel()
+		<-c.handlerSlots
+	}()
 }
 
 func readBoundedLine(br *bufio.Reader, max int) ([]byte, error) {
@@ -443,96 +655,17 @@ func readBoundedLine(br *bufio.Reader, max int) ([]byte, error) {
 	line = bytes.TrimSuffix(line, []byte{'\r'})
 	return line, nil
 }
-func (c *Client) dispatchNotification(msg envelope, retained int) bool {
+
+func (c *Client) dispatchNotification(msg envelope, retained int, deadline time.Time, previous *handlerBarrier) *handlerBarrier {
+	barrier := c.newBarrier(deadline, nil, func() { c.releaseHandlerBytes(retained) })
 	if c.opts.Handler == nil {
-		return true
+		barrier.returned()
+		return barrier
 	}
-	c.mu.Lock()
-	if c.closed || c.pendingBytes+retained > c.opts.MaxRetainedBytes {
-		c.mu.Unlock()
-		c.fail(ErrRetainedLimit)
-		return false
-	}
-	c.pendingBytes += retained
-	c.mu.Unlock()
-	job := handlerJob{request: Request{Method: msg.Method, Params: clone(msg.Params)}, retained: retained}
-	select {
-	case c.notificationQueue <- job:
-		return true
-	default:
-		c.releaseHandlerBytes(retained)
-		c.fail(ErrPendingLimit)
-		return false
-	}
+	c.runHandler(barrier, previous, Request{Method: msg.Method, Params: clone(msg.Params)})
+	return barrier
 }
 
-func (c *Client) notificationWorker() {
-	for {
-		select {
-		case <-c.done:
-			return
-		case job := <-c.notificationQueue:
-			if !c.acquireHandler() {
-				c.releaseHandlerBytes(job.retained)
-				return
-			}
-			ctx, cancel := context.WithTimeout(c.handlerCtx, c.opts.HandlerTimeout)
-			c.opts.Handler(ctx, job.request)
-			cancel()
-			c.releaseHandler()
-			c.releaseHandlerBytes(job.retained)
-		}
-	}
-}
-func (c *Client) requestWorker() {
-	for {
-		select {
-		case <-c.done:
-			return
-		case job := <-c.requestQueue:
-			if !c.acquireHandler() {
-				return
-			}
-			ctx, cancel := context.WithTimeout(c.handlerCtx, c.opts.HandlerTimeout)
-			if c.opts.Handler == nil {
-				_, _ = job.responder.Respond(ctx, nil, &RPCError{Code: -32601, Message: "method not found"})
-				cancel()
-				c.releaseHandler()
-				continue
-			}
-			job.request.Responder = job.responder
-			go func() { defer c.releaseHandler(); c.opts.Handler(ctx, job.request) }()
-			select {
-			case <-job.responder.done:
-			case <-ctx.Done():
-				responseCtx, responseCancel := context.WithTimeout(context.Background(), c.opts.FinalPeriod)
-				_, _ = job.responder.respond(responseCtx, nil, &RPCError{Code: -32603, Message: "request expired"}, true)
-				responseCancel()
-			}
-			cancel()
-		}
-	}
-}
-func (c *Client) acquireHandler() bool {
-	select {
-	case <-c.done:
-		return false
-	default:
-	}
-	select {
-	case c.handlerSlots <- struct{}{}:
-		select {
-		case <-c.done:
-			c.releaseHandler()
-			return false
-		default:
-			return true
-		}
-	case <-c.done:
-		return false
-	}
-}
-func (c *Client) releaseHandler() { <-c.handlerSlots }
 func (c *Client) releaseHandlerBytes(n int) {
 	c.mu.Lock()
 	if c.pendingBytes >= n {
@@ -540,42 +673,84 @@ func (c *Client) releaseHandlerBytes(n int) {
 	}
 	c.mu.Unlock()
 }
-func (c *Client) dispatchRequest(msg envelope, retained int) bool {
+
+func (c *Client) dispatchRequest(msg envelope, retained int, deadline time.Time) (*handlerBarrier, bool) {
 	key, valid := requestIDKey(msg.ID)
 	if !valid {
+		c.releaseHandlerBytes(retained)
 		c.fail(ErrMalformed)
-		return false
+		return nil, false
 	}
 	c.mu.Lock()
-	if c.closed || len(c.inbound) >= c.opts.MaxInboundPending || c.pendingBytes+retained > c.opts.MaxRetainedBytes {
+	if c.closed || len(c.inbound) >= c.opts.MaxInboundPending {
 		c.mu.Unlock()
+		c.releaseHandlerBytes(retained)
 		c.fail(ErrPendingLimit)
-		return false
+		return nil, false
 	}
 	if _, ok := c.inbound[key]; ok {
 		c.mu.Unlock()
+		c.releaseHandlerBytes(retained)
 		c.fail(ErrDuplicateID)
-		return false
+		return nil, false
 	}
-	r := &Responder{client: c, id: clone(msg.ID), key: key, retained: retained, stateChanged: make(chan struct{}), done: make(chan struct{})}
+	r := &Responder{client: c, id: clone(msg.ID), key: key, retained: retained, stateChanged: make(chan struct{}), done: make(chan struct{}), deadline: deadline}
 	c.inbound[key] = r
-	c.pendingBytes += retained
 	c.mu.Unlock()
-	job := handlerJob{request: Request{ID: clone(msg.ID), Method: msg.Method, Params: clone(msg.Params)}, responder: r, retained: retained}
-	select {
-	case c.requestQueue <- job:
-		return true
-	default:
-		c.releaseInbound(key)
-		c.fail(ErrPendingLimit)
-		return false
+	barrier := c.newBarrier(deadline, r.expire, nil)
+	request := Request{ID: clone(msg.ID), Method: msg.Method, Params: clone(msg.Params), Responder: r}
+	if c.opts.Handler == nil {
+		barrier.returned()
+		go func() {
+			_, _ = r.Respond(context.Background(), nil, &RPCError{Code: -32601, Message: "method not found"})
+		}()
+		return barrier, true
 	}
-}
-func (r *Responder) Respond(ctx context.Context, value any, rpcErr *RPCError) (Delivery, error) {
-	return r.respond(ctx, value, rpcErr, false)
+	c.runHandler(barrier, nil, request)
+	go func() {
+		t := time.NewTimer(time.Until(deadline))
+		defer t.Stop()
+		select {
+		case <-t.C:
+			r.expire()
+		case <-r.done:
+		case <-c.done:
+		}
+	}()
+	return barrier, true
 }
 
-func (r *Responder) respond(ctx context.Context, value any, rpcErr *RPCError, waitInFlight bool) (Delivery, error) {
+func (r *Responder) expire() {
+	r.mu.Lock()
+	if r.state == responderOpen {
+		r.expiryClaimed = true
+	}
+	r.mu.Unlock()
+	responseCtx, cancel := context.WithTimeout(context.Background(), r.client.opts.FinalPeriod)
+	delivery, err := r.respond(responseCtx, nil, &RPCError{Code: -32603, Message: "request expired"}, true, true)
+	cancel()
+	if errors.Is(err, ErrAlreadyResponded) {
+		outcome := r.Outcome()
+		if outcome.Settled && outcome.Delivery == Complete {
+			return
+		}
+	}
+	if delivery != Complete {
+		r.client.fail(context.DeadlineExceeded)
+	}
+}
+
+func (r *Responder) Done() <-chan struct{} { return r.done }
+func (r *Responder) Outcome() ResponderOutcome {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.outcome
+}
+func (r *Responder) Respond(ctx context.Context, value any, rpcErr *RPCError) (Delivery, error) {
+	return r.respond(ctx, value, rpcErr, false, false)
+}
+
+func (r *Responder) respond(ctx context.Context, value any, rpcErr *RPCError, waitInFlight, expired bool) (Delivery, error) {
 	if rpcErr != nil && value != nil {
 		return NotWritten, ErrMalformed
 	}
@@ -604,13 +779,19 @@ func (r *Responder) respond(ctx context.Context, value any, rpcErr *RPCError, wa
 
 	for {
 		r.mu.Lock()
+		if !expired && !time.Now().Before(r.deadline) {
+			r.expiryClaimed = true
+			r.mu.Unlock()
+			go r.expire()
+			return NotWritten, ErrAlreadyResponded
+		}
 		switch r.state {
 		case responderOpen:
 			r.state = responderInFlight
 			r.signalStateChangeLocked()
 			r.mu.Unlock()
 			delivery, writeErr := r.client.writeFrame(ctx, frame)
-			r.finishAttempt(delivery)
+			r.finishAttempt(delivery, expired)
 			return delivery, writeErr
 		case responderSettled:
 			r.mu.Unlock()
@@ -632,16 +813,17 @@ func (r *Responder) respond(ctx context.Context, value any, rpcErr *RPCError, wa
 	}
 }
 
-func (r *Responder) finishAttempt(delivery Delivery) {
+func (r *Responder) finishAttempt(delivery Delivery, expired bool) {
 	closed := r.client.isClosed()
 	release := false
 	r.mu.Lock()
 	if r.state == responderInFlight {
-		if delivery == NotWritten && !closed {
+		if delivery == NotWritten && !closed && !expired {
 			r.state = responderOpen
 			r.signalStateChangeLocked()
 		} else {
 			r.state = responderSettled
+			r.outcome = ResponderOutcome{Delivery: delivery, Expired: expired || r.expiryClaimed, Settled: true}
 			r.signalStateChangeLocked()
 			close(r.done)
 			release = true
@@ -655,8 +837,9 @@ func (r *Responder) finishAttempt(delivery Delivery) {
 
 func (r *Responder) settle() {
 	r.mu.Lock()
-	if r.state != responderSettled {
+	if r.state == responderOpen {
 		r.state = responderSettled
+		r.outcome = ResponderOutcome{Delivery: NotWritten, Expired: r.expiryClaimed, Settled: true}
 		r.signalStateChangeLocked()
 		close(r.done)
 	}
@@ -731,14 +914,15 @@ func (c *Client) fail(err error) {
 		c.terminal = err
 		c.cancelHandlers()
 		pending := c.pending
+		inbound := c.inbound
 		c.pending = map[int64]chan result{}
+		c.inbound = map[string]*Responder{}
 		c.pendingBytes = 0
 		close(c.done)
-		for _, r := range c.inbound {
+		c.mu.Unlock()
+		for _, r := range inbound {
 			r.settle()
 		}
-		c.inbound = map[string]*Responder{}
-		c.mu.Unlock()
 		for _, w := range pending {
 			w <- result{err: err}
 		}

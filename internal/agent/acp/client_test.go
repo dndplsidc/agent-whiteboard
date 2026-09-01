@@ -32,6 +32,264 @@ func (m marshalSignal) MarshalJSON() ([]byte, error) {
 	return []byte(`{"ok":true}`), nil
 }
 
+func TestResponseWaitsForWireEarlierNotificationHandler(t *testing.T) {
+	p := acptest.NewProcess()
+	finishOnTerminate(p)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	o := options()
+	o.Handler = func(_ context.Context, r acp.Request) {
+		if r.Method == "before" {
+			close(started)
+			<-release
+		}
+	}
+	c, _ := acp.New(p, o)
+	got := make(chan error, 1)
+	go func() { _, err := c.Call(context.Background(), "prompt", nil, nil); got <- err }()
+	<-p.Stdin.Changed
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"method\":\"before\",\"params\":{}}\n"))
+	<-started
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n"))
+	select {
+	case err := <-got:
+		t.Fatalf("later response crossed handler barrier: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-got; err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Shutdown(context.Background())
+}
+
+func TestPoisonFrameWaitsForWireEarlierHandler(t *testing.T) {
+	p := acptest.NewProcess()
+	finishOnTerminate(p)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	o := options()
+	o.Handler = func(context.Context, acp.Request) { close(started); <-release }
+	c, _ := acp.New(p, o)
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"method\":\"before\"}\n"))
+	<-started
+	_, _ = p.OutputWriter.Write([]byte("{not-json}\n"))
+	select {
+	case <-c.Done():
+		t.Fatal("poison crossed handler barrier")
+	default:
+	}
+	close(release)
+	<-c.Done()
+	if !errors.Is(c.Err(), acp.ErrMalformed) {
+		t.Fatal(c.Err())
+	}
+	_ = c.Shutdown(context.Background())
+}
+
+func TestResponseWaitsForWireEarlierRequestAdmission(t *testing.T) {
+	p := acptest.NewProcess()
+	finishOnTerminate(p)
+	admitted := make(chan *acp.Responder, 1)
+	release := make(chan struct{})
+	o := options()
+	o.Handler = func(_ context.Context, r acp.Request) { admitted <- r.Responder; <-release }
+	c, _ := acp.New(p, o)
+	got := make(chan error, 1)
+	go func() { _, err := c.Call(context.Background(), "prompt", nil, nil); got <- err }()
+	<-p.Stdin.Changed
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"permission\",\"method\":\"ask\"}\n"))
+	responder := <-admitted
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n"))
+	if d, err := responder.Respond(context.Background(), true, nil); d != acp.Complete || err != nil {
+		t.Fatalf("responder write while gated: %s %v", d, err)
+	}
+	select {
+	case err := <-got:
+		t.Fatalf("response crossed request admission: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-got; err != nil {
+		t.Fatal(err)
+	}
+	outcome := responder.Outcome()
+	if !outcome.Settled || outcome.Expired || outcome.Delivery != acp.Complete {
+		t.Fatalf("outcome: %+v", outcome)
+	}
+	select {
+	case <-responder.Done():
+	default:
+		t.Fatal("settled responder Done is open")
+	}
+	_ = c.Shutdown(context.Background())
+}
+
+func TestConcurrentHandlersStillGateLaterResponse(t *testing.T) {
+	p := acptest.NewProcess()
+	finishOnTerminate(p)
+	started := make(chan string, 2)
+	releases := map[string]chan struct{}{"one": make(chan struct{}), "two": make(chan struct{})}
+	o := options()
+	o.MaxHandlerConcurrency = 2
+	o.Handler = func(_ context.Context, r acp.Request) { started <- r.Method; <-releases[r.Method] }
+	c, _ := acp.New(p, o)
+	got := make(chan error, 1)
+	go func() { _, err := c.Call(context.Background(), "prompt", nil, nil); got <- err }()
+	<-p.Stdin.Changed
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"one\",\"method\":\"one\"}\n{\"jsonrpc\":\"2.0\",\"id\":\"two\",\"method\":\"two\"}\n"))
+	seen := map[string]bool{<-started: true, <-started: true}
+	if !seen["one"] || !seen["two"] {
+		t.Fatalf("handlers not concurrent: %v", seen)
+	}
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n"))
+	close(releases["two"])
+	select {
+	case err := <-got:
+		t.Fatalf("response crossed first barrier: %v", err)
+	default:
+	}
+	close(releases["one"])
+	if err := <-got; err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Shutdown(context.Background())
+}
+
+func TestDeadlineOwnsHandlerBoundary(t *testing.T) {
+	for _, request := range []bool{false, true} {
+		name := "notification"
+		frame := "{\"jsonrpc\":\"2.0\",\"method\":\"boundary\"}\n"
+		if request {
+			name = "request"
+			frame = "{\"jsonrpc\":\"2.0\",\"id\":\"boundary\",\"method\":\"boundary\"}\n"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := acptest.NewProcess()
+			o := options()
+			o.HandlerTimeout = 10 * time.Millisecond
+			o.Handler = func(ctx context.Context, _ acp.Request) { <-ctx.Done() }
+			c, _ := acp.New(p, o)
+			_, _ = p.OutputWriter.Write([]byte(frame))
+			<-c.Done()
+			if !errors.Is(c.Err(), context.DeadlineExceeded) {
+				t.Fatalf("late return released barrier: %v", c.Err())
+			}
+			<-p.TerminateCalled
+			p.Complete(nil)
+			_ = c.Shutdown(context.Background())
+		})
+	}
+}
+
+func TestDelayedResponderCannotAcquireAtDeadline(t *testing.T) {
+	p := acptest.NewProcess()
+	finishOnTerminate(p)
+	p.Stdin.Block()
+	requests := make(chan acp.Request, 1)
+	o := options()
+	o.HandlerTimeout = 10 * time.Millisecond
+	o.FinalPeriod = time.Second
+	o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
+	c, _ := acp.New(p, o)
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"delayed\",\"method\":\"ask\"}\n"))
+	r := <-requests
+	<-p.Stdin.WriteStarted
+	if d, err := r.Responder.Respond(context.Background(), true, nil); d != acp.NotWritten || !errors.Is(err, acp.ErrAlreadyResponded) {
+		t.Fatalf("late explicit response: %s %v", d, err)
+	}
+	p.Stdin.Release()
+	<-r.Responder.Done()
+	outcome := r.Responder.Outcome()
+	if !outcome.Settled || !outcome.Expired || outcome.Delivery != acp.Complete {
+		t.Fatalf("deadline did not own outcome: %+v", outcome)
+	}
+	_ = c.Shutdown(context.Background())
+}
+
+func TestHandlerSaturationExpiresQueuedAdmissionWithoutStartingIt(t *testing.T) {
+	p := acptest.NewProcess()
+	o := options()
+	o.MaxHandlerConcurrency = 1
+	o.HandlerTimeout = 10 * time.Millisecond
+	started := make(chan string, 2)
+	o.Handler = func(ctx context.Context, r acp.Request) { started <- r.Method; <-ctx.Done() }
+	c, _ := acp.New(p, o)
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"one\",\"method\":\"one\"}\n{\"jsonrpc\":\"2.0\",\"id\":\"two\",\"method\":\"two\"}\n"))
+	if method := <-started; method != "one" {
+		t.Fatalf("wire order: %s", method)
+	}
+	<-c.Done()
+	select {
+	case method := <-started:
+		t.Fatalf("expired queued handler started: %s", method)
+	default:
+	}
+	if !errors.Is(c.Err(), context.DeadlineExceeded) {
+		t.Fatalf("saturation deadline: %v", c.Err())
+	}
+	<-p.TerminateCalled
+	p.Complete(nil)
+	_ = c.Shutdown(context.Background())
+}
+
+func TestAutomaticExpiryOutcome(t *testing.T) {
+	p := acptest.NewProcess()
+	finishOnTerminate(p)
+	requests := make(chan acp.Request, 1)
+	o := options()
+	o.HandlerTimeout = 20 * time.Millisecond
+	o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
+	c, _ := acp.New(p, o)
+	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"expiry\",\"method\":\"ask\"}\n"))
+	r := <-requests
+	<-r.Responder.Done()
+	outcome := r.Responder.Outcome()
+	if !outcome.Settled || !outcome.Expired || outcome.Delivery != acp.Complete {
+		t.Fatalf("expiry outcome: %+v", outcome)
+	}
+	if c.Err() != nil {
+		t.Fatalf("complete expiry closed transport: %v", c.Err())
+	}
+	_ = c.Shutdown(context.Background())
+}
+
+func TestAutomaticExpiryUncertainDeliveryFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		n    int
+		want acp.Delivery
+	}{
+		{name: "not written", n: 0, want: acp.NotWritten},
+		{name: "indeterminate", n: 1, want: acp.Indeterminate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := acptest.NewProcess()
+			p.Stdin.CompleteBlockedWriteOnClose(tc.n, io.ErrClosedPipe)
+			requests := make(chan acp.Request, 1)
+			o := options()
+			o.HandlerTimeout = 10 * time.Millisecond
+			o.FinalPeriod = 10 * time.Millisecond
+			o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
+			c, _ := acp.New(p, o)
+			_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"expiry\",\"method\":\"ask\"}\n"))
+			r := <-requests
+			<-r.Responder.Done()
+			outcome := r.Responder.Outcome()
+			if !outcome.Settled || !outcome.Expired || outcome.Delivery != tc.want {
+				t.Fatalf("expiry outcome: %+v", outcome)
+			}
+			<-c.Done()
+			if c.Err() == nil {
+				t.Fatal("uncertain expiry left transport open")
+			}
+			<-p.TerminateCalled
+			p.Complete(nil)
+			_ = c.Shutdown(context.Background())
+		})
+	}
+}
+
 func TestCallReportsCompleteAndCorrelatesOutOfOrder(t *testing.T) {
 	p := acptest.NewProcess()
 	finishOnTerminate(p)
@@ -484,6 +742,7 @@ func TestProviderMaximumFitsSupportedTransportBounds(t *testing.T) {
 	o.MaxInboundFrameBytes = acp.SupportedMaxFrameBytes
 	o.MaxOutboundFrameBytes = acp.SupportedMaxFrameBytes
 	o.MaxRetainedBytes = acp.SupportedMaxRetainedBytes
+	o.HandlerTimeout = 30 * time.Second
 	received := make(chan struct{}, 1)
 	o.Handler = func(context.Context, acp.Request) { received <- struct{}{} }
 	c, err := acp.New(p, o)
@@ -502,8 +761,50 @@ func TestProviderMaximumFitsSupportedTransportBounds(t *testing.T) {
 	go func() { _, _ = p.OutputWriter.Write(append(frame, '\n')) }()
 	select {
 	case <-received:
-	case <-time.After(30 * time.Second):
-		t.Fatal("maximum inbound replay not delivered")
+	case <-time.After(60 * time.Second):
+		t.Fatalf("maximum inbound replay not delivered: %v", c.Err())
+	}
+	_ = c.Shutdown(context.Background())
+}
+
+func TestRetainedWireQueueOverflowFailsClosedAndSettles(t *testing.T) {
+	p := acptest.NewProcess()
+	o := options()
+	o.MaxRetainedBytes = 256
+	o.MaxHandlerQueue = 8
+	started := make(chan struct{})
+	release := make(chan struct{})
+	o.Handler = func(context.Context, acp.Request) { close(started); <-release }
+	c, _ := acp.New(p, o)
+	frame := []byte("{\"jsonrpc\":\"2.0\",\"method\":\"retained\",\"params\":{\"v\":\"" + strings.Repeat("x", 80) + "\"}}\n")
+	_, _ = p.OutputWriter.Write(frame)
+	<-started
+	_, _ = p.OutputWriter.Write(frame)
+	<-c.Done()
+	if !errors.Is(c.Err(), acp.ErrRetainedLimit) {
+		t.Fatalf("retained overflow: %v", c.Err())
+	}
+	close(release)
+	<-p.TerminateCalled
+	p.Complete(nil)
+	_ = c.Shutdown(context.Background())
+}
+
+func TestRetainedWireBytesReleaseAfterHandlerSettlement(t *testing.T) {
+	p := acptest.NewProcess()
+	finishOnTerminate(p)
+	o := options()
+	o.MaxRetainedBytes = 256
+	received := make(chan struct{}, 2)
+	o.Handler = func(context.Context, acp.Request) { received <- struct{}{} }
+	c, _ := acp.New(p, o)
+	frame := []byte("{\"jsonrpc\":\"2.0\",\"method\":\"retained\",\"params\":{\"v\":\"" + strings.Repeat("x", 140) + "\"}}\n")
+	_, _ = p.OutputWriter.Write(frame)
+	<-received
+	_, _ = p.OutputWriter.Write(frame)
+	<-received
+	if c.Err() != nil {
+		t.Fatalf("settled frame retained bytes: %v", c.Err())
 	}
 	_ = c.Shutdown(context.Background())
 }
@@ -603,7 +904,7 @@ func TestNoncooperativeRequestHandlerRetainsItsInboundSlot(t *testing.T) {
 	_, _ = p.OutputWriter.Write(append(second, '\n'))
 	<-c.Done()
 	if !errors.Is(c.Err(), acp.ErrPendingLimit) {
-		t.Fatalf("noncooperative handler released its slot: %v", c.Err())
+		t.Fatalf("noncooperative handler released its inbound slot: %v", c.Err())
 	}
 	close(release)
 	<-p.TerminateCalled
@@ -626,10 +927,12 @@ func TestHandlerConcurrencyAndNotificationQueueStayBoundedAndOrdered(t *testing.
 	if got := <-started; got != "n1" {
 		t.Fatal(got)
 	}
-	for _, method := range []string{"n2", "n3", "n4"} {
-		frame, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": map[string]string{"v": "x"}})
-		_, _ = p.OutputWriter.Write(append(frame, '\n'))
-	}
+	go func() {
+		for _, method := range []string{"n2", "n3", "n4", "n5", "n6", "n7"} {
+			frame, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": map[string]string{"v": "x"}})
+			_, _ = p.OutputWriter.Write(append(frame, '\n'))
+		}
+	}()
 	select {
 	case got := <-started:
 		t.Fatalf("concurrency exceeded with %s", got)
