@@ -1,10 +1,20 @@
 export const CODEX_SETTINGS_STORAGE_KEY = "agent-whiteboard-codex-settings-v1";
+export const CURSOR_SETTINGS_STORAGE_KEY = "agent-whiteboard-cursor-settings-v1";
 export const PI_SETTINGS_STORAGE_KEY = "agent-whiteboard-pi-settings-v1";
 
+export const PROVIDER_METADATA = Object.freeze({
+  pi: Object.freeze({ value: "pi", label: "Pi", glyph: "P", settingsStorageKey: PI_SETTINGS_STORAGE_KEY, accessCopy: "Uses your effective Pi native tools, extensions, approvals, sandbox, project trust, and configuration" }),
+  codex: Object.freeze({ value: "codex", label: "Codex", glyph: "C", settingsStorageKey: CODEX_SETTINGS_STORAGE_KEY, accessCopy: "Uses your effective Codex native tools, extensions, approvals, sandbox, project trust, and configuration" }),
+  cursor: Object.freeze({ value: "cursor", label: "Cursor", glyph: "C", settingsStorageKey: CURSOR_SETTINGS_STORAGE_KEY, accessCopy: "Uses your effective Cursor native tools, extensions, approvals, sandbox, project trust, and configuration" }),
+});
+
+export function providerMetadata(provider) {
+  if (!Object.hasOwn(PROVIDER_METADATA, provider)) throw new TypeError("invalid settings provider");
+  return PROVIDER_METADATA[provider];
+}
+
 export function settingsStorageKey(provider) {
-  if (provider === "codex") return CODEX_SETTINGS_STORAGE_KEY;
-  if (provider === "pi") return PI_SETTINGS_STORAGE_KEY;
-  throw new TypeError("invalid settings provider");
+  return providerMetadata(provider).settingsStorageKey;
 }
 
 const encoder = new TextEncoder();
@@ -149,8 +159,9 @@ export function readSettingsPreference(storage, provider) {
 
 export function writeSettingsPreference(storage, provider, settings) {
   if (!validExecutionSettings(settings)) throw new TypeError("invalid settings preference");
+  const key = settingsStorageKey(provider);
   try {
-    storage?.setItem(settingsStorageKey(provider), JSON.stringify(cloneExecutionSettings(settings)));
+    storage?.setItem(key, JSON.stringify(cloneExecutionSettings(settings)));
   } catch {
     // Model controls remain usable when browser storage is disabled.
   }
@@ -278,7 +289,9 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
       effort: formatEffort(current.settings.effort),
       speed: current.settings.speed === "fast" ? "Fast" : "Standard",
     };
-    const sections = current.catalog.some(({ supports_fast: supportsFast }) => supportsFast) ? ["model", "effort", "speed"] : ["model", "effort"];
+    const sections = ["model"];
+    if ((model?.supported_reasoning_efforts.length ?? 0) > 1) sections.push("effort");
+    if (model?.supports_fast === true) sections.push("speed");
     for (const section of sections) {
       const row = menuButton(doc, { label: `${section[0].toUpperCase()}${section.slice(1)}`, description: values[section] });
       row.dataset.settingsSection = section;

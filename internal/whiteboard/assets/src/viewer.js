@@ -11,6 +11,8 @@ import {
   createModelSettingsControl,
   editSettingsDraft,
   formatEffort,
+  PROVIDER_METADATA,
+  providerMetadata,
   readSettingsPreference,
   reconcileSettingsDraft,
   recordSettingsSubmission,
@@ -513,7 +515,8 @@ const MAX_PENDING_INTERACTIONS = 32;
 const MAX_RETAINED_INTERACTIONS = 64;
 const MAX_TIMELINE_TEXT_BYTES = 96 * 1024;
 const MAX_DELTA_BYTES = 32 * 1024;
-const PROVIDERS = new Set(["pi", "codex"]);
+const PROVIDER_ENTRIES = Object.values(PROVIDER_METADATA);
+const PROVIDERS = new Set(PROVIDER_ENTRIES.map(({ value }) => value));
 const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const INTERACTION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/u;
 const encoder = new TextEncoder();
@@ -1028,9 +1031,9 @@ function validSettingsSnapshot(settingsState, effectiveSettings, catalog) {
 function validateEventPayload(type, payload) {
   switch (type) {
     case "snapshot": {
-      if (!exactObject(payload, ["lifecycle", "queue", "context_state", "active_work", "supports_images", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "max_selected_skills", "supports_compact", "busy_policy", "composer_admission"])
+      if (!exactObject(payload, ["lifecycle", "queue", "context_state", "active_work", "supports_images", "supports_archive_delete", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "max_selected_skills", "supports_compact", "busy_policy", "composer_admission"])
         || !lifecycleValues.has(payload.lifecycle) || !Array.isArray(payload.queue) || payload.queue.length > MAX_QUEUE_ITEMS || !payload.queue.every(validQueueItem)
-        || !contextValues.has(payload.context_state) || !validActiveWork(payload.lifecycle, payload.active_work) || typeof payload.supports_images !== "boolean" || typeof payload.supports_compact !== "boolean"
+        || !contextValues.has(payload.context_state) || !validActiveWork(payload.lifecycle, payload.active_work) || typeof payload.supports_images !== "boolean" || typeof payload.supports_archive_delete !== "boolean" || typeof payload.supports_compact !== "boolean"
         || !validSettingsSnapshot(payload.settings_state, payload.effective_settings, payload.catalog)
         || !validSkillCatalog(payload.skills_state, payload.skills, payload.max_selected_skills)
         || !validComposerAdmission(payload.busy_policy, payload.composer_admission)) return false;
@@ -1214,6 +1217,7 @@ export function createAgentState(provider = "pi") {
     contextDigest: null,
     provider: { provider, state: "starting", model: "", supportsImages: false },
     supportsImages: false,
+    supportsArchiveDelete: false,
     settingsState: null,
     effectiveSettings: null,
     catalog: [],
@@ -1315,6 +1319,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
       state.contextState = payload.context_state;
       state.queue = payload.queue.map((item) => ({ ...item, content: cloneMessageContent(item.content), images: item.images?.map((image) => ({ ...image })), settings: item.settings ? { ...item.settings } : null }));
       state.supportsImages = payload.supports_images;
+      state.supportsArchiveDelete = payload.supports_archive_delete;
       state.provider.supportsImages = payload.supports_images;
       state.settingsState = payload.settings_state;
       state.effectiveSettings = payload.effective_settings ? { ...payload.effective_settings } : null;
@@ -2159,7 +2164,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   const providerSelect = doc.createElement("select");
   providerSelect.className = "agent-provider-select";
   providerSelect.setAttribute("aria-label", "Conversation provider");
-  for (const [value, label] of [["pi", "Pi"], ["codex", "Codex"]]) {
+  for (const { value, label } of PROVIDER_ENTRIES) {
     const option = doc.createElement("option");
     option.value = value;
     option.textContent = label;
@@ -2525,10 +2530,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   doc.body.append(overlay, drawer, toggle, toast);
 
   function buildController(provider) {
-    const initialSettings = readSettingsPreference(storage, provider);
+    const metadata = providerMetadata(provider);
+    const initialSettings = readSettingsPreference(storage, metadata.value);
     const owned = {
-      provider,
-      state: createAgentState(provider),
+      provider: metadata.value,
+      state: createAgentState(metadata.value),
       settingsDraft: createSettingsDraftState(initialSettings),
       composerDraft: { generation: 0, content: { parts: [] }, attachments: [], inlineVisuals: new Map(), inlineClaims: new Set(), pendingCompactCommandID: null, pendingCompactDraft: null },
       interactionForms: new Map(),
@@ -2546,7 +2552,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     };
     owned.transport = transportFactory({
       payload,
-      provider,
+      provider: metadata.value,
       port,
       initialSettings: () => cloneExecutionSettings(owned.settingsDraft.draft),
       onEvent(event) {
@@ -2562,7 +2568,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
             acceptedTurnID: event.type === "settings" ? event.payload.accepted_turn_id : null,
           });
           if (event.type === "settings" && event.payload.settings_state === "verified" && event.payload.accepted_turn_id !== null) {
-            writeSettingsPreference(storage, provider, cloneExecutionSettings(event.payload.effective_settings));
+            writeSettingsPreference(storage, metadata.value, cloneExecutionSettings(event.payload.effective_settings));
           }
         }
         if (event.type === "command_result" && event.payload.command_id === owned.handoffCommandID && event.payload.status === "rejected") owned.handoffCommandID = null;
@@ -2635,6 +2641,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           owned.state.skills = [];
           owned.state.maxSelectedSkills = null;
           owned.state.supportsCompact = false;
+          owned.state.supportsArchiveDelete = false;
           owned.state.busyPolicy = "queue";
           owned.state.composerAdmission = "blocked";
           owned.state.compactions = [];
@@ -2658,7 +2665,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         if (!error?.protocolViolation && owned.transport.consented) scheduleReconnect(owned);
       },
     });
-    controllers.set(provider, owned);
+    controllers.set(metadata.value, owned);
     return owned;
   }
 
@@ -3527,13 +3534,14 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         }
       : null;
     if (activeInteractionControl) controller.interactionFocus = activeInteractionControl;
-    const providerName = selectedProvider === "codex" ? "Codex" : "Pi";
+    const metadata = providerMetadata(selectedProvider);
+    const providerName = metadata.label;
     const connectionState = controller.connecting ? "connecting" : brokerState;
-    agentGlyph.textContent = providerName[0];
+    agentGlyph.textContent = metadata.glyph;
     connectButton.textContent = `Connect to ${providerName}`;
     message.setAttribute("aria-label", `Message ${providerName} about this whiteboard`);
     composerFineprint.textContent = `${providerName} can make mistakes. Review important details.`;
-    accessListItem.textContent = `Uses your effective ${providerName} native tools, extensions, approvals, sandbox, project trust, and configuration`;
+    accessListItem.textContent = metadata.accessCopy;
     headerSubtitle.removeAttribute("title");
     if (!timeline.hidden) {
       timelineScrollTop = timeline.scrollTop;
@@ -3869,9 +3877,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         const row = doc.createElement("article");
         row.className = "agent-archive-card";
         row.dataset.archiveId = item.archive_id;
-        const glyph = doc.createElement("span"); glyph.className = "agent-archive-glyph"; glyph.setAttribute("aria-hidden", "true"); glyph.textContent = item.provider === "codex" ? "C" : "P";
+        const archiveProvider = providerMetadata(item.provider);
+        const glyph = doc.createElement("span"); glyph.className = "agent-archive-glyph"; glyph.setAttribute("aria-hidden", "true"); glyph.textContent = archiveProvider.glyph;
         const copy = doc.createElement("div"); copy.className = "agent-archive-copy";
-        const title = doc.createElement("strong"); title.textContent = `${item.provider === "codex" ? "Codex" : "Pi"}${item.model ? ` · ${item.model}` : ""}`;
+        const title = doc.createElement("strong"); title.textContent = `${archiveProvider.label}${item.model ? ` · ${item.model}` : ""}`;
         const time = doc.createElement("time"); time.dateTime = item.updated_at; time.title = item.updated_at; time.textContent = `Updated ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.updated_at))}`;
         copy.append(title, time);
         if (item.preview) { const preview = doc.createElement("p"); preview.textContent = item.preview; copy.append(preview); }
@@ -3880,7 +3889,15 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         const remove = doc.createElement("button"); remove.type = "button"; remove.textContent = "Delete"; remove.dataset.archiveAction = "delete";
         restore.addEventListener("click", () => openConfirmation({ title: "Restore this conversation?", description: "The current conversation will be archived first.", confirmLabel: "Restore", action: "restore", archiveID: item.archive_id, invoker: restore, onConfirm: () => forcedConversationCommand("archive_restore", { archive_id: item.archive_id }) }));
         remove.addEventListener("click", () => openConfirmation({ title: "Delete this archive permanently?", description: "This conversation cannot be recovered.", confirmLabel: "Delete", tone: "danger", action: "delete", archiveID: item.archive_id, invoker: remove, onConfirm: () => sendCommand("archive_delete", { archive_id: item.archive_id }) }));
-        rowActions.append(restore, remove); row.append(glyph, copy, rowActions); archives.append(row);
+        rowActions.append(restore);
+        if (state.supportsArchiveDelete) rowActions.append(remove);
+        else {
+          const unavailable = doc.createElement("small");
+          unavailable.className = "agent-archive-delete-unavailable";
+          unavailable.textContent = "Deletion unavailable for this provider";
+          rowActions.append(unavailable);
+        }
+        row.append(glyph, copy, rowActions); archives.append(row);
       }
       if (state.archiveCursor) {
         const more = doc.createElement("button");

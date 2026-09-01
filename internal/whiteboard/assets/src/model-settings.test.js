@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   CODEX_SETTINGS_STORAGE_KEY,
+  CURSOR_SETTINGS_STORAGE_KEY,
   PI_SETTINGS_STORAGE_KEY,
   createSettingsDraftState,
   createModelSettingsControl,
@@ -63,16 +64,21 @@ describe("provider settings helpers", () => {
     expect(formatExecutionSettings(presentedSol)).toEqual({ visible: "5.6 Sol · High", accessible: "Model 5.6 Sol, effort High, speed Fast", fast: true });
   });
 
-  test("uses isolated provider keys while retaining the exact Codex key and value", () => {
+  test("uses isolated provider keys while retaining the exact Pi and Codex keys", () => {
     writeSettingsPreference(localStorage, "codex", fastSol);
+    writeSettingsPreference(localStorage, "cursor", { ...fastSol, speed: "standard" });
     writeSettingsPreference(localStorage, "pi", standardLuna);
     expect(CODEX_SETTINGS_STORAGE_KEY).toBe("agent-whiteboard-codex-settings-v1");
+    expect(CURSOR_SETTINGS_STORAGE_KEY).toBe("agent-whiteboard-cursor-settings-v1");
     expect(PI_SETTINGS_STORAGE_KEY).toBe("agent-whiteboard-pi-settings-v1");
     expect(readSettingsPreference(localStorage, "codex")).toEqual(fastSol);
+    expect(readSettingsPreference(localStorage, "cursor")).toEqual({ ...fastSol, speed: "standard" });
     expect(readSettingsPreference(localStorage, "pi")).toEqual(standardLuna);
-    expect(Object.keys(localStorage).sort()).toEqual([CODEX_SETTINGS_STORAGE_KEY, PI_SETTINGS_STORAGE_KEY].sort());
+    expect(Object.keys(localStorage).sort()).toEqual([CODEX_SETTINGS_STORAGE_KEY, CURSOR_SETTINGS_STORAGE_KEY, PI_SETTINGS_STORAGE_KEY].sort());
     expect(() => readSettingsPreference(localStorage, "other")).not.toThrow();
     expect(readSettingsPreference(localStorage, "other")).toBeNull();
+    expect(readSettingsPreference(localStorage, "toString")).toBeNull();
+    expect(() => writeSettingsPreference(localStorage, "other", fastSol)).toThrow(TypeError);
   });
 
   test("reads and writes only a complete bounded semantic preference", () => {
@@ -167,7 +173,17 @@ describe("provider settings menu", () => {
     control.destroy();
   });
 
-  test("omits Speed when the catalog advertises no fast choice", () => {
+  test("omits Effort and Speed when the selected model has only one effective choice", () => {
+    const singletonCatalog = [{ ...luna, default: true }];
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings: standardLuna, presentation: { ...standardLuna, model_display_name: luna.model_display_name, selectable: true }, catalog: singletonCatalog });
+    control.button.click();
+    expect([...control.menu.querySelectorAll('[data-settings-section]')].map(({ dataset }) => dataset.settingsSection)).toEqual(["model"]);
+    control.destroy();
+  });
+
+  test("retains Pi's multiple-effort menu while omitting its synthetic Speed choice", () => {
     const piCatalog = catalog.map((model) => ({ ...model, supports_fast: false }));
     const settings = { ...fastSol, speed: "standard" };
     const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });

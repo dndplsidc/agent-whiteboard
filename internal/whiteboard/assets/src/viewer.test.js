@@ -381,7 +381,7 @@ function agentEvent(type, payload, overrides = {}) {
     return { ...rest, content: textContent(text) };
   }) };
   const versionedPayload = type === "snapshot"
-    ? { supports_images: true, settings_state: null, effective_settings: null, catalog: [], skills_state: "unavailable", skills: [], max_selected_skills: null, supports_compact: false, busy_policy: "queue", composer_admission: "submit", ...payload }
+    ? { supports_images: true, supports_archive_delete: true, settings_state: null, effective_settings: null, catalog: [], skills_state: "unavailable", skills: [], max_selected_skills: null, supports_compact: false, busy_policy: "queue", composer_admission: "submit", ...payload }
     : type === "provider"
       ? { supports_images: true, ...payload }
       : type === "skill_catalog"
@@ -435,6 +435,17 @@ const codexCatalog = [{
 const codexSolSettings = { model: "gpt-5.6-sol", effort: "high", speed: "fast", model_display_name: "5.6 Sol", selectable: true };
 const piCatalog = codexCatalog.map((model, index) => ({ ...model, model: `pi-provider:${model.model}`, supports_fast: false, default: index === 0 }));
 const piSettings = { model: piCatalog[0].model, effort: "high", speed: "standard", model_display_name: piCatalog[0].model_display_name, selectable: true };
+const cursorCatalog = [{
+  model: "cursor-standard",
+  model_display_name: "Cursor Standard",
+  description: "Cursor's standard model.",
+  default_effort: "default",
+  supported_reasoning_efforts: [{ effort: "default", description: "Provider default." }],
+  supports_images: true,
+  default: true,
+  supports_fast: false,
+}];
+const cursorSettings = { model: "cursor-standard", effort: "default", speed: "standard", model_display_name: "Cursor Standard", selectable: true };
 
 function piSnapshotEvent({ event = {}, payload = {} } = {}) {
   return agentEvent("snapshot", {
@@ -463,6 +474,16 @@ function codexSnapshotEvent({ settings = codexSolSettings, event = {}, payload =
     busy_policy: "preserve_draft",
     composer_admission: "submit",
     ...payload,
+  }, event);
+}
+
+function cursorSnapshotEvent({ event = {}, payload = {} } = {}) {
+  return agentEvent("snapshot", {
+    lifecycle: "ready", queue: [], context_state: "accepted", active_work: null,
+    supports_images: true, supports_archive_delete: false,
+    settings_state: "verified", effective_settings: cursorSettings, catalog: cursorCatalog,
+    skills_state: "unavailable", skills: [], max_selected_skills: null, supports_compact: false,
+    busy_policy: "preserve_draft", composer_admission: "submit", ...payload,
   }, event);
 }
 
@@ -552,12 +573,14 @@ describe("local agent source and commands", () => {
   });
 
   test("stores only the canonical provider preference and falls back to Pi", () => {
-    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
-    expect(readAgentPreferences(localStorage).provider).toBe("codex");
+    for (const provider of ["pi", "codex", "cursor"]) {
+      localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
+      expect(readAgentPreferences(localStorage).provider).toBe(provider);
+      expect(createConnectCommand({ payload: agentPayload(), provider, clientID: agentIDs.message, idFactory: fixedIDFactory }).payload.provider).toBe(provider);
+    }
 
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "unknown");
     expect(readAgentPreferences(localStorage).provider).toBe("pi");
-    expect(createConnectCommand({ payload: agentPayload(), provider: "codex", clientID: agentIDs.message, idFactory: fixedIDFactory }).payload.provider).toBe("codex");
     expect(() => createConnectCommand({ payload: agentPayload(), provider: "unknown", clientID: agentIDs.message, idFactory: fixedIDFactory })).toThrow(TypeError);
   });
 
@@ -799,7 +822,7 @@ describe("local agent transport and event state", () => {
 
   test("strictly validates capability, admission, deadline, and multiline fields", () => {
     const snapshot = snapshotEvent();
-    for (const field of ["max_selected_skills", "busy_policy", "composer_admission"]) {
+    for (const field of ["supports_archive_delete", "max_selected_skills", "busy_policy", "composer_admission"]) {
       const malformed = structuredClone(snapshot);
       delete malformed.payload[field];
       expect(() => decodeAgentEvent(JSON.stringify(malformed))).toThrow(TypeError);
@@ -873,10 +896,10 @@ describe("local agent transport and event state", () => {
     })).toThrow(TypeError);
   });
 
-  test("reduces Codex provider, tool updates, requests, and first-response resolution", () => {
-    const state = createAgentState("codex");
+  test.each(["pi", "codex", "cursor"])("reduces shared %s provider, tool, and permission updates", (provider) => {
+    const state = createAgentState(provider);
     applyAgentEvent(state, snapshotEvent());
-    applyAgentEvent(state, agentEvent("provider", { provider: "codex", state: "ready", model: "gpt-5" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    applyAgentEvent(state, agentEvent("provider", { provider, state: "ready", model: "fixture-model" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
     applyAgentEvent(state, agentEvent("tool_activity", {
       activity_id: agentIDs.archive, kind: "command", status: "running", title: "Run tests", summary: "Started", detail: "pnpm test",
     }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
@@ -895,13 +918,13 @@ describe("local agent transport and event state", () => {
       request_id: agentIDs.message, kind: "command_approval", option_id: "accept",
     }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
 
-    expect(state.provider).toEqual({ provider: "codex", state: "ready", model: "gpt-5", supportsImages: true });
+    expect(state.provider).toEqual({ provider, state: "ready", model: "fixture-model", supportsImages: true });
     expect(state.timeline).toContainEqual(expect.objectContaining({ kind: "tool", status: "completed", summary: "Passed" }));
     expect(state.timeline.filter((item) => item.kind === "tool")).toHaveLength(1);
     expect(state.interactions).toEqual([expect.objectContaining({ title: "Approve command", resolved: true, option_id: "accept" })]);
   });
 
-  test.each(["pi", "codex"])("coalesces only consecutive identical same-turn passive notifications for %s", (provider) => {
+  test.each(["pi", "codex", "cursor"])("coalesces only consecutive identical same-turn passive notifications for %s", (provider) => {
     const state = createAgentState(provider);
     applyAgentEvent(state, agentEvent("snapshot", {
       lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" },
@@ -964,8 +987,8 @@ describe("local agent transport and event state", () => {
     expect(() => applyAgentEvent(state, agentEvent("interaction_request", requestPayload(opaqueID("P", 32)), { event_id: opaqueID("G", 32) }))).toThrow(TypeError);
   });
 
-  test("normalizes snapshot, streaming, completion, queue, and deduplicates event IDs", () => {
-    const state = createAgentState();
+  test.each(["pi", "codex", "cursor"])("normalizes %s snapshot, streaming, completion, queue, and deduplicates event IDs", (provider) => {
+    const state = createAgentState(provider);
     expect(applyAgentEvent(state, snapshotEvent())).toBe(true);
     expect(applyAgentEvent(state, snapshotEvent())).toBe(false);
     applyAgentEvent(state, agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "hel" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
@@ -1035,14 +1058,14 @@ describe("local agent transport and event state", () => {
     expect(state.archiveStatus).toBe("loaded");
   });
 
-  test("accepts empty archive previews and normalizes archive deletion", () => {
-    const state = createAgentState();
+  test.each(["pi", "codex", "cursor"])("accepts empty %s archive previews and normalizes archive deletion", (provider) => {
+    const state = createAgentState(provider);
     applyAgentEvent(state, snapshotEvent());
     const listCommand = createAgentCommand({ type: "archive_list", payload: {}, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
     registerAgentCommand(state, listCommand);
     applyAgentEvent(state, agentEvent("history", {
       command_id: listCommand.command_id,
-      items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider: "pi", preview: "" }],
+      items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider, preview: "" }],
       next_cursor: null,
     }, { event_id: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR" }));
     expect(state.archives).toEqual([expect.objectContaining({ archive_id: agentIDs.archive, preview: "" })]);
@@ -1051,8 +1074,8 @@ describe("local agent transport and event state", () => {
     expect(state.archives).toEqual([]);
   });
 
-  test("requires command-result correlation and surfaces only validated stable errors", () => {
-    const state = createAgentState();
+  test.each(["pi", "codex", "cursor"])("requires %s command-result correlation and surfaces only validated stable errors", (provider) => {
+    const state = createAgentState(provider);
     applyAgentEvent(state, snapshotEvent());
     const command = createAgentCommand({ type: "new", payload: { settings: null }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
     registerAgentCommand(state, command);
@@ -1123,7 +1146,7 @@ describe("local agent transport and event state", () => {
 });
 
 describe("local agent rendering and controls", () => {
-  test("switches silently between independent Pi and Codex controllers", async () => {
+  test("switches silently between independent Pi, Codex, and Cursor controllers", async () => {
     const instances = [];
     const drawer = createAgentDrawer({
       payload: agentPayload(), doc: document, storage: localStorage,
@@ -1131,7 +1154,7 @@ describe("local agent rendering and controls", () => {
         const transport = {
           provider: options.provider,
           options,
-          clientID: `${options.provider === "pi" ? "P" : "C"}`.repeat(32),
+          clientID: ({ pi: "P", codex: "C", cursor: "U" })[options.provider].repeat(32),
           conversationID: agentIDs.conversation,
           consented: false,
           probe: vi.fn(async () => ({ ok: true, code: null })),
@@ -1154,6 +1177,14 @@ describe("local agent rendering and controls", () => {
     expect(drawer.elements.setup.textContent).toContain("effective Codex native tools, extensions, approvals, sandbox, project trust, and configuration");
     expect(localStorage.getItem(AGENT_PROVIDER_STORAGE_KEY)).toBe("codex");
 
+    drawer.elements.providerSelect.value = "cursor";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(instances.map((item) => item.provider)).toEqual(["pi", "codex", "cursor"]);
+    expect(drawer.elements.drawer.querySelector(".agent-drawer-header")?.textContent).toContain("Cursor ready");
+    drawer.elements.message.value = "Cursor draft";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(instances.every((item) => item.send.mock.calls.length === 0 && item.connect.mock.calls.length === 0)).toBe(true);
+
     instances[0].options.onEvent(agentEvent("assistant_message", {
       turn_id: agentIDs.turn, message_id: agentIDs.message, text: "Pi finished in the background.", created_at: "2026-07-27T03:04:05Z",
     }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
@@ -1164,6 +1195,9 @@ describe("local agent rendering and controls", () => {
     drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
     expect(drawer.elements.timeline.textContent).toContain("Pi finished in the background.");
     expect(instances[1].close).not.toHaveBeenCalled();
+    drawer.elements.providerSelect.value = "cursor";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(drawer.elements.message.value).toBe("Cursor draft");
     drawer.destroy();
   });
 
@@ -1493,6 +1527,7 @@ describe("local agent rendering and controls", () => {
   test.each([
     ["pi", piSnapshotEvent, ["model", "effort"], "effective Pi native tools"],
     ["codex", codexSnapshotEvent, ["model", "effort", "speed"], "effective Codex native tools"],
+    ["cursor", cursorSnapshotEvent, ["model"], "effective Cursor native tools"],
   ])("renders shared capability controls for %s", (provider, snapshotFactory, sections, accessCopy) => {
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
     let options;
@@ -1508,7 +1543,8 @@ describe("local agent rendering and controls", () => {
     expect(drawer.elements.setup.textContent).toContain(accessCopy);
     drawer.elements.message.value = "/co";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    expect(drawer.elements.completionMenu.textContent).toContain("/compact");
+    if (provider === "cursor") expect(drawer.elements.completionMenu.textContent).not.toContain("/compact");
+    else expect(drawer.elements.completionMenu.textContent).toContain("/compact");
     drawer.elements.message.value = "/n";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
     expect(drawer.elements.completionMenu.textContent).toContain("/new");
@@ -1518,6 +1554,7 @@ describe("local agent rendering and controls", () => {
   test.each([
     ["pi", piSnapshotEvent, { model: piSettings.model, effort: "high", speed: "standard" }],
     ["codex", codexSnapshotEvent, { model: "gpt-5.6-sol", effort: "high", speed: "fast" }],
+    ["cursor", cursorSnapshotEvent, { model: "cursor-standard", effort: "default", speed: "standard" }],
   ])("confirms exact /new and starts a fresh %s conversation", async (provider, snapshotFactory, expectedSettings) => {
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
     let options;
@@ -2435,6 +2472,25 @@ describe("local agent rendering and controls", () => {
     expect(confirm).not.toHaveBeenCalled();
     drawer.destroy();
     confirm.mockRestore();
+  });
+
+  test("keeps Cursor archive restore and pagination while omitting unsupported deletion", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "cursor");
+    let options;
+    const calls = [];
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(async (command) => calls.push(command)), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(cursorSnapshotEvent());
+    drawer.elements.overflowButton.click();
+    [...drawer.elements.overflowMenu.querySelectorAll("button")].find((button) => button.textContent === "Archives").click();
+    await vi.waitFor(() => expect(calls.at(-1)?.type).toBe("archive_list"));
+    options.onEvent(agentEvent("history", { command_id: calls.at(-1).command_id, items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider: "cursor", model: "Cursor Standard", preview: "Saved" }], next_cursor: agentIDs.archive }, { event_id: "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS" }));
+    expect(drawer.elements.archives.querySelector('[data-archive-action="restore"]')).not.toBeNull();
+    expect(drawer.elements.archives.querySelector('[data-archive-action="delete"]')).toBeNull();
+    expect(drawer.elements.archives.textContent).toContain("Deletion unavailable for this provider");
+    expect(drawer.elements.archives.textContent).toContain("Load more archives");
+    expect(drawer.elements.archives.querySelector(".agent-archive-glyph")?.textContent).toBe("C");
+    drawer.destroy();
   });
 
   test("owns confirmation focus, sends nothing on cancel, and falls back when an archive row disappears", async () => {

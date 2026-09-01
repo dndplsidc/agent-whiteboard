@@ -1831,8 +1831,16 @@ body.agent-drawer-modal-open .agent-toast {
 }
 
 .agent-archive-actions {
+  align-items: center;
   display: flex;
   gap: 0.35rem;
+}
+
+.agent-archive-delete-unavailable {
+  color: var(--awb-muted);
+  font-size: 0.68rem;
+  line-height: 1.3;
+  max-width: 8rem;
 }
 
 .agent-archive-actions button {
