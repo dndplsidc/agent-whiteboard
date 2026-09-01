@@ -286,7 +286,8 @@ func archiveFixtureWithMapping(t *testing.T, base uint64, mutate func(*statepkg.
 	connected, err := broker.Connect(context.Background(), identity.Origin, lifecycleConnect(sequenceID(base+10), identity.CapabilityID))
 	require.NoError(t, err)
 	connection := connected.(*Connection)
-	receiveLifecycle(t, connection.Events())
+	snapshot := receiveLifecycle(t, connection.Events()).Payload.(protocol.SnapshotPayload)
+	require.True(t, snapshot.SupportsArchiveDelete)
 	state.resetOperations()
 	return broker, state, driver, connection, identity
 }
@@ -296,6 +297,50 @@ func archiveListCommand(commandID, clientID, conversationID, before string, limi
 }
 func archiveDeleteCommand(commandID, clientID, conversationID, archiveID string) protocol.Command {
 	return protocol.Command{APIVersion: protocol.APIVersion, CommandID: commandID, ClientID: clientID, ConversationID: &conversationID, Type: protocol.CommandArchiveDelete, Payload: protocol.ArchiveReferencePayload{ArchiveID: archiveID}}
+}
+
+func TestUnsupportedArchiveDeletePublishesCapabilityAndHasNoSideEffects(t *testing.T) {
+	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1680))
+	identity.Provider = provider.NameCursor
+	mapping.Identity = identity
+	settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: false}
+	mapping.Current.Settings = &settings
+	mapping.Current.Presentation = &presentation
+	mapping.Current.ModelLabel = presentation.ModelDisplayName
+	archiveRef, err := statepkg.NativeSessionRef("sessions/cursor-archive")
+	require.NoError(t, err)
+	archiveID := sequenceID(1681)
+	mapping.Archives = []statepkg.Session{{ConversationID: archiveID, NativeSession: archiveRef, CreatedAt: testTime(), UpdatedAt: testTime(), ProviderLabel: "Cursor", ModelLabel: presentation.ModelDisplayName, Settings: &settings, Presentation: &presentation}}
+	state := &lifecycleState{mappings: map[statepkg.Identity]statepkg.Mapping{identity: mapping}}
+	inner := &lifecycleDriver{name: provider.NameCursor}
+	driver := &nonDeletingLifecycleDriver{inner: inner}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCursor: driver})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: 1682})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+	defer broker.Close(context.Background())
+	connected, err := broker.Connect(context.Background(), identity.Origin, lifecycleProviderConnect(sequenceID(1683), identity.CapabilityID, protocol.ProviderCursor))
+	require.NoError(t, err)
+	connection := connected.(*Connection)
+	defer connection.Close(context.Background())
+	snapshot := receiveLifecycle(t, connection.Events()).Payload.(protocol.SnapshotPayload)
+	require.False(t, snapshot.SupportsArchiveDelete)
+
+	command := archiveDeleteCommand(sequenceID(1684), connection.clientID, connection.ConversationID(), archiveID)
+	result, err := connection.Command(context.Background(), command)
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandRejected, protocol.ErrorArchiveDeleteUnsupported)
+	require.Equal(t, result, receiveLifecycle(t, connection.Events()))
+	inner.mu.Lock()
+	require.Empty(t, inner.deletes)
+	inner.mu.Unlock()
+	state.mu.Lock()
+	require.Empty(t, state.removes)
+	require.Len(t, state.mappings[identity].Archives, 1)
+	state.mu.Unlock()
 }
 
 func TestArchiveListIsTargetedPagedAndContainsNoPreviewContent(t *testing.T) {

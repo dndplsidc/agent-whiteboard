@@ -62,7 +62,7 @@ type turnSession struct {
 func newTurnSession(ref string) *turnSession {
 	return &turnSession{
 		hardeningSession:   newHardeningSession(ref),
-		preflightResult:    provider.PreflightResult{ResolvedModel: "model", EstimatedInputTokens: 10, EffectiveCapacityTokens: 100, SafetyMarginTokens: 10},
+		preflightResult:    provider.PreflightResult{CapacityMode: provider.CapacityPrechecked, ResolvedModel: "model", EstimatedInputTokens: 10, EffectiveCapacityTokens: 100, SafetyMarginTokens: 10},
 		submitted:          make(chan provider.TurnRequest, 32),
 		interrupted:        make(chan provider.AcceptedTurn, 8),
 		responded:          make(chan provider.InteractionResponse, 8),
@@ -1555,6 +1555,21 @@ func TestDefinitePreflightRejectionKeepsObservationPendingAndNeverSubmits(t *tes
 	require.NotNil(t, state.mapping.Current.Observed)
 	require.Nil(t, state.mapping.Current.PreparedCommit)
 	state.mu.Unlock()
+}
+
+func TestProviderEnforcedPreflightNeedsNoFabricatedCapacityValues(t *testing.T) {
+	broker, _, session, connection, clientID, _, _, page := turnFixture(t, 7220)
+	defer broker.Close(context.Background())
+	session.mu.Lock()
+	session.preflightResult = provider.PreflightResult{CapacityMode: provider.CapacityProviderEnforced, ResolvedModel: "model"}
+	session.mu.Unlock()
+	conversationID := connection.ConversationID()
+	command := submitCommand(sequenceID(7221), clientID, conversationID, sequenceID(7222), sequenceID(7223), "question", &page)
+
+	result, err := connection.Command(context.Background(), command)
+	require.NoError(t, err)
+	requireCommandResult(t, result, protocol.CommandSucceeded, "")
+	require.EqualValues(t, 1, session.submissions.Load())
 }
 
 func TestTurnDurableMutationsRetryOnlyFromProvenPreconditions(t *testing.T) {

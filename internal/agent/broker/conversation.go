@@ -794,7 +794,8 @@ func (actor *conversation) snapshot(contextState protocol.ContextState) (protoco
 	payload := protocol.SnapshotPayload{
 		Lifecycle: actor.lifecycle, Queue: actor.queue.Items(),
 		ContextState: contextState, ActiveWork: actor.activeWork(), SupportsImages: actor.session.capabilities.Images,
-		SettingsState: settingsState, EffectiveSettings: effectiveSettings, Catalog: catalog,
+		SupportsArchiveDelete: supportsArchiveDelete(actor.driver),
+		SettingsState:         settingsState, EffectiveSettings: effectiveSettings, Catalog: catalog,
 		SkillsState: skillsState, Skills: append([]protocol.SkillDescriptor{}, actor.skills...), MaxSelectedSkills: cloneInt(actor.maxSelectedSkills), SupportsCompact: actor.supportsCompact,
 		BusyPolicy: actor.busyPolicy, ComposerAdmission: actor.composerAdmission(),
 	}
@@ -806,6 +807,11 @@ func (actor *conversation) snapshot(contextState protocol.ContextState) (protoco
 		return protocol.Event{}, errors.New("invalid provider snapshot state")
 	}
 	return actor.factory.New(payload)
+}
+
+func supportsArchiveDelete(driver provider.Driver) bool {
+	deleter, ok := driver.(provider.NativeSessionDeleter)
+	return ok && !common.IsNil(deleter)
 }
 
 func (actor *conversation) detach(attachments map[*clientAttachment]struct{}, item *clientAttachment) {

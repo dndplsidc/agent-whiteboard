@@ -58,7 +58,7 @@ func TestPiCapableSessionRepairsLegacySettingsAndSupportsCompact(t *testing.T) {
 
 func TestComposerAdmissionUsesBusyPolicyNotProviderIdentity(t *testing.T) {
 	current := &statepkg.Session{}
-	for _, identity := range []provider.Name{provider.NamePi, provider.NameCodex} {
+	for _, identity := range provider.AllNames() {
 		actor := &conversation{identity: statepkg.Identity{Provider: identity}, mapping: statepkg.Mapping{Current: current}, lifecycle: protocol.LifecycleReady, queue: NewQueue()}
 		actor.busyPolicy = protocol.BusyTurnQueue
 		require.Equal(t, protocol.ComposerSubmit, actor.composerAdmission())

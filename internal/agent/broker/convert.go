@@ -66,6 +66,8 @@ func providerNameToDomain(name protocol.ProviderName) (provider.Name, error) {
 		return provider.NamePi, nil
 	case protocol.ProviderCodex:
 		return provider.NameCodex, nil
+	case protocol.ProviderCursor:
+		return provider.NameCursor, nil
 	default:
 		return "", errors.New("invalid provider")
 	}
@@ -77,6 +79,8 @@ func providerNameFromDomain(name provider.Name) (protocol.ProviderName, error) {
 		return protocol.ProviderPi, nil
 	case provider.NameCodex:
 		return protocol.ProviderCodex, nil
+	case provider.NameCursor:
+		return protocol.ProviderCursor, nil
 	default:
 		return "", errors.New("invalid provider")
 	}
