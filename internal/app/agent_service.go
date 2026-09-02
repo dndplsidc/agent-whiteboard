@@ -398,7 +398,11 @@ func resolveCursorExecutable(value string) (string, bool, error) {
 	if err != nil {
 		return "", false, fmt.Errorf("resolve Cursor executable path: %w", err)
 	}
-	return filepath.Clean(absolute), true, nil
+	canonical, err := filepath.EvalSymlinks(filepath.Clean(absolute))
+	if err != nil {
+		return "", false, fmt.Errorf("canonicalize Cursor executable path: %w", err)
+	}
+	return filepath.Clean(canonical), true, nil
 }
 
 func resolveCodexExecutable(value string) (string, bool, error) {

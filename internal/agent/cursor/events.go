@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/acp"
@@ -15,7 +16,8 @@ import (
 )
 
 const (
-	maxNativeUpdateBytes = 1 << 20
+	maxNativeUpdateBytes       = 1 << 20
+	cursorClosedStreamArtifact = "Error: RetriableError: WritableIterable is closed"
 	// A replay notification can JSON-escape every byte of a maximum configured
 	// v4 envelope. This remains comfortably below ACP's 128 MiB frame ceiling.
 	maxReplayUpdateBytes = 72 << 20
@@ -148,6 +150,16 @@ func (s *Session) update(raw json.RawMessage) {
 			s.poisonPrompt(turn)
 			return
 		}
+		if cursorClosedStreamFailure(update.Content.Text) {
+			// Cursor ACP 2026.08.11 can expose this adapter-runtime artifact as
+			// assistant text after its upstream turn has ended, then never return
+			// session/prompt. The matching turn-scoped update proves admission, but
+			// it is not model output. Fail closed and restart the transport without
+			// ever making the accepted prompt eligible for replay.
+			s.accept(turn)
+			s.poisonPrompt(turn)
+			return
+		}
 		s.mu.Lock()
 		if s.active != turn || turn.poisoned || len(turn.assistant)+len(update.Content.Text) > provider.MaxEventTextBytes {
 			bad := s.active == turn && !turn.poisoned
@@ -178,6 +190,10 @@ func (s *Session) update(raw json.RawMessage) {
 		// Required notification fields and aggregate bounds were validated above.
 		// Unknown standard-compatible updates are ignored and do not prove admission.
 	}
+}
+
+func cursorClosedStreamFailure(text string) bool {
+	return strings.Trim(text, " \t\r\n") == cursorClosedStreamArtifact
 }
 
 func (s *Session) poisonActiveUpdate() {
@@ -855,6 +871,9 @@ func (s *Session) replayAssistant(raw json.RawMessage) {
 	var update contentUpdate
 	if json.Unmarshal(raw, &update) != nil || update.Content.Type != "text" || !bounded(update.Content.Text, provider.MaxDeltaBytes, true) {
 		s.markBad()
+		return
+	}
+	if cursorClosedStreamFailure(update.Content.Text) {
 		return
 	}
 	s.mu.Lock()

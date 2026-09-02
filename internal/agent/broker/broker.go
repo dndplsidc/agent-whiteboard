@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"sync"
 	"time"
 
@@ -27,6 +28,10 @@ type StateStore interface {
 	ReconcilePrepared(statepkg.Identity, string, bool, time.Time) (statepkg.CommitOutcome, error)
 	EnsureWorkspace(string) (string, error)
 	RemoveWorkspace(string) error
+}
+
+type missingNativeSessionStore interface {
+	ReplaceMissingCurrentNativeSessionIfUnchanged(statepkg.Identity, statepkg.Mapping, provider.NativeSessionRef, time.Time) (statepkg.CommitOutcome, error)
 }
 
 type AttachmentStore interface {
@@ -436,6 +441,10 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.
 		if ctx.Err() != nil {
 			return nil, NewBrokerError(protocol.ErrorBrokerShuttingDown)
 		}
+		var failure provider.ProviderError
+		if identity.Provider == provider.NameCursor && errors.As(err, &failure) && failure.Code() == provider.ErrorNativeSessionMissing && mapping.Current.Committed == nil && mapping.Current.PreparedCommit == nil {
+			return broker.replaceMissingNativeSession(ctx, identity, mapping, driver, workspace)
+		}
 		return nil, MapError(err)
 	}
 	if _, err := validateProviderSession(handle, &mapping.Current.NativeSession, identity.Provider); err != nil {
@@ -446,6 +455,73 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.
 		return broker.reconcilePrepared(ctx, identity, mapping, handle)
 	}
 	return broker.newConversation(identity, mapping, handle)
+}
+
+func (broker *Broker) replaceMissingNativeSession(ctx context.Context, identity statepkg.Identity, mapping statepkg.Mapping, driver provider.Driver, workspace string) (*conversation, error) {
+	store, ok := broker.state.(missingNativeSessionStore)
+	if !ok || mapping.Current == nil || mapping.Current.Committed != nil || mapping.Current.PreparedCommit != nil {
+		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
+	}
+	var settings *provider.ExecutionSettings
+	if mapping.Current.Settings != nil {
+		copyOfSettings := *mapping.Current.Settings
+		settings = &copyOfSettings
+	}
+	request := provider.CreateRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), Workspace: workspace, Settings: settings}
+	if request.Validate() != nil {
+		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
+	}
+	session, createErr := driver.Create(ctx, request)
+	handle := captureSession(session)
+	if createErr != nil {
+		if handle != nil {
+			broker.retainStop(identity, handle)
+		}
+		if ctx.Err() != nil {
+			return nil, NewBrokerError(protocol.ErrorBrokerShuttingDown)
+		}
+		return nil, MapError(createErr)
+	}
+	native, validationErr := validateProviderSession(handle, nil, identity.Provider)
+	if validationErr != nil || native.Ref == mapping.Current.NativeSession {
+		broker.retainStop(identity, handle)
+		return nil, NewBrokerError(protocol.ErrorProviderProtocolFailure)
+	}
+	at := broker.clock.Now().UTC()
+	if at.IsZero() {
+		broker.retainStop(identity, handle)
+		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
+	}
+	outcome, mutationErr := store.ReplaceMissingCurrentNativeSessionIfUnchanged(identity, mapping, native.Ref, at)
+	target := cloneMapping(mapping)
+	target.Current.NativeSession = native.Ref
+	if target.Current.UpdatedAt.Before(at) {
+		target.Current.UpdatedAt = at
+	}
+	if target.UpdatedAt.Before(at) {
+		target.UpdatedAt = at
+	}
+	install := func(loaded statepkg.Mapping) (*conversation, error) {
+		actor, actorErr := broker.newConversation(identity, loaded, handle)
+		if actorErr != nil {
+			broker.retainStop(identity, handle)
+		}
+		return actor, actorErr
+	}
+	if outcome == statepkg.CommitApplied && mutationErr == nil {
+		return install(target)
+	}
+	if outcome == statepkg.CommitApplied || outcome == statepkg.CommitUncertain {
+		loaded, loadErr := broker.state.Load(identity)
+		if loadErr == nil && loaded.Validate(identity) == nil && reflect.DeepEqual(loaded, target) {
+			return install(loaded)
+		}
+	}
+	// Cursor does not support native deletion. Stop the replacement process but
+	// preserve its native session and the shared workspace if the durable CAS
+	// cannot be proven.
+	broker.retainStop(identity, handle)
+	return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 }
 
 func validateProviderSession(handle *sessionHandle, expected *provider.NativeSessionRef, expectedProvider provider.Name) (provider.NativeSession, error) {

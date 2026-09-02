@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -122,6 +123,29 @@ func TestCursorMatrixExactOpenParamsAndReplayBoundary(t *testing.T) {
 	}
 	_ = created.Shutdown(context.Background())
 	_ = resumed.Shutdown(context.Background())
+}
+
+func TestCursorResumeProvesNativeSessionExistsBeforeLoad(t *testing.T) {
+	open := map[string]any{"sessionId": "missing-native", "configOptions": testOptions("model-a")}
+	d, launcher, root := matrixDriver(t, scriptScenario{loadResult: open})
+	launcher.listPages = map[string]scriptedListPage{
+		"": {result: map[string]any{"sessions": []any{}}},
+	}
+	ref, _ := provider.NewNativeSessionRef("missing-native")
+	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+	assertMatrixProviderError(t, err, provider.ErrorNativeSessionMissing)
+	if opened != nil {
+		_ = opened.Shutdown(context.Background())
+	}
+	launcher.mu.Lock()
+	child := launcher.children[0]
+	launcher.mu.Unlock()
+	child.mu.Lock()
+	methods := append([]string(nil), child.methods...)
+	child.mu.Unlock()
+	if !slices.Equal(methods, []string{"initialize", "session/list"}) {
+		t.Fatalf("methods = %v", methods)
+	}
 }
 
 func TestCursorMatrixReplayRejectsKnownInboundRequests(t *testing.T) {

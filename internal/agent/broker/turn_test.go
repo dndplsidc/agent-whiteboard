@@ -27,8 +27,10 @@ type turnSession struct {
 	preflightIgnoreContext bool
 	submitErr              error
 	submitEvent            *provider.Event
+	submitEvents           []provider.Event
 	submitAccepted         *provider.AcceptedTurn
 	submitGate             chan struct{}
+	closeEventsOnSubmit    bool
 	interruptErr           error
 	interruptEvent         *provider.Event
 	interruptGate          chan struct{}
@@ -228,13 +230,21 @@ func (session *turnSession) Submit(ctx context.Context, request provider.TurnReq
 	}
 	session.mu.Lock()
 	err, event, accepted, gate := session.submitErr, session.submitEvent, session.submitAccepted, session.submitGate
+	events := append([]provider.Event(nil), session.submitEvents...)
+	closeEvents := session.closeEventsOnSubmit
 	session.mu.Unlock()
 	if event != nil {
+		events = append(events, *event)
+	}
+	for _, emitted := range events {
 		select {
-		case session.events <- *event:
+		case session.events <- emitted:
 		case <-ctx.Done():
 			return provider.AcceptedTurn{}, ctx.Err()
 		}
+	}
+	if closeEvents {
+		close(session.events)
 	}
 	if gate != nil {
 		select {

@@ -324,6 +324,21 @@ func (a *agent) prompt(r request, p map[string]any) {
 		}
 	}
 	a.notify(id, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "scripted answer"}})
+	if a.scenario == "closed_stream" {
+		env, _ := json.Marshal(map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]any{"type": "text", "text": firstText(blocks)}})
+		ans, _ := json.Marshal(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "scripted answer"}})
+		a.stateTxn(func(current *state) {
+			for i := range current.Sessions {
+				if current.Sessions[i].ID == id {
+					current.Sessions[i].Replay = append(current.Sessions[i].Replay, env, ans)
+					break
+				}
+			}
+		})
+		a.record(map[string]any{"method": "session/prompt.runtime_failure", "failure_kind": "closed_stream"})
+		a.notify(id, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "Error: RetriableError: WritableIterable is closed"}})
+		select {}
+	}
 	if strings.Contains(a.scenario, "hold") {
 		a.barrier("prompt")
 		if strings.Contains(a.scenario, "cancel") {

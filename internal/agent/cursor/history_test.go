@@ -43,6 +43,32 @@ func TestLoadReplayExactEnvelopeAndReconciliation(t *testing.T) {
 		t.Fatalf("%v %s", err, state)
 	}
 }
+func TestLoadReplaySuppressesCursorClosedStreamArtifact(t *testing.T) {
+	d, _, root := testDriver(t)
+	s := newSession(d, &runtime{caps: capabilities{}}, root)
+	s.beginReplay()
+	request := provider.TurnRequest{TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("reader")}
+	encoded, err := provider.Build(request, provider.PolicyConfigured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendReplay(t, s, "user_message_chunk", string(encoded))
+	sendReplay(t, s, "agent_message_chunk", "answer")
+	sendReplay(t, s, "agent_message_chunk", "\n"+cursorClosedStreamArtifact+"\n")
+	if err = s.finishOpen(openResult{SessionID: "native", ConfigOptions: testOptions("model-a")}, true); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.History(context.Background(), provider.HistoryRequest{})
+	if err != nil || len(page.Items) != 2 {
+		t.Fatalf("history = %+v, %v", page, err)
+	}
+	for _, item := range page.Items {
+		if strings.Contains(item.Text, "RetriableError") {
+			t.Fatalf("runtime artifact escaped through replay: %+v", page.Items)
+		}
+	}
+}
+
 func TestHistoryReturnsDeeplyIsolatedMessageContent(t *testing.T) {
 	d, _, root := testDriver(t)
 	s := newSession(d, &runtime{caps: capabilities{}}, root)

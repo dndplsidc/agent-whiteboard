@@ -139,7 +139,7 @@ agent-whiteboard agent serve \
   --cursor-executable /path/to/cursor-agent
 ```
 
-Each selector uses its explicit flag first, then its matching non-empty environment variable, then default `PATH` discovery. Cursor's default executable is exactly `cursor-agent`; a generic executable named `agent` is accepted only through `--cursor-executable` or `AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE`. An explicitly supplied empty executable flag is invalid. A missing provider does not stop the broker or other providers from working.
+Each selector uses its explicit flag first, then its matching non-empty environment variable, then default `PATH` discovery. Cursor's default executable is exactly `cursor-agent`; a generic executable named `agent` is accepted only through `--cursor-executable` or `AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE`. Cursor executable selection canonicalizes a discovered symlink before the adapter validates and launches the direct regular executable. An explicitly supplied empty executable flag is invalid. A missing provider does not stop the broker or other providers from working.
 
 ### Trust the publishing origin
 

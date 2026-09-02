@@ -48,6 +48,67 @@ func drainTurn(events <-chan provider.Event, terminal provider.EventKind) {
 	}
 }
 
+func TestCursorClosedStreamArtifactFailsAcceptedTurnWithoutLeakingNativeText(t *testing.T) {
+	driver, launcher, root := testDriver(t)
+	opened, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := opened.(*Session)
+	launcher.mu.Lock()
+	child := launcher.children[0]
+	launcher.mu.Unlock()
+	request := provider.TurnRequest{TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("reader")}
+	started, _, submitted := startBlockedTurn(t, session, child, request)
+	accepted := acceptBlockedTurn(t, session, child, started, submitted, "answer")
+	if accepted.TurnID != turnID {
+		t.Fatalf("accepted turn = %#v", accepted)
+	}
+	child.send(t, map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": session.NativeSession().Ref.Value(), "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "\n\n" + cursorClosedStreamArtifact + "\n"}}}})
+
+	var kinds []provider.EventKind
+	var assistantText string
+	for event := range session.events {
+		kinds = append(kinds, event.Kind)
+		if event.Kind == provider.EventAssistantDelta || event.Kind == provider.EventAssistantMessage {
+			assistantText += event.Text
+		}
+	}
+	if assistantText != "answer" {
+		t.Fatalf("assistant text = %q", assistantText)
+	}
+	terminalFailures := 0
+	for _, kind := range kinds {
+		if kind == provider.EventTerminalFailure {
+			terminalFailures++
+		}
+		if kind == provider.EventCompletion {
+			t.Fatalf("runtime artifact completed turn: %v", kinds)
+		}
+	}
+	if terminalFailures != 1 {
+		t.Fatalf("terminal failures = %d, events = %v", terminalFailures, kinds)
+	}
+	<-child.done
+}
+
+func TestCursorClosedStreamArtifactClassifierIsExact(t *testing.T) {
+	for _, text := range []string{
+		"Error: RetriableError",
+		"WritableIterable is closed",
+		"The log said " + cursorClosedStreamArtifact,
+		cursorClosedStreamArtifact + ".",
+		"Error: RetriableError: another stream is closed",
+	} {
+		if cursorClosedStreamFailure(text) {
+			t.Fatalf("near miss classified as runtime artifact: %q", text)
+		}
+	}
+	if !cursorClosedStreamFailure("\n" + cursorClosedStreamArtifact + "\n") {
+		t.Fatal("captured runtime artifact was not classified")
+	}
+}
+
 func TestStopJoinIsPerTurnAndConcurrentStopWritesOnce(t *testing.T) {
 	driver, launcher, root := testDriver(t)
 	opened, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root})

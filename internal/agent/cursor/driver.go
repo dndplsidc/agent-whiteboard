@@ -188,6 +188,22 @@ func (d *Driver) open(ctx context.Context, workspace, method string, params map[
 	}
 	router.publish(session)
 	go func() { <-rt.client.Done(); session.transportEnded() }()
+	if method == "session/load" {
+		target, validTarget := params["sessionId"].(string)
+		if !validTarget || target == "" {
+			_ = session.Shutdown(context.Background())
+			return session, provider.NewProviderError(provider.ErrorProtocolFailure)
+		}
+		listed, listErr := walkSessionList(ctx, rt, target)
+		if listErr != nil {
+			_ = session.Shutdown(context.Background())
+			return session, listErr
+		}
+		if listed == nil {
+			_ = session.Shutdown(context.Background())
+			return session, provider.NewProviderError(provider.ErrorNativeSessionMissing)
+		}
+	}
 	var opened openResult
 	if _, err = rt.client.Call(ctx, method, params, &opened); err != nil {
 		_ = session.Shutdown(context.Background())

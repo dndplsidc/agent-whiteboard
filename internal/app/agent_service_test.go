@@ -140,7 +140,25 @@ func TestResolveCursorExecutableUsesOnlyCursorAgentByDefault(t *testing.T) {
 	resolved, available, err = resolveCursorExecutable("")
 	require.NoError(t, err)
 	require.True(t, available)
-	require.Equal(t, cursorAgent, resolved)
+	canonical, canonicalErr := filepath.EvalSymlinks(cursorAgent)
+	require.NoError(t, canonicalErr)
+	require.Equal(t, canonical, resolved)
+}
+
+func TestResolveCursorExecutableCanonicalizesDiscoveredSymlink(t *testing.T) {
+	directory := t.TempDir()
+	targetDirectory := t.TempDir()
+	target := filepath.Join(targetDirectory, "cursor-agent-real")
+	require.NoError(t, os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	require.NoError(t, os.Symlink(target, filepath.Join(directory, "cursor-agent")))
+	t.Setenv("PATH", directory)
+
+	resolved, available, err := resolveCursorExecutable("")
+	require.NoError(t, err)
+	require.True(t, available)
+	canonical, canonicalErr := filepath.EvalSymlinks(target)
+	require.NoError(t, canonicalErr)
+	require.Equal(t, canonical, resolved)
 }
 
 func TestResolveCursorExecutableExplicitNameAndInvalidValue(t *testing.T) {
@@ -152,7 +170,9 @@ func TestResolveCursorExecutableExplicitNameAndInvalidValue(t *testing.T) {
 	resolved, available, err := resolveCursorExecutable("agent")
 	require.NoError(t, err)
 	require.True(t, available)
-	require.Equal(t, executable, resolved)
+	canonical, canonicalErr := filepath.EvalSymlinks(executable)
+	require.NoError(t, canonicalErr)
+	require.Equal(t, canonical, resolved)
 	_, _, err = resolveCursorExecutable("missing-explicit-cursor")
 	require.ErrorContains(t, err, "resolve Cursor executable")
 	_, _, err = resolveCursorExecutable(filepath.Join(directory, "missing-cursor"))

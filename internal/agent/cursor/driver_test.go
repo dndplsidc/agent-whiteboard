@@ -228,6 +228,14 @@ func (c *scriptChild) serve() {
 			c.mu.Unlock()
 			if configured {
 				result, responseError = page.result, page.rpcError
+			} else if params.Cursor == "" && c.scenario.loadResult != nil {
+				var opened openResult
+				raw, _ := json.Marshal(c.scenario.loadResult)
+				if json.Unmarshal(raw, &opened) == nil && opened.SessionID != "" {
+					result = map[string]any{"sessions": []any{map[string]any{"sessionId": opened.SessionID}}}
+				} else {
+					result = map[string]any{"sessions": []any{}}
+				}
 			} else {
 				result = map[string]any{"sessions": []any{}}
 			}

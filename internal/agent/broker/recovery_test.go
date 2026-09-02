@@ -103,6 +103,75 @@ func TestRecoveryExpiresIdleSessionInteractionBeforeReplacement(t *testing.T) {
 	require.Equal(t, 1, replayInteractionResolutionCount(t, connection.actor.replay, requestID))
 }
 
+func TestAcceptedSubmitTerminalSettlesBeforeImmediateProviderClosureRecovery(t *testing.T) {
+	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1263))
+	resource := testResource(identity.CapabilityID)
+	page := testPageContext(resource)
+	mapping.Current.Observed = &statepkg.Revision{Digest: page.Digest, Revision: statepkg.RevisionInitial, SourceUpdatedAt: resource.UpdatedAt}
+	state := &repairState{mapping: &mapping, promotions: []repairMutation{{outcome: statepkg.CommitApplied, apply: true}}}
+	old := newTurnSession(mapping.Current.NativeSession.Value())
+	replacement := newTurnSession(mapping.Current.NativeSession.Value())
+	driver := &recoverySequenceDriver{sessions: []provider.Session{old, replacement}}
+	broker, err := New(validLifecycleConfig(state, driver, &lockedIDs{next: 1264}))
+	require.NoError(t, err)
+	defer broker.Close(context.Background())
+	clientID := sequenceID(1265)
+	connected, err := broker.Connect(context.Background(), identity.Origin, observationConnect(clientID, identity.CapabilityID, page.Digest, resource, ""))
+	require.NoError(t, err)
+	connection := connected.(*Connection)
+	receiveLifecycle(t, connection.Events())
+	turnID, messageID := sequenceID(1266), sequenceID(1267)
+	old.mu.Lock()
+	old.submitGate = make(chan struct{})
+	old.submitEvents = []provider.Event{
+		provider.NewUserMessageEvent(turnID, messageID, provider.TextMessage("active"), testTime()),
+		provider.NewTerminalFailureEvent(turnID, provider.NewProviderError(provider.ErrorProtocolFailure)),
+	}
+	old.closeEventsOnSubmit = true
+	submitGate := old.submitGate
+	old.mu.Unlock()
+	closureObserved, releaseClosure := make(chan struct{}), make(chan struct{})
+	connection.actor.afterProviderEventsClose = func() {
+		close(closureObserved)
+		<-releaseClosure
+	}
+	answer := make(chan commandResponse, 1)
+	commandID := sequenceID(1268)
+	go func() {
+		event, commandErr := connection.Command(context.Background(), submitCommand(commandID, clientID, connection.ConversationID(), turnID, messageID, "active", &page))
+		answer <- commandResponse{event: event, err: commandErr}
+	}()
+	receiveLifecycle(t, old.submitted)
+	<-closureObserved
+	close(submitGate)
+	close(releaseClosure)
+	result := receiveLifecycle(t, answer)
+	require.NoError(t, result.err)
+	requireCommandResult(t, result.event, protocol.CommandSucceeded, "")
+
+	ready := false
+	providerCrashed := false
+	for !ready {
+		event := receiveLifecycle(t, connection.Events())
+		if payload, ok := event.Payload.(protocol.ErrorPayload); ok && payload.Error.Code() == protocol.ErrorProviderCrashed {
+			providerCrashed = true
+		}
+		if payload, ok := event.Payload.(protocol.LifecyclePayload); ok && payload.State == protocol.LifecycleReady {
+			ready = true
+		}
+	}
+	require.False(t, providerCrashed, "accepted terminal failure was followed by a duplicate crash error")
+	require.EqualValues(t, 1, old.submissions.Load())
+	require.Zero(t, replacement.submissions.Load())
+	driver.mu.Lock()
+	require.Len(t, driver.requests, 2)
+	driver.mu.Unlock()
+	state.mu.Lock()
+	require.NotNil(t, state.mapping.Current.Committed)
+	require.Nil(t, state.mapping.Current.PreparedCommit)
+	state.mu.Unlock()
+}
+
 func TestRecoveryPreservesConcurrentInteractionResponseOwnership(t *testing.T) {
 	identity, mapping := hardeningMapping(t, "https://example.com", sequenceID(1270))
 	resource := testResource(identity.CapabilityID)

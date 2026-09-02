@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -198,10 +199,18 @@ func TestInterruptCancelsPermissionBeforeCancelNotification(t *testing.T) {
 	if !strings.Contains(string(encoded), "cancelled") {
 		t.Fatalf("permission outcome = %s", encoded)
 	}
+	// A completed write does not imply that the scripted child goroutine has
+	// parsed it. A following request/response is a deterministic FIFO barrier
+	// proving that session/cancel was observed before this assertion.
+	var barrier json.RawMessage
+	if _, err = session.rt.client.Call(context.Background(), "session/list", map[string]any{}, &barrier); err != nil {
+		t.Fatal(err)
+	}
 	child.mu.Lock()
 	observed := append([]string(nil), child.observed...)
 	child.mu.Unlock()
-	if len(observed) < 2 || observed[len(observed)-2] != "response" || observed[len(observed)-1] != "session/cancel" {
+	cancelIndex, barrierIndex := slices.Index(observed, "session/cancel"), slices.Index(observed, "session/list")
+	if cancelIndex < 1 || observed[cancelIndex-1] != "response" || barrierIndex <= cancelIndex {
 		t.Fatalf("write order = %v", observed)
 	}
 	_ = session.Shutdown(context.Background())

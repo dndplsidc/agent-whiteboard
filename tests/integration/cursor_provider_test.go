@@ -520,6 +520,50 @@ func TestCursorArchiveRestoreLoadReplayHistoryAndUnsupportedDelete(t *testing.T)
 	require.GreaterOrEqual(t, strings.Count(evidence, "session/load.semantic"), 1, "restore must load through ACP")
 }
 
+func TestCursorClosedStreamRuntimeFailureIsSanitizedAndRecoveredWithoutReplay(t *testing.T) {
+	h := newCursorHarness(t, "closed_stream")
+	s := h.connect(t)
+	defer s.ws.Close()
+	created := time.Date(2026, 8, 29, 1, 2, 3, 0, time.UTC)
+	digest := agent.CalculateContextDigest([]byte(cursorSource), []byte(cursorCreator))
+	turnID, messageID := cursorID('K'), cursorID('L')
+	commandID := s.command(t, protocol.CommandSubmit, protocol.SubmitPayload{TurnID: turnID, MessageID: messageID, Content: protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartText, Text: "runtime failure"}}}, Context: &protocol.PageContext{Revision: protocol.ContextInitial, Source: cursorSource, CreatorContext: cursorCreator, Title: "Failure", URL: h.origin + "/failure", Resource: protocol.Resource{Kind: protocol.ResourceMarkdown, ID: cursorID('C'), CreatedAt: created, UpdatedAt: created}, Digest: digest}, Settings: &protocol.ExecutionSettings{Model: "cursor-large", Effort: "default", Speed: protocol.SpeedStandard}})
+
+	commandSucceeded, sanitizedFailure, unavailable, recovered := false, false, false, false
+	for !commandSucceeded || !sanitizedFailure || !recovered {
+		event := s.read(t)
+		encoded, err := json.Marshal(event)
+		require.NoError(t, err)
+		require.NotContains(t, string(encoded), "RetriableError")
+		require.NotContains(t, string(encoded), "WritableIterable")
+		switch event["type"] {
+		case string(protocol.EventCommandResult):
+			payload := event["payload"].(map[string]any)
+			if payload["command_id"] == commandID {
+				require.Equal(t, string(protocol.CommandSucceeded), payload["status"])
+				commandSucceeded = true
+			}
+		case string(protocol.EventError):
+			code, _ := event["payload"].(map[string]any)["error"].(map[string]any)["code"].(string)
+			if code == string(protocol.ErrorProviderProtocolFailure) {
+				sanitizedFailure = true
+			}
+		case string(protocol.EventLifecycle):
+			state, _ := event["payload"].(map[string]any)["state"].(string)
+			if state == string(protocol.LifecycleUnavailable) {
+				unavailable = true
+			}
+			if unavailable && state == string(protocol.LifecycleReady) {
+				recovered = true
+			}
+		}
+	}
+	evidence := h.waitEvidence(t, "session/load.semantic")
+	require.Equal(t, 1, strings.Count(evidence, "session/prompt.semantic"))
+	require.Equal(t, 1, strings.Count(evidence, "session/prompt.runtime_failure"))
+	require.GreaterOrEqual(t, strings.Count(evidence, "session/load.semantic"), 1)
+}
+
 func TestCursorImageSemanticsManagedShutdownAndCrashIsolation(t *testing.T) {
 	t.Run("image semantics and managed shutdown", func(t *testing.T) {
 		h := newCursorHarness(t, "hold_cancel")

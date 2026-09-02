@@ -403,12 +403,16 @@ func (c *Client) readLoop(reader io.Reader) {
 			}
 			return
 		}
-		item := wireItem{retained: len(line), deadline: time.Now().Add(c.opts.HandlerTimeout)}
+		item := wireItem{retained: len(line)}
 		if len(line) == 0 || !json.Valid(line) || duplicateJSONKey(line) {
 			item.err = ErrMalformed
 		} else if json.Unmarshal(line, &item.msg) != nil || item.msg.JSONRPC != "2.0" || len(item.msg.Method) > c.opts.MaxMethodBytes || len(item.msg.ID) > c.opts.MaxIDBytes {
 			item.err = ErrMalformed
 		}
+		// HandlerTimeout bounds dispatch and handler ownership, not the
+		// transport's bounded JSON validation work. Starting it before parsing
+		// makes maximum supported frames spuriously expire under race builds.
+		item.deadline = time.Now().Add(c.opts.HandlerTimeout)
 		if !c.enqueueWire(item) {
 			return
 		}
