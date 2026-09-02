@@ -46,6 +46,11 @@ function parsedCommands(requests) {
     .map((request) => JSON.parse(request.body));
 }
 
+async function recordedCommand(fixture, type) {
+  await expect.poll(() => parsedCommands(fixture.brokerRequests).some((command) => command.type === type)).toBe(true);
+  return parsedCommands(fixture.brokerRequests).find((command) => command.type === type);
+}
+
 test("keeps page context behind explicit consent and uses the HTTP fallback", async ({
   context,
   page,
@@ -134,7 +139,7 @@ test("adds multiple document selections inline with surrounding message text", a
   await expect(sent).toContainText("and");
   await expect(sent).toContainText("explain the relationship");
 
-  const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
+  const submit = await recordedCommand(localAgentSidebar, "submit");
   const references = submit.payload.content.parts.filter((part) => part.type === "reference");
   expect(references).toHaveLength(2);
   expect(references.map((part) => part.reference)).toEqual(expect.arrayContaining([
@@ -181,7 +186,7 @@ test("adds exact Mermaid source as existing section context", async ({ context, 
 
   const sent = page.locator(".agent-message-user").last();
   await expect(sent.locator('[data-reference-kind="section"]')).toHaveText("Architecture — Mermaid diagram 1");
-  const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
+  const submit = await recordedCommand(localAgentSidebar, "submit");
   const submittedReference = submit.payload.content.parts.find((part) => part.type === "reference").reference;
   expect(submittedReference).toMatchObject({
     kind: "section",
@@ -245,7 +250,7 @@ test("adds a rendered raster as a private inline image reference", async ({ cont
   await expect(sent.locator(".agent-message-images")).toHaveCount(0);
   const upload = localAgentSidebar.brokerRequests.find((request) => request.method === "POST" && request.url === "/api/v1/agent/images");
   expect(upload.headers["x-agent-whiteboard-image-purpose"]).toBe("inline_reference");
-  const submit = parsedCommands(localAgentSidebar.brokerRequests).find((command) => command.type === "submit");
+  const submit = await recordedCommand(localAgentSidebar, "submit");
   expect(submit.payload.images).toBeUndefined();
   expect(submit.payload.content.parts[0].reference).toMatchObject({ kind: "image", visual: { name: "image-1.png", alt: "Architecture" } });
 });
@@ -1090,8 +1095,86 @@ test("uses Cursor capabilities without copied skill, compact, or archive-delete 
   await expect(page.locator(".agent-message-user .agent-message-images img")).toHaveCount(1);
   const upload = localAgentSidebar.brokerRequests.find((request) => request.method === "POST" && request.url === "/api/v1/agent/images");
   expect(upload.headers["x-agent-whiteboard-provider"]).toBe("cursor");
-  expect(parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit").payload.images).toEqual([{ image_id: expect.any(String), name: "cursor.png" }]);
+  expect((await recordedCommand(localAgentSidebar, "submit")).payload.images).toEqual([{ image_id: expect.any(String), name: "cursor.png" }]);
   expect(parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "compact" || type === "archive_delete")).toBe(false);
+});
+
+test("shows Cursor submit delivery from sending through correlated acceptance", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Cursor delivery\n", creatorContext: "Cursor delivery context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("cursor");
+  localAgentSidebar.setWebSocketEnabled(true);
+  await connectSidebar(page, "cursor");
+  localAgentSidebar.holdNextSubmit("cursor");
+
+  const composer = page.getByLabel("Message Cursor about this whiteboard");
+  await composer.fill("Show this immediately.");
+  await composer.press("Enter");
+
+  await expect(composer).toBeEmpty();
+  const pending = page.locator('.agent-message-pending[data-state="sending"]');
+  await expect(pending).toContainText("Show this immediately.");
+  await expect(pending.locator(".agent-message-delivery")).toHaveText("Sending…");
+  expect(localAgentSidebar.webSocketCommands.filter(({ type }) => type === "submit")).toHaveLength(1);
+
+  localAgentSidebar.resolveHeldSubmit("accepted", "cursor");
+  await expect(page.locator(".agent-message-pending")).toHaveCount(0);
+  await expect(page.locator(".agent-message-user").last()).toContainText("Show this immediately.");
+  expect(localAgentSidebar.webSocketCommands.filter(({ type }) => type === "submit")).toHaveLength(1);
+});
+
+test("retains a rejected Cursor submit without overwriting a newer draft", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Cursor rejection\n", creatorContext: "Cursor rejection context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("cursor");
+  await connectSidebar(page, "cursor");
+  localAgentSidebar.holdNextSubmit("cursor");
+
+  const composer = page.getByLabel("Message Cursor about this whiteboard");
+  await composer.fill("Rejected exact payload.");
+  await composer.press("Enter");
+  await composer.fill("Newer draft stays here.");
+  localAgentSidebar.resolveHeldSubmit("rejected", "cursor");
+
+  await expect(composer).toHaveText("Newer draft stays here.");
+  const rejected = page.locator('.agent-message-pending[data-state="rejected"]');
+  await expect(rejected).toContainText("Rejected exact payload.");
+  await expect(rejected.locator(".agent-message-delivery > span")).toHaveText("Not sent");
+  const restore = rejected.getByRole("button", { name: "Restore draft" });
+  await expect(restore).toBeVisible();
+  await composer.fill("");
+  await restore.click();
+  await expect(composer).toHaveText("Rejected exact payload.");
+  await expect(page.locator(".agent-message-pending")).toHaveCount(0);
+});
+
+test("confirms indeterminate Cursor delivery and recovers without resubmitting", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Cursor reconnect\n", creatorContext: "Cursor reconnect context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("cursor");
+  localAgentSidebar.setWebSocketEnabled(true);
+  await connectSidebar(page, "cursor");
+  localAgentSidebar.holdNextSubmit("cursor");
+
+  const composer = page.getByLabel("Message Cursor about this whiteboard");
+  await composer.fill("Recover this once.");
+  await composer.press("Enter");
+  localAgentSidebar.setProviderAvailable("cursor", false);
+  localAgentSidebar.disconnectProvider("cursor");
+
+  const confirming = page.locator('.agent-message-pending[data-state="confirming"]');
+  await expect(page.locator(".agent-live-status")).toHaveText("Broker unavailable");
+  await expect(confirming).toBeVisible();
+  await expect(confirming).toContainText("Recover this once.");
+  await expect(confirming.locator(".agent-message-delivery")).toHaveText("Confirming delivery…");
+  expect(localAgentSidebar.webSocketCommands.filter(({ type }) => type === "submit")).toHaveLength(1);
+
+  localAgentSidebar.resolveHeldSubmit("accepted", "cursor");
+  localAgentSidebar.setProviderAvailable("cursor", true);
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected", { timeout: 10_000 });
+  await expect(page.locator(".agent-message-pending")).toHaveCount(0);
+  await expect(page.locator(".agent-message-user").last()).toContainText("Recover this once.");
+  expect(localAgentSidebar.webSocketCommands.filter(({ type }) => type === "submit")).toHaveLength(1);
 });
 
 test("uses accessible Codex model controls and captures accepted exact settings", async ({ context, page, localAgentSidebar }) => {

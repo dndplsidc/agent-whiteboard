@@ -513,6 +513,7 @@ const MAX_ARCHIVES = 100;
 const MAX_QUEUE_ITEMS = 64;
 const MAX_PENDING_INTERACTIONS = 32;
 const MAX_RETAINED_INTERACTIONS = 64;
+const MAX_SUBMISSION_RECOVERY_HISTORY_PAGES = 8;
 const MAX_TIMELINE_TEXT_BYTES = 96 * 1024;
 const MAX_DELTA_BYTES = 32 * 1024;
 const PROVIDER_ENTRIES = Object.values(PROVIDER_METADATA);
@@ -1408,7 +1409,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
       break;
     }
     case "blocked": appendTimeline(state, { kind: "activity", activity: "blocked", blockedKind: payload.kind, text: payload.message, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
-    case "error": state.errors.push({ ...payload.error }); state.errors = state.errors.slice(-20); appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
+    case "error": state.errors.push({ ...payload.error }); state.errors = state.errors.slice(-20); appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, code: payload.error.code, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
     case "completion": state.lifecycle = "ready"; state.activeWork = null; break;
     case "interruption": state.lifecycle = "interrupted"; state.activeWork = null; appendTimeline(state, { kind: "activity", activity: "interruption", text: "The active response was interrupted and was not replayed automatically.", created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder }); break;
     case "archive":
@@ -1447,7 +1448,7 @@ function applyAgentEventMutable(state, untrustedEvent) {
       if (payload.status === "rejected") {
         state.freshArchiveCommandIDs.delete(payload.command_id);
         state.errors.push({ ...payload.error });
-        appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder });
+        appendTimeline(state, { kind: "activity", activity: "error", text: payload.error.message, code: payload.error.code, action: payload.error.action, created_at: event.timestamp, item_id: event.event_id, expanded: true, transcript_order: transcriptOrder });
       }
       state.errors = state.errors.slice(-20);
       break;
@@ -1773,8 +1774,9 @@ export function createAgentTransport({
   };
 }
 
-export function actionGuidance(action, doc, selectedProvider = "pi") {
+export function actionGuidance(action, doc, selectedProvider = "pi", errorCode = "") {
   const origin = doc.location?.origin ?? "this HTTPS origin";
+  const cursorRecoversAutomatically = selectedProvider === "cursor" && ["provider_protocol_failure", "provider_malformed_stream"].includes(errorCode);
   const guidance = {
     none: "",
     retry_connection: "Check the broker and try connecting again.",
@@ -1788,7 +1790,9 @@ export function actionGuidance(action, doc, selectedProvider = "pi") {
       : "Complete provider-native login in a terminal, then try again.",
     configure_model: "Configure a usable default model for the selected provider, then try again.",
     try_again: "Try the operation again; if it still fails, restart the broker.",
-    restart_provider: "Restart the local agent broker before trying again.",
+    restart_provider: cursorRecoversAutomatically
+      ? "The broker reconnects automatically without resubmitting the turn. Do not submit the same message again while delivery is being confirmed."
+      : "Restart the local agent broker before trying again.",
     reduce_context: "Reduce the complete page source or creator context before trying again.",
     restore_session: "Restore an available archive or start a new conversation.",
     retry_turn: "Send a new message when ready; interrupted turns are never replayed automatically.",
@@ -1805,7 +1809,7 @@ export function actionGuidance(action, doc, selectedProvider = "pi") {
 export function browserErrorText(code, doc, fallback, selectedProvider = "pi") {
   const definition = ERROR_DEFINITIONS[code];
   if (!definition) return fallback;
-  const guidance = actionGuidance(definition[1], doc, selectedProvider);
+  const guidance = actionGuidance(definition[1], doc, selectedProvider, code);
   return guidance ? `${definition[0]} ${guidance}` : definition[0];
 }
 
@@ -1825,6 +1829,7 @@ function appendAgentMessage(doc, container, item, providerName = "Pi", appendIma
   article.append(label, body);
   appendImages(article, item.images ?? []);
   container.append(article);
+  return article;
 }
 
 function appendToolActivity(doc, container, item) {
@@ -2076,6 +2081,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let state;
   let transport;
   let controller;
+  let suppressDraftRevision = false;
   const controllers = new Map();
   let open = preferences.open;
   let port = preferences.port;
@@ -2453,7 +2459,15 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   let messageEditor;
   messageEditor = createMessageEditor({
     doc,
-    onChange: (content) => { handleDraftContentChange(content); resizeComposer(); updateComposerAvailability(); },
+    onChange: (content) => {
+      handleDraftContentChange(content);
+      if (controller) {
+        controller.composerDraft.content = cloneMessageContent(content);
+        if (!suppressDraftRevision) controller.composerDraft.revision += 1;
+      }
+      resizeComposer();
+      updateComposerAvailability();
+    },
     onSubmit: () => composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
   });
   const message = messageEditor.element;
@@ -2539,7 +2553,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       provider: metadata.value,
       state: createAgentState(metadata.value),
       settingsDraft: createSettingsDraftState(initialSettings),
-      composerDraft: { generation: 0, content: { parts: [] }, attachments: [], inlineVisuals: new Map(), inlineClaims: new Set(), pendingCompactCommandID: null, pendingCompactDraft: null },
+      composerDraft: { generation: 0, revision: 0, content: { parts: [] }, attachments: [], inlineVisuals: new Map(), inlineClaims: new Set(), pendingCompactCommandID: null, pendingCompactDraft: null },
       interactionForms: new Map(),
       interactionFocus: null,
       transport: null,
@@ -2552,6 +2566,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       handoffCommandID: null,
       pendingSubmitCommandID: null,
       pendingSubmission: null,
+      rejectedSubmissions: [],
     };
     owned.transport = transportFactory({
       payload,
@@ -2560,6 +2575,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       initialSettings: () => cloneExecutionSettings(owned.settingsDraft.draft),
       onEvent(event) {
         if (!applyAgentEvent(owned.state, event)) return;
+        if (pendingSubmissionSeen(owned)) {
+          if (owned.pendingSubmission?.recovery) settleRecoveredSubmission(owned, true, { authoritative: true });
+          else acceptPendingSubmission(owned, { authoritative: true });
+        }
         if (["snapshot", "timeline"].includes(event.type)) reconcilePendingSubmitRecovery(owned, event);
         if (event.type === "interaction_resolved") owned.interactionForms.delete(event.payload.request_id);
         if ((event.type === "snapshot" || event.type === "settings") && event.payload.settings_state !== null) {
@@ -2576,9 +2595,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         }
         if (event.type === "command_result" && event.payload.command_id === owned.handoffCommandID && event.payload.status === "rejected") owned.handoffCommandID = null;
         if (event.type === "command_result" && event.payload.command_id === owned.pendingSubmitCommandID) {
-          if (event.payload.status === "succeeded") completePendingSubmission(owned);
+          if (event.payload.status === "succeeded") {
+            if (owned.pendingSubmission?.recovery) owned.pendingSubmission.recovery.acceptedEvidence = true;
+            acceptPendingSubmission(owned);
+          }
+          else rejectPendingSubmission(owned);
           owned.pendingSubmitCommandID = null;
-          owned.pendingSubmission = null;
+          if (owned.pendingSubmission?.authoritative) owned.pendingSubmission = null;
         }
         if (event.type === "command_result" && event.payload.command_id === owned.composerDraft.pendingCompactCommandID) {
           const compactDraft = owned.composerDraft.pendingCompactDraft;
@@ -2616,10 +2639,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         owned.connecting = false;
         owned.state.connected = false;
         owned.state.lifecycle = "unavailable";
+        if (owned.pendingSubmission?.status === "sending") owned.pendingSubmission.status = "confirming";
+        const pendingSubmitIndeterminate = owned.pendingSubmitCommandID !== null && owned.pendingSubmission !== null;
         if (owned.contextCommandID !== null) {
           owned.contextDeliveryUnknown = true;
-          resetControllerForFreshSnapshot(owned, { preserveContextDelivery: true });
-        }
+          resetControllerForFreshSnapshot(owned, { preserveContextDelivery: true, reconcilePendingSubmit: pendingSubmitIndeterminate });
+        } else if (pendingSubmitIndeterminate) resetControllerForFreshSnapshot(owned, { reconcilePendingSubmit: true });
         if (owned.handoffCommandID !== null) {
           owned.transport.resetConversation();
           owned.state.conversationID = null;
@@ -2692,7 +2717,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     draftInlineVisuals = next.composerDraft.inlineVisuals;
     pendingCompactCommandID = next.composerDraft.pendingCompactCommandID;
     pendingCompactDraft = next.composerDraft.pendingCompactDraft ? cloneMessageContent(next.composerDraft.pendingCompactDraft) : null;
-    if (messageEditor) messageEditor.setContent(next.composerDraft.content);
+    if (messageEditor) {
+      suppressDraftRevision = true;
+      try { messageEditor.setContent(next.composerDraft.content); }
+      finally { suppressDraftRevision = false; }
+    }
     ({ contextRevision, contextAccepted, contextCommandID, contextDeliveryUnknown, handoffCommandID, pendingSubmitCommandID } = next);
   }
 
@@ -2701,7 +2730,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   function resetControllerForFreshSnapshot(target, { preserveContextDelivery = false, reconcilePendingSubmit = false } = {}) {
     const pendingSubmitID = target.pendingSubmitCommandID;
     if (reconcilePendingSubmit && pendingSubmitID !== null && target.pendingSubmission !== null) {
-      target.pendingSubmission.recovery = { snapshotSeen: false, firstPageSeen: false, firstPageMatched: false };
+      target.pendingSubmission.recovery = { snapshotSeen: false, historyPagesSeen: 0, historyCommandID: null, historyComplete: false, historyBoundReached: false, acceptedEvidence: false };
     }
     target.transport.resetReplay();
     target.state.seenEventIDs.clear();
@@ -2750,9 +2779,13 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         await target.transport.reconnect();
         brokerState = "ready";
         if (target === controller) render();
-        if (target.state.timeline.length === 0) void sendControllerCommand(target, "history_page", { limit: 50 });
+        if (target.pendingSubmission?.recovery) void requestRecoveryHistoryPage(target);
+        else if (target.state.timeline.length === 0) void sendControllerCommand(target, "history_page", { limit: 50 });
       } catch (error) {
-        if (error?.code === "replay_window_unavailable") resetControllerForFreshSnapshot(target, { reconcilePendingSubmit: true });
+        if (error?.code === "replay_window_unavailable") {
+          const preserveContextDelivery = target.contextCommandID !== null || target.contextDeliveryUnknown;
+          resetControllerForFreshSnapshot(target, { preserveContextDelivery, reconcilePendingSubmit: target.pendingSubmission !== null });
+        }
         if (!destroyed) scheduleReconnect(target);
       }
     }, 1000);
@@ -3376,6 +3409,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
     const owner = controller;
     const conversationID = owner.transport.conversationID;
+    const initialAttachmentCount = draftAttachments.length;
     let aggregate = draftAttachments.reduce((total, item) => total + item.file.size, 0);
     for (const file of files) {
       if (!file || draftAttachments.length >= MAX_AGENT_IMAGES_PER_TURN) {
@@ -3409,6 +3443,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       draftAttachments.push(item);
       void stageAttachment(item);
     }
+    if (draftAttachments.length !== initialAttachmentCount) owner.composerDraft.revision += 1;
     renderDraftAttachments();
   }
 
@@ -3418,6 +3453,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (index < 0) return;
     item.abort?.abort();
     attachments.splice(index, 1);
+    item.owner.composerDraft.revision += 1;
     revokeObjectURL(item.objectURL);
     if (deleteStaged && item.imageID) deleteCapturedImage(item.owner.transport, item.imageID, item.conversationID, item.deletedImageIDs);
     if (item.owner === controller) renderDraftAttachments();
@@ -3442,17 +3478,155 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     owner.composerDraft.content = { parts: [] };
     owner.composerDraft.pendingCompactCommandID = null;
     owner.composerDraft.pendingCompactDraft = null;
+    for (const submission of owner.rejectedSubmissions) discardSubmissionResources(submission, { deleteStaged: true });
+    owner.rejectedSubmissions = [];
+    if (owner.pendingSubmission) discardSubmissionResources(owner.pendingSubmission, { deleteStaged: false });
+    owner.pendingSubmission = null;
   }
 
-  function settleRecoveredSubmission(owner, accepted) {
+  function discardSubmissionResources(submission, { deleteStaged }) {
+    for (const [imageID, visual] of submission.inlineVisuals) {
+      if (deleteStaged) deleteCapturedImage(visual.owner.transport, imageID, visual.conversationID, visual.deletedImageIDs);
+    }
+    submission.inlineVisuals.clear();
+    for (const item of submission.attachments) {
+      item.abort?.abort();
+      revokeObjectURL(item.objectURL);
+      item.objectURL = "";
+      if (deleteStaged && item.imageID) deleteCapturedImage(item.owner.transport, item.imageID, item.conversationID, item.deletedImageIDs);
+    }
+    submission.attachments = [];
+  }
+
+  function pendingSubmissionSeen(owner) {
+    const submission = owner.pendingSubmission;
+    return submission !== null && owner.state.timeline.some((item) => item.kind === "user" && item.turn_id === submission.turnID && item.message_id === submission.messageID);
+  }
+
+  function releaseAcceptedSubmissionResources(submission) {
+    if (submission.resourcesReleased) return;
+    submission.resourcesReleased = true;
+    for (const item of submission.attachments) {
+      item.abort?.abort();
+      revokeObjectURL(item.objectURL);
+      item.objectURL = "";
+    }
+    submission.attachments = [];
+    submission.inlineVisuals.clear();
+  }
+
+  function acceptPendingSubmission(owner, { authoritative = false } = {}) {
+    const submission = owner.pendingSubmission;
+    if (!submission) return;
+    releaseAcceptedSubmissionResources(submission);
+    submission.status = "accepted";
+    submission.authoritative = submission.authoritative || authoritative;
+    if (submission.authoritative && owner.pendingSubmitCommandID === null) owner.pendingSubmission = null;
+  }
+
+  function draftSlotAvailable(owner) {
+    const content = owner === controller ? messageEditor.getContent() : owner.composerDraft.content;
+    return content.parts.length === 0 && owner.composerDraft.attachments.length === 0 && owner.composerDraft.inlineVisuals.size === 0;
+  }
+
+  function restorePendingSubmission(owner, submission = owner.pendingSubmission, { requireUnchanged = false } = {}) {
+    if (!submission || submission.authoritative || !draftSlotAvailable(owner)) return false;
+    if (requireUnchanged && owner.composerDraft.revision !== submission.draftRevision) return false;
+    owner.composerDraft.attachments.push(...submission.attachments);
+    for (const [imageID, visual] of submission.inlineVisuals) owner.composerDraft.inlineVisuals.set(imageID, visual);
+    owner.composerDraft.content = cloneMessageContent(submission.content);
+    submission.attachments = [];
+    submission.inlineVisuals.clear();
+    if (owner.pendingSubmission === submission) owner.pendingSubmission = null;
+    const rejectedIndex = owner.rejectedSubmissions.indexOf(submission);
+    if (rejectedIndex >= 0) owner.rejectedSubmissions.splice(rejectedIndex, 1);
+    if (owner === controller) {
+      messageEditor.setContent(owner.composerDraft.content);
+      resizeComposer();
+    }
+    return true;
+  }
+
+  function rejectPendingSubmission(owner) {
+    const submission = owner.pendingSubmission;
+    if (!submission || submission.authoritative) return;
+    submission.status = "rejected";
+    if (!restorePendingSubmission(owner, submission, { requireUnchanged: true })) {
+      owner.pendingSubmission = null;
+      owner.rejectedSubmissions.push(submission);
+    }
+  }
+
+  function moveDraftToPendingSubmission(owner, submission) {
+    invalidateControllerDraft(owner);
+    for (const item of submission.attachments) {
+      const index = owner.composerDraft.attachments.indexOf(item);
+      if (index >= 0) owner.composerDraft.attachments.splice(index, 1);
+    }
+    for (const { image_id: imageID } of inlineImages(submission.content)) {
+      const visual = owner.composerDraft.inlineVisuals.get(imageID);
+      if (visual) submission.inlineVisuals.set(imageID, visual);
+      owner.composerDraft.inlineVisuals.delete(imageID);
+    }
+    owner.composerDraft.content = { parts: [] };
+    if (owner === controller) {
+      messageEditor.clear();
+      resizeComposer();
+    } else owner.composerDraft.revision += 1;
+    submission.draftRevision = owner.composerDraft.revision;
+  }
+
+  async function requestRecoveryHistoryPage(owner, cursor = null) {
+    const recovery = owner.pendingSubmission?.recovery;
+    if (!recovery || recovery.historyComplete || recovery.historyBoundReached || recovery.historyCommandID !== null) return;
+    if (recovery.historyPagesSeen >= MAX_SUBMISSION_RECOVERY_HISTORY_PAGES) {
+      recovery.historyBoundReached = true;
+      return;
+    }
+    const payload = { limit: 50 };
+    if (cursor !== null) payload.before = cursor;
+    const command = createAgentCommand({ type: "history_page", payload, clientID: owner.transport.clientID, conversationID: owner.transport.conversationID });
+    registerAgentCommand(owner.state, command);
+    recovery.historyCommandID = command.command_id;
+    try {
+      await owner.transport.send(command);
+    } catch (error) {
+      if (owner.pendingSubmission?.recovery !== recovery || recovery.historyCommandID !== command.command_id) return;
+      owner.state.pendingCommandIDs.delete(command.command_id);
+      owner.state.knownCommandIDs.delete(command.command_id);
+      recovery.historyCommandID = null;
+      owner.transport.close();
+      owner.connecting = false;
+      owner.state.connected = false;
+      owner.state.lifecycle = "unavailable";
+      const preserveContextDelivery = owner.contextCommandID !== null || owner.contextDeliveryUnknown;
+      resetControllerForFreshSnapshot(owner, { preserveContextDelivery, reconcilePendingSubmit: true });
+      if (owner === controller) {
+        brokerState = "offline";
+        brokerCode = error?.code ?? "broker_unavailable";
+        brokerGuidance = "Page Agent could not read enough history to confirm delivery. It is reconnecting and will not resubmit the message.";
+        loadController(owner);
+        render();
+      }
+      scheduleReconnect(owner);
+    }
+  }
+
+  function settleRecoveredSubmission(owner, accepted, { authoritative = false } = {}) {
+    const submission = owner.pendingSubmission;
+    if (submission === null) return;
+    const recovery = submission.recovery;
+    if (accepted && !authoritative && recovery) recovery.acceptedEvidence = true;
+    if (!accepted && recovery?.acceptedEvidence) return;
     const commandID = owner.pendingSubmitCommandID;
-    if (commandID === null || owner.pendingSubmission === null) return;
-    if (accepted) completePendingSubmission(owner);
-    owner.state.pendingCommandIDs.delete(commandID);
-    owner.state.knownCommandIDs.delete(commandID);
-    owner.pendingSubmitCommandID = null;
-    owner.pendingSubmission = null;
-    if (owner === controller) pendingSubmitCommandID = null;
+    if (commandID !== null) {
+      owner.state.pendingCommandIDs.delete(commandID);
+      owner.state.knownCommandIDs.delete(commandID);
+      owner.pendingSubmitCommandID = null;
+      if (owner === controller) pendingSubmitCommandID = null;
+    }
+    if (accepted) acceptPendingSubmission(owner, { authoritative });
+    else rejectPendingSubmission(owner);
   }
 
   function reconcilePendingSubmitRecovery(owner, event) {
@@ -3464,33 +3638,22 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       const queued = event.payload.queue.some((item) => item.turn_id === submission.turnID && item.message_id === submission.messageID);
       const active = event.payload.active_work?.kind === "turn" && event.payload.active_work.work_id === submission.turnID;
       if (queued || active) {
-        settleRecoveredSubmission(owner, true);
+        settleRecoveredSubmission(owner, true, { authoritative: queued });
         return;
       }
-    } else if (event.type === "timeline" && !recovery.firstPageSeen) {
-      recovery.firstPageSeen = true;
-      recovery.firstPageMatched = event.payload.items.some((item) => item.kind === "user" && item.turn_id === submission.turnID && item.message_id === submission.messageID);
-      if (recovery.firstPageMatched) {
-        settleRecoveredSubmission(owner, true);
+    } else if (event.type === "timeline" && event.payload.command_id === recovery.historyCommandID) {
+      recovery.historyCommandID = null;
+      recovery.historyPagesSeen += 1;
+      const matched = event.payload.items.some((item) => item.kind === "user" && item.turn_id === submission.turnID && item.message_id === submission.messageID);
+      if (matched) {
+        settleRecoveredSubmission(owner, true, { authoritative: true });
         return;
       }
+      if (event.payload.next_cursor === null) recovery.historyComplete = true;
+      else if (recovery.historyPagesSeen < MAX_SUBMISSION_RECOVERY_HISTORY_PAGES) void requestRecoveryHistoryPage(owner, event.payload.next_cursor);
+      else recovery.historyBoundReached = true;
     }
-    if (recovery.snapshotSeen && recovery.firstPageSeen) settleRecoveredSubmission(owner, false);
-  }
-
-  function completePendingSubmission(owner) {
-    const submission = owner.pendingSubmission;
-    if (!submission) return;
-    const currentContent = owner === controller ? messageEditor.getContent() : owner.composerDraft.content;
-    if (JSON.stringify(currentContent) === JSON.stringify(submission.content)) {
-      for (const { image_id: imageID } of inlineImages(submission.content)) owner.composerDraft.inlineVisuals.delete(imageID);
-      owner.composerDraft.content = { parts: [] };
-      if (owner === controller) {
-        messageEditor.clear();
-        resizeComposer();
-      }
-    }
-    for (const item of submission.attachments) removeAttachment(item, { deleteStaged: false });
+    if (recovery.snapshotSeen && recovery.historyComplete) settleRecoveredSubmission(owner, false);
   }
 
   function appendDescriptorImages(parent, images) {
@@ -3508,7 +3671,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       const cached = imageObjectURLs.get(cacheKey);
       if (cached) image.src = cached;
       else if (conversationID && typeof transport.readImage === "function" && !imageLoads.has(cacheKey)) {
-        const load = transport.readImage(descriptor.image_id, conversationID)
+        const load = Promise.resolve(transport.readImage(descriptor.image_id, conversationID))
           .then((blob) => {
             if (destroyed) return;
             const url = createObjectURL(blob);
@@ -3588,7 +3751,8 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         liveStatus.textContent = shortStatus[brokerCode] ?? shortStatus.broker_unavailable;
       }
     }
-    setup.hidden = state.connected || activeView !== "conversation";
+    const hasRetainedDelivery = controller.rejectedSubmissions.length > 0 || controller.pendingSubmission !== null && !controller.pendingSubmission.authoritative;
+    setup.hidden = state.connected || activeView !== "conversation" || hasRetainedDelivery;
     setup.dataset.state = connectionState;
     if (!state.connected) {
       const ready = connectionState === "ready" || connectionState === "connecting";
@@ -3628,7 +3792,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     archivesMenuButton.disabled = !state.connected;
     reconnectMenuButton.disabled = transport.consented !== true;
     composerWrap.hidden = !state.connected || activeView !== "conversation";
-    timeline.hidden = !state.connected || activeView !== "conversation";
+    timeline.hidden = activeView !== "conversation" || !state.connected && !hasRetainedDelivery;
     queue.hidden = !state.connected || activeView !== "conversation" || state.queue.length === 0;
     actions.hidden = true;
     const alternateView = activeView !== "conversation";
@@ -3732,7 +3896,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           error: "Something went wrong",
         };
         const title = item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
-        const guidanceText = actionGuidance(item.action, doc, selectedProvider);
+        const guidanceText = actionGuidance(item.action, doc, selectedProvider, item.code);
         const text = guidanceText ? `${item.text} ${guidanceText}` : item.text;
         const tone = item.activity === "error" ? "error" : item.activity === "blocked" ? "warning" : "neutral";
         const icon = item.activity === "error" ? "error" : item.activity === "blocked" ? "blocked" : item.activity === "retry" ? "retry" : "info";
@@ -3755,11 +3919,52 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         const activityLabel = item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
         const summary = doc.createElement("summary"); summary.textContent = activityLabel ?? "Activity";
         const content = doc.createElement("p");
-        const guidanceText = actionGuidance(item.action, doc, selectedProvider);
+        const guidanceText = actionGuidance(item.action, doc, selectedProvider, item.code);
         content.textContent = guidanceText ? `${item.text} ${guidanceText}` : item.text;
         details.append(summary, content); timeline.append(details);
       }
     }
+    function appendPendingSubmission(submission) {
+      const article = appendAgentMessage(doc, timeline, {
+        kind: "user",
+        content: submission.content,
+        images: submission.images,
+      }, providerName, appendDescriptorImages, onReference);
+      article.classList.add("agent-message-pending");
+      article.dataset.state = submission.status;
+      article.setAttribute("aria-label", `Message delivery ${submission.status}`);
+      const delivery = doc.createElement("div");
+      delivery.className = "agent-message-delivery";
+      const labels = {
+        sending: "Sending…",
+        confirming: "Confirming delivery…",
+        accepted: "Sent",
+        rejected: "Not sent",
+      };
+      const status = doc.createElement("span");
+      status.textContent = labels[submission.status] ?? labels.confirming;
+      delivery.append(status);
+      if (submission.status === "rejected") {
+        const restore = doc.createElement("button");
+        restore.type = "button";
+        restore.className = "agent-message-restore";
+        restore.textContent = "Restore draft";
+        restore.addEventListener("click", () => {
+          if (!restorePendingSubmission(controller, submission)) {
+            announce("Clear the current draft before restoring this message.");
+            return;
+          }
+          loadController(controller);
+          render();
+          messageEditor.focus();
+        });
+        delivery.append(restore);
+      }
+      article.append(delivery);
+    }
+    for (const submission of controller.rejectedSubmissions) appendPendingSubmission(submission);
+    const pendingSubmission = controller.pendingSubmission;
+    if (pendingSubmission && !pendingSubmission.authoritative) appendPendingSubmission(pendingSubmission);
     const pendingInteractionIDs = new Set(state.interactions.filter((request) => !request.resolved).map((request) => request.request_id));
     for (const requestID of controller.interactionForms.keys()) {
       if (!pendingInteractionIDs.has(requestID)) controller.interactionForms.delete(requestID);
@@ -4280,9 +4485,15 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       turnID: command.payload.turn_id,
       messageID: command.payload.message_id,
       content: cloneMessageContent(content),
+      images: imageReferences.map((image) => ({ ...image })),
       attachments: [...sentAttachments],
+      inlineVisuals: new Map(),
+      status: "sending",
+      authoritative: false,
+      resourcesReleased: false,
       recovery: null,
     };
+    moveDraftToPendingSubmission(target, target.pendingSubmission);
     if (settingsRequired()) recordSettingsSubmission(target.settingsDraft, command.payload.turn_id);
     if (revision !== undefined) target.contextCommandID = command.command_id;
     loadController(target);
@@ -4291,19 +4502,32 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       await target.transport.send(command);
     }
     catch (error) {
-      if (error?.code) {
+      const ownsPendingSubmit = target.pendingSubmitCommandID === command.command_id && target.pendingSubmission !== null;
+      if (error?.code && ownsPendingSubmit) {
         target.pendingSubmitCommandID = null;
-        target.pendingSubmission = null;
         target.state.pendingCommandIDs.delete(command.command_id);
+        rejectPendingSubmission(target);
+      } else if (!error?.code && ownsPendingSubmit && target.pendingSubmission.status === "sending") {
+        target.pendingSubmission.status = "confirming";
+        const preserveContextDelivery = target.contextCommandID === command.command_id;
+        if (preserveContextDelivery) target.contextDeliveryUnknown = true;
+        target.transport.close();
+        target.connecting = false;
+        target.state.connected = false;
+        target.state.lifecycle = "unavailable";
+        resetControllerForFreshSnapshot(target, { preserveContextDelivery, reconcilePendingSubmit: true });
+        if (target === controller) {
+          brokerState = "offline";
+          brokerCode = "broker_unavailable";
+          brokerGuidance = "The submit delivery outcome is unknown. Page Agent is reconnecting to confirm it without resubmitting the message.";
+        }
+        scheduleReconnect(target);
       }
-      if (target.contextCommandID === command.command_id) {
-        if (error?.code) target.contextCommandID = null;
-        else target.contextDeliveryUnknown = true;
-      }
+      if (target.contextCommandID === command.command_id && error?.code) target.contextCommandID = null;
       if (target === controller) {
         loadController(target);
         render();
-        showTransientStatus("Send failed", "Retry", browserErrorText(error.code, doc, "the delivery outcome is unknown; reconnect before trying again.", selectedProvider));
+        showTransientStatus("Send failed", error?.code ? "Retry" : "Confirming delivery", browserErrorText(error?.code, doc, "The delivery outcome is unknown. Page Agent is reconnecting to confirm it; do not resubmit the message.", selectedProvider));
       }
     }
   });

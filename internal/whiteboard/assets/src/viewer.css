@@ -1389,6 +1389,42 @@ body.agent-drawer-modal-open .agent-toast {
   padding: 0.68rem 0.78rem;
 }
 
+.agent-message-pending {
+  border: 1px solid color-mix(in srgb, var(--awb-accent) 28%, transparent);
+}
+
+.agent-message-pending[data-state="confirming"] {
+  border-style: dashed;
+}
+
+.agent-message-pending[data-state="rejected"] {
+  border-color: color-mix(in srgb, var(--awb-danger) 45%, transparent);
+}
+
+.agent-message-delivery {
+  align-items: center;
+  color: var(--awb-muted);
+  display: flex;
+  font-size: 0.68rem;
+  gap: 0.6rem;
+  justify-content: flex-end;
+  margin-top: 0.45rem;
+}
+
+.agent-message-restore {
+  background: transparent;
+  border: 0;
+  color: var(--awb-link);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  padding: 0;
+}
+
+.agent-message-restore:hover {
+  text-decoration: underline;
+}
+
 .agent-message-assistant {
   border: 0;
   padding: 0 0.1rem;

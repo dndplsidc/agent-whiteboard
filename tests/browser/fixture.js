@@ -583,6 +583,8 @@ function createSidebarBroker(initialAllowedOrigin) {
       catalog: structuredClone(definition.catalog),
       rejectNextSettings: false,
       rejectionCatalog: null,
+      nextSubmitOutcome: "accept",
+      heldSubmit: null,
       applyConnectSettings: false,
       acceptedSettings: [],
       createdSettings: [],
@@ -784,6 +786,11 @@ function createSidebarBroker(initialAllowedOrigin) {
     if (command.type === "history_page") {
       targetedEvent(state, "timeline", { command_id: command.command_id, items: [...state.history].reverse(), next_cursor: null }, command.client_id);
     } else if (command.type === "submit") {
+      if (state.nextSubmitOutcome === "hold") {
+        state.nextSubmitOutcome = "accept";
+        state.heldSubmit = structuredClone(command);
+        return;
+      }
       if (state.rejectNextSettings) {
         state.rejectNextSettings = false;
         state.catalog = state.rejectionCatalog ?? state.catalog;
@@ -1096,6 +1103,22 @@ function createSidebarBroker(initialAllowedOrigin) {
     setAllowedOrigin(origin) { allowedOrigin = origin; },
     setWebSocketEnabled(value) { webSocketEnabled = value; },
     setHoldResponses(value, provider = "pi") { providerState(provider).holdResponses = value; },
+    holdNextSubmit(provider = "pi") { providerState(provider).nextSubmitOutcome = "hold"; },
+    resolveHeldSubmit(outcome, provider = "pi") {
+      const state = providerState(provider);
+      const command = state.heldSubmit;
+      if (!command) throw new Error(`no held ${provider} submit`);
+      state.heldSubmit = null;
+      if (outcome === "accepted") {
+        handleCommand(command, provider);
+        return;
+      }
+      if (outcome === "rejected") {
+        commandResult(state, command, { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" });
+        return;
+      }
+      throw new Error(`unsupported held submit outcome: ${outcome}`);
+    },
     setContextState(value, provider = "pi") {
       if (!["pending", "accepted", "unchanged", "uncertain"].includes(value)) throw new Error(`unsupported context state: ${value}`);
       providerState(provider).contextState = value;
@@ -1552,6 +1575,8 @@ export const test = base.extend({
           resetBrokerState: broker.resetState,
           setWebSocketEnabled: broker.setWebSocketEnabled,
           setHoldResponses: broker.setHoldResponses,
+          holdNextSubmit: broker.holdNextSubmit,
+          resolveHeldSubmit: broker.resolveHeldSubmit,
           setContextState: broker.setContextState,
           setSkills: broker.setSkills,
           setHoldInterruptCompletion: broker.setHoldInterruptCompletion,
