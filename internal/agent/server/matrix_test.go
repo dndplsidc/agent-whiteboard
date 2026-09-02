@@ -93,6 +93,10 @@ func TestInvalidAndMultiplePrivateNetworkHeadersAreNeverGranted(t *testing.T) {
 	}
 }
 
+func TestWebSocketReadLimitUsesMessageTooBigCloseCode(t *testing.T) {
+	assert.Equal(t, websocket.CloseMessageTooBig, closeCode(websocket.ErrReadLimit))
+}
+
 func TestFragmentedOversizedWebSocketMessageIsRejected(t *testing.T) {
 	running := startServer(t)
 	wsURL := url.URL{Scheme: "ws", Host: running.server.Host(), Path: protocol.ConnectPath}

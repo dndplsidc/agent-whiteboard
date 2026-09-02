@@ -245,7 +245,7 @@ func offersRequiredSubprotocol(request *http.Request) bool {
 }
 
 func closeCode(err error) int {
-	if errors.Is(err, protocol.ErrMessageTooLarge) {
+	if errors.Is(err, protocol.ErrMessageTooLarge) || errors.Is(err, websocket.ErrReadLimit) {
 		return websocket.CloseMessageTooBig
 	}
 	var closeErr *websocket.CloseError
