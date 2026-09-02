@@ -1127,6 +1127,7 @@ test("retains a rejected Cursor submit without overwriting a newer draft", async
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Cursor rejection\n", creatorContext: "Cursor rejection context.\n" });
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
   await page.getByLabel("Conversation provider").selectOption("cursor");
+  localAgentSidebar.setWebSocketEnabled(true);
   await connectSidebar(page, "cursor");
   localAgentSidebar.holdNextSubmit("cursor");
 
