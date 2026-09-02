@@ -188,6 +188,7 @@ func (d *Driver) open(ctx context.Context, workspace, method string, params map[
 	}
 	router.publish(session)
 	go func() { <-rt.client.Done(); session.transportEnded() }()
+	loadedSessionID := ""
 	if method == "session/load" {
 		target, validTarget := params["sessionId"].(string)
 		if !validTarget || target == "" {
@@ -203,13 +204,22 @@ func (d *Driver) open(ctx context.Context, workspace, method string, params map[
 			_ = session.Shutdown(context.Background())
 			return session, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 		}
+		loadedSessionID = target
 	}
 	var opened openResult
 	if _, err = rt.client.Call(ctx, method, params, &opened); err != nil {
 		_ = session.Shutdown(context.Background())
 		return session, classifyRPC(err)
 	}
-	if err = session.finishOpen(opened, method == "session/load"); err != nil {
+	loaded := loadedSessionID != ""
+	if loaded {
+		if opened.SessionID != "" && opened.SessionID != loadedSessionID {
+			_ = session.Shutdown(context.Background())
+			return session, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+		}
+		opened.SessionID = loadedSessionID
+	}
+	if err = session.finishOpen(opened, loaded); err != nil {
 		_ = session.Shutdown(context.Background())
 		return session, err
 	}

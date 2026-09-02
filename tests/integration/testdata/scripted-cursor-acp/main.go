@@ -253,7 +253,7 @@ func (a *agent) handle(r request) {
 			a.notify(id, v)
 		}
 		a.record(map[string]any{"method": "session/load.semantic", "workspace_identity": digest(fmt.Sprint(p["cwd"])), "model_option": loaded.Model, "content_block_count": len(loaded.Replay)})
-		a.ok(r.ID, map[string]any{"sessionId": id, "configOptions": options(loaded.Model)})
+		a.ok(r.ID, map[string]any{"configOptions": options(loaded.Model), "models": map[string]any{}, "modes": map[string]any{}})
 	case "session/set_config_option":
 		id, _ := p["sessionId"].(string)
 		model, _ := p["value"].(string)

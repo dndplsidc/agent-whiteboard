@@ -125,6 +125,37 @@ func TestCursorMatrixExactOpenParamsAndReplayBoundary(t *testing.T) {
 	_ = resumed.Shutdown(context.Background())
 }
 
+func TestCursorResumeAcceptsStandardLoadResponseWithoutSessionID(t *testing.T) {
+	loaded := map[string]any{"configOptions": testOptions("model-a"), "models": map[string]any{}, "modes": map[string]any{}}
+	d, launcher, root := matrixDriver(t, scriptScenario{loadResult: loaded})
+	launcher.listPages = map[string]scriptedListPage{
+		"": {result: map[string]any{"sessions": []any{map[string]any{"sessionId": "native-standard"}}}},
+	}
+	ref, _ := provider.NewNativeSessionRef("native-standard")
+	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := opened.NativeSession().Ref; got != ref {
+		t.Fatalf("native ref = %q, want %q", got.Value(), ref.Value())
+	}
+	_ = opened.Shutdown(context.Background())
+}
+
+func TestCursorResumeRejectsMismatchedLoadResponseSessionID(t *testing.T) {
+	loaded := map[string]any{"sessionId": "native-other", "configOptions": testOptions("model-a")}
+	d, launcher, root := matrixDriver(t, scriptScenario{loadResult: loaded})
+	launcher.listPages = map[string]scriptedListPage{
+		"": {result: map[string]any{"sessions": []any{map[string]any{"sessionId": "native-requested"}}}},
+	}
+	ref, _ := provider.NewNativeSessionRef("native-requested")
+	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+	assertMatrixProviderError(t, err, provider.ErrorProtocolIncompatible)
+	if opened != nil {
+		_ = opened.Shutdown(context.Background())
+	}
+}
+
 func TestCursorResumeProvesNativeSessionExistsBeforeLoad(t *testing.T) {
 	open := map[string]any{"sessionId": "missing-native", "configOptions": testOptions("model-a")}
 	d, launcher, root := matrixDriver(t, scriptScenario{loadResult: open})
