@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"sync"
 	"time"
 
@@ -27,6 +28,14 @@ type StateStore interface {
 	ReconcilePrepared(statepkg.Identity, string, bool, time.Time) (statepkg.CommitOutcome, error)
 	EnsureWorkspace(string) (string, error)
 	RemoveWorkspace(string) error
+}
+
+type missingNativeSessionStore interface {
+	ReplaceMissingCurrentNativeSessionIfUnchanged(statepkg.Identity, statepkg.Mapping, provider.NativeSessionRef, time.Time) (statepkg.CommitOutcome, error)
+}
+
+type promptFreeNativeSettingsStore interface {
+	ReplacePromptFreeCurrentNativeSessionAndSettingsIfUnchanged(statepkg.Identity, statepkg.Mapping, provider.NativeSessionRef, provider.ExecutionSettings, provider.ModelPresentation, time.Time) (statepkg.CommitOutcome, error)
 }
 
 type AttachmentStore interface {
@@ -111,10 +120,9 @@ type pendingCleanup struct {
 	handle         *sessionHandle
 	ref            provider.NativeSessionRef
 	conversationID string
+	policy         provider.CleanupPolicy
 	processStopped bool
-	deleteRequired bool
-	deleteDone     bool
-	workspaceOwned bool
+	nativeDone     bool
 	workspaceDone  bool
 }
 
@@ -403,6 +411,14 @@ func (broker *Broker) createConversation(ctx context.Context, identity statepkg.
 	return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 }
 
+func cloneExecutionSettings(settings *provider.ExecutionSettings) *provider.ExecutionSettings {
+	if settings == nil {
+		return nil
+	}
+	copyOfSettings := *settings
+	return &copyOfSettings
+}
+
 func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.Identity, mapping statepkg.Mapping, driver provider.Driver) (*conversation, error) {
 	if mapping.Validate(identity) != nil || mapping.Current == nil {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
@@ -424,7 +440,7 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.
 	if err != nil {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 	}
-	request := provider.ResumeRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), NativeSession: mapping.Current.NativeSession, Workspace: workspace}
+	request := provider.ResumeRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), NativeSession: mapping.Current.NativeSession, Workspace: workspace, Settings: cloneExecutionSettings(mapping.Current.Settings)}
 	if request.Validate() != nil {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 	}
@@ -437,6 +453,10 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.
 		if ctx.Err() != nil {
 			return nil, NewBrokerError(protocol.ErrorBrokerShuttingDown)
 		}
+		var failure provider.ProviderError
+		if identity.Provider == provider.NameCursor && errors.As(err, &failure) && failure.Code() == provider.ErrorNativeSessionMissing && mapping.Current.Committed == nil && mapping.Current.PreparedCommit == nil {
+			return broker.replaceMissingNativeSession(ctx, identity, mapping, driver, workspace)
+		}
 		return nil, MapError(err)
 	}
 	if _, err := validateProviderSession(handle, &mapping.Current.NativeSession, identity.Provider); err != nil {
@@ -447,6 +467,73 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.
 		return broker.reconcilePrepared(ctx, identity, mapping, handle)
 	}
 	return broker.newConversation(identity, mapping, handle)
+}
+
+func (broker *Broker) replaceMissingNativeSession(ctx context.Context, identity statepkg.Identity, mapping statepkg.Mapping, driver provider.Driver, workspace string) (*conversation, error) {
+	store, ok := broker.state.(missingNativeSessionStore)
+	if !ok || mapping.Current == nil || mapping.Current.Committed != nil || mapping.Current.PreparedCommit != nil {
+		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
+	}
+	var settings *provider.ExecutionSettings
+	if mapping.Current.Settings != nil {
+		copyOfSettings := *mapping.Current.Settings
+		settings = &copyOfSettings
+	}
+	request := provider.CreateRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), Workspace: workspace, Settings: settings}
+	if request.Validate() != nil {
+		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
+	}
+	session, createErr := driver.Create(ctx, request)
+	handle := captureSession(session)
+	if createErr != nil {
+		if handle != nil {
+			broker.retainStop(identity, handle)
+		}
+		if ctx.Err() != nil {
+			return nil, NewBrokerError(protocol.ErrorBrokerShuttingDown)
+		}
+		return nil, MapError(createErr)
+	}
+	native, validationErr := validateProviderSession(handle, nil, identity.Provider)
+	if validationErr != nil || native.Ref == mapping.Current.NativeSession {
+		broker.retainStop(identity, handle)
+		return nil, NewBrokerError(protocol.ErrorProviderProtocolFailure)
+	}
+	at := broker.clock.Now().UTC()
+	if at.IsZero() {
+		broker.retainStop(identity, handle)
+		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
+	}
+	outcome, mutationErr := store.ReplaceMissingCurrentNativeSessionIfUnchanged(identity, mapping, native.Ref, at)
+	target := cloneMapping(mapping)
+	target.Current.NativeSession = native.Ref
+	if target.Current.UpdatedAt.Before(at) {
+		target.Current.UpdatedAt = at
+	}
+	if target.UpdatedAt.Before(at) {
+		target.UpdatedAt = at
+	}
+	install := func(loaded statepkg.Mapping) (*conversation, error) {
+		actor, actorErr := broker.newConversation(identity, loaded, handle)
+		if actorErr != nil {
+			broker.retainStop(identity, handle)
+		}
+		return actor, actorErr
+	}
+	if outcome == statepkg.CommitApplied && mutationErr == nil {
+		return install(target)
+	}
+	if outcome == statepkg.CommitApplied || outcome == statepkg.CommitUncertain {
+		loaded, loadErr := broker.state.Load(identity)
+		if loadErr == nil && loaded.Validate(identity) == nil && reflect.DeepEqual(loaded, target) {
+			return install(loaded)
+		}
+	}
+	// Cursor does not support native deletion. Stop the replacement process but
+	// preserve its native session and the shared workspace if the durable CAS
+	// cannot be proven.
+	broker.retainStop(identity, handle)
+	return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 }
 
 func validateProviderSession(handle *sessionHandle, expected *provider.NativeSessionRef, expectedProvider provider.Name) (provider.NativeSession, error) {
@@ -481,15 +568,21 @@ func mappingHasCurrent(mapping statepkg.Mapping, identity statepkg.Identity, cur
 }
 
 func (broker *Broker) cleanupWorkspace(identity statepkg.Identity, conversationID string) {
-	cleanup := &pendingCleanup{identity: identity, conversationID: conversationID, processStopped: true, deleteDone: true, workspaceOwned: true}
-	broker.retainCleanup(cleanup)
+	broker.retainCleanup(&pendingCleanup{
+		identity: identity, conversationID: conversationID,
+		policy:         provider.CleanupPolicy{NativeDeletion: provider.NativeDeletionUnsupported, RemoveWorkspace: true},
+		processStopped: true,
+	})
 }
 
 func (broker *Broker) retainStop(identity statepkg.Identity, handle *sessionHandle) {
 	if handle == nil || common.IsNil(handle.session) {
 		return
 	}
-	broker.retainCleanup(&pendingCleanup{identity: identity, handle: handle})
+	broker.retainCleanup(&pendingCleanup{
+		identity: identity, handle: handle,
+		policy: provider.CleanupPolicy{NativeDeletion: provider.NativeDeletionUnsafe, RemoveWorkspace: false},
+	})
 }
 
 func (broker *Broker) compensateCreate(identity statepkg.Identity, handle *sessionHandle, ref provider.NativeSessionRef, conversationID string) {
@@ -497,9 +590,15 @@ func (broker *Broker) compensateCreate(identity statepkg.Identity, handle *sessi
 		broker.cleanupWorkspace(identity, conversationID)
 		return
 	}
+	policy := provider.CleanupPolicy{NativeDeletion: provider.NativeDeletionUnsupported, RemoveWorkspace: true}
+	if supportsArchiveDelete(broker.drivers.Lookup(identity.Provider)) {
+		policy = provider.CleanupPolicy{NativeDeletion: provider.NativeDeletionRequired, RemoveWorkspace: true}
+		if !ref.Valid() {
+			policy = provider.CleanupPolicy{NativeDeletion: provider.NativeDeletionUnsafe, RemoveWorkspace: false}
+		}
+	}
 	broker.retainCleanup(&pendingCleanup{
-		identity: identity, handle: handle, ref: ref, conversationID: conversationID,
-		deleteRequired: true, workspaceOwned: true,
+		identity: identity, handle: handle, ref: ref, conversationID: conversationID, policy: policy,
 	})
 }
 
@@ -571,32 +670,38 @@ func (broker *Broker) runCleanup(ctx context.Context, cleanup *pendingCleanup) b
 // across provider, child, filesystem, or state operations. Another Close can
 // therefore honor its context while a noncooperative cleanup remains owned.
 func (broker *Broker) performCleanup(ctx context.Context, cleanup *pendingCleanup) bool {
+	if cleanup.policy.Validate() != nil {
+		return false
+	}
 	if !cleanup.processStopped {
 		cleanup.processStopped = stopPreActor(ctx, cleanup.handle)
 	}
 	if !cleanup.processStopped {
 		return false
 	}
-	if cleanup.deleteRequired && !cleanup.deleteDone {
-		if !cleanup.ref.Valid() {
+	if !cleanup.nativeDone {
+		switch cleanup.policy.NativeDeletion {
+		case provider.NativeDeletionRequired:
+			deleter, ok := broker.drivers.Lookup(cleanup.identity.Provider).(provider.NativeSessionDeleter)
+			request := provider.DeleteRequest{Provider: cleanup.identity.Provider, NativeSession: cleanup.ref}
+			if !ok || common.IsNil(deleter) || request.Validate() != nil || deleter.Delete(ctx, request) != nil {
+				return false
+			}
+		case provider.NativeDeletionUnsupported, provider.NativeDeletionUnsafe:
+			// Unsupported and unsafe native deletion are terminal states. In the
+			// unsafe case policy validation also forbids workspace removal.
+		default:
 			return false
 		}
-		driver := broker.drivers.Lookup(cleanup.identity.Provider)
-		if common.IsNil(driver) || driver.Delete(ctx, provider.DeleteRequest{Provider: cleanup.identity.Provider, NativeSession: cleanup.ref}) != nil {
-			return false
-		}
-		cleanup.deleteDone = true
+		cleanup.nativeDone = true
 	}
-	if cleanup.workspaceOwned && !cleanup.workspaceDone {
-		if cleanup.deleteRequired && !cleanup.deleteDone {
-			return false
-		}
+	if cleanup.policy.RemoveWorkspace && !cleanup.workspaceDone {
 		if err := removeImageWorkspace(ctx, broker.attachments, broker.state, cleanup.conversationID); err != nil {
 			return false
 		}
 		cleanup.workspaceDone = true
 	}
-	return (!cleanup.deleteRequired || cleanup.deleteDone) && (!cleanup.workspaceOwned || cleanup.workspaceDone)
+	return cleanup.nativeDone && (!cleanup.policy.RemoveWorkspace || cleanup.workspaceDone)
 }
 
 func stopPreActor(ctx context.Context, handle *sessionHandle) bool {

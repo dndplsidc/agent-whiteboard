@@ -39,6 +39,7 @@ func TestSessionPreflightUsesConservativeNativeUsage(t *testing.T) {
 		require.NoError(t, resolved.err)
 		envelope, err := BuildEnvelope(request.Turn)
 		require.NoError(t, err)
+		require.Equal(t, provider.CapacityPrechecked, resolved.result.CapacityMode)
 		require.Equal(t, len(envelope), resolved.result.EstimatedInputTokens)
 		require.Equal(t, 16384, resolved.result.SafetyMarginTokens)
 		require.Equal(t, 16384, resolved.result.EffectiveCapacityTokens)

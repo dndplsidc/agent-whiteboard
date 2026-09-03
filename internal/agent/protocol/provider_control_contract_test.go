@@ -13,7 +13,7 @@ import (
 func TestV5ProviderControlSnapshotIsStrictAndProviderNeutral(t *testing.T) {
 	skillsState := protocol.SkillsReady
 	limit := 1
-	for _, providerName := range []protocol.ProviderName{protocol.ProviderPi, protocol.ProviderCodex} {
+	for _, providerName := range []protocol.ProviderName{protocol.ProviderPi, protocol.ProviderCodex, protocol.ProviderCursor} {
 		payload := protocol.SnapshotPayload{
 			Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextAccepted,
 			Catalog: []protocol.CatalogModel{}, SkillsState: &skillsState, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &limit,
@@ -22,7 +22,7 @@ func TestV5ProviderControlSnapshotIsStrictAndProviderNeutral(t *testing.T) {
 		require.NoError(t, payload.ValidateForProvider(providerName))
 		encoded, err := protocol.EncodeEvent(validEvent(payload))
 		require.NoError(t, err)
-		for _, field := range []string{"max_selected_skills", "busy_policy", "composer_admission"} {
+		for _, field := range []string{"supports_archive_delete", "max_selected_skills", "busy_policy", "composer_admission"} {
 			without := removeJSONField(t, encoded, field)
 			_, err := protocol.DecodeEvent(without)
 			require.ErrorIs(t, err, protocol.ErrInvalidMessage, field)

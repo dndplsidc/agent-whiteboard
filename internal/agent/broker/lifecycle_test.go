@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,14 +21,18 @@ import (
 )
 
 type lifecycleState struct {
-	mu           sync.Mutex
-	mappings     map[statepkg.Identity]statepkg.Mapping
-	creates      int
-	ensures      []string
-	removes      []string
-	outcome      statepkg.CommitOutcome
-	createErr    error
-	doNotPersist bool
+	mu                  sync.Mutex
+	mappings            map[statepkg.Identity]statepkg.Mapping
+	creates             int
+	ensures             []string
+	removes             []string
+	outcome             statepkg.CommitOutcome
+	createErr           error
+	doNotPersist        bool
+	removeFailures      int
+	replaceOutcome      statepkg.CommitOutcome
+	replaceErr          error
+	replaceDoNotPersist bool
 }
 
 func (s *lifecycleState) Load(identity statepkg.Identity) (statepkg.Mapping, error) {
@@ -80,6 +86,25 @@ func (s *lifecycleState) PromotePrepared(identity statepkg.Identity, turnID stri
 func (s *lifecycleState) ReconcilePrepared(identity statepkg.Identity, turnID string, accepted bool, at time.Time) (statepkg.CommitOutcome, error) {
 	return statepkg.CommitNotApplied, errors.New("reconciliation not configured")
 }
+func (s *lifecycleState) ReplaceMissingCurrentNativeSessionIfUnchanged(identity statepkg.Identity, expected statepkg.Mapping, nativeSession provider.NativeSessionRef, at time.Time) (statepkg.CommitOutcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mapping, ok := s.mappings[identity]
+	if !ok || !reflect.DeepEqual(mapping, expected) || mapping.Current == nil || mapping.Current.Committed != nil || mapping.Current.PreparedCommit != nil {
+		return statepkg.CommitNotApplied, errors.New("native session replacement rejected")
+	}
+	outcome := s.replaceOutcome
+	if outcome == "" {
+		outcome = statepkg.CommitApplied
+	}
+	if outcome != statepkg.CommitNotApplied && !s.replaceDoNotPersist {
+		mapping.Current.NativeSession = nativeSession
+		mapping.Current.UpdatedAt = at
+		mapping.UpdatedAt = at
+		s.mappings[identity] = mapping
+	}
+	return outcome, s.replaceErr
+}
 func (s *lifecycleState) UpdateCurrentSettings(identity statepkg.Identity, conversationID string, nativeSession provider.NativeSessionRef, settings provider.ExecutionSettings, presentation provider.ModelPresentation, at time.Time) (statepkg.CommitOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -107,12 +132,17 @@ func (s *lifecycleState) RemoveWorkspace(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.removes = append(s.removes, id)
+	if s.removeFailures > 0 {
+		s.removeFailures--
+		return errors.New("workspace removal failed")
+	}
 	return nil
 }
 
 type lifecycleDriver struct {
 	mu          sync.Mutex
 	name        provider.Name
+	resumeErr   error
 	createGate  chan struct{}
 	createEnter chan struct{}
 	enterOnce   sync.Once
@@ -153,7 +183,7 @@ func (d *lifecycleDriver) Resume(_ context.Context, request provider.ResumeReque
 	d.resumes = append(d.resumes, request)
 	session := newLifecycleSessionForProvider(request.NativeSession.Value(), request.Provider)
 	d.sessions = append(d.sessions, session)
-	return session, nil
+	return session, d.resumeErr
 }
 func (d *lifecycleDriver) Inspect(context.Context, provider.InspectRequest) (provider.NativeSession, error) {
 	return provider.NativeSession{}, nil
@@ -163,6 +193,34 @@ func (d *lifecycleDriver) Delete(_ context.Context, request provider.DeleteReque
 	defer d.mu.Unlock()
 	d.deletes = append(d.deletes, request)
 	return nil
+}
+
+// nonDeletingLifecycleDriver deliberately exposes only provider.Driver. It
+// models providers whose native lifecycle has no archive-delete capability.
+type nonDeletingLifecycleDriver struct {
+	inner        *lifecycleDriver
+	createErr    error
+	mutateCreate func(*lifecycleSession)
+}
+
+func (driver *nonDeletingLifecycleDriver) Readiness(ctx context.Context) provider.Readiness {
+	return driver.inner.Readiness(ctx)
+}
+func (driver *nonDeletingLifecycleDriver) Create(ctx context.Context, request provider.CreateRequest) (provider.Session, error) {
+	session, err := driver.inner.Create(ctx, request)
+	if err != nil {
+		return session, err
+	}
+	if driver.mutateCreate != nil {
+		driver.mutateCreate(session.(*lifecycleSession))
+	}
+	return session, driver.createErr
+}
+func (driver *nonDeletingLifecycleDriver) Resume(ctx context.Context, request provider.ResumeRequest) (provider.Session, error) {
+	return driver.inner.Resume(ctx, request)
+}
+func (driver *nonDeletingLifecycleDriver) Inspect(ctx context.Context, request provider.InspectRequest) (provider.NativeSession, error) {
+	return driver.inner.Inspect(ctx, request)
 }
 
 type lifecycleSession struct {
@@ -191,7 +249,7 @@ func (s *lifecycleSession) History(context.Context, provider.HistoryRequest) (pr
 	return provider.HistoryPage{}, nil
 }
 func (s *lifecycleSession) Preflight(context.Context, provider.PreflightRequest) (provider.PreflightResult, error) {
-	return provider.PreflightResult{}, nil
+	return provider.PreflightResult{CapacityMode: provider.CapacityProviderEnforced, ResolvedModel: s.native.Model}, nil
 }
 func (s *lifecycleSession) Submit(context.Context, provider.TurnRequest) (provider.AcceptedTurn, error) {
 	return provider.AcceptedTurn{}, nil
@@ -246,8 +304,9 @@ func TestRegistryRoutesSameWhiteboardToIndependentProviderDrivers(t *testing.T) 
 	state := &lifecycleState{mappings: make(map[statepkg.Identity]statepkg.Mapping)}
 	piDriver := &lifecycleDriver{name: provider.NamePi}
 	codexDriver := &lifecycleDriver{name: provider.NameCodex}
+	cursorDriver := &lifecycleDriver{name: provider.NameCursor}
 	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{
-		provider.NamePi: piDriver, provider.NameCodex: codexDriver,
+		provider.NamePi: piDriver, provider.NameCodex: codexDriver, provider.NameCursor: cursorDriver,
 	})
 	require.NoError(t, err)
 	config := validLifecycleConfig(state, nil, &lockedIDs{next: 250})
@@ -260,7 +319,11 @@ func TestRegistryRoutesSameWhiteboardToIndependentProviderDrivers(t *testing.T) 
 	require.NoError(t, err)
 	codexConnection, err := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnect(sequenceID(253), resourceID, protocol.ProviderCodex))
 	require.NoError(t, err)
+	cursorConnection, err := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnect(sequenceID(254), resourceID, protocol.ProviderCursor))
+	require.NoError(t, err)
 	require.NotEqual(t, piConnection.ConversationID(), codexConnection.ConversationID())
+	require.NotEqual(t, piConnection.ConversationID(), cursorConnection.ConversationID())
+	require.NotEqual(t, codexConnection.ConversationID(), cursorConnection.ConversationID())
 
 	piDriver.mu.Lock()
 	require.Equal(t, []provider.CreateRequest{{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: "/tmp/agent-whiteboard-test/" + piConnection.ConversationID()}}, piDriver.creates)
@@ -268,6 +331,9 @@ func TestRegistryRoutesSameWhiteboardToIndependentProviderDrivers(t *testing.T) 
 	codexDriver.mu.Lock()
 	require.Equal(t, []provider.CreateRequest{{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: "/tmp/agent-whiteboard-test/" + codexConnection.ConversationID()}}, codexDriver.creates)
 	codexDriver.mu.Unlock()
+	cursorDriver.mu.Lock()
+	require.Equal(t, []provider.CreateRequest{{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: "/tmp/agent-whiteboard-test/" + cursorConnection.ConversationID()}}, cursorDriver.creates)
+	cursorDriver.mu.Unlock()
 	require.NoError(t, broker.Close(context.Background()))
 }
 
@@ -511,6 +577,95 @@ func TestStateCreateNotAppliedCompensatesAndAppliedErrorIsRecoveredByLoad(t *tes
 	}
 }
 
+func TestUnsupportedFailedCreateCleanupStopsThenRemovesWorkspaceWithoutNativeDelete(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		createErr    error
+		outcome      statepkg.CommitOutcome
+		mutateCreate func(*lifecycleSession)
+		zeroClock    bool
+	}{
+		{name: "create error with handle", createErr: errors.New("create failed")},
+		{name: "invalid native metadata", mutateCreate: func(session *lifecycleSession) { session.native.Provider = provider.NamePi }},
+		{name: "invalid native reference", mutateCreate: func(session *lifecycleSession) { session.native.Ref = provider.NativeSessionRef{} }},
+		{name: "invalid native time", mutateCreate: func(session *lifecycleSession) { session.native.CreatedAt = time.Time{} }},
+		{name: "invalid session conversion", mutateCreate: func(session *lifecycleSession) { session.native.Presentation.ModelDisplayName = "" }},
+		{name: "invalid broker clock", zeroClock: true},
+		{name: "definitively unapplied commit", outcome: statepkg.CommitNotApplied},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &lifecycleState{mappings: make(map[statepkg.Identity]statepkg.Mapping), outcome: test.outcome}
+			inner := &lifecycleDriver{name: provider.NameCursor}
+			driver := &nonDeletingLifecycleDriver{inner: inner, createErr: test.createErr, mutateCreate: test.mutateCreate}
+			registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCursor: driver})
+			require.NoError(t, err)
+			config := validLifecycleConfig(state, nil, &lockedIDs{next: 250})
+			config.Drivers = registry
+			if test.zeroClock {
+				config.Clock = testClock{}
+			}
+			broker, err := New(config)
+			require.NoError(t, err)
+
+			_, connectErr := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnect(sequenceID(251), sequenceID(252), protocol.ProviderCursor))
+			require.Error(t, connectErr)
+			inner.mu.Lock()
+			require.Len(t, inner.sessions, 1)
+			require.EqualValues(t, 1, inner.sessions[0].shutdownCalls.Load())
+			require.Empty(t, inner.deletes)
+			inner.mu.Unlock()
+			state.mu.Lock()
+			require.Equal(t, []string{sequenceID(251)}, state.removes)
+			state.mu.Unlock()
+			require.NoError(t, broker.Close(context.Background()))
+		})
+	}
+}
+
+func TestUnsupportedFailedCreateCleanupRetriesWorkspaceOnCloseWithoutDeletingNative(t *testing.T) {
+	state := &lifecycleState{mappings: make(map[statepkg.Identity]statepkg.Mapping), removeFailures: 1}
+	inner := &lifecycleDriver{name: provider.NameCursor}
+	driver := &nonDeletingLifecycleDriver{inner: inner, createErr: errors.New("create failed")}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCursor: driver})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: 260})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+	_, connectErr := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnect(sequenceID(261), sequenceID(262), protocol.ProviderCursor))
+	require.Error(t, connectErr)
+	require.NoError(t, broker.Close(context.Background()))
+	inner.mu.Lock()
+	require.EqualValues(t, 1, inner.sessions[0].shutdownCalls.Load())
+	require.Empty(t, inner.deletes)
+	inner.mu.Unlock()
+	state.mu.Lock()
+	require.Equal(t, []string{sequenceID(261), sequenceID(261)}, state.removes)
+	state.mu.Unlock()
+}
+
+func TestUnsafeFailedCreateCleanupStopsAndRetainsWorkspaceAndNativeState(t *testing.T) {
+	state := &lifecycleState{mappings: make(map[statepkg.Identity]statepkg.Mapping), outcome: statepkg.CommitOutcome("future"), createErr: errors.New("uncertain"), doNotPersist: true}
+	inner := &lifecycleDriver{name: provider.NameCursor}
+	driver := &nonDeletingLifecycleDriver{inner: inner}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCursor: driver})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: 270})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+	_, connectErr := broker.Connect(context.Background(), "https://example.com", lifecycleProviderConnect(sequenceID(271), sequenceID(272), protocol.ProviderCursor))
+	require.Error(t, connectErr)
+	inner.mu.Lock()
+	require.Len(t, inner.sessions, 1)
+	require.EqualValues(t, 1, inner.sessions[0].shutdownCalls.Load())
+	inner.mu.Unlock()
+	state.mu.Lock()
+	require.Empty(t, state.removes)
+	state.mu.Unlock()
+	require.NoError(t, broker.Close(context.Background()))
+}
+
 func TestDifferentIdentitiesCreateIsolatedSessionsAndExistingMappingResumesExactly(t *testing.T) {
 	state := &lifecycleState{mappings: make(map[statepkg.Identity]statepkg.Mapping)}
 	driver := &lifecycleDriver{}
@@ -546,6 +701,143 @@ func TestDifferentIdentitiesCreateIsolatedSessionsAndExistingMappingResumesExact
 	require.Len(t, driver.resumes, 1)
 	require.Equal(t, ref, driver.resumes[0].NativeSession)
 	require.Equal(t, "/tmp/agent-whiteboard-test/"+current.ConversationID, driver.resumes[0].Workspace)
+	driver.mu.Unlock()
+	require.NoError(t, broker.Close(context.Background()))
+}
+
+func TestCursorMissingPromptFreeNativeSessionIsReplacedWithoutArchiveOrReplay(t *testing.T) {
+	identity := statepkg.Identity{Origin: "https://example.com", Kind: statepkg.ResourceMarkdown, CapabilityID: sequenceID(345), Provider: provider.NameCursor}
+	ref, err := statepkg.NativeSessionRef("sessions/cursor-missing")
+	require.NoError(t, err)
+	settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: false}
+	observed := statepkg.Revision{Digest: "0000000000000000000000000000000000000000000000000000000000000000", Revision: statepkg.RevisionInitial, SourceUpdatedAt: testTime()}
+	current := statepkg.Session{ConversationID: sequenceID(346), NativeSession: ref, CreatedAt: testTime(), UpdatedAt: testTime(), ProviderLabel: "Cursor", ModelLabel: presentation.ModelDisplayName, Settings: &settings, Presentation: &presentation, Observed: &observed}
+	mapping := statepkg.Mapping{SchemaVersion: statepkg.SchemaVersion, Identity: identity, Current: &current, Archives: []statepkg.Session{}, CreatedAt: testTime(), UpdatedAt: testTime()}
+	state := &lifecycleState{mappings: map[statepkg.Identity]statepkg.Mapping{identity: mapping}}
+	driver := &lifecycleDriver{name: provider.NameCursor, resumeErr: provider.NewProviderError(provider.ErrorNativeSessionMissing)}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCursor: driver})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: 347})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+
+	connection, err := broker.Connect(context.Background(), identity.Origin, lifecycleProviderConnect(sequenceID(348), identity.CapabilityID, protocol.ProviderCursor))
+	require.NoError(t, err)
+	require.Equal(t, current.ConversationID, connection.ConversationID())
+	driver.mu.Lock()
+	require.Len(t, driver.resumes, 1)
+	require.Len(t, driver.creates, 1)
+	require.Equal(t, current.ConversationID, filepath.Base(driver.creates[0].Workspace))
+	require.NotNil(t, driver.creates[0].Settings)
+	require.Equal(t, settings, *driver.creates[0].Settings)
+	require.Len(t, driver.sessions, 2)
+	replacementRef := driver.sessions[1].native.Ref
+	driver.mu.Unlock()
+	state.mu.Lock()
+	loaded := cloneMapping(state.mappings[identity])
+	state.mu.Unlock()
+	require.Equal(t, replacementRef, loaded.Current.NativeSession)
+	require.Equal(t, current.ConversationID, loaded.Current.ConversationID)
+	require.Equal(t, current.CreatedAt, loaded.Current.CreatedAt)
+	require.Equal(t, current.Observed, loaded.Current.Observed)
+	require.Equal(t, current.Settings, loaded.Current.Settings)
+	require.Empty(t, loaded.Archives)
+	require.NoError(t, broker.Close(context.Background()))
+}
+
+func TestCursorMissingPromptFreeReplacementAcceptsUncertainPersistedCommit(t *testing.T) {
+	identity := statepkg.Identity{Origin: "https://example.com", Kind: statepkg.ResourceMarkdown, CapabilityID: sequenceID(353), Provider: provider.NameCursor}
+	ref, err := statepkg.NativeSessionRef("sessions/cursor-missing")
+	require.NoError(t, err)
+	settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: false}
+	current := statepkg.Session{ConversationID: sequenceID(354), NativeSession: ref, CreatedAt: testTime(), UpdatedAt: testTime(), ProviderLabel: "Cursor", ModelLabel: presentation.ModelDisplayName, Settings: &settings, Presentation: &presentation}
+	mapping := statepkg.Mapping{SchemaVersion: statepkg.SchemaVersion, Identity: identity, Current: &current, Archives: []statepkg.Session{}, CreatedAt: testTime(), UpdatedAt: testTime()}
+	state := &lifecycleState{mappings: map[statepkg.Identity]statepkg.Mapping{identity: mapping}, replaceOutcome: statepkg.CommitUncertain, replaceErr: errors.New("ambiguous durable acknowledgement")}
+	driver := &lifecycleDriver{name: provider.NameCursor, resumeErr: provider.NewProviderError(provider.ErrorNativeSessionMissing)}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCursor: driver})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: 355})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+
+	connection, err := broker.Connect(context.Background(), identity.Origin, lifecycleProviderConnect(sequenceID(356), identity.CapabilityID, protocol.ProviderCursor))
+	require.NoError(t, err)
+	require.Equal(t, current.ConversationID, connection.ConversationID())
+	driver.mu.Lock()
+	require.Len(t, driver.creates, 1)
+	require.Len(t, driver.sessions, 2)
+	require.Zero(t, driver.sessions[1].shutdownCalls.Load())
+	replacementRef := driver.sessions[1].native.Ref
+	driver.mu.Unlock()
+	state.mu.Lock()
+	require.Equal(t, replacementRef, state.mappings[identity].Current.NativeSession)
+	state.mu.Unlock()
+	require.NoError(t, broker.Close(context.Background()))
+}
+
+func TestCursorMissingPromptFreeReplacementRejectsUnprovenCommit(t *testing.T) {
+	for _, outcome := range []statepkg.CommitOutcome{statepkg.CommitUncertain, statepkg.CommitNotApplied} {
+		t.Run(string(outcome), func(t *testing.T) {
+			identity := statepkg.Identity{Origin: "https://example.com", Kind: statepkg.ResourceMarkdown, CapabilityID: sequenceID(357), Provider: provider.NameCursor}
+			ref, err := statepkg.NativeSessionRef("sessions/cursor-missing")
+			require.NoError(t, err)
+			settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+			presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: false}
+			current := statepkg.Session{ConversationID: sequenceID(358), NativeSession: ref, CreatedAt: testTime(), UpdatedAt: testTime(), ProviderLabel: "Cursor", ModelLabel: presentation.ModelDisplayName, Settings: &settings, Presentation: &presentation}
+			mapping := statepkg.Mapping{SchemaVersion: statepkg.SchemaVersion, Identity: identity, Current: &current, Archives: []statepkg.Session{}, CreatedAt: testTime(), UpdatedAt: testTime()}
+			state := &lifecycleState{mappings: map[statepkg.Identity]statepkg.Mapping{identity: mapping}, replaceOutcome: outcome, replaceErr: errors.New("durable mutation failed"), replaceDoNotPersist: true}
+			driver := &lifecycleDriver{name: provider.NameCursor, resumeErr: provider.NewProviderError(provider.ErrorNativeSessionMissing)}
+			registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCursor: driver})
+			require.NoError(t, err)
+			config := validLifecycleConfig(state, nil, &lockedIDs{next: 359})
+			config.Drivers = registry
+			broker, err := New(config)
+			require.NoError(t, err)
+
+			_, err = broker.Connect(context.Background(), identity.Origin, lifecycleProviderConnect(sequenceID(360), identity.CapabilityID, protocol.ProviderCursor))
+			var brokerErr BrokerError
+			require.ErrorAs(t, err, &brokerErr)
+			require.Equal(t, protocol.ErrorStateRepairFailed, brokerErr.Code())
+			driver.mu.Lock()
+			require.Len(t, driver.sessions, 2)
+			require.EqualValues(t, 1, driver.sessions[1].shutdownCalls.Load())
+			driver.mu.Unlock()
+			state.mu.Lock()
+			require.Equal(t, mapping, state.mappings[identity])
+			state.mu.Unlock()
+			require.NoError(t, broker.Close(context.Background()))
+		})
+	}
+}
+
+func TestCursorMissingCommittedNativeSessionIsNotReplaced(t *testing.T) {
+	identity := statepkg.Identity{Origin: "https://example.com", Kind: statepkg.ResourceMarkdown, CapabilityID: sequenceID(349), Provider: provider.NameCursor}
+	ref, err := statepkg.NativeSessionRef("sessions/cursor-missing")
+	require.NoError(t, err)
+	settings := provider.ExecutionSettings{Model: "model", Effort: "high", Speed: provider.SpeedStandard}
+	presentation := provider.ModelPresentation{ModelDisplayName: "Model", Selectable: false}
+	committed := statepkg.Revision{Digest: "0000000000000000000000000000000000000000000000000000000000000000", Revision: statepkg.RevisionInitial, SourceUpdatedAt: testTime()}
+	current := statepkg.Session{ConversationID: sequenceID(350), NativeSession: ref, CreatedAt: testTime(), UpdatedAt: testTime(), ProviderLabel: "Cursor", ModelLabel: presentation.ModelDisplayName, Settings: &settings, Presentation: &presentation, Committed: &committed}
+	mapping := statepkg.Mapping{SchemaVersion: statepkg.SchemaVersion, Identity: identity, Current: &current, Archives: []statepkg.Session{}, CreatedAt: testTime(), UpdatedAt: testTime()}
+	state := &lifecycleState{mappings: map[statepkg.Identity]statepkg.Mapping{identity: mapping}}
+	driver := &lifecycleDriver{name: provider.NameCursor, resumeErr: provider.NewProviderError(provider.ErrorNativeSessionMissing)}
+	registry, err := provider.NewRegistry(map[provider.Name]provider.Driver{provider.NameCursor: driver})
+	require.NoError(t, err)
+	config := validLifecycleConfig(state, nil, &lockedIDs{next: 351})
+	config.Drivers = registry
+	broker, err := New(config)
+	require.NoError(t, err)
+
+	_, err = broker.Connect(context.Background(), identity.Origin, lifecycleProviderConnect(sequenceID(352), identity.CapabilityID, protocol.ProviderCursor))
+	var brokerErr BrokerError
+	require.ErrorAs(t, err, &brokerErr)
+	require.Equal(t, protocol.ErrorNativeSessionMissing, brokerErr.Code())
+	driver.mu.Lock()
+	require.Empty(t, driver.creates)
 	driver.mu.Unlock()
 	require.NoError(t, broker.Close(context.Background()))
 }

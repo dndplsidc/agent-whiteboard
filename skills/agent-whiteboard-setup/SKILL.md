@@ -26,7 +26,7 @@ Before durable changes, follow the active harness's approval requirements.
 
 - Inspect an existing configuration before editing it; merge only required fields.
 - Use the same configuration path for the server, trust commands, broker, and daemon.
-- Never collect, copy, or edit Pi or Codex credentials or native configuration.
+- Never collect, copy, or edit Pi, Codex, or Cursor credentials or native configuration. Never run provider authentication for the user.
 - Prefer supervised foreground processes for initial setup.
 - Install a persistent daemon only when the user requests it.
 - Do not delete whiteboards, provider histories, or broker state to fix setup.
@@ -39,7 +39,7 @@ command -v agent-whiteboard || true
 go version || true
 ```
 
-Check `pi` or `codex` only when Page Agent is required.
+Check `pi`, `codex`, and exactly `cursor-agent` only when Page Agent is required. Never check a generic `agent` executable for Cursor default discovery.
 
 Before offering to start a Page Agent broker, inspect any existing foreground broker or macOS managed daemon and confirm that its process owns a loopback listening socket on the configured `agent.port` (default `8568`). Read [Page Agent setup](references/page-agent.md) for the exact lifecycle and listener checks. Do not send publishing-server `/healthz` or `/readyz` probes to the broker port: those routes belong to the publishing server, not the broker, and their failure does not mean the broker is stopped.
 
@@ -104,7 +104,7 @@ Configuration: selected path or default
 Mode: existing server | local server | remote Page Agent | local all-in-one
 Publishing server: verified URL or not required
 Page Agent broker: foreground | managed daemon | not started | not required
-Providers: available providers or not required
+Providers: available Pi/Codex/Cursor providers or not required (paths/availability only; no secrets)
 Manual action remaining: exact action or none
 ```
 

@@ -178,6 +178,14 @@ func TestPreflightUsesCapturedModelImageCapability(t *testing.T) {
 	}}
 	_, err = session.Preflight(context.Background(), request)
 	assertProviderError(t, err, provider.ErrorImageInputUnsupported)
+
+	request.Turn.Images = nil
+	result, err := session.Preflight(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, provider.CapacityProviderEnforced, result.CapacityMode)
+	require.Zero(t, result.EstimatedInputTokens)
+	require.Zero(t, result.EffectiveCapacityTokens)
+	require.Zero(t, result.SafetyMarginTokens)
 }
 
 func TestStaleTurnSettingsRejectWithoutTransitionAndRefreshCatalog(t *testing.T) {

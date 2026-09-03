@@ -23,6 +23,13 @@ type codexProviderDescriptor struct{}
 func (codexProviderDescriptor) ProviderName() string   { return common.LaunchAgentProviderCodex }
 func (codexProviderDescriptor) ExecutableName() string { return common.LaunchAgentProviderCodex }
 
+type cursorProviderDescriptor struct{}
+
+func (cursorProviderDescriptor) ProviderName() string { return common.LaunchAgentProviderCursor }
+func (cursorProviderDescriptor) ExecutableName() string {
+	return common.LaunchAgentCursorExecutableName
+}
+
 func (factory commandFactory) newAgentDaemonCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use:         "daemon",
@@ -101,7 +108,7 @@ func rejectDaemonFlags(cmd *cobra.Command) error {
 	return nil
 }
 
-func (factory commandFactory) installAgentDaemon(cmd *cobra.Command, piFlagValue string, piFlagSet bool, codexFlagValue string, codexFlagSet bool) error {
+func (factory commandFactory) installAgentDaemon(cmd *cobra.Command, piFlagValue string, piFlagSet bool, codexFlagValue string, codexFlagSet bool, cursorFlagValue string, cursorFlagSet bool) error {
 	manager, err := factory.newLaunchAgentManager()
 	if err != nil {
 		return err
@@ -122,15 +129,19 @@ func (factory commandFactory) installAgentDaemon(cmd *cobra.Command, piFlagValue
 	if !codexFlagSet {
 		codexSelected = factory.deps.Getenv(common.LaunchAgentCodexExecutableEnvironment)
 	}
+	cursorSelected := cursorFlagValue
+	if !cursorFlagSet {
+		cursorSelected = factory.deps.Getenv(common.LaunchAgentCursorExecutableEnvironment)
+	}
 	install := common.LaunchAgentConfig{
 		Executable:         executable,
 		ConfigPath:         configuration,
-		Providers:          []common.LaunchAgentProviderDescriptor{piProviderDescriptor{}, codexProviderDescriptor{}},
+		Providers:          []common.LaunchAgentProviderDescriptor{piProviderDescriptor{}, codexProviderDescriptor{}, cursorProviderDescriptor{}},
 		ExecutableResolver: nil,
 		EnvironmentPath:    factory.deps.Getenv(common.LaunchAgentPathEnvironment),
 	}
-	if piSelected != "" || codexSelected != "" {
-		install.ExecutableResolver = selectedProviderExecutableResolver{pi: piSelected, codex: codexSelected}
+	if piSelected != "" || codexSelected != "" || cursorSelected != "" {
+		install.ExecutableResolver = selectedProviderExecutableResolver{pi: piSelected, codex: codexSelected, cursor: cursorSelected}
 	}
 	return manager.Install(cmd.Context(), install)
 }

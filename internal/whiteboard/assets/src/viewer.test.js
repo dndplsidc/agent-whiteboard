@@ -24,7 +24,9 @@ import {
   THEME_STORAGE_KEY,
   agentDrawerLayoutMode,
   applyAgentEvent,
+  actionGuidance,
   bootViewer,
+  browserErrorText,
   clampAgentDrawerWidth,
   createAgentCommand,
   createAgentDrawer,
@@ -381,7 +383,7 @@ function agentEvent(type, payload, overrides = {}) {
     return { ...rest, content: textContent(text) };
   }) };
   const versionedPayload = type === "snapshot"
-    ? { supports_images: true, settings_state: null, effective_settings: null, catalog: [], skills_state: "unavailable", skills: [], max_selected_skills: null, supports_compact: false, busy_policy: "queue", composer_admission: "submit", ...payload }
+    ? { supports_images: true, supports_archive_delete: true, settings_state: null, effective_settings: null, catalog: [], skills_state: "unavailable", skills: [], max_selected_skills: null, supports_compact: false, busy_policy: "queue", composer_admission: "submit", ...payload }
     : type === "provider"
       ? { supports_images: true, ...payload }
       : type === "skill_catalog"
@@ -435,10 +437,21 @@ const codexCatalog = [{
 const codexSolSettings = { model: "gpt-5.6-sol", effort: "high", speed: "fast", model_display_name: "5.6 Sol", selectable: true };
 const piCatalog = codexCatalog.map((model, index) => ({ ...model, model: `pi-provider:${model.model}`, supports_fast: false, default: index === 0 }));
 const piSettings = { model: piCatalog[0].model, effort: "high", speed: "standard", model_display_name: piCatalog[0].model_display_name, selectable: true };
+const cursorCatalog = [{
+  model: "cursor-standard",
+  model_display_name: "Cursor Standard",
+  description: "Cursor's standard model.",
+  default_effort: "default",
+  supported_reasoning_efforts: [{ effort: "default", description: "Provider default." }],
+  supports_images: true,
+  default: true,
+  supports_fast: false,
+}];
+const cursorSettings = { model: "cursor-standard", effort: "default", speed: "standard", model_display_name: "Cursor Standard", selectable: true };
 
 function piSnapshotEvent({ event = {}, payload = {} } = {}) {
   return agentEvent("snapshot", {
-    lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true,
+    lifecycle: "ready", queue: [], context_state: "accepted", active_work: null, supports_images: true, supports_archive_delete: true,
     settings_state: "verified", effective_settings: piSettings, catalog: piCatalog,
     skills_state: "ready", skills: [], max_selected_skills: 1, supports_compact: true,
     busy_policy: "queue", composer_admission: "submit", ...payload,
@@ -453,6 +466,7 @@ function codexSnapshotEvent({ settings = codexSolSettings, event = {}, payload =
     context_state: "accepted",
     active_work: null,
     supports_images: model?.supports_images ?? false,
+    supports_archive_delete: true,
     settings_state: "verified",
     effective_settings: settings,
     catalog: codexCatalog,
@@ -463,6 +477,16 @@ function codexSnapshotEvent({ settings = codexSolSettings, event = {}, payload =
     busy_policy: "preserve_draft",
     composer_admission: "submit",
     ...payload,
+  }, event);
+}
+
+function cursorSnapshotEvent({ event = {}, payload = {} } = {}) {
+  return agentEvent("snapshot", {
+    lifecycle: "ready", queue: [], context_state: "accepted", active_work: null,
+    supports_images: true, supports_archive_delete: false,
+    settings_state: "verified", effective_settings: cursorSettings, catalog: cursorCatalog,
+    skills_state: "unavailable", skills: [], max_selected_skills: null, supports_compact: false,
+    busy_policy: "preserve_draft", composer_admission: "submit", ...payload,
   }, event);
 }
 
@@ -494,6 +518,25 @@ describe("local agent source and commands", () => {
     const id = generateAgentID(cryptoObject);
     expect(id).toMatch(/^[A-Za-z0-9_-]{32}$/u);
     expect(cryptoObject.getRandomValues.mock.calls[0][0]).toHaveLength(24);
+  });
+
+  test("uses provider-specific authentication and recovery guidance without changing generic provider behavior", () => {
+    const cursorGuidance = actionGuidance("provider_login", document, "cursor");
+    expect(cursorGuidance).toContain("cursor-agent login");
+    expect(cursorGuidance).toMatch(/terminal/iu);
+    expect(browserErrorText("authentication_required", document, "fallback", "cursor")).toContain(cursorGuidance);
+
+    const cursorFailure = browserErrorText("provider_protocol_failure", document, "fallback", "cursor");
+    expect(cursorFailure).toContain("reconnects automatically");
+    expect(cursorFailure).toContain("without resubmitting");
+    expect(cursorFailure).not.toContain("Restart the local agent broker");
+
+    for (const provider of ["pi", "codex"]) {
+      const loginGuidance = actionGuidance("provider_login", document, provider);
+      expect(loginGuidance).toContain("provider-native login");
+      expect(loginGuidance).not.toContain("cursor-agent");
+      expect(browserErrorText("provider_protocol_failure", document, "fallback", provider)).toContain("Restart the local agent broker");
+    }
   });
 
   test.each([
@@ -552,12 +595,14 @@ describe("local agent source and commands", () => {
   });
 
   test("stores only the canonical provider preference and falls back to Pi", () => {
-    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
-    expect(readAgentPreferences(localStorage).provider).toBe("codex");
+    for (const provider of ["pi", "codex", "cursor"]) {
+      localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
+      expect(readAgentPreferences(localStorage).provider).toBe(provider);
+      expect(createConnectCommand({ payload: agentPayload(), provider, clientID: agentIDs.message, idFactory: fixedIDFactory }).payload.provider).toBe(provider);
+    }
 
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "unknown");
     expect(readAgentPreferences(localStorage).provider).toBe("pi");
-    expect(createConnectCommand({ payload: agentPayload(), provider: "codex", clientID: agentIDs.message, idFactory: fixedIDFactory }).payload.provider).toBe("codex");
     expect(() => createConnectCommand({ payload: agentPayload(), provider: "unknown", clientID: agentIDs.message, idFactory: fixedIDFactory })).toThrow(TypeError);
   });
 
@@ -799,7 +844,7 @@ describe("local agent transport and event state", () => {
 
   test("strictly validates capability, admission, deadline, and multiline fields", () => {
     const snapshot = snapshotEvent();
-    for (const field of ["max_selected_skills", "busy_policy", "composer_admission"]) {
+    for (const field of ["supports_archive_delete", "max_selected_skills", "busy_policy", "composer_admission"]) {
       const malformed = structuredClone(snapshot);
       delete malformed.payload[field];
       expect(() => decodeAgentEvent(JSON.stringify(malformed))).toThrow(TypeError);
@@ -873,10 +918,10 @@ describe("local agent transport and event state", () => {
     })).toThrow(TypeError);
   });
 
-  test("reduces Codex provider, tool updates, requests, and first-response resolution", () => {
-    const state = createAgentState("codex");
+  test.each(["pi", "codex", "cursor"])("reduces shared %s provider, tool, and permission updates", (provider) => {
+    const state = createAgentState(provider);
     applyAgentEvent(state, snapshotEvent());
-    applyAgentEvent(state, agentEvent("provider", { provider: "codex", state: "ready", model: "gpt-5" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    applyAgentEvent(state, agentEvent("provider", { provider, state: "ready", model: "fixture-model" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
     applyAgentEvent(state, agentEvent("tool_activity", {
       activity_id: agentIDs.archive, kind: "command", status: "running", title: "Run tests", summary: "Started", detail: "pnpm test",
     }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
@@ -895,13 +940,13 @@ describe("local agent transport and event state", () => {
       request_id: agentIDs.message, kind: "command_approval", option_id: "accept",
     }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
 
-    expect(state.provider).toEqual({ provider: "codex", state: "ready", model: "gpt-5", supportsImages: true });
+    expect(state.provider).toEqual({ provider, state: "ready", model: "fixture-model", supportsImages: true });
     expect(state.timeline).toContainEqual(expect.objectContaining({ kind: "tool", status: "completed", summary: "Passed" }));
     expect(state.timeline.filter((item) => item.kind === "tool")).toHaveLength(1);
     expect(state.interactions).toEqual([expect.objectContaining({ title: "Approve command", resolved: true, option_id: "accept" })]);
   });
 
-  test.each(["pi", "codex"])("coalesces only consecutive identical same-turn passive notifications for %s", (provider) => {
+  test.each(["pi", "codex", "cursor"])("coalesces only consecutive identical same-turn passive notifications for %s", (provider) => {
     const state = createAgentState(provider);
     applyAgentEvent(state, agentEvent("snapshot", {
       lifecycle: "responding", queue: [], context_state: "accepted", active_work: { work_id: agentIDs.turn, kind: "turn", state: "running" },
@@ -964,8 +1009,8 @@ describe("local agent transport and event state", () => {
     expect(() => applyAgentEvent(state, agentEvent("interaction_request", requestPayload(opaqueID("P", 32)), { event_id: opaqueID("G", 32) }))).toThrow(TypeError);
   });
 
-  test("normalizes snapshot, streaming, completion, queue, and deduplicates event IDs", () => {
-    const state = createAgentState();
+  test.each(["pi", "codex", "cursor"])("normalizes %s snapshot, streaming, completion, queue, and deduplicates event IDs", (provider) => {
+    const state = createAgentState(provider);
     expect(applyAgentEvent(state, snapshotEvent())).toBe(true);
     expect(applyAgentEvent(state, snapshotEvent())).toBe(false);
     applyAgentEvent(state, agentEvent("assistant_delta", { turn_id: agentIDs.turn, message_id: agentIDs.message, text: "hel" }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
@@ -1035,14 +1080,14 @@ describe("local agent transport and event state", () => {
     expect(state.archiveStatus).toBe("loaded");
   });
 
-  test("accepts empty archive previews and normalizes archive deletion", () => {
-    const state = createAgentState();
+  test.each(["pi", "codex", "cursor"])("accepts empty %s archive previews and normalizes archive deletion", (provider) => {
+    const state = createAgentState(provider);
     applyAgentEvent(state, snapshotEvent());
     const listCommand = createAgentCommand({ type: "archive_list", payload: {}, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
     registerAgentCommand(state, listCommand);
     applyAgentEvent(state, agentEvent("history", {
       command_id: listCommand.command_id,
-      items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider: "pi", preview: "" }],
+      items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider, preview: "" }],
       next_cursor: null,
     }, { event_id: "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR" }));
     expect(state.archives).toEqual([expect.objectContaining({ archive_id: agentIDs.archive, preview: "" })]);
@@ -1051,8 +1096,8 @@ describe("local agent transport and event state", () => {
     expect(state.archives).toEqual([]);
   });
 
-  test("requires command-result correlation and surfaces only validated stable errors", () => {
-    const state = createAgentState();
+  test.each(["pi", "codex", "cursor"])("requires %s command-result correlation and surfaces only validated stable errors", (provider) => {
+    const state = createAgentState(provider);
     applyAgentEvent(state, snapshotEvent());
     const command = createAgentCommand({ type: "new", payload: { settings: null }, clientID: agentIDs.message, conversationID: agentIDs.conversation, idFactory: fixedIDFactory });
     registerAgentCommand(state, command);
@@ -1123,7 +1168,7 @@ describe("local agent transport and event state", () => {
 });
 
 describe("local agent rendering and controls", () => {
-  test("switches silently between independent Pi and Codex controllers", async () => {
+  test("switches silently between independent Pi, Codex, and Cursor controllers", async () => {
     const instances = [];
     const drawer = createAgentDrawer({
       payload: agentPayload(), doc: document, storage: localStorage,
@@ -1131,7 +1176,7 @@ describe("local agent rendering and controls", () => {
         const transport = {
           provider: options.provider,
           options,
-          clientID: `${options.provider === "pi" ? "P" : "C"}`.repeat(32),
+          clientID: ({ pi: "P", codex: "C", cursor: "U" })[options.provider].repeat(32),
           conversationID: agentIDs.conversation,
           consented: false,
           probe: vi.fn(async () => ({ ok: true, code: null })),
@@ -1154,6 +1199,14 @@ describe("local agent rendering and controls", () => {
     expect(drawer.elements.setup.textContent).toContain("effective Codex native tools, extensions, approvals, sandbox, project trust, and configuration");
     expect(localStorage.getItem(AGENT_PROVIDER_STORAGE_KEY)).toBe("codex");
 
+    drawer.elements.providerSelect.value = "cursor";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(instances.map((item) => item.provider)).toEqual(["pi", "codex", "cursor"]);
+    expect(drawer.elements.drawer.querySelector(".agent-drawer-header")?.textContent).toContain("Cursor ready");
+    drawer.elements.message.value = "Cursor draft";
+    drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    expect(instances.every((item) => item.send.mock.calls.length === 0 && item.connect.mock.calls.length === 0)).toBe(true);
+
     instances[0].options.onEvent(agentEvent("assistant_message", {
       turn_id: agentIDs.turn, message_id: agentIDs.message, text: "Pi finished in the background.", created_at: "2026-07-27T03:04:05Z",
     }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
@@ -1164,6 +1217,9 @@ describe("local agent rendering and controls", () => {
     drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
     expect(drawer.elements.timeline.textContent).toContain("Pi finished in the background.");
     expect(instances[1].close).not.toHaveBeenCalled();
+    drawer.elements.providerSelect.value = "cursor";
+    drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(drawer.elements.message.value).toBe("Cursor draft");
     drawer.destroy();
   });
 
@@ -1493,6 +1549,7 @@ describe("local agent rendering and controls", () => {
   test.each([
     ["pi", piSnapshotEvent, ["model", "effort"], "effective Pi native tools"],
     ["codex", codexSnapshotEvent, ["model", "effort", "speed"], "effective Codex native tools"],
+    ["cursor", cursorSnapshotEvent, ["model"], "effective Cursor native tools"],
   ])("renders shared capability controls for %s", (provider, snapshotFactory, sections, accessCopy) => {
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
     let options;
@@ -1503,12 +1560,18 @@ describe("local agent rendering and controls", () => {
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
     options.onEvent(snapshotFactory());
     expect(drawer.elements.modelControl.element.hidden).toBe(false);
+    if (provider === "cursor") {
+      expect(drawer.elements.modelControl.button.textContent).toBe("Cursor Standard");
+      expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model Cursor Standard");
+      expect(drawer.elements.modelControl.button.querySelector(".agent-model-pill-fast")).toBeNull();
+    }
     drawer.elements.modelControl.button.click();
     expect([...drawer.elements.modelControl.menu.querySelectorAll("[data-settings-section]")].map(({ dataset }) => dataset.settingsSection)).toEqual(sections);
     expect(drawer.elements.setup.textContent).toContain(accessCopy);
     drawer.elements.message.value = "/co";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    expect(drawer.elements.completionMenu.textContent).toContain("/compact");
+    if (provider === "cursor") expect(drawer.elements.completionMenu.textContent).not.toContain("/compact");
+    else expect(drawer.elements.completionMenu.textContent).toContain("/compact");
     drawer.elements.message.value = "/n";
     drawer.elements.message.dispatchEvent(new InputEvent("input", { bubbles: true }));
     expect(drawer.elements.completionMenu.textContent).toContain("/new");
@@ -1518,6 +1581,7 @@ describe("local agent rendering and controls", () => {
   test.each([
     ["pi", piSnapshotEvent, { model: piSettings.model, effort: "high", speed: "standard" }],
     ["codex", codexSnapshotEvent, { model: "gpt-5.6-sol", effort: "high", speed: "fast" }],
+    ["cursor", cursorSnapshotEvent, { model: "cursor-standard", effort: "default", speed: "standard" }],
   ])("confirms exact /new and starts a fresh %s conversation", async (provider, snapshotFactory, expectedSettings) => {
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, provider);
     let options;
@@ -1588,7 +1652,8 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.value = "busy follow-up";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(sent.filter(({ type }) => type === "submit")).toHaveLength(expectedSubmits));
-    expect(drawer.elements.message.value).toBe("busy follow-up");
+    expect(drawer.elements.message.value).toBe(admission === "queue" ? "" : "busy follow-up");
+    if (admission === "queue") expect(drawer.elements.timeline.textContent).toContain("Pi is responding");
     expect(drawer.elements.sendButton.hidden).toBe(admission !== "queue");
     drawer.destroy();
   });
@@ -1708,7 +1773,8 @@ describe("local agent rendering and controls", () => {
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({ type: "submit", payload: { settings: { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" } } });
-    expect(drawer.elements.message.value).toBe("use this tuple");
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.timeline.textContent).toContain("Codex is working");
 
     options.onEvent(agentEvent("queue", { items: [{
       turn_id: agentIDs.turn, message_id: agentIDs.message, message: "queued",
@@ -1774,7 +1840,7 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
-  test("keeps Codex draft and message intact when settings become unverified or submit is rejected", async () => {
+  test("moves a Codex submission out of the composer and restores it after definitive rejection", async () => {
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
     let options;
     const transport = {
@@ -1786,18 +1852,86 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.value = "do not lose me";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="waiting"]')?.textContent).toContain("do not lose me");
+    expect(drawer.elements.timeline.querySelector(".agent-message-delivery")).toBeNull();
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")?.textContent).toContain("Codex is working");
+
     const command = transport.send.mock.calls[0][0];
     options.onEvent(agentEvent("command_result", {
       command_id: command.command_id, status: "rejected",
       error: { code: "invalid_model_configuration", message: "The selected model settings are no longer available.", action: "configure_model" },
     }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
     expect(drawer.elements.message.value).toBe("do not lose me");
+    expect(drawer.elements.timeline.querySelector(".agent-message-pending")).toBeNull();
     expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Fast");
 
     options.onEvent(agentEvent("settings", { settings_state: "unverified", effective_settings: null, catalog: codexCatalog, accepted_turn_id: null }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
     expect(drawer.elements.modelControl.button.disabled).toBe(true);
     expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model 5.6 Sol, effort High, speed Fast. Model options unavailable");
     expect(drawer.elements.message.value).toBe("do not lose me");
+    drawer.destroy();
+  });
+
+  test("retains a rejected submission without overwriting a newer draft", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "cursor");
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(cursorSnapshotEvent());
+    drawer.elements.message.value = "first draft";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    expect(drawer.elements.message.value).toBe("");
+
+    drawer.elements.message.value = "newer draft";
+    const command = transport.send.mock.calls[0][0];
+    options.onEvent(agentEvent("command_result", {
+      command_id: command.command_id, status: "rejected",
+      error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" },
+    }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+
+    expect(drawer.elements.message.value).toBe("newer draft");
+    const retained = drawer.elements.timeline.querySelector('.agent-message-pending[data-state="rejected"]');
+    expect(retained?.textContent).toContain("first draft");
+    expect(retained?.querySelector(".agent-message-delivery > span")?.textContent).toBe("Not sent");
+    expect(retained?.querySelector(".agent-message-restore")?.textContent).toBe("Restore draft");
+
+    drawer.elements.message.value = "";
+    retained.querySelector(".agent-message-restore").click();
+    expect(drawer.elements.message.value).toBe("first draft");
+    expect(drawer.elements.timeline.querySelector(".agent-message-pending")).toBeNull();
+    drawer.destroy();
+  });
+
+  test("does not auto-restore a rejected submission after a newer draft was changed and cleared", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "cursor");
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(cursorSnapshotEvent());
+    drawer.elements.message.value = "original payload";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    drawer.elements.message.value = "temporary newer draft";
+    drawer.elements.message.value = "";
+
+    const command = transport.send.mock.calls[0][0];
+    options.onEvent(agentEvent("command_result", {
+      command_id: command.command_id, status: "rejected",
+      error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" },
+    }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+
+    expect(drawer.elements.message.value).toBe("");
+    const retained = drawer.elements.timeline.querySelector('.agent-message-pending[data-state="rejected"]');
+    expect(retained?.textContent).toContain("original payload");
+    expect(retained?.querySelector(".agent-message-restore")?.textContent).toBe("Restore draft");
     drawer.destroy();
   });
 
@@ -1864,9 +1998,10 @@ describe("local agent rendering and controls", () => {
 
     drawer.elements.providerSelect.value = "codex";
     drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(drawer.elements.message.value).toBe("Codex only");
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.timeline.textContent).toContain("Codex only");
     pi.options.onEvent(agentEvent("command_result", { command_id: piSubmit.command_id, status: "succeeded" }, { event_id: "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK" }));
-    expect(drawer.elements.message.value).toBe("Codex only");
+    expect(drawer.elements.message.value).toBe("");
     expect(revokeObjectURL).toHaveBeenCalledOnce();
 
     drawer.elements.providerSelect.value = "pi";
@@ -1879,13 +2014,149 @@ describe("local agent rendering and controls", () => {
     const compact = pi.send.mock.calls.find(([command]) => command.type === "compact")[0];
     drawer.elements.providerSelect.value = "codex";
     drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(drawer.elements.message.value).toBe("Codex only");
+    expect(drawer.elements.message.value).toBe("");
     pi.options.onEvent(agentEvent("command_result", { command_id: compact.command_id, status: "succeeded" }, { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" }));
-    expect(drawer.elements.message.value).toBe("Codex only");
+    expect(drawer.elements.message.value).toBe("");
     drawer.elements.providerSelect.value = "pi";
     drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
     expect(drawer.elements.message.value).toBe("");
     drawer.destroy();
+  });
+
+  test("paginates ordinary reconnect history before accepting an indeterminate submit", async () => {
+    vi.useFakeTimers();
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(piSnapshotEvent());
+    options.onEvent(agentEvent("assistant_message", {
+      turn_id: agentIDs.turn, message_id: agentIDs.archive, text: "Existing history", created_at: "2026-07-27T03:03:00Z",
+    }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
+    drawer.elements.message.value = "not written to the broker";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send.mock.calls.some(([command]) => command.type === "submit")).toBe(true));
+    const submit = transport.send.mock.calls.find(([command]) => command.type === "submit")[0];
+
+    options.onDisconnect(new Error("socket closed"));
+    expect(transport.resetReplay).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(transport.reconnect).toHaveBeenCalledOnce();
+    const history = transport.send.mock.calls.find(([command]) => command.type === "history_page")?.[0];
+    expect(history).toBeDefined();
+    options.onEvent(piSnapshotEvent({ event: { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" } }));
+    const pageCursor = "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL";
+    options.onEvent(agentEvent("timeline", { command_id: history.command_id, items: [{
+      item_id: pageCursor, kind: "assistant", turn_id: agentIDs.turn, message_id: agentIDs.archive, text: "Newer history", created_at: "2026-07-27T03:03:30Z",
+    }], next_cursor: pageCursor }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
+    expect(drawer.elements.message.value).toBe("");
+    const olderHistory = transport.send.mock.calls.find(([command]) => command.type === "history_page" && command.command_id !== history.command_id)?.[0];
+    expect(olderHistory?.payload.before).toBe(pageCursor);
+    options.onEvent(agentEvent("timeline", { command_id: olderHistory.command_id, items: [{
+      item_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN", kind: "user", turn_id: submit.payload.turn_id, message_id: submit.payload.message_id, text: "not written to the broker", created_at: "2026-07-27T03:03:00Z",
+    }], next_cursor: null }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
+
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.timeline.querySelector(".agent-message-pending")).toBeNull();
+    expect(transport.send.mock.calls.filter(([command]) => command.type === "submit")).toHaveLength(1);
+    expect(drawer.state.pendingCommandIDs.has(submit.command_id)).toBe(false);
+    drawer.destroy();
+    vi.useRealTimers();
+  });
+
+  test("keeps delivery indeterminate when bounded history cannot prove absence", async () => {
+    vi.useFakeTimers();
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(piSnapshotEvent());
+    drawer.elements.message.value = "remain indeterminate";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send.mock.calls.some(([command]) => command.type === "submit")).toBe(true));
+    options.onDisconnect(new Error("socket closed"));
+    await vi.advanceTimersByTimeAsync(1000);
+    options.onEvent(piSnapshotEvent({ event: { event_id: "00000000000000000000000000000000" } }));
+
+    for (let page = 0; page < 8; page += 1) {
+      const command = transport.send.mock.calls.filter(([candidate]) => candidate.type === "history_page").at(-1)[0];
+      const cursor = String.fromCharCode(80 + page).repeat(32);
+      options.onEvent(agentEvent("timeline", { command_id: command.command_id, items: [{
+        item_id: cursor, kind: "assistant", turn_id: agentIDs.turn, message_id: agentIDs.archive, text: `page ${page}`, created_at: "2026-07-27T03:03:30Z",
+      }], next_cursor: cursor }, { event_id: String(page + 1).repeat(32) }));
+    }
+
+    expect(transport.send.mock.calls.filter(([command]) => command.type === "history_page")).toHaveLength(8);
+    expect(transport.send.mock.calls.filter(([command]) => command.type === "submit")).toHaveLength(1);
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="confirming"]')?.textContent).toContain("remain indeterminate");
+    drawer.destroy();
+    vi.useRealTimers();
+  });
+
+  test("retries fresh reconciliation when a history-page request fails", async () => {
+    vi.useFakeTimers();
+    let options;
+    let historyAttempts = 0;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(),
+      send: vi.fn(async (command) => {
+        if (command.type === "history_page" && ++historyAttempts === 1) throw new Error("history read failed");
+      }),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(piSnapshotEvent());
+    drawer.elements.message.value = "confirm after history retry";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send.mock.calls.some(([command]) => command.type === "submit")).toBe(true));
+
+    options.onDisconnect(new Error("socket closed"));
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(transport.close).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(transport.reconnect).toHaveBeenCalledTimes(2);
+    const historyCommands = transport.send.mock.calls.filter(([command]) => command.type === "history_page").map(([command]) => command);
+    expect(historyCommands).toHaveLength(2);
+    options.onEvent(piSnapshotEvent({ event: { event_id: "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL" } }));
+    options.onEvent(agentEvent("timeline", { command_id: historyCommands[1].command_id, items: [], next_cursor: null }, { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" }));
+
+    expect(drawer.elements.message.value).toBe("confirm after history retry");
+    expect(transport.send.mock.calls.filter(([command]) => command.type === "submit")).toHaveLength(1);
+    drawer.destroy();
+    vi.useRealTimers();
+  });
+
+  test("forces fresh reconciliation after an unclassified submit transport failure", async () => {
+    vi.useFakeTimers();
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(async () => {}), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(),
+      send: vi.fn(async (command) => { if (command.type === "submit") throw new Error("connection lost after write"); }),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(piSnapshotEvent());
+    drawer.elements.message.value = "unknown write outcome";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.close).toHaveBeenCalledOnce());
+    expect(transport.resetReplay).toHaveBeenCalledOnce();
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="confirming"]')?.textContent).toContain("unknown write outcome");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(transport.reconnect).toHaveBeenCalledOnce();
+    const history = transport.send.mock.calls.find(([command]) => command.type === "history_page")?.[0];
+    expect(history).toBeDefined();
+    options.onEvent(piSnapshotEvent({ event: { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" } }));
+    options.onEvent(agentEvent("timeline", { command_id: history.command_id, items: [], next_cursor: null }, { event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
+    expect(drawer.elements.message.value).toBe("unknown write outcome");
+    expect(transport.send.mock.calls.filter(([command]) => command.type === "submit")).toHaveLength(1);
+    drawer.destroy();
+    vi.useRealTimers();
   });
 
   test.each([
@@ -1904,9 +2175,10 @@ describe("local agent rendering and controls", () => {
     const drawer = createAgentDrawer({
       payload: agentPayload(), doc: document, storage: localStorage,
       transportFactory: (options) => {
+        let reconnectAttempts = 0;
         const transport = {
           options, clientID: (options.provider === "pi" ? "P" : "C").repeat(32), conversationID: agentIDs.conversation, consented: true,
-          probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(async () => { const error = new Error("replay unavailable"); error.code = "replay_window_unavailable"; throw error; }), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+          probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(async () => { if (++reconnectAttempts === 1) { const error = new Error("replay unavailable"); error.code = "replay_window_unavailable"; throw error; } }), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
           uploadImage: vi.fn(async (file) => ({ image_id: "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", media_type: file.type, bytes: file.size })), deleteImage: vi.fn(async () => {}),
         };
         instances.set(options.provider, transport);
@@ -1930,8 +2202,8 @@ describe("local agent rendering and controls", () => {
       drawer.elements.message.value = "Codex untouched";
     }
     pi.options.onDisconnect(new Error("socket closed"));
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(pi.reconnect).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(pi.reconnect).toHaveBeenCalledTimes(2);
 
     const payload = recoveryKind === "queue"
       ? { queue: [{ turn_id: submitted.payload.turn_id, message_id: submitted.payload.message_id, message: `fresh ${recoveryKind}` }] }
@@ -1945,8 +2217,8 @@ describe("local agent rendering and controls", () => {
         drawer.elements.providerSelect.value = "pi";
         drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
       }
-      const history = createAgentCommand({ type: "history_page", payload: { limit: 50 }, clientID: pi.clientID, conversationID: pi.conversationID, idFactory: () => "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ" });
-      registerAgentCommand(drawer.state, history);
+      const history = pi.send.mock.calls.find(([command]) => command.type === "history_page")?.[0];
+      expect(history).toBeDefined();
       if (inactive) {
         drawer.elements.providerSelect.value = "codex";
         drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1962,6 +2234,13 @@ describe("local agent rendering and controls", () => {
       drawer.elements.providerSelect.value = "pi";
       drawer.elements.providerSelect.dispatchEvent(new Event("change", { bubbles: true }));
     }
+    if (recoveryKind === "active") {
+      expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="accepted"]')).not.toBeNull();
+      pi.options.onEvent(agentEvent("user_message", {
+        turn_id: submitted.payload.turn_id, message_id: submitted.payload.message_id, text: `fresh ${recoveryKind}`, created_at: "2026-07-27T03:03:30Z",
+      }, { event_id: "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT" }));
+      expect(drawer.elements.timeline.querySelector(".agent-message-pending")).toBeNull();
+    }
     if (recoveryKind === "absent") {
       expect(drawer.elements.message.value).toBe(`fresh ${recoveryKind}`);
       expect(drawer.elements.attachmentList.children).toHaveLength(1);
@@ -1973,7 +2252,7 @@ describe("local agent rendering and controls", () => {
       expect(revokeObjectURL).toHaveBeenCalledWith(`blob:fresh-${recoveryKind}-${inactive}`);
       expect(pi.deleteImage).not.toHaveBeenCalled();
     }
-    expect(pi.send).toHaveBeenCalledOnce();
+    expect(pi.send.mock.calls.filter(([command]) => command.type === "submit")).toHaveLength(1);
     drawer.destroy();
     vi.useRealTimers();
   });
@@ -2015,6 +2294,7 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.value = "Codex remains active";
     pi.options.onDisconnect(new Error("socket closed"));
     await pi.reconnect();
+    pi.options.onEvent(piSnapshotEvent({ event: { event_id: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM" } }));
     const result = status === "succeeded"
       ? { command_id: submitted.command_id, status }
       : { command_id: submitted.command_id, status, error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" } };
@@ -2348,13 +2628,15 @@ describe("local agent rendering and controls", () => {
     expect(transport.resetReplay).toHaveBeenCalledOnce();
     expect(document.querySelector(".agent-context")?.textContent).not.toMatch(/digest|delivery outcome|initial or replacement/iu);
     options.onEvent(snapshotEvent({ event_id: "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" }));
-    expect(drawer.elements.message.value).toBe("second");
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.timeline.textContent).toContain("Confirming delivery…");
     expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(true);
     options.onEvent(agentEvent("command_result", {
       command_id: sent[1].command_id,
       status: "rejected",
       error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" },
     }, { event_id: "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ" }));
+    expect(drawer.elements.message.value).toBe("second");
     expect(drawer.elements.composer.querySelector('button[type="submit"]').disabled).toBe(false);
     drawer.destroy();
   });
@@ -2435,6 +2717,25 @@ describe("local agent rendering and controls", () => {
     expect(confirm).not.toHaveBeenCalled();
     drawer.destroy();
     confirm.mockRestore();
+  });
+
+  test("keeps Cursor archive restore and pagination while omitting unsupported deletion", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "cursor");
+    let options;
+    const calls = [];
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(async (command) => calls.push(command)), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(cursorSnapshotEvent());
+    drawer.elements.overflowButton.click();
+    [...drawer.elements.overflowMenu.querySelectorAll("button")].find((button) => button.textContent === "Archives").click();
+    await vi.waitFor(() => expect(calls.at(-1)?.type).toBe("archive_list"));
+    options.onEvent(agentEvent("history", { command_id: calls.at(-1).command_id, items: [{ archive_id: agentIDs.archive, created_at: "2026-07-27T01:02:03Z", updated_at: "2026-07-27T02:03:04Z", provider: "cursor", model: "Cursor Standard", preview: "Saved" }], next_cursor: agentIDs.archive }, { event_id: "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS" }));
+    expect(drawer.elements.archives.querySelector('[data-archive-action="restore"]')).not.toBeNull();
+    expect(drawer.elements.archives.querySelector('[data-archive-action="delete"]')).toBeNull();
+    expect(drawer.elements.archives.textContent).toContain("Deletion unavailable for this provider");
+    expect(drawer.elements.archives.textContent).toContain("Load more archives");
+    expect(drawer.elements.archives.querySelector(".agent-archive-glyph")?.textContent).toBe("C");
+    drawer.destroy();
   });
 
   test("owns confirmation focus, sends nothing on cancel, and falls back when an archive row disappears", async () => {
@@ -2748,7 +3049,7 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
-  test("shows Sending until correlated acceptance and clears it on rejection or disconnect", async () => {
+  test("shows pending delivery until correlated acceptance and confirms it across disconnect", async () => {
     let options;
     const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(() => new Promise(() => {})), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
@@ -2756,15 +3057,46 @@ describe("local agent rendering and controls", () => {
     drawer.elements.message.value = "first";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Sending"));
+    expect(drawer.elements.message.value).toBe("");
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="sending"]')?.textContent).toContain("first");
     const first = transport.send.mock.calls[0][0];
     options.onEvent(agentEvent("command_result", { command_id: first.command_id, status: "rejected", error: { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" } }, { event_id: "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" }));
     expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Connected");
+    expect(drawer.elements.message.value).toBe("first");
 
     drawer.elements.message.value = "second";
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
+    expect(drawer.elements.message.value).toBe("");
     options.onDisconnect(new Error("closed"));
     expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Broker unavailable");
+    expect(drawer.elements.timeline.hidden).toBe(false);
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="confirming"]')?.textContent).toContain("second");
+    expect(drawer.elements.timeline.querySelector(".agent-message-delivery")?.textContent).toBe("Confirming delivery…");
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")).toBeNull();
+    drawer.destroy();
+  });
+
+  test("distinguishes browser sending from provider waiting with the working animation", async () => {
+    let options;
+    let markSent;
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(() => new Promise((resolve) => { markSent = resolve; })), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null }));
+    drawer.elements.message.value = "first";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Sending"));
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")).toBeNull();
+    markSent();
+    await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Waiting for Pi"));
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="waiting"]')).not.toBeNull();
+    expect(drawer.elements.timeline.querySelector(".agent-message-delivery")).toBeNull();
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")?.textContent).toContain("Pi is working");
+    expect(drawer.elements.timeline.querySelectorAll(".agent-response-dot")).toHaveLength(3);
+
+    options.onDisconnect(new Error("closed"));
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="confirming"]')).not.toBeNull();
     expect(drawer.elements.timeline.querySelector(".agent-response-loading")).toBeNull();
     drawer.destroy();
   });

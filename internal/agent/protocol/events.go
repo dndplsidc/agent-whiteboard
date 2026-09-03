@@ -160,20 +160,21 @@ type EventPayload interface {
 }
 
 type SnapshotPayload struct {
-	Lifecycle         LifecycleState              `json:"lifecycle"`
-	Queue             []QueueItem                 `json:"queue"`
-	ContextState      ContextState                `json:"context_state"`
-	ActiveWork        *ActiveWork                 `json:"active_work"`
-	SupportsImages    bool                        `json:"supports_images"`
-	SettingsState     *SettingsState              `json:"settings_state"`
-	EffectiveSettings *PresentedExecutionSettings `json:"effective_settings"`
-	Catalog           []CatalogModel              `json:"catalog"`
-	SkillsState       *SkillsState                `json:"skills_state"`
-	Skills            []SkillDescriptor           `json:"skills"`
-	MaxSelectedSkills *int                        `json:"max_selected_skills"`
-	SupportsCompact   bool                        `json:"supports_compact"`
-	BusyPolicy        BusyTurnPolicy              `json:"busy_policy"`
-	ComposerAdmission ComposerAdmission           `json:"composer_admission"`
+	Lifecycle             LifecycleState              `json:"lifecycle"`
+	Queue                 []QueueItem                 `json:"queue"`
+	ContextState          ContextState                `json:"context_state"`
+	ActiveWork            *ActiveWork                 `json:"active_work"`
+	SupportsImages        bool                        `json:"supports_images"`
+	SupportsArchiveDelete bool                        `json:"supports_archive_delete"`
+	SettingsState         *SettingsState              `json:"settings_state"`
+	EffectiveSettings     *PresentedExecutionSettings `json:"effective_settings"`
+	Catalog               []CatalogModel              `json:"catalog"`
+	SkillsState           *SkillsState                `json:"skills_state"`
+	Skills                []SkillDescriptor           `json:"skills"`
+	MaxSelectedSkills     *int                        `json:"max_selected_skills"`
+	SupportsCompact       bool                        `json:"supports_compact"`
+	BusyPolicy            BusyTurnPolicy              `json:"busy_policy"`
+	ComposerAdmission     ComposerAdmission           `json:"composer_admission"`
 }
 
 func (SnapshotPayload) EventType() EventType { return EventSnapshot }
@@ -627,7 +628,7 @@ func decodeEventPayload(kind EventType, raw json.RawMessage) (EventPayload, erro
 	var required []string
 	switch kind {
 	case EventSnapshot:
-		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_work", "supports_images", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "max_selected_skills", "supports_compact", "busy_policy", "composer_admission"}
+		target, required = &SnapshotPayload{}, []string{"lifecycle", "queue", "context_state", "active_work", "supports_images", "supports_archive_delete", "settings_state", "effective_settings", "catalog", "skills_state", "skills", "max_selected_skills", "supports_compact", "busy_policy", "composer_admission"}
 	case EventCommandResult:
 		target, required = &CommandResultPayload{}, []string{"command_id", "status"}
 	case EventTimeline:

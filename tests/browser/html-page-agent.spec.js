@@ -2,6 +2,8 @@ import { expect, test } from "./fixture.js";
 
 test.use({ browserRequestInterception: false, ignoreHTTPSErrors: true });
 
+const providerLabels = { pi: "Pi", codex: "Codex", cursor: "Cursor" };
+
 function parsedCommands(requests) {
   return requests
     .filter((request) => request.method === "POST" && ["/api/v1/agent/connect", "/api/v1/agent/commands"].includes(request.url) && typeof request.body === "string" && request.body !== "")
@@ -22,14 +24,14 @@ async function openHTMLPage({ context, page, fixture, html, creatorContext, prov
   fixture.resetBrokerRequests();
   fixture.resetBrokerState();
   await page.goto(resource.url);
-  await expect(page.locator(".agent-live-status")).toHaveText(`${provider === "codex" ? "Codex" : "Pi"} ready`);
+  await expect(page.locator(".agent-live-status")).toHaveText(`${providerLabels[provider]} ready`);
   return resource;
 }
 
 async function connect(page, provider) {
   const launcher = page.getByRole("button", { name: "Open Page agent", exact: true });
   if (await launcher.isVisible()) await launcher.click();
-  await page.getByRole("button", { name: `Connect to ${provider === "codex" ? "Codex" : "Pi"}`, exact: true }).click();
+  await page.getByRole("button", { name: `Connect to ${providerLabels[provider]}`, exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toBeVisible();
 }
 

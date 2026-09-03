@@ -26,7 +26,10 @@ const (
 	pollInterval       = 20 * time.Millisecond
 )
 
-var binaryPath string
+var (
+	binaryPath            string
+	scriptedCursorACPPath string
+)
 
 func TestMain(m *testing.M) {
 	buildDir, err := os.MkdirTemp("", "agent-whiteboard-integration-*")
@@ -42,15 +45,36 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	build := exec.Command("go", "build", "-trimpath", "-o", binaryPath, "../../cmd/agent-whiteboard")
-	build.Stdout = &stdout
-	build.Stderr = &stderr
-	if err := build.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "build integration binary: %v\nstdout:\n%s\nstderr:\n%s\n", err, stdout.String(), stderr.String())
+	scriptedCursorACPPath, err = filepath.Abs(filepath.Join(buildDir, "scripted-cursor-acp"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve scripted Cursor ACP path: %v\n", err)
 		_ = os.RemoveAll(buildDir)
 		os.Exit(1)
+	}
+
+	builds := []struct {
+		name, output, source string
+	}{
+		{name: "integration binary", output: binaryPath, source: "../../cmd/agent-whiteboard"},
+		{name: "scripted Cursor ACP", output: scriptedCursorACPPath, source: "./testdata/scripted-cursor-acp"},
+	}
+	for _, item := range builds {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		build := exec.Command("go", "build", "-trimpath", "-o", item.output, item.source)
+		build.Stdout = &stdout
+		build.Stderr = &stderr
+		if err := build.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "build %s: %v\nstdout:\n%s\nstderr:\n%s\n", item.name, err, stdout.String(), stderr.String())
+			_ = os.RemoveAll(buildDir)
+			os.Exit(1)
+		}
+		info, err := os.Lstat(item.output)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 || info.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(os.Stderr, "%s is not a direct regular executable: %v\n", item.name, err)
+			_ = os.RemoveAll(buildDir)
+			os.Exit(1)
+		}
 	}
 
 	code := m.Run()

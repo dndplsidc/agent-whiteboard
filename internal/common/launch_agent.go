@@ -8,15 +8,18 @@ import (
 )
 
 const (
-	LaunchAgentLabel                      = "com.agent-whiteboard.local-agent"
-	LaunchAgentControlExecutable          = "/bin/launchctl"
-	LaunchAgentProviderPi                 = "pi"
-	LaunchAgentProviderCodex              = "codex"
-	LaunchAgentPiExecutableEnvironment    = "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE"
-	LaunchAgentCodexExecutableEnvironment = "AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE"
-	LaunchAgentPathEnvironment            = "PATH"
-	installedNotRunningGuidance           = "LaunchAgent is installed but not running"
-	notInstalledGuidance                  = "LaunchAgent is not installed"
+	LaunchAgentLabel                       = "com.agent-whiteboard.local-agent"
+	LaunchAgentControlExecutable           = "/bin/launchctl"
+	LaunchAgentProviderPi                  = "pi"
+	LaunchAgentProviderCodex               = "codex"
+	LaunchAgentProviderCursor              = "cursor"
+	LaunchAgentCursorExecutableName        = "cursor-agent"
+	LaunchAgentPiExecutableEnvironment     = "AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE"
+	LaunchAgentCodexExecutableEnvironment  = "AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE"
+	LaunchAgentCursorExecutableEnvironment = "AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE"
+	LaunchAgentPathEnvironment             = "PATH"
+	installedNotRunningGuidance            = "LaunchAgent is installed but not running"
+	notInstalledGuidance                   = "LaunchAgent is not installed"
 )
 
 var (

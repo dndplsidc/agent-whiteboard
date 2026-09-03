@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   CODEX_SETTINGS_STORAGE_KEY,
+  CURSOR_SETTINGS_STORAGE_KEY,
   PI_SETTINGS_STORAGE_KEY,
   createSettingsDraftState,
   createModelSettingsControl,
@@ -13,6 +14,7 @@ import {
   reconcileSettingsDraft,
   recordSettingsSubmission,
   settingsCompatibility,
+  validModelCatalog,
   writeSettingsPreference,
 } from "./model-settings.js";
 
@@ -51,6 +53,17 @@ beforeEach(() => {
 });
 
 describe("provider settings helpers", () => {
+  test("accepts 256 catalog entries and rejects 257 under the existing catalog byte bound", () => {
+    const models = Array.from({ length: 257 }, (_, index) => ({
+      ...luna,
+      model: `cursor-model-${index}`,
+      model_display_name: `Cursor Model ${index}`,
+      default: index === 0,
+    }));
+    expect(validModelCatalog(models.slice(0, 256))).toBe(true);
+    expect(validModelCatalog(models)).toBe(false);
+  });
+
   test("validates compatibility without silently changing effort or speed", () => {
     expect(settingsCompatibility(catalog, fastSol)).toEqual({ compatible: true, reason: null });
     expect(settingsCompatibility(catalog, { ...fastSol, effort: "minimal" })).toEqual({ compatible: false, reason: "effort_unsupported" });
@@ -63,16 +76,21 @@ describe("provider settings helpers", () => {
     expect(formatExecutionSettings(presentedSol)).toEqual({ visible: "5.6 Sol · High", accessible: "Model 5.6 Sol, effort High, speed Fast", fast: true });
   });
 
-  test("uses isolated provider keys while retaining the exact Codex key and value", () => {
+  test("uses isolated provider keys while retaining the exact Pi and Codex keys", () => {
     writeSettingsPreference(localStorage, "codex", fastSol);
+    writeSettingsPreference(localStorage, "cursor", { ...fastSol, speed: "standard" });
     writeSettingsPreference(localStorage, "pi", standardLuna);
     expect(CODEX_SETTINGS_STORAGE_KEY).toBe("agent-whiteboard-codex-settings-v1");
+    expect(CURSOR_SETTINGS_STORAGE_KEY).toBe("agent-whiteboard-cursor-settings-v1");
     expect(PI_SETTINGS_STORAGE_KEY).toBe("agent-whiteboard-pi-settings-v1");
     expect(readSettingsPreference(localStorage, "codex")).toEqual(fastSol);
+    expect(readSettingsPreference(localStorage, "cursor")).toEqual({ ...fastSol, speed: "standard" });
     expect(readSettingsPreference(localStorage, "pi")).toEqual(standardLuna);
-    expect(Object.keys(localStorage).sort()).toEqual([CODEX_SETTINGS_STORAGE_KEY, PI_SETTINGS_STORAGE_KEY].sort());
+    expect(Object.keys(localStorage).sort()).toEqual([CODEX_SETTINGS_STORAGE_KEY, CURSOR_SETTINGS_STORAGE_KEY, PI_SETTINGS_STORAGE_KEY].sort());
     expect(() => readSettingsPreference(localStorage, "other")).not.toThrow();
     expect(readSettingsPreference(localStorage, "other")).toBeNull();
+    expect(readSettingsPreference(localStorage, "toString")).toBeNull();
+    expect(() => writeSettingsPreference(localStorage, "other", fastSol)).toThrow(TypeError);
   });
 
   test("reads and writes only a complete bounded semantic preference", () => {
@@ -155,6 +173,8 @@ describe("provider settings menu", () => {
     const modelRow = control.menu.querySelector('[data-settings-section="model"]');
     modelRow.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
     expect(control.menu.dataset.view).toBe("model");
+    expect(control.menu.querySelector('[aria-label="Filter models"]')).toBeNull();
+    expect(document.activeElement?.dataset.settingsValue).toBe(sol.model);
     const lunaChoice = control.menu.querySelector(`[data-settings-value="${luna.model}"]`);
     expect(lunaChoice.getAttribute("aria-disabled")).toBe("true");
     expect(lunaChoice.textContent).toContain("Choose a supported effort and Standard speed first.");
@@ -167,7 +187,129 @@ describe("provider settings menu", () => {
     control.destroy();
   });
 
-  test("omits Speed when the catalog advertises no fast choice", () => {
+  test("renders Cursor catalog rows as exact variants without synthetic controls", () => {
+    const cursorVariant = {
+      ...sol,
+      model: "cursor-fast-high",
+      model_display_name: "Cursor Fast High",
+      default_effort: "default",
+      supported_reasoning_efforts: [{ effort: "default", description: "Provider managed." }],
+      supports_fast: false,
+    };
+    const settings = { model: cursorVariant.model, effort: "default", speed: "standard" };
+    const presentation = { ...settings, model_display_name: cursorVariant.model_display_name, selectable: true };
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings, presentation, catalog: [cursorVariant], variantOnly: true });
+
+    expect(control.button.textContent).toBe("Cursor Fast High");
+    expect(control.button.getAttribute("aria-label")).toBe("Model Cursor Fast High");
+    expect(control.button.querySelector(".agent-model-pill-fast")).toBeNull();
+    control.button.click();
+    expect([...control.menu.querySelectorAll("[data-settings-section]")].map(({ dataset }) => dataset.settingsSection)).toEqual(["model"]);
+    expect(control.menu.textContent).toContain("Cursor Fast High");
+    expect(control.menu.textContent).not.toContain("Default");
+    expect(control.menu.textContent).not.toContain("Standard");
+    control.destroy();
+  });
+
+  test("sorts Cursor variants by model name and ascending effort", () => {
+    const variant = (model, model_display_name, isDefault = false) => ({
+      ...luna,
+      model,
+      model_display_name,
+      default_effort: "default",
+      supported_reasoning_efforts: [{ effort: "default", description: "Provider managed." }],
+      default: isDefault,
+    });
+    const variants = [
+      variant("gpt-5.6-sol-xhigh", "GPT-5.6 Sol 1M Extra High"),
+      variant("gpt-5.4-terra-high", "GPT-5.4 Terra 1M High"),
+      variant("claude-opus-5-max", "Claude Opus 5 1M Max"),
+      variant("gpt-5.6-sol-none", "GPT-5.6 Sol 1M None"),
+      variant("claude-opus-5-low", "Claude Opus 5 1M Low"),
+      variant("gpt-5.6-sol-medium", "GPT-5.6 Sol 1M", true),
+      variant("gpt-5.4-terra-low", "GPT-5.4 Terra 1M Low"),
+      variant("claude-opus-5-high", "Claude Opus 5 1M"),
+      variant("gpt-5.6-sol-max", "GPT-5.6 Sol 1M Max"),
+      variant("claude-opus-5-medium", "Claude Opus 5 1M Medium"),
+      variant("gpt-5.6-sol-low", "GPT-5.6 Sol 1M Low"),
+      variant("gpt-5.6-sol-high", "GPT-5.6 Sol 1M High"),
+      variant("claude-opus-5-xhigh", "Claude Opus 5 1M Extra High"),
+    ];
+    const settings = { model: "gpt-5.6-sol-medium", effort: "default", speed: "standard" };
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings, presentation: { ...settings, model_display_name: "GPT-5.6 Sol 1M", selectable: true }, catalog: variants, variantOnly: true });
+    control.button.click();
+    control.menu.querySelector('[data-settings-section="model"]').click();
+
+    expect([...control.menu.querySelectorAll('[role="menuitemradio"]')].map((row) => row.dataset.settingsValue)).toEqual([
+      "claude-opus-5-low",
+      "claude-opus-5-medium",
+      "claude-opus-5-high",
+      "claude-opus-5-xhigh",
+      "claude-opus-5-max",
+      "gpt-5.4-terra-low",
+      "gpt-5.4-terra-high",
+      "gpt-5.6-sol-none",
+      "gpt-5.6-sol-low",
+      "gpt-5.6-sol-medium",
+      "gpt-5.6-sol-high",
+      "gpt-5.6-sol-xhigh",
+      "gpt-5.6-sol-max",
+    ]);
+    control.destroy();
+  });
+
+  test("filters a large model catalog by display name and slug with accessible keyboard focus", () => {
+    const largeCatalog = Array.from({ length: 155 }, (_, index) => ({
+      ...luna,
+      model: `cursor-variant-${index}`,
+      model_display_name: index === 87 ? "Native High Fast Special" : `Cursor Variant ${index}`,
+      default: index === 0,
+    }));
+    const settings = { model: largeCatalog[0].model, effort: "medium", speed: "standard" };
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings, presentation: { ...settings, model_display_name: largeCatalog[0].model_display_name, selectable: true }, catalog: largeCatalog, variantOnly: true });
+    control.button.click();
+    control.menu.querySelector('[data-settings-section="model"]').click();
+
+    const filter = control.menu.querySelector('input[aria-label="Filter models"]');
+    expect(document.activeElement).toBe(filter);
+    filter.value = "HIGH fast";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    expect([...control.menu.querySelectorAll('[role="menuitemradio"]:not([hidden])')].map((row) => row.dataset.settingsValue)).toEqual(["cursor-variant-87"]);
+    filter.value = "variant-154";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    expect([...control.menu.querySelectorAll('[role="menuitemradio"]:not([hidden])')].map((row) => row.dataset.settingsValue)).toEqual(["cursor-variant-154"]);
+    filter.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    expect(document.activeElement?.dataset.settingsValue).toBe("cursor-variant-154");
+    filter.focus();
+    filter.value = "";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    filter.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    expect(document.activeElement?.dataset.settingsValue).toBe("cursor-variant-87");
+    filter.focus();
+    filter.value = "missing";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(control.menu.querySelector('[role="status"]').textContent).toBe("No models found.");
+    expect(control.menu.querySelector("img, script")).toBeNull();
+    control.destroy();
+  });
+
+  test("omits Effort and Speed when the selected model has only one effective choice", () => {
+    const singletonCatalog = [{ ...luna, default: true }];
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings: standardLuna, presentation: { ...standardLuna, model_display_name: luna.model_display_name, selectable: true }, catalog: singletonCatalog });
+    control.button.click();
+    expect([...control.menu.querySelectorAll('[data-settings-section]')].map(({ dataset }) => dataset.settingsSection)).toEqual(["model"]);
+    control.destroy();
+  });
+
+  test("retains Pi's multiple-effort menu while omitting its synthetic Speed choice", () => {
     const piCatalog = catalog.map((model) => ({ ...model, supports_fast: false }));
     const settings = { ...fastSol, speed: "standard" };
     const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });

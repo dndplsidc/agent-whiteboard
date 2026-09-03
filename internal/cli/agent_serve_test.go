@@ -19,11 +19,12 @@ func TestAgentServeUsesFlagEnvironmentYAMLBuiltinPrecedence(t *testing.T) {
 	application := &fakeApplication{}
 	deps := validDependencies()
 	deps.Getenv = mapGetenv(map[string]string{
-		"AGENT_WHITEBOARD_AGENT_PORT":                "2002",
-		"AGENT_WHITEBOARD_PROVIDER_IDLE_TIMEOUT":     "4m",
-		"AGENT_WHITEBOARD_AGENT_SHUTDOWN_TIMEOUT":    "5s",
-		"AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE":    "/env/pi",
-		"AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE": "/env/codex",
+		"AGENT_WHITEBOARD_AGENT_PORT":                 "2002",
+		"AGENT_WHITEBOARD_PROVIDER_IDLE_TIMEOUT":      "4m",
+		"AGENT_WHITEBOARD_AGENT_SHUTDOWN_TIMEOUT":     "5s",
+		"AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE":     "/env/pi",
+		"AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE":  "/env/codex",
+		"AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE": "/env/cursor-agent",
 	})
 	deps.NewAgentApplication = func(config app.AgentServiceConfig) (Application, error) {
 		got = config
@@ -35,14 +36,33 @@ func TestAgentServeUsesFlagEnvironmentYAMLBuiltinPrecedence(t *testing.T) {
 		"--config", configPath, "agent", "serve",
 		"--port", "2003", "--provider-idle-timeout", "6m",
 		"--shutdown-timeout", "7s", "--pi-executable", "/flag/pi",
-		"--codex-executable", "/flag/codex",
+		"--codex-executable", "/flag/codex", "--cursor-executable", "/flag/cursor-agent",
 	})
 	require.NoError(t, root.ExecuteContext(context.Background()))
 	require.Equal(t, app.AgentServiceConfig{
-		ConfigPath: configPath, Port: 2003, PiExecutable: "/flag/pi", CodexExecutable: "/flag/codex",
+		ConfigPath: configPath, Port: 2003, PiExecutable: "/flag/pi", CodexExecutable: "/flag/codex", CursorExecutable: "/flag/cursor-agent",
 		IdleTimeout: 6 * time.Minute, ShutdownTimeout: 7 * time.Second,
 	}, got)
 	require.Equal(t, int32(1), application.closeCalls.Load())
+}
+
+func TestAgentServeUsesCursorExecutableEnvironment(t *testing.T) {
+	var got app.AgentServiceConfig
+	application := &fakeApplication{}
+	deps := validDependencies()
+	deps.Getenv = mapGetenv(map[string]string{
+		"AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE": "/env/cursor-agent",
+	})
+	deps.NewAgentApplication = func(config app.AgentServiceConfig) (Application, error) {
+		got = config
+		return application, nil
+	}
+	root, err := NewRoot(deps)
+	require.NoError(t, err)
+	root.SetArgs([]string{"agent", "serve"})
+
+	require.NoError(t, root.ExecuteContext(context.Background()))
+	require.Equal(t, "/env/cursor-agent", got.CursorExecutable)
 }
 
 func TestAgentServeUsesCodexExecutableEnvironment(t *testing.T) {

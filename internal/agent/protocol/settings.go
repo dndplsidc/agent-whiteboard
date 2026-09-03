@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	MaxCatalogModels          = 64
+	MaxCatalogModels          = 256
 	MaxReasoningEfforts       = 16
 	MaxModelValueBytes        = 256
 	MaxEffortValueBytes       = 64

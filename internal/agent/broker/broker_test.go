@@ -88,6 +88,7 @@ func TestProviderAndReadinessErrorsAreExhaustivelyMappedWithoutCauses(t *testing
 		provider.ErrorImageStorageFailure:       protocol.ErrorImageStorageFailure,
 		provider.ErrorSkillUnavailable:          protocol.ErrorSkillUnavailable,
 		provider.ErrorCompactUnsupported:        protocol.ErrorCompactUnsupported,
+		provider.ErrorArchiveDeleteUnsupported:  protocol.ErrorArchiveDeleteUnsupported,
 	}
 	for _, code := range provider.AllProviderErrorCodes() {
 		failure := provider.NewProviderError(code)
@@ -226,6 +227,7 @@ func TestConnectIdentityPreservesEachProvider(t *testing.T) {
 	}{
 		{protocol.ProviderPi, provider.NamePi},
 		{protocol.ProviderCodex, provider.NameCodex},
+		{protocol.ProviderCursor, provider.NameCursor},
 	} {
 		identity := ConnectIdentity{Origin: "https://example.com", Provider: test.wire, Resource: resource, ContextDigest: page.Digest}
 		state, err := ConnectIdentityToState(identity, identity.Origin)
@@ -327,7 +329,7 @@ func TestReplayDeepClonesSkillLimitsForValueAndPointerPayloads(t *testing.T) {
 	log := NewReplayLog()
 	limit := 2
 	ready := protocol.SkillsReady
-	valueSnapshot := protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, Catalog: []protocol.CatalogModel{}, SkillsState: &ready, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &limit, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit}
+	valueSnapshot := protocol.SnapshotPayload{Lifecycle: protocol.LifecycleReady, Queue: []protocol.QueueItem{}, ContextState: protocol.ContextPending, SupportsArchiveDelete: true, Catalog: []protocol.CatalogModel{}, SkillsState: &ready, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &limit, BusyPolicy: protocol.BusyTurnQueue, ComposerAdmission: protocol.ComposerSubmit}
 	pointerCatalog := &protocol.SkillCatalogPayload{State: protocol.SkillsReady, Skills: []protocol.SkillDescriptor{}, MaxSelectedSkills: &limit}
 	events := []protocol.Event{
 		{APIVersion: protocol.APIVersion, EventID: sequenceID(180), ConversationID: testID('A'), Type: protocol.EventSnapshot, Timestamp: testTime(), Payload: valueSnapshot},
@@ -340,6 +342,7 @@ func TestReplayDeepClonesSkillLimitsForValueAndPointerPayloads(t *testing.T) {
 	first, err := log.Replay(testID('G'), "")
 	require.NoError(t, err)
 	require.Equal(t, 2, *first[0].Payload.(protocol.SnapshotPayload).MaxSelectedSkills)
+	require.True(t, first[0].Payload.(protocol.SnapshotPayload).SupportsArchiveDelete)
 	require.Equal(t, 2, *first[1].Payload.(*protocol.SkillCatalogPayload).MaxSelectedSkills)
 	*first[0].Payload.(protocol.SnapshotPayload).MaxSelectedSkills = 7
 	*first[1].Payload.(*protocol.SkillCatalogPayload).MaxSelectedSkills = 8

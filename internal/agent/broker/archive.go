@@ -8,6 +8,7 @@ import (
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/protocol"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
 	statepkg "github.com/dndplsidc/agent-whiteboard/internal/agent/state"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 type archiveRemovalStore interface {
@@ -90,6 +91,10 @@ func (actor *conversation) commandArchiveDelete(results chan<- archiveWorkerResu
 	if results == nil || actor.active != nil || actor.compact != nil || !actor.queue.Empty() || actor.workerSettled != nil || actor.deferredInterrupt != nil || actor.recoveryActive || actor.dispatchBlocked || actor.stopping || actor.mapping.Current == nil || actor.mapping.Current.PreparedCommit != nil {
 		return protocol.ErrorInvalidState
 	}
+	deleter, supported := actor.driver.(provider.NativeSessionDeleter)
+	if !supported || common.IsNil(deleter) {
+		return protocol.ErrorArchiveDeleteUnsupported
+	}
 	var archived *statepkg.Session
 	for index := range actor.mapping.Archives {
 		if actor.mapping.Archives[index].ConversationID == request.ArchiveID {
@@ -118,7 +123,7 @@ func (actor *conversation) commandArchiveDelete(results chan<- archiveWorkerResu
 	go func(target statepkg.Session) {
 		result := archiveWorkerResult{generation: generation, commandID: command.CommandID, clientID: command.ClientID, archiveID: target.ConversationID}
 		deleteRequest := provider.DeleteRequest{Provider: actor.identity.Provider, NativeSession: target.NativeSession}
-		if deleteRequest.Validate() != nil || actor.driver.Delete(actor.lifecycleCtx, deleteRequest) != nil {
+		if deleteRequest.Validate() != nil || deleter.Delete(actor.lifecycleCtx, deleteRequest) != nil {
 			result.code = protocol.ErrorArchiveDeleteRetained
 			results <- result
 			return

@@ -338,6 +338,14 @@ func TestDriverLifecycleOperationsAreExplicitAndRejectZeroReferences(t *testing.
 	require.NoError(t, create.Validate())
 	resume := provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, NativeSession: ref, Workspace: workspace}
 	require.NoError(t, resume.Validate())
+	resumeSettings := provider.ExecutionSettings{Model: "durable-model", Effort: "default", Speed: provider.SpeedStandard}
+	resume.Settings = &resumeSettings
+	require.NoError(t, resume.Validate())
+	invalidResumeSettings := resumeSettings
+	invalidResumeSettings.Model = ""
+	resume.Settings = &invalidResumeSettings
+	require.Error(t, resume.Validate())
+	resume.Settings = &resumeSettings
 	inspect := provider.InspectRequest{Provider: provider.NamePi, NativeSession: ref}
 	require.NoError(t, inspect.Validate())
 	deleteRequest := provider.DeleteRequest{Provider: provider.NamePi, NativeSession: ref}
@@ -357,15 +365,16 @@ func TestDriverLifecycleOperationsAreExplicitAndRejectZeroReferences(t *testing.
 }
 
 func TestProviderNamesAndAccessModesAreClosed(t *testing.T) {
-	for _, name := range []provider.Name{provider.NamePi, provider.NameCodex} {
+	for _, name := range []provider.Name{provider.NamePi, provider.NameCodex, provider.NameCursor} {
 		require.True(t, name.Valid())
 	}
 	require.False(t, provider.Name("other").Valid())
-	require.Equal(t, []provider.Name{provider.NamePi, provider.NameCodex}, provider.AllNames())
+	require.Equal(t, []provider.Name{provider.NamePi, provider.NameCodex, provider.NameCursor}, provider.AllNames())
 
 	workspace := t.TempDir()
 	require.NoError(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
 	require.NoError(t, (provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
+	require.NoError(t, (provider.CreateRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: workspace}).Validate())
 	require.Error(t, (provider.CreateRequest{Provider: provider.NamePi, Access: provider.AccessContentOnly, Workspace: workspace}).Validate())
 	require.Error(t, (provider.CreateRequest{Provider: provider.NameCodex, Access: provider.AccessContentOnly, Workspace: workspace}).Validate())
 }
@@ -422,7 +431,7 @@ func TestLaunchRequestCarriesAnExplicitProcessSpecification(t *testing.T) {
 func TestPreflightExposesEffectiveSizingAndTypedContextTooLarge(t *testing.T) {
 	request := provider.PreflightRequest{Turn: validTurnRequest()}
 	require.NoError(t, request.Validate())
-	result := provider.PreflightResult{ResolvedModel: "resolved-model", EstimatedInputTokens: 1_000, EffectiveCapacityTokens: 8_000, SafetyMarginTokens: 1_000}
+	result := provider.PreflightResult{CapacityMode: provider.CapacityPrechecked, ResolvedModel: "resolved-model", EstimatedInputTokens: 1_000, EffectiveCapacityTokens: 8_000, SafetyMarginTokens: 1_000}
 	require.NoError(t, result.Validate())
 
 	session := validFakeSession()
@@ -446,7 +455,7 @@ func TestProviderErrorTaxonomyIsClosedStaticAndRedacted(t *testing.T) {
 		provider.ErrorContextTooLarge, provider.ErrorAcceptanceUnknown, provider.ErrorInvalidModelConfiguration,
 		provider.ErrorImageInputUnsupported, provider.ErrorImageUnsupported, provider.ErrorImageTooLarge,
 		provider.ErrorImageTurnLimit, provider.ErrorImageMissing, provider.ErrorImageStorageFailure,
-		provider.ErrorSkillUnavailable, provider.ErrorCompactUnsupported,
+		provider.ErrorSkillUnavailable, provider.ErrorCompactUnsupported, provider.ErrorArchiveDeleteUnsupported,
 	}
 	require.Equal(t, codes, provider.AllProviderErrorCodes())
 	for _, code := range codes {
@@ -587,7 +596,9 @@ func TestCompileTimeFakesHaveBehaviorallyUsableSignatures(t *testing.T) {
 	metadata, err := driver.Inspect(context.Background(), provider.InspectRequest{Provider: provider.NamePi, NativeSession: ref})
 	require.NoError(t, err)
 	require.NoError(t, metadata.Validate())
-	require.NoError(t, driver.Delete(context.Background(), provider.DeleteRequest{Provider: provider.NamePi, NativeSession: ref}))
+	deleter, ok := driver.(provider.NativeSessionDeleter)
+	require.True(t, ok)
+	require.NoError(t, deleter.Delete(context.Background(), provider.DeleteRequest{Provider: provider.NamePi, NativeSession: ref}))
 
 	workingDirectory := t.TempDir()
 	child, err := (&fakeLauncher{}).Launch(context.Background(), provider.LaunchRequest{

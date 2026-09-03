@@ -19,6 +19,12 @@ func TestExactContractLiterals(t *testing.T) {
 	if LaunchAgentCodexExecutableEnvironment != "AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE" {
 		t.Fatalf("Codex environment key = %q", LaunchAgentCodexExecutableEnvironment)
 	}
+	if LaunchAgentCursorExecutableEnvironment != "AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE" {
+		t.Fatalf("Cursor environment key = %q", LaunchAgentCursorExecutableEnvironment)
+	}
+	if LaunchAgentCursorExecutableName != "cursor-agent" {
+		t.Fatalf("Cursor executable name = %q", LaunchAgentCursorExecutableName)
+	}
 	if LaunchAgentPathEnvironment != "PATH" {
 		t.Fatalf("PATH environment key = %q", LaunchAgentPathEnvironment)
 	}
@@ -38,6 +44,7 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	configuration := testRegularFile(t, filepath.Join(home, "config & selected.yaml"), 0o600)
 	piProvider := testRegularFile(t, filepath.Join(home, "providers", "pi & rpc"), 0o700)
 	codexProvider := testRegularFile(t, filepath.Join(home, "providers", "codex & rpc"), 0o700)
+	cursorProvider := testRegularFile(t, filepath.Join(home, "providers", "cursor & rpc"), 0o700)
 	paths := pathsForHome(home)
 	config := LaunchAgentConfig{
 		Executable: executable,
@@ -45,8 +52,9 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 		Providers: []LaunchAgentProviderDescriptor{
 			testProviderDescriptor{name: LaunchAgentProviderPi, executable: LaunchAgentProviderPi},
 			testProviderDescriptor{name: LaunchAgentProviderCodex, executable: LaunchAgentProviderCodex},
+			testProviderDescriptor{name: LaunchAgentProviderCursor, executable: LaunchAgentCursorExecutableName},
 		},
-		ExecutableResolver: testExecutableResolver{paths: map[string]string{LaunchAgentProviderPi: piProvider, LaunchAgentProviderCodex: codexProvider}},
+		ExecutableResolver: testExecutableResolver{paths: map[string]string{LaunchAgentProviderPi: piProvider, LaunchAgentProviderCodex: codexProvider, LaunchAgentCursorExecutableName: cursorProvider}},
 		EnvironmentPath:    filepath.Join(home, ".nvm", "versions", "node", "v22.0.0", "bin"),
 	}
 
@@ -83,8 +91,9 @@ func TestPlistIsDeterministicAndStructurallySafe(t *testing.T) {
 	assertStringValue(t, parsed, "StandardOutPath", paths.StdoutLog)
 	assertStringValue(t, parsed, "StandardErrorPath", paths.StderrLog)
 	assertStringDictionary(t, parsed, "EnvironmentVariables", map[string]string{
-		LaunchAgentPiExecutableEnvironment:    normalized.ProviderExecutables[LaunchAgentProviderPi],
-		LaunchAgentCodexExecutableEnvironment: normalized.ProviderExecutables[LaunchAgentProviderCodex],
+		LaunchAgentPiExecutableEnvironment:     normalized.ProviderExecutables[LaunchAgentProviderPi],
+		LaunchAgentCodexExecutableEnvironment:  normalized.ProviderExecutables[LaunchAgentProviderCodex],
+		LaunchAgentCursorExecutableEnvironment: normalized.ProviderExecutables[LaunchAgentProviderCursor],
 		LaunchAgentPathEnvironment: strings.Join([]string{
 			filepath.Join(home, ".nvm", "versions", "node", "v22.0.0", "bin"),
 			filepath.Join(home, ".bun", "bin"),
@@ -438,7 +447,7 @@ func TestProviderResolverFoundMissingAndUntrustedResults(t *testing.T) {
 	}
 }
 
-func TestProviderResolverResolvesPiAndCodexIndependently(t *testing.T) {
+func TestProviderResolverResolvesPiCodexAndCursorIndependently(t *testing.T) {
 	t.Parallel()
 
 	home := t.TempDir()
@@ -449,6 +458,7 @@ func TestProviderResolverResolvesPiAndCodexIndependently(t *testing.T) {
 		Providers: []LaunchAgentProviderDescriptor{
 			testProviderDescriptor{name: LaunchAgentProviderPi, executable: LaunchAgentProviderPi},
 			testProviderDescriptor{name: LaunchAgentProviderCodex, executable: LaunchAgentProviderCodex},
+			testProviderDescriptor{name: LaunchAgentProviderCursor, executable: LaunchAgentCursorExecutableName},
 		},
 		ExecutableResolver: testExecutableResolver{paths: map[string]string{LaunchAgentProviderPi: piProvider}},
 	}
@@ -459,6 +469,9 @@ func TestProviderResolverResolvesPiAndCodexIndependently(t *testing.T) {
 	}
 	if _, exists := normalized.ProviderExecutables[LaunchAgentProviderCodex]; exists {
 		t.Fatalf("missing Codex executable recorded: %#v", normalized.ProviderExecutables)
+	}
+	if _, exists := normalized.ProviderExecutables[LaunchAgentProviderCursor]; exists {
+		t.Fatalf("missing Cursor executable recorded: %#v", normalized.ProviderExecutables)
 	}
 	resolvedPi, _ := filepath.EvalSymlinks(piProvider)
 	if normalized.ProviderExecutables[LaunchAgentProviderPi] != resolvedPi {

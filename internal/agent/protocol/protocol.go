@@ -63,13 +63,18 @@ var (
 type ProviderName string
 
 const (
-	ProviderPi    ProviderName = "pi"
-	ProviderCodex ProviderName = "codex"
+	ProviderPi     ProviderName = "pi"
+	ProviderCodex  ProviderName = "codex"
+	ProviderCursor ProviderName = "cursor"
 )
 
-func (name ProviderName) Valid() bool { return name == ProviderPi || name == ProviderCodex }
+func (name ProviderName) Valid() bool {
+	return name == ProviderPi || name == ProviderCodex || name == ProviderCursor
+}
 
-func AllProviderNames() []ProviderName { return []ProviderName{ProviderPi, ProviderCodex} }
+func AllProviderNames() []ProviderName {
+	return []ProviderName{ProviderPi, ProviderCodex, ProviderCursor}
+}
 
 type ResourceKind string
 

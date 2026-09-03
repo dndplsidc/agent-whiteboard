@@ -37,13 +37,14 @@ const (
 type Name string
 
 const (
-	NamePi    Name = "pi"
-	NameCodex Name = "codex"
+	NamePi     Name = "pi"
+	NameCodex  Name = "codex"
+	NameCursor Name = "cursor"
 )
 
-func (name Name) Valid() bool { return name == NamePi || name == NameCodex }
+func (name Name) Valid() bool { return name == NamePi || name == NameCodex || name == NameCursor }
 
-func AllNames() []Name { return []Name{NamePi, NameCodex} }
+func AllNames() []Name { return []Name{NamePi, NameCodex, NameCursor} }
 
 type AccessMode string
 
@@ -78,6 +79,7 @@ const (
 	ErrorImageStorageFailure       ProviderErrorCode = "image_storage_failure"
 	ErrorSkillUnavailable          ProviderErrorCode = "skill_unavailable"
 	ErrorCompactUnsupported        ProviderErrorCode = "compact_unsupported"
+	ErrorArchiveDeleteUnsupported  ProviderErrorCode = "archive_delete_unsupported"
 )
 
 var providerErrorMessages = map[ProviderErrorCode]string{
@@ -104,6 +106,7 @@ var providerErrorMessages = map[ProviderErrorCode]string{
 	ErrorImageStorageFailure:       "The image input could not be read safely.",
 	ErrorSkillUnavailable:          "The selected skill is no longer available. Refresh the skill catalog and try again.",
 	ErrorCompactUnsupported:        "Manual context compaction is unavailable for this provider runtime.",
+	ErrorArchiveDeleteUnsupported:  "Native archive deletion is unavailable for this provider.",
 }
 
 // ProviderError is a closed, provider-neutral failure. It intentionally carries
@@ -133,7 +136,7 @@ func AllProviderErrorCodes() []ProviderErrorCode {
 		ErrorNoUsableModel, ErrorContentOnlyUnavailable, ErrorProtocolIncompatible, ErrorProtocolFailure, ErrorMalformedStream,
 		ErrorChildExited, ErrorNativeSessionMissing, ErrorContextTooLarge, ErrorAcceptanceUnknown,
 		ErrorInvalidModelConfiguration, ErrorImageInputUnsupported, ErrorImageUnsupported, ErrorImageTooLarge, ErrorImageTurnLimit,
-		ErrorImageMissing, ErrorImageStorageFailure, ErrorSkillUnavailable, ErrorCompactUnsupported,
+		ErrorImageMissing, ErrorImageStorageFailure, ErrorSkillUnavailable, ErrorCompactUnsupported, ErrorArchiveDeleteUnsupported,
 	}
 }
 
@@ -232,10 +235,12 @@ type ResumeRequest struct {
 	Access        AccessMode
 	NativeSession NativeSessionRef
 	Workspace     string
+	Settings      *ExecutionSettings
 }
 
 func (r ResumeRequest) Validate() error {
-	if validateProviderAccess(r.Provider, r.Access) != nil || !r.NativeSession.Valid() || !validAbsoluteCleanPath(r.Workspace) {
+	if validateProviderAccess(r.Provider, r.Access) != nil || !r.NativeSession.Valid() || !validAbsoluteCleanPath(r.Workspace) ||
+		(r.Settings != nil && r.Settings.Validate() != nil) {
 		return errors.New("invalid provider resume request")
 	}
 	return nil
@@ -244,10 +249,13 @@ func (r ResumeRequest) Validate() error {
 type InspectRequest struct {
 	Provider      Name
 	NativeSession NativeSessionRef
+	// Settings is persisted broker metadata identifying the exact process-scoped
+	// selection used by providers whose native session listing omits that value.
+	Settings *ExecutionSettings
 }
 
 func (r InspectRequest) Validate() error {
-	if !r.Provider.Valid() || !r.NativeSession.Valid() {
+	if !r.Provider.Valid() || !r.NativeSession.Valid() || (r.Settings != nil && r.Settings.Validate() != nil) {
 		return errors.New("invalid provider inspect request")
 	}
 	return nil
@@ -270,8 +278,45 @@ type Driver interface {
 	Create(context.Context, CreateRequest) (Session, error)
 	Resume(context.Context, ResumeRequest) (Session, error)
 	Inspect(context.Context, InspectRequest) (NativeSession, error)
-	// Delete is idempotent: an already-missing native session is success.
+}
+
+// NativeSessionDeleter is the optional provider capability for destructive
+// native archive deletion. Delete is idempotent: an already-missing native
+// session is success.
+type NativeSessionDeleter interface {
 	Delete(context.Context, DeleteRequest) error
+}
+
+type NativeDeletionState string
+
+const (
+	NativeDeletionRequired    NativeDeletionState = "required"
+	NativeDeletionUnsupported NativeDeletionState = "unsupported"
+	NativeDeletionUnsafe      NativeDeletionState = "unsafe"
+)
+
+func (state NativeDeletionState) Valid() bool {
+	return state == NativeDeletionRequired || state == NativeDeletionUnsupported || state == NativeDeletionUnsafe
+}
+
+// CleanupPolicy records the native step required after failed creation and
+// whether definitive non-publication permits removal of the owned workspace.
+type CleanupPolicy struct {
+	NativeDeletion  NativeDeletionState
+	RemoveWorkspace bool
+}
+
+func (policy CleanupPolicy) Validate() error {
+	switch {
+	case policy.NativeDeletion == NativeDeletionRequired && policy.RemoveWorkspace:
+		return nil
+	case policy.NativeDeletion == NativeDeletionUnsupported && policy.RemoveWorkspace:
+		return nil
+	case policy.NativeDeletion == NativeDeletionUnsafe && !policy.RemoveWorkspace:
+		return nil
+	default:
+		return errors.New("invalid failed-create cleanup policy")
+	}
 }
 
 type Session interface {
@@ -452,10 +497,22 @@ func (r PreflightRequest) Validate() error {
 	return nil
 }
 
-// PreflightResult reports a conservative provider-effective sizing estimate
-// after model resolution. EffectiveCapacityTokens is the usable capacity after
-// the reported safety margin.
+type CapacityMode string
+
+const (
+	CapacityPrechecked       CapacityMode = "prechecked"
+	CapacityProviderEnforced CapacityMode = "provider_enforced"
+)
+
+func (mode CapacityMode) Valid() bool {
+	return mode == CapacityPrechecked || mode == CapacityProviderEnforced
+}
+
+// PreflightResult reports either a conservative provider-effective sizing
+// estimate or that the native provider enforces capacity without an estimate.
+// EffectiveCapacityTokens is the usable capacity after the safety margin.
 type PreflightResult struct {
+	CapacityMode            CapacityMode
 	ResolvedModel           string
 	EstimatedInputTokens    int
 	EffectiveCapacityTokens int
@@ -463,10 +520,20 @@ type PreflightResult struct {
 }
 
 func (r PreflightResult) Validate() error {
-	if !validBoundedText(r.ResolvedModel, MaxTitleBytes, true) || r.EstimatedInputTokens <= 0 || r.EffectiveCapacityTokens <= 0 || r.SafetyMarginTokens < 0 || r.EstimatedInputTokens > r.EffectiveCapacityTokens {
+	if !validBoundedText(r.ResolvedModel, MaxTitleBytes, true) {
 		return errors.New("invalid provider preflight result")
 	}
-	return nil
+	switch r.CapacityMode {
+	case CapacityPrechecked:
+		if r.EstimatedInputTokens > 0 && r.EffectiveCapacityTokens > 0 && r.SafetyMarginTokens >= 0 && r.EstimatedInputTokens <= r.EffectiveCapacityTokens {
+			return nil
+		}
+	case CapacityProviderEnforced:
+		if r.EstimatedInputTokens == 0 && r.EffectiveCapacityTokens == 0 && r.SafetyMarginTokens == 0 {
+			return nil
+		}
+	}
+	return errors.New("invalid provider preflight result")
 }
 
 type AcceptedTurn struct {
@@ -804,7 +871,7 @@ func (Event) MarshalJSON() ([]byte, error) {
 }
 
 func validateProviderAccess(name Name, access AccessMode) error {
-	valid := (name == NamePi || name == NameCodex) && access == AccessConfigured
+	valid := name.Valid() && access == AccessConfigured
 	if !valid {
 		return errors.New("invalid provider access")
 	}

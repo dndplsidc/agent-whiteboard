@@ -85,18 +85,22 @@ Creator context is not a private or hidden channel. Anyone with the capability I
 
 ## Local Page Agent and daemon output
 
-`agent serve` is a long-running local broker service rather than a stream of CLI JSON envelopes. It resolves Pi and Codex independently and accepts these provider executable selectors:
+`agent serve` is a long-running local broker service rather than a stream of CLI JSON envelopes. It resolves Pi, Codex, and Cursor independently and accepts these provider executable selectors:
 
 ```sh
 agent-whiteboard agent serve --pi-executable /absolute/path/to/pi
 agent-whiteboard agent serve --codex-executable /absolute/path/to/codex
+agent-whiteboard agent serve --cursor-executable /absolute/path/to/cursor-agent
 
 AGENT_WHITEBOARD_PROVIDER_PI_EXECUTABLE=/absolute/path/to/pi \
   AGENT_WHITEBOARD_PROVIDER_CODEX_EXECUTABLE=/absolute/path/to/codex \
+  AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE=/absolute/path/to/cursor-agent \
   agent-whiteboard agent serve
 ```
 
-An explicit flag takes precedence over the matching non-empty environment variable; otherwise the service resolves `pi` or `codex` from `PATH`. One unavailable provider does not prevent the other provider or the broker from starting. Codex inherits the effective default user Codex configuration and authentication unchanged. Agent Whiteboard never edits `~/.codex/config.toml` or sets a production `CODEX_HOME`.
+For each provider, an explicit flag takes precedence over the matching non-empty environment variable; otherwise the service resolves exactly `pi`, `codex`, or `cursor-agent` from `PATH`. An explicitly supplied empty executable flag is invalid. A generic `agent` executable is accepted for Cursor only through the explicit flag or environment selector; it is never discovered by default. One unavailable provider does not prevent other providers or the broker from starting.
+
+Providers inherit their effective native environment and configuration unchanged. Authenticate Cursor with `cursor-agent login`. Agent Whiteboard never invokes ACP authentication, opens a login browser, receives credentials, edits `~/.codex/config.toml`, sets a production `CODEX_HOME`, or copies or edits Cursor authentication, configuration, or shell state.
 
 On macOS, `agent serve --daemon` install success and `agent daemon restart|stop|uninstall` mutation success use the ordinary delete-success JSON envelope:
 
@@ -112,8 +116,10 @@ On macOS, `agent serve --daemon` install success and `agent daemon restart|stop|
 
 This status does not prove broker reachability. Confirm that the reported process owns the configured loopback listener, then verify Page Agent through the Whiteboard UI. The broker does not implement the publishing server's `/healthz` or `/readyz` routes, so requests to those paths on the broker port are not readiness checks.
 
-The daemon accepts `--pi-executable` and `--codex-executable`, but rejects the foreground-only `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` flags. Its provider-specific persisted values are resolved executable paths only; it does not copy provider configuration or credentials. The generated LaunchAgent also receives a standalone runtime `PATH` built from safe absolute entries in the installing process plus common system and package-manager locations. It never sources shell startup files. Activate an NVM or Nix development environment before installation and rerun `agent-whiteboard agent serve --daemon` after changing that runtime.
+The daemon accepts `--pi-executable`, `--codex-executable`, and `--cursor-executable`, but rejects the foreground-only `--port`, `--provider-idle-timeout`, and `--shutdown-timeout` flags. Its provider-specific persisted values are resolved Pi, Codex, and Cursor executable paths only; it does not copy provider configuration or credentials. The generated LaunchAgent also receives a standalone runtime `PATH` built from safe absolute entries in the installing process plus common system and package-manager locations. It never sources shell startup files. Activate an NVM or Nix development environment before installation and rerun `agent-whiteboard agent serve --daemon` after changing that runtime.
 
-The browser protocol remains separate from CLI JSON. It is versioned and strictly validated, and identifies `pi` or `codex` conversations independently. Provider selection itself does not connect or send whiteboard content. The first contextual turn carries the complete canonical context envelope. Codex tool activity is normalized into bounded `tool_activity` events, while native App Server identifiers and raw JSONL never enter the browser protocol.
+The browser protocol remains separate from CLI JSON. It is versioned and strictly validated, and identifies `pi`, `codex`, or `cursor` conversations independently. Provider selection itself does not connect or send whiteboard content. The first contextual turn carries the complete canonical context envelope. Codex and standard Cursor tool activity are normalized into bounded provider-neutral events; native session, request, tool, and message IDs and raw App Server or ACP frames never enter the browser protocol or log evidence.
 
-Stable command, file-change, and permission approvals and MCP elicitation use typed `interaction_request` and `interaction_resolved` events plus the `interaction_respond` command. The broker accepts exactly one valid response; the first response across attached tabs wins and all tabs receive the resolved state. App Server's `request_user_input` remains experimental, so `experimentalApi` is disabled and that request family is not active in this stable protocol slice.
+Cursor uses the public CLI catalog and launch interfaces: a bounded `cursor-agent --list-models` probe discovers exact complete variants, and each loaded conversation runs `cursor-agent --model <slug> acp`. Standard ACP v1 carries session traffic; readiness may use a transient non-conversation ACP probe. Negotiation requires ACP v1 and stable `session/list` and `session/load`, and fails closed otherwise. An explicit idle model change replaces only that conversation's child after the candidate successfully loads the same native session; failed replacement retains the previous process and settings. Cursor-private `cursor/*` methods, private storage, ACP client tools, filesystem or terminal capabilities, and arbitrary configuration options are outside the supported surface.
+
+Stable command, file-change, and permission approvals and MCP elicitation, including standard Cursor command/file permission requests, use typed `interaction_request` and `interaction_resolved` events plus the `interaction_respond` command. The broker accepts exactly one valid response; the first response across attached tabs wins and all tabs receive the resolved state. For Cursor, interaction success means a complete local ACP response write, not Cursor consumption. Only `NotWritten` is retry-safe; `Indeterminate` fails closed without automatic replay. App Server's `request_user_input` remains experimental, so `experimentalApi` is disabled and that request family is not active in this stable protocol slice.

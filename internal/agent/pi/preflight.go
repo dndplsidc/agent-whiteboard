@@ -104,7 +104,7 @@ func (s *Session) Preflight(ctx context.Context, request provider.PreflightReque
 	if effective <= 0 || estimated > effective {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorContextTooLarge)
 	}
-	result := provider.PreflightResult{ResolvedModel: resolved, EstimatedInputTokens: estimated, EffectiveCapacityTokens: effective, SafetyMarginTokens: safety}
+	result := provider.PreflightResult{CapacityMode: provider.CapacityPrechecked, ResolvedModel: resolved, EstimatedInputTokens: estimated, EffectiveCapacityTokens: effective, SafetyMarginTokens: safety}
 	if result.Validate() != nil {
 		return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}

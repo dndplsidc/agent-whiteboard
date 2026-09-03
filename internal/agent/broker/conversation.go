@@ -14,68 +14,69 @@ import (
 )
 
 type conversation struct {
-	identity                statepkg.Identity
-	mapping                 statepkg.Mapping
-	state                   StateStore
-	attachments             AttachmentStore
-	driver                  provider.Driver
-	retainSession           func(*sessionHandle)
-	session                 *sessionHandle
-	generation              uint64
-	factory                 *EventFactory
-	replay                  *ReplayLog
-	requests                chan any
-	done                    chan struct{}
-	clock                   common.Clock
-	timers                  TimerFactory
-	idleTimeout             time.Duration
-	resource                protocol.Resource
-	contextDigest           string
-	contextState            protocol.ContextState
-	lifecycle               protocol.LifecycleState
-	catalog                 []protocol.CatalogModel
-	domainCatalog           provider.ModelCatalog
-	settingsState           protocol.SettingsState
-	settingsCapable         bool
-	effectiveSettings       *provider.ExecutionSettings
-	effectivePresentation   *provider.ModelPresentation
-	skillsState             *protocol.SkillsState
-	skills                  []protocol.SkillDescriptor
-	maxSelectedSkills       *int
-	supportsCompact         bool
-	busyPolicy              protocol.BusyTurnPolicy
-	queue                   *Queue
-	commands                commandLedger
-	pendingInteractions     map[string]*pendingInteraction
-	nextInteractionToken    uint64
-	interactionCallBudget   chan struct{}
-	pendingInteractionBytes int
-	active                  *activeTurn
-	compact                 *activeCompact
-	workerSettled           chan struct{}
-	workerKind              providerWorkerKind
-	workerCommandID         string
-	workerClientID          string
-	workerResolved          bool
-	shutdownAttempt         *actorShutdown
-	deferredInterrupt       *deferredInterrupt
-	lifecycleCtx            context.Context
-	recoveryCancel          context.CancelFunc
-	recoveryResults         chan<- recoveryWorkerResult
-	recoveryActive          bool
-	recoveryAttempted       uint64
-	recoveryUnavailable     bool
-	recoveryPending         bool
-	recoveryPendingTrigger  recoveryTrigger
-	deferredObserve         *deferredObservation
-	stopping                bool
-	dispatchBlocked         bool
-	dispatchPending         bool
-	shutdownTimeout         time.Duration
-	startHandoff            func(handoffRequest, chan<- handoffResult) bool
-	handoffActive           bool
-	handoffFailed           bool
-	closeRequested          bool
+	identity                 statepkg.Identity
+	mapping                  statepkg.Mapping
+	state                    StateStore
+	attachments              AttachmentStore
+	driver                   provider.Driver
+	retainSession            func(*sessionHandle)
+	session                  *sessionHandle
+	generation               uint64
+	factory                  *EventFactory
+	replay                   *ReplayLog
+	requests                 chan any
+	done                     chan struct{}
+	clock                    common.Clock
+	timers                   TimerFactory
+	idleTimeout              time.Duration
+	resource                 protocol.Resource
+	contextDigest            string
+	contextState             protocol.ContextState
+	lifecycle                protocol.LifecycleState
+	catalog                  []protocol.CatalogModel
+	domainCatalog            provider.ModelCatalog
+	settingsState            protocol.SettingsState
+	settingsCapable          bool
+	effectiveSettings        *provider.ExecutionSettings
+	effectivePresentation    *provider.ModelPresentation
+	skillsState              *protocol.SkillsState
+	skills                   []protocol.SkillDescriptor
+	maxSelectedSkills        *int
+	supportsCompact          bool
+	busyPolicy               protocol.BusyTurnPolicy
+	queue                    *Queue
+	commands                 commandLedger
+	pendingInteractions      map[string]*pendingInteraction
+	nextInteractionToken     uint64
+	interactionCallBudget    chan struct{}
+	pendingInteractionBytes  int
+	active                   *activeTurn
+	compact                  *activeCompact
+	workerSettled            chan struct{}
+	workerKind               providerWorkerKind
+	workerCommandID          string
+	workerClientID           string
+	workerResolved           bool
+	shutdownAttempt          *actorShutdown
+	deferredInterrupt        *deferredInterrupt
+	lifecycleCtx             context.Context
+	recoveryCancel           context.CancelFunc
+	recoveryResults          chan<- recoveryWorkerResult
+	recoveryActive           bool
+	recoveryAttempted        uint64
+	recoveryUnavailable      bool
+	recoveryPending          bool
+	recoveryPendingTrigger   recoveryTrigger
+	deferredObserve          *deferredObservation
+	stopping                 bool
+	dispatchBlocked          bool
+	dispatchPending          bool
+	shutdownTimeout          time.Duration
+	startHandoff             func(handoffRequest, chan<- handoffResult) bool
+	handoffActive            bool
+	handoffFailed            bool
+	closeRequested           bool
+	afterProviderEventsClose func()
 
 	closeMu  sync.Mutex
 	activate sync.Once
@@ -342,6 +343,8 @@ func (actor *conversation) run() {
 	recoveryResults := make(chan recoveryWorkerResult, 1)
 	actor.recoveryResults = recoveryResults
 	shutdownActive := false
+	providerClosurePending := false
+	providerClosureHasTerminal := false
 	var shutdownWaiters []chan error
 	var idleTimer Timer
 	var attachmentSweepTimer Timer
@@ -439,6 +442,18 @@ func (actor *conversation) run() {
 			}
 		case result := <-turnResults:
 			actor.handleTurnResult(attachments, turnResults, result)
+			if result.kind == turnWorkerPromptFreeSettings && result.handle != nil && actor.session == result.handle {
+				providerEvents = result.handle.events
+			}
+			if providerClosurePending && actor.workerSettled == nil {
+				trigger := recoveryTriggerClosure
+				if providerClosureHasTerminal {
+					trigger = recoveryTriggerTerminal
+				}
+				providerClosurePending = false
+				providerClosureHasTerminal = false
+				actor.startRecovery(attachments, recoveryResults, trigger)
+			}
 		case result := <-historyResults:
 			actor.handleHistoryResult(attachments, turnResults, result)
 		case result := <-archiveResults:
@@ -581,7 +596,26 @@ func (actor *conversation) run() {
 		case event, open := <-providerEvents:
 			if !open {
 				providerEvents = nil
-				actor.startRecovery(attachments, recoveryResults, recoveryTriggerClosure)
+				if actor.afterProviderEventsClose != nil {
+					actor.afterProviderEventsClose()
+				}
+				if actor.workerSettled != nil && actor.workerKind == providerWorkerSubmit && actor.active != nil && actor.active.phase == turnStarting {
+					for _, pending := range actor.active.pendingEvents {
+						providerClosureHasTerminal = providerClosureHasTerminal || providerEventTerminal(pending)
+					}
+					if providerClosureHasTerminal {
+						// An authoritative buffered terminal must settle after Submit
+						// acceptance and before closure recovery. Otherwise a closed
+						// channel can reject an already accepted prompt.
+						providerClosurePending = true
+						continue
+					}
+				}
+				trigger := recoveryTriggerClosure
+				if actor.active == nil && actor.lifecycle == protocol.LifecycleInterrupted {
+					trigger = recoveryTriggerTerminal
+				}
+				actor.startRecovery(attachments, recoveryResults, trigger)
 				continue
 			}
 			if actor.recoveryActive {
@@ -794,7 +828,8 @@ func (actor *conversation) snapshot(contextState protocol.ContextState) (protoco
 	payload := protocol.SnapshotPayload{
 		Lifecycle: actor.lifecycle, Queue: actor.queue.Items(),
 		ContextState: contextState, ActiveWork: actor.activeWork(), SupportsImages: actor.session.capabilities.Images,
-		SettingsState: settingsState, EffectiveSettings: effectiveSettings, Catalog: catalog,
+		SupportsArchiveDelete: supportsArchiveDelete(actor.driver),
+		SettingsState:         settingsState, EffectiveSettings: effectiveSettings, Catalog: catalog,
 		SkillsState: skillsState, Skills: append([]protocol.SkillDescriptor{}, actor.skills...), MaxSelectedSkills: cloneInt(actor.maxSelectedSkills), SupportsCompact: actor.supportsCompact,
 		BusyPolicy: actor.busyPolicy, ComposerAdmission: actor.composerAdmission(),
 	}
@@ -806,6 +841,11 @@ func (actor *conversation) snapshot(contextState protocol.ContextState) (protoco
 		return protocol.Event{}, errors.New("invalid provider snapshot state")
 	}
 	return actor.factory.New(payload)
+}
+
+func supportsArchiveDelete(driver provider.Driver) bool {
+	deleter, ok := driver.(provider.NativeSessionDeleter)
+	return ok && !common.IsNil(deleter)
 }
 
 func (actor *conversation) detach(attachments map[*clientAttachment]struct{}, item *clientAttachment) {
@@ -822,6 +862,13 @@ func (actor *conversation) handleProviderEvent(attachments map[*clientAttachment
 	}
 	if source.Kind == provider.EventSkillCatalog {
 		actor.publishSkillCatalog(attachments, source)
+		return
+	}
+	// An uncorrelated settings event describes authoritative process-scoped
+	// state. It is independent of prompt admission, including while a submit is
+	// starting, and must never be buffered as evidence that the prompt was sent.
+	if source.Kind == provider.EventSettings && source.TurnID == "" {
+		actor.publishSettingsEvent(attachments, source)
 		return
 	}
 	if source.Kind == provider.EventCompact {
@@ -987,7 +1034,7 @@ func (actor *conversation) flushPendingProviderEvents(attachments map[*clientAtt
 
 func (actor *conversation) providerEventMatchesActive(source provider.Event) bool {
 	if source.Kind == provider.EventSettings {
-		return actor.active != nil && (source.TurnID == "" || source.TurnID == actor.active.request.TurnID)
+		return actor.active != nil && source.TurnID == actor.active.request.TurnID
 	}
 	if source.Kind == provider.EventInteractionResolved {
 		return true

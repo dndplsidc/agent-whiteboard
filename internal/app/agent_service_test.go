@@ -124,6 +124,77 @@ func TestDefaultCodexEnvironmentClonesAndValidatesOverride(t *testing.T) {
 	require.ErrorContains(t, err, "NUL")
 }
 
+func TestResolveCursorExecutableUsesOnlyCursorAgentByDefault(t *testing.T) {
+	directory := t.TempDir()
+	genericAgent := filepath.Join(directory, "agent")
+	require.NoError(t, os.WriteFile(genericAgent, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", directory)
+
+	resolved, available, err := resolveCursorExecutable("")
+	require.NoError(t, err)
+	require.Empty(t, resolved)
+	require.False(t, available)
+
+	cursorAgent := filepath.Join(directory, "cursor-agent")
+	require.NoError(t, os.WriteFile(cursorAgent, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	resolved, available, err = resolveCursorExecutable("")
+	require.NoError(t, err)
+	require.True(t, available)
+	canonical, canonicalErr := filepath.EvalSymlinks(cursorAgent)
+	require.NoError(t, canonicalErr)
+	require.Equal(t, canonical, resolved)
+}
+
+func TestResolveCursorExecutableCanonicalizesDiscoveredSymlink(t *testing.T) {
+	directory := t.TempDir()
+	targetDirectory := t.TempDir()
+	target := filepath.Join(targetDirectory, "cursor-agent-real")
+	require.NoError(t, os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	require.NoError(t, os.Symlink(target, filepath.Join(directory, "cursor-agent")))
+	t.Setenv("PATH", directory)
+
+	resolved, available, err := resolveCursorExecutable("")
+	require.NoError(t, err)
+	require.True(t, available)
+	canonical, canonicalErr := filepath.EvalSymlinks(target)
+	require.NoError(t, canonicalErr)
+	require.Equal(t, canonical, resolved)
+}
+
+func TestResolveCursorExecutableExplicitNameAndInvalidValue(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "agent")
+	require.NoError(t, os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	t.Setenv("PATH", directory)
+
+	resolved, available, err := resolveCursorExecutable("agent")
+	require.NoError(t, err)
+	require.True(t, available)
+	canonical, canonicalErr := filepath.EvalSymlinks(executable)
+	require.NoError(t, canonicalErr)
+	require.Equal(t, canonical, resolved)
+	_, _, err = resolveCursorExecutable("missing-explicit-cursor")
+	require.ErrorContains(t, err, "resolve Cursor executable")
+	_, _, err = resolveCursorExecutable(filepath.Join(directory, "missing-cursor"))
+	require.ErrorContains(t, err, "resolve Cursor executable")
+}
+
+func TestDefaultCursorEnvironmentInheritsAndClonesValidatedOverride(t *testing.T) {
+	t.Setenv("CURSOR_TEST_AMBIENT", "unchanged")
+	want := os.Environ()
+	got, err := defaultCursorEnvironment(nil)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	override := []string{"HOME=/native/home", "CURSOR_TOKEN=kept"}
+	got, err = defaultCursorEnvironment(override)
+	require.NoError(t, err)
+	override[0] = "HOME=mutated"
+	require.Equal(t, []string{"HOME=/native/home", "CURSOR_TOKEN=kept"}, got)
+	_, err = defaultCursorEnvironment([]string{"A=1", "A=2"})
+	require.ErrorContains(t, err, "duplicate")
+}
+
 func TestResolveCodexExecutableOptionalDefaultAndExplicitErrors(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	resolved, available, err := resolveCodexExecutable("")
@@ -176,17 +247,20 @@ func TestResolvePiExecutableFindsExplicitNamedExecutable(t *testing.T) {
 
 func TestProviderEnvironmentCompositionRegistersAvailableProviders(t *testing.T) {
 	for _, test := range []struct {
-		name           string
-		piAvailable    bool
-		codexAvailable bool
-		missing        []provider.Name
-		wantPiRoot     bool
-		wantCodexRoot  bool
+		name            string
+		piAvailable     bool
+		codexAvailable  bool
+		cursorAvailable bool
+		missing         []provider.Name
+		wantPiRoot      bool
+		wantCodexRoot   bool
+		wantCursorRoot  bool
 	}{
-		{name: "Pi and Codex", piAvailable: true, codexAvailable: true, wantPiRoot: true, wantCodexRoot: true},
-		{name: "Pi only", piAvailable: true, missing: []provider.Name{provider.NameCodex}, wantPiRoot: true},
-		{name: "Codex only", codexAvailable: true, missing: []provider.Name{provider.NamePi}, wantCodexRoot: true},
-		{name: "neither provider", missing: []provider.Name{provider.NamePi, provider.NameCodex}},
+		{name: "all providers", piAvailable: true, codexAvailable: true, cursorAvailable: true, wantPiRoot: true, wantCodexRoot: true, wantCursorRoot: true},
+		{name: "Pi only", piAvailable: true, missing: []provider.Name{provider.NameCodex, provider.NameCursor}, wantPiRoot: true},
+		{name: "Codex only", codexAvailable: true, missing: []provider.Name{provider.NamePi, provider.NameCursor}, wantCodexRoot: true},
+		{name: "Cursor only", cursorAvailable: true, missing: []provider.Name{provider.NamePi, provider.NameCodex}, wantCursorRoot: true},
+		{name: "no providers", missing: []provider.Name{provider.NamePi, provider.NameCodex, provider.NameCursor}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -198,11 +272,18 @@ func TestProviderEnvironmentCompositionRegistersAvailableProviders(t *testing.T)
 			registry, err := newProviderRegistry(providerRegistryConfig{
 				state: state, piExecutable: executable, piEnvironment: []string{}, piAvailable: test.piAvailable,
 				codexExecutable: executable, codexEnvironment: []string{}, codexAvailable: test.codexAvailable,
+				cursorExecutable: executable, cursorEnvironment: []string{}, cursorAvailable: test.cursorAvailable,
 				launcher: common.NewProcessGroupLauncher(), ids: common.CryptoIDGenerator{}, clock: common.SystemClock{},
 				idleTimeout: time.Second,
 			})
 			require.NoError(t, err)
 			require.Equal(t, provider.AllNames(), registry.Names())
+			_, piDeletes := registry.Lookup(provider.NamePi).(provider.NativeSessionDeleter)
+			_, codexDeletes := registry.Lookup(provider.NameCodex).(provider.NativeSessionDeleter)
+			_, cursorDeletes := registry.Lookup(provider.NameCursor).(provider.NativeSessionDeleter)
+			require.True(t, piDeletes)
+			require.True(t, codexDeletes)
+			require.False(t, cursorDeletes)
 
 			backend, err := broker.New(broker.Config{
 				State: state, Drivers: registry, IDs: common.CryptoIDGenerator{}, Clock: common.SystemClock{}, Timers: broker.RealTimerFactory{},
@@ -230,6 +311,15 @@ func TestProviderEnvironmentCompositionRegistersAvailableProviders(t *testing.T)
 			if test.wantCodexRoot {
 				require.NoError(t, err)
 				require.NotEqual(t, piRoot, codexRoot)
+			} else {
+				require.ErrorIs(t, err, os.ErrNotExist)
+			}
+			cursorRoot := filepath.Join(home, ".agent-whiteboard", "state", "providers", string(provider.NameCursor))
+			_, err = os.Stat(cursorRoot)
+			if test.wantCursorRoot {
+				require.NoError(t, err)
+				require.NotEqual(t, piRoot, cursorRoot)
+				require.NotEqual(t, codexRoot, cursorRoot)
 			} else {
 				require.ErrorIs(t, err, os.ErrNotExist)
 			}

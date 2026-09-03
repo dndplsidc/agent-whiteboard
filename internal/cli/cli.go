@@ -193,21 +193,25 @@ func isDaemonServeRequest(cmd *cobra.Command) bool {
 }
 
 // selectedProviderExecutableResolver records explicit provider selections.
-// Absolute selections are returned as-is; names are resolved using the current PATH.
-type selectedProviderExecutableResolver struct{ pi, codex string }
+// LookPath receives descriptor executable names, which differ from the durable
+// provider key for Cursor. Absolute selections are returned as-is; names are
+// resolved using the current PATH.
+type selectedProviderExecutableResolver struct{ pi, codex, cursor string }
 
-func (resolver selectedProviderExecutableResolver) LookPath(name string) (string, error) {
-	selected := ""
-	switch name {
+func (resolver selectedProviderExecutableResolver) LookPath(executableName string) (string, error) {
+	selected, providerName := "", ""
+	switch executableName {
 	case common.LaunchAgentProviderPi:
-		selected = resolver.pi
+		selected, providerName = resolver.pi, common.LaunchAgentProviderPi
 	case common.LaunchAgentProviderCodex:
-		selected = resolver.codex
+		selected, providerName = resolver.codex, common.LaunchAgentProviderCodex
+	case common.LaunchAgentCursorExecutableName:
+		selected, providerName = resolver.cursor, common.LaunchAgentProviderCursor
 	default:
 		return "", exec.ErrNotFound
 	}
 	if selected == "" {
-		return exec.LookPath(name)
+		return exec.LookPath(executableName)
 	}
 	if filepath.IsAbs(selected) {
 		return selected, nil
@@ -217,7 +221,7 @@ func (resolver selectedProviderExecutableResolver) LookPath(name string) (string
 		// An absent provider discovered through the ordinary PATH is optional,
 		// but a non-empty flag or environment selection is an explicit request
 		// and must make daemon installation fail.
-		return "", fmt.Errorf("explicit %s executable %q is unavailable: %v", name, selected, err)
+		return "", fmt.Errorf("explicit %s executable %q is unavailable: %v", providerName, selected, err)
 	}
 	return path, nil
 }

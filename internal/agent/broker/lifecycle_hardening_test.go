@@ -271,8 +271,8 @@ func (session *hardeningSession) Capabilities() provider.Capabilities   { return
 func (*hardeningSession) History(context.Context, provider.HistoryRequest) (provider.HistoryPage, error) {
 	return provider.HistoryPage{}, nil
 }
-func (*hardeningSession) Preflight(context.Context, provider.PreflightRequest) (provider.PreflightResult, error) {
-	return provider.PreflightResult{}, nil
+func (session *hardeningSession) Preflight(context.Context, provider.PreflightRequest) (provider.PreflightResult, error) {
+	return provider.PreflightResult{CapacityMode: provider.CapacityProviderEnforced, ResolvedModel: session.native.Model}, nil
 }
 func (session *hardeningSession) Submit(context.Context, provider.TurnRequest) (provider.AcceptedTurn, error) {
 	session.submissions.Add(1)

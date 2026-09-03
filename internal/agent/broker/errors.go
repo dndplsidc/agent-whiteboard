@@ -111,6 +111,8 @@ func MapProviderError(failure provider.ProviderError) BrokerError {
 		code = protocol.ErrorSkillUnavailable
 	case provider.ErrorCompactUnsupported:
 		code = protocol.ErrorCompactUnsupported
+	case provider.ErrorArchiveDeleteUnsupported:
+		code = protocol.ErrorArchiveDeleteUnsupported
 	default:
 		code = protocol.ErrorProviderProtocolFailure
 	}

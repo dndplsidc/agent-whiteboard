@@ -53,7 +53,7 @@ func TestProviderNamesAreClosedAndCodexConnectRoundTrips(t *testing.T) {
 	require.True(t, protocol.ProviderPi.Valid())
 	require.True(t, protocol.ProviderCodex.Valid())
 	require.False(t, protocol.ProviderName("other").Valid())
-	require.Equal(t, []protocol.ProviderName{protocol.ProviderPi, protocol.ProviderCodex}, protocol.AllProviderNames())
+	require.Equal(t, []protocol.ProviderName{protocol.ProviderPi, protocol.ProviderCodex, protocol.ProviderCursor}, protocol.AllProviderNames())
 
 	input := `{"api_version":"5","command_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","client_id":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","conversation_id":null,"type":"connect","payload":{"provider":"codex","resource":{"kind":"markdown","id":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","created_at":"2026-07-27T01:02:03Z","updated_at":"2026-07-27T02:03:04Z","expires_at":null},"context_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","settings":null}}`
 	command, err := protocol.DecodeCommand([]byte(input))
