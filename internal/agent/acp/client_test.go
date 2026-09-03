@@ -892,10 +892,17 @@ func TestNoncooperativeRequestHandlerRetainsItsInboundSlot(t *testing.T) {
 	o := options()
 	o.MaxInboundPending = 1
 	o.MaxHandlerConcurrency = 1
-	o.HandlerTimeout = time.Millisecond
+	// Drive cancellation through inbound overflow, not a scheduling deadline.
+	o.HandlerTimeout = time.Hour
 	started := make(chan struct{})
+	canceled := make(chan struct{})
 	release := make(chan struct{})
-	o.Handler = func(ctx context.Context, r acp.Request) { close(started); <-ctx.Done(); <-release }
+	o.Handler = func(ctx context.Context, r acp.Request) {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+	}
 	c, _ := acp.New(p, o)
 	first, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "one", "method": "ask", "params": map[string]string{"v": "x"}})
 	_, _ = p.OutputWriter.Write(append(first, '\n'))
@@ -906,6 +913,7 @@ func TestNoncooperativeRequestHandlerRetainsItsInboundSlot(t *testing.T) {
 	if !errors.Is(c.Err(), acp.ErrPendingLimit) {
 		t.Fatalf("noncooperative handler released its inbound slot: %v", c.Err())
 	}
+	<-canceled
 	close(release)
 	<-p.TerminateCalled
 	p.Complete(nil)
