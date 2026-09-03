@@ -1099,7 +1099,7 @@ test("uses Cursor capabilities without copied skill, compact, or archive-delete 
   expect(parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "compact" || type === "archive_delete")).toBe(false);
 });
 
-test("shows Cursor submit delivery from sending through correlated acceptance", async ({ context, page, localAgentSidebar }) => {
+test("shows Cursor working after transport send and before correlated acceptance", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Cursor delivery\n", creatorContext: "Cursor delivery context.\n" });
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
   await page.getByLabel("Conversation provider").selectOption("cursor");
@@ -1112,9 +1112,12 @@ test("shows Cursor submit delivery from sending through correlated acceptance", 
   await composer.press("Enter");
 
   await expect(composer).toBeEmpty();
-  const pending = page.locator('.agent-message-pending[data-state="sending"]');
+  const pending = page.locator('.agent-message-pending[data-state="waiting"]');
   await expect(pending).toContainText("Show this immediately.");
-  await expect(pending.locator(".agent-message-delivery")).toHaveText("Sending…");
+  await expect(pending.locator(".agent-message-delivery")).toHaveCount(0);
+  await expect(page.locator(".agent-live-status")).toHaveText("Waiting for Cursor");
+  await expect(page.locator(".agent-response-loading")).toContainText("Cursor is working");
+  await expect(page.locator(".agent-response-dot")).toHaveCount(3);
   expect(localAgentSidebar.webSocketCommands.filter(({ type }) => type === "submit")).toHaveLength(1);
 
   localAgentSidebar.resolveHeldSubmit("accepted", "cursor");

@@ -2639,7 +2639,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         owned.connecting = false;
         owned.state.connected = false;
         owned.state.lifecycle = "unavailable";
-        if (owned.pendingSubmission?.status === "sending") owned.pendingSubmission.status = "confirming";
+        if (["sending", "waiting"].includes(owned.pendingSubmission?.status)) owned.pendingSubmission.status = "confirming";
         const pendingSubmitIndeterminate = owned.pendingSubmitCommandID !== null && owned.pendingSubmission !== null;
         if (owned.contextCommandID !== null) {
           owned.contextDeliveryUnknown = true;
@@ -3728,9 +3728,11 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         ? "Responding"
         : state.lifecycle === "compacting"
           ? "Compacting"
-        : pendingSubmitCommandID !== null
-          ? "Sending"
-          : "Connected";
+        : controller.pendingSubmission?.status === "waiting"
+          ? `Waiting for ${providerName}`
+          : pendingSubmitCommandID !== null
+            ? "Sending"
+            : "Connected";
     } else {
       providerLabel.hidden = true;
       if (connectionState === "checking") {
@@ -3934,34 +3936,36 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       article.classList.add("agent-message-pending");
       article.dataset.state = submission.status;
       article.setAttribute("aria-label", `Message delivery ${submission.status}`);
-      const delivery = doc.createElement("div");
-      delivery.className = "agent-message-delivery";
-      const labels = {
-        sending: "Sending…",
-        confirming: "Confirming delivery…",
-        accepted: "Sent",
-        rejected: "Not sent",
-      };
-      const status = doc.createElement("span");
-      status.textContent = labels[submission.status] ?? labels.confirming;
-      delivery.append(status);
-      if (submission.status === "rejected") {
-        const restore = doc.createElement("button");
-        restore.type = "button";
-        restore.className = "agent-message-restore";
-        restore.textContent = "Restore draft";
-        restore.addEventListener("click", () => {
-          if (!restorePendingSubmission(controller, submission)) {
-            announce("Clear the current draft before restoring this message.");
-            return;
-          }
-          loadController(controller);
-          render();
-          messageEditor.focus();
-        });
-        delivery.append(restore);
+      if (submission.status !== "waiting") {
+        const delivery = doc.createElement("div");
+        delivery.className = "agent-message-delivery";
+        const labels = {
+          sending: "Sending…",
+          confirming: "Confirming delivery…",
+          accepted: "Sent",
+          rejected: "Not sent",
+        };
+        const status = doc.createElement("span");
+        status.textContent = labels[submission.status] ?? labels.confirming;
+        delivery.append(status);
+        if (submission.status === "rejected") {
+          const restore = doc.createElement("button");
+          restore.type = "button";
+          restore.className = "agent-message-restore";
+          restore.textContent = "Restore draft";
+          restore.addEventListener("click", () => {
+            if (!restorePendingSubmission(controller, submission)) {
+              announce("Clear the current draft before restoring this message.");
+              return;
+            }
+            loadController(controller);
+            render();
+            messageEditor.focus();
+          });
+          delivery.append(restore);
+        }
+        article.append(delivery);
       }
-      article.append(delivery);
     }
     for (const submission of controller.rejectedSubmissions) appendPendingSubmission(submission);
     const pendingSubmission = controller.pendingSubmission;
@@ -3994,11 +3998,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     }
     const activeTurnID = state.activeWork?.kind === "turn" ? state.activeWork.work_id : null;
     const hasActiveAssistant = activeTurnID !== null && state.timeline.some((item) => item.kind === "assistant" && item.turn_id === activeTurnID);
-    if (state.lifecycle === "responding" && !hasActiveAssistant) {
+    const waitingForProvider = state.lifecycle !== "responding" && pendingSubmission?.status === "waiting" && !pendingSubmission.authoritative;
+    if ((state.lifecycle === "responding" || waitingForProvider) && !hasActiveAssistant) {
       const loading = doc.createElement("div");
       loading.className = "agent-response-loading";
       loading.setAttribute("role", "status");
-      loading.setAttribute("aria-label", `${providerName} is responding`);
+      loading.setAttribute("aria-label", waitingForProvider ? `${providerName} is working` : `${providerName} is responding`);
       const loadingGlyph = doc.createElement("span");
       loadingGlyph.className = "agent-loading-glyph";
       loadingGlyph.setAttribute("aria-hidden", "true");
@@ -4009,7 +4014,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       loadingLabel.textContent = providerName;
       const loadingText = doc.createElement("span");
       loadingText.className = "agent-response-text";
-      loadingText.textContent = `${providerName} is responding`;
+      loadingText.textContent = waitingForProvider ? `${providerName} is working` : `${providerName} is responding`;
       const dots = doc.createElement("span");
       dots.className = "agent-response-dots";
       dots.setAttribute("aria-hidden", "true");
@@ -4501,6 +4506,14 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     render();
     try {
       await target.transport.send(command);
+      const stillWaitingForAdmission = target.pendingSubmitCommandID === command.command_id && target.pendingSubmission?.status === "sending";
+      if (stillWaitingForAdmission) {
+        target.pendingSubmission.status = "waiting";
+        if (target === controller) {
+          loadController(target);
+          render();
+        }
+      }
     }
     catch (error) {
       const ownsPendingSubmit = target.pendingSubmitCommandID === command.command_id && target.pendingSubmission !== null;

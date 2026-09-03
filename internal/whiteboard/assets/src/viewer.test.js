@@ -1653,7 +1653,7 @@ describe("local agent rendering and controls", () => {
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(sent.filter(({ type }) => type === "submit")).toHaveLength(expectedSubmits));
     expect(drawer.elements.message.value).toBe(admission === "queue" ? "" : "busy follow-up");
-    if (admission === "queue") expect(drawer.elements.timeline.textContent).toContain("Sending…");
+    if (admission === "queue") expect(drawer.elements.timeline.textContent).toContain("Pi is responding");
     expect(drawer.elements.sendButton.hidden).toBe(admission !== "queue");
     drawer.destroy();
   });
@@ -1774,7 +1774,7 @@ describe("local agent rendering and controls", () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({ type: "submit", payload: { settings: { model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" } } });
     expect(drawer.elements.message.value).toBe("");
-    expect(drawer.elements.timeline.textContent).toContain("Sending…");
+    expect(drawer.elements.timeline.textContent).toContain("Codex is working");
 
     options.onEvent(agentEvent("queue", { items: [{
       turn_id: agentIDs.turn, message_id: agentIDs.message, message: "queued",
@@ -1853,8 +1853,9 @@ describe("local agent rendering and controls", () => {
     drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
     expect(drawer.elements.message.value).toBe("");
-    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="sending"]')?.textContent).toContain("do not lose me");
-    expect(drawer.elements.timeline.querySelector(".agent-message-delivery")?.textContent).toBe("Sending…");
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="waiting"]')?.textContent).toContain("do not lose me");
+    expect(drawer.elements.timeline.querySelector(".agent-message-delivery")).toBeNull();
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")?.textContent).toContain("Codex is working");
 
     const command = transport.send.mock.calls[0][0];
     options.onEvent(agentEvent("command_result", {
@@ -3072,6 +3073,30 @@ describe("local agent rendering and controls", () => {
     expect(drawer.elements.timeline.hidden).toBe(false);
     expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="confirming"]')?.textContent).toContain("second");
     expect(drawer.elements.timeline.querySelector(".agent-message-delivery")?.textContent).toBe("Confirming delivery…");
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")).toBeNull();
+    drawer.destroy();
+  });
+
+  test("distinguishes browser sending from provider waiting with the working animation", async () => {
+    let options;
+    let markSent;
+    const transport = { clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true, probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), send: vi.fn(() => new Promise((resolve) => { markSent = resolve; })), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn() };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(agentEvent("snapshot", { lifecycle: "ready", queue: [], context_state: "accepted", active_work: null }));
+    drawer.elements.message.value = "first";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Sending"));
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")).toBeNull();
+    markSent();
+    await vi.waitFor(() => expect(drawer.elements.drawer.querySelector(".agent-live-status")?.textContent).toBe("Waiting for Pi"));
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="waiting"]')).not.toBeNull();
+    expect(drawer.elements.timeline.querySelector(".agent-message-delivery")).toBeNull();
+    expect(drawer.elements.timeline.querySelector(".agent-response-loading")?.textContent).toContain("Pi is working");
+    expect(drawer.elements.timeline.querySelectorAll(".agent-response-dot")).toHaveLength(3);
+
+    options.onDisconnect(new Error("closed"));
+    expect(drawer.elements.timeline.querySelector('.agent-message-pending[data-state="confirming"]')).not.toBeNull();
     expect(drawer.elements.timeline.querySelector(".agent-response-loading")).toBeNull();
     drawer.destroy();
   });
