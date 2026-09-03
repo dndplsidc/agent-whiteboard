@@ -345,6 +345,15 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
     let status = null;
     const choices = [];
     if (current.variantOnly) {
+      const filterShell = doc.createElement("div");
+      filterShell.className = "agent-model-filter-shell";
+      const filterIcon = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+      filterIcon.classList.add("agent-model-filter-icon");
+      filterIcon.setAttribute("viewBox", "0 0 24 24");
+      filterIcon.setAttribute("aria-hidden", "true");
+      const filterIconPath = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+      filterIconPath.setAttribute("d", "m20 20-4.2-4.2m1.7-5.3a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z");
+      filterIcon.append(filterIconPath);
       filter = doc.createElement("input");
       filter.type = "search";
       filter.className = "agent-model-filter";
@@ -352,7 +361,8 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
       filter.placeholder = "Filter models";
       filter.autocomplete = "off";
       filter.spellcheck = false;
-      menu.append(filter);
+      filterShell.append(filterIcon, filter);
+      menu.append(filterShell);
       status = doc.createElement("div");
       status.className = "agent-model-filter-empty";
       status.setAttribute("role", "status");

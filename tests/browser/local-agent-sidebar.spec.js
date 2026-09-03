@@ -1254,6 +1254,8 @@ test("searches a large Cursor variant catalog with keyboard focus and contained 
   await menu.locator('[data-settings-section="model"]').press("ArrowRight");
   const filter = page.getByLabel("Filter models");
   await expect(filter).toBeFocused();
+  await expect(filter.locator("..")).toHaveClass(/agent-model-filter-shell/);
+  await expect(filter).toHaveCSS("outline-style", "none");
   const sortedValues = ["cursor-small", ...Array.from({ length: 154 }, (_, index) => index + 1).filter((index) => index !== 87).map((index) => `cursor-variant-${index}`), "cursor-variant-87"];
   await expect.poll(() => menu.locator('[role="menuitemradio"]').evaluateAll((rows) => rows.map((row) => row.dataset.settingsValue))).toEqual(sortedValues);
   await filter.fill("fast high");

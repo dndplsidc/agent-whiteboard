@@ -2566,20 +2566,54 @@ body.agent-drawer-modal-open .agent-toast {
   display: none;
 }
 
-.agent-model-filter {
+.agent-model-filter-shell {
+  align-items: center;
   background: var(--awb-code-background);
   border: 1px solid var(--awb-border);
   border-radius: 0.55rem;
-  color: var(--awb-foreground);
-  font: inherit;
-  margin: 0.12rem;
-  min-height: 2rem;
-  padding: 0.4rem 0.55rem;
+  display: grid;
+  gap: 0.42rem;
+  grid-template-columns: 0.85rem minmax(0, 1fr);
+  margin: 0.16rem 0.12rem 0.3rem;
+  min-height: 2.15rem;
+  padding: 0 0.62rem;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
   width: calc(100% - 0.24rem);
 }
 
-.agent-model-filter::placeholder {
+.agent-model-filter-shell:focus-within {
+  border-color: color-mix(in srgb, var(--awb-link) 52%, var(--awb-border));
+  box-shadow: 0 0 0 0.16rem var(--awb-accent-soft);
+}
+
+.agent-model-filter-icon {
   color: var(--awb-muted);
+  fill: none;
+  height: 0.85rem;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 0.85rem;
+}
+
+.agent-model-filter {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--awb-foreground);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 500;
+  min-height: 2.05rem;
+  min-width: 0;
+  outline: 0;
+  padding: 0;
+  width: 100%;
+}
+
+.agent-model-filter::placeholder {
+  color: color-mix(in srgb, var(--awb-muted) 82%, transparent);
 }
 
 .agent-model-filter-empty {
@@ -2700,6 +2734,11 @@ body.agent-drawer-modal-open .agent-toast {
 .agent-drawer summary:focus-visible {
   outline: 0.18rem solid var(--awb-link);
   outline-offset: 0.12rem;
+}
+
+.agent-drawer .agent-model-filter:focus,
+.agent-drawer .agent-model-filter:focus-visible {
+  outline: 0;
 }
 
 .agent-composer textarea:focus,
