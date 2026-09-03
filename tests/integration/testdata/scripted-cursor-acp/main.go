@@ -225,6 +225,9 @@ func (a *agent) handle(r request) {
 		current := a.stateSnapshot()
 		items := []any{}
 		for _, s := range current.Sessions {
+			if strings.Contains(a.scenario, "hide_unprompted") && len(s.Replay) == 0 {
+				continue
+			}
 			items = append(items, map[string]any{"sessionId": s.ID, "configOptions": options(s.Model)})
 		}
 		a.ok(r.ID, map[string]any{"sessions": items})

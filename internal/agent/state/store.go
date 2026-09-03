@@ -290,6 +290,33 @@ func (store *Store) ReplaceMissingCurrentNativeSessionIfUnchanged(identity Ident
 	}, nil, transition)
 }
 
+// ReplacePromptFreeCurrentNativeSessionAndSettingsIfUnchanged atomically
+// replaces a definitively missing prompt-free native session together with the
+// exact process-scoped settings used to create its replacement.
+func (store *Store) ReplacePromptFreeCurrentNativeSessionAndSettingsIfUnchanged(identity Identity, expected Mapping, nativeSession provider.NativeSessionRef, settings provider.ExecutionSettings, presentation provider.ModelPresentation, at time.Time) (CommitOutcome, error) {
+	if expected.Validate(identity) != nil || expected.Current == nil || expected.Current.Committed != nil || expected.Current.PreparedCommit != nil || !nativeSession.Valid() || nativeSession == expected.Current.NativeSession || settings.Validate() != nil || presentation.Validate() != nil || !validStoredTime(at) {
+		return CommitNotApplied, errors.New("invalid prompt-free native session replacement")
+	}
+	if _, err := validateNativeSessionRef(nativeSession.Value()); err != nil {
+		return CommitNotApplied, errors.New("invalid prompt-free native session replacement")
+	}
+	nativeTransition := &nativeSessionTransition{conversationID: expected.Current.ConversationID, before: expected.Current.NativeSession.Value(), after: nativeSession.Value()}
+	settingsTransition := &settingsTransition{conversationID: expected.Current.ConversationID, nativeSession: nativeSession.Value(), settings: settings, presentation: presentation}
+	return store.updateAtExpectedTransition(identity, &expected, at, func(mapping *Mapping) error {
+		if mapping.Current == nil || mapping.Current.Committed != nil || mapping.Current.PreparedCommit != nil || mapping.Current.ConversationID != expected.Current.ConversationID || mapping.Current.NativeSession != expected.Current.NativeSession {
+			return errors.New("current session changed")
+		}
+		copyOfSettings := settings
+		copyOfPresentation := presentation
+		mapping.Current.NativeSession = nativeSession
+		mapping.Current.Settings = &copyOfSettings
+		mapping.Current.Presentation = &copyOfPresentation
+		mapping.Current.ModelLabel = presentation.ModelDisplayName
+		mapping.Current.UpdatedAt = laterTime(mapping.Current.UpdatedAt, at)
+		return nil
+	}, settingsTransition, nativeTransition)
+}
+
 func (store *Store) NewConversation(identity Identity, current Session, at time.Time) (CommitOutcome, error) {
 	return store.updateAt(identity, at, func(mapping *Mapping) error {
 		if mapping.Current != nil {
@@ -900,7 +927,9 @@ func validateSessionTransitions(mapping Mapping, before map[string]sessionSnapsh
 		}
 		settingsChanged := !equalExecutionSettingsPointers(previous.settings, current.Settings) || !equalModelPresentationPointers(previous.presentation, current.Presentation)
 		if settingsChanged {
-			allowed := allowedSettings != nil && id == allowedSettings.conversationID && previous.nativeSession == allowedSettings.nativeSession && current.NativeSession.Value() == allowedSettings.nativeSession && current.Settings != nil && *current.Settings == allowedSettings.settings && current.Presentation != nil && *current.Presentation == allowedSettings.presentation
+			settingsNativeMatched := allowedSettings != nil && previous.nativeSession == allowedSettings.nativeSession && current.NativeSession.Value() == allowedSettings.nativeSession
+			combinedNativeMatched := allowedSettings != nil && allowedNativeSession != nil && id == allowedNativeSession.conversationID && id == allowedSettings.conversationID && previous.nativeSession == allowedNativeSession.before && current.NativeSession.Value() == allowedNativeSession.after && allowedSettings.nativeSession == allowedNativeSession.after
+			allowed := allowedSettings != nil && id == allowedSettings.conversationID && (settingsNativeMatched || combinedNativeMatched) && current.Settings != nil && *current.Settings == allowedSettings.settings && current.Presentation != nil && *current.Presentation == allowedSettings.presentation
 			if !allowed {
 				return errors.New("cannot change execution settings outside an exact current-session transition")
 			}

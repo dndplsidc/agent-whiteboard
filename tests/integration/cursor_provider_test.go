@@ -323,6 +323,24 @@ func cursorSubmitPayload(h *cursorHarness, resourceID, turnID, messageID, text s
 	}
 }
 
+func TestCursorFirstPromptCanReplaceAnUnlistedPromptFreeNativeSessionForModelSelection(t *testing.T) {
+	h := newCursorHarness(t, "ready_hide_unprompted")
+	s := h.connect(t)
+	defer s.ws.Close()
+
+	payload := cursorSubmitPayload(h, cursorID('C'), cursorID('M'), cursorID('N'), "first prompt after model choice", nil)
+	payload.Settings = &protocol.ExecutionSettings{Model: "cursor-small", Effort: "default", Speed: protocol.SpeedStandard}
+	commandID := s.command(t, protocol.CommandSubmit, payload)
+	result := s.waitResult(t, commandID)
+	require.Equal(t, string(protocol.CommandSucceeded), result["status"], "%#v", result)
+
+	evidence := h.waitEvidence(t, `"method":"session/prompt.semantic"`)
+	require.GreaterOrEqual(t, strings.Count(evidence, `"method":"session/new.semantic"`), 2, evidence)
+	require.Contains(t, evidence, `"launch_model":"cursor-small"`)
+	require.Equal(t, 1, strings.Count(evidence, `"method":"session/prompt.semantic"`), evidence)
+	require.NotContains(t, evidence, "session/set_config_option.semantic")
+}
+
 func TestCursorInterruptCancelsPromptAndPendingPermission(t *testing.T) {
 	h := newCursorHarness(t, "permission_hold_cancel")
 	s := h.connect(t)

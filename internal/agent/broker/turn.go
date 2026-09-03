@@ -34,6 +34,7 @@ type turnWorkerKind uint8
 
 const (
 	turnWorkerSubmit turnWorkerKind = iota
+	turnWorkerPromptFreeSettings
 	turnWorkerInterrupt
 	turnWorkerCompactStart
 	turnWorkerCompactInterrupt
@@ -52,6 +53,9 @@ type turnWorkerResult struct {
 	turnID          string
 	accepted        provider.AcceptedTurn
 	acceptedCompact provider.AcceptedCompact
+	settings        *provider.ExecutionSettings
+	presentation    *provider.ModelPresentation
+	handle          *sessionHandle
 	workID          string
 	commandID       string
 	clientID        string
@@ -114,6 +118,11 @@ func (actor *conversation) commandSubmit(attachments map[*clientAttachment]struc
 		return false, releaseOnFailure(code)
 	}
 	if actor.active == nil && actor.compact == nil && actor.queue.Empty() {
+		if actor.needsPromptFreeCursorSettingsPreparation(request) {
+			actor.active = &activeTurn{request: request, phase: turnStarting, originCommandID: command.CommandID, originClientID: command.ClientID}
+			actor.startPromptFreeCursorSettingsWorker(turnResults, request)
+			return true, ""
+		}
 		if code := actor.prepareTurn(request); code != "" {
 			zeroProviderContext(request.Context)
 			return false, releaseOnFailure(code)
@@ -243,6 +252,65 @@ func (actor *conversation) prepareTurn(request provider.TurnRequest) protocol.Br
 	return ""
 }
 
+func (actor *conversation) needsPromptFreeCursorSettingsPreparation(request provider.TurnRequest) bool {
+	return actor.identity.Provider == provider.NameCursor && actor.mapping.Current != nil && actor.mapping.Current.Committed == nil && actor.mapping.Current.PreparedCommit == nil && actor.settingsCapable && request.Settings != nil && actor.effectiveSettings != nil && *request.Settings != *actor.effectiveSettings
+}
+
+func (actor *conversation) startPromptFreeCursorSettingsWorker(results chan<- turnWorkerResult, request provider.TurnRequest) {
+	actor.beginProviderWorker(providerWorkerSubmit, "", "")
+	generation := actor.generation
+	workspace, workspaceErr := actor.state.EnsureWorkspace(actor.mapping.Current.ConversationID)
+	go func() {
+		result := turnWorkerResult{generation: generation, kind: turnWorkerPromptFreeSettings, turnID: request.TurnID}
+		if workspaceErr != nil {
+			result.err = workspaceErr
+			results <- result
+			return
+		}
+		preflight, err := actor.session.session.Preflight(actor.lifecycleCtx, provider.PreflightRequest{Turn: request})
+		if err == nil {
+			err = preflight.Validate()
+		}
+		settingsSession, capable := actor.session.session.(provider.SettingsSession)
+		if err == nil && !capable {
+			err = provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+		}
+		var settings provider.ExecutionSettings
+		var presentation provider.ModelPresentation
+		if err == nil {
+			settings, presentation, err = settingsSession.ApplySettings(actor.lifecycleCtx, *request.Settings)
+		}
+		var providerFailure provider.ProviderError
+		if err != nil && errors.As(err, &providerFailure) && providerFailure.Code() == provider.ErrorNativeSessionMissing {
+			created, createErr := actor.driver.Create(actor.lifecycleCtx, provider.CreateRequest{Provider: actor.identity.Provider, Access: accessForProvider(actor.identity.Provider), Workspace: workspace, Settings: request.Settings})
+			handle := captureSession(created)
+			if createErr != nil {
+				if handle != nil {
+					actor.retainSession(handle)
+				}
+				err = createErr
+			} else {
+				native, validationErr := validateProviderSession(handle, nil, actor.identity.Provider)
+				if validationErr != nil || native.Settings == nil || native.Presentation == nil || *native.Settings != *request.Settings {
+					actor.retainSession(handle)
+					err = provider.NewProviderError(provider.ErrorProtocolFailure)
+				} else {
+					result.handle = handle
+					settings = *native.Settings
+					presentation = *native.Presentation
+					err = nil
+				}
+			}
+		}
+		if err == nil {
+			result.settings = &settings
+			result.presentation = &presentation
+		}
+		result.err = err
+		results <- result
+	}()
+}
+
 func (actor *conversation) startSubmitWorker(results chan<- turnWorkerResult, request provider.TurnRequest) {
 	actor.beginProviderWorker(providerWorkerSubmit, "", "")
 	generation := actor.generation
@@ -316,6 +384,9 @@ func (actor *conversation) handleTurnResult(attachments map[*clientAttachment]st
 		return
 	}
 	if actor.active == nil || actor.active.request.TurnID != result.turnID {
+		if result.handle != nil {
+			actor.retainSession(result.handle)
+		}
 		if result.kind == turnWorkerInterrupt && result.commandID != "" {
 			actor.completePendingCommand(attachments, result.commandID, result.clientID, protocol.ErrorTurnInterrupted)
 		}
@@ -325,7 +396,123 @@ func (actor *conversation) handleTurnResult(attachments map[*clientAttachment]st
 		actor.handleInterruptResult(attachments, results, result)
 		return
 	}
+	if result.kind == turnWorkerPromptFreeSettings {
+		actor.handlePromptFreeCursorSettingsResult(attachments, results, result)
+		return
+	}
 	actor.handleSubmitResult(attachments, results, result)
+}
+
+func (actor *conversation) handlePromptFreeCursorSettingsResult(attachments map[*clientAttachment]struct{}, results chan<- turnWorkerResult, result turnWorkerResult) {
+	if result.err != nil || result.settings == nil || result.presentation == nil || actor.active == nil || actor.active.request.Settings == nil || *result.settings != *actor.active.request.Settings || result.settings.Validate() != nil || result.presentation.Validate() != nil || !actor.domainCatalog.Compatibility(*result.settings).Compatible {
+		if result.handle != nil {
+			actor.retainSession(result.handle)
+		}
+		code := protocol.ErrorProviderProtocolFailure
+		if result.err != nil {
+			code = MapError(result.err).Code()
+		}
+		actor.rejectStartingTurn(attachments, results, code)
+		return
+	}
+	settings := *result.settings
+	presentation := *result.presentation
+	if result.handle != nil {
+		store, ok := actor.state.(promptFreeNativeSettingsStore)
+		native, validationErr := validateProviderSession(result.handle, nil, actor.identity.Provider)
+		if !ok || validationErr != nil || actor.mapping.Current == nil || actor.mapping.Current.Committed != nil || actor.mapping.Current.PreparedCommit != nil || native.Settings == nil || native.Presentation == nil || *native.Settings != settings || *native.Presentation != presentation {
+			actor.retainSession(result.handle)
+			actor.rejectStartingTurn(attachments, results, protocol.ErrorStateRepairFailed)
+			return
+		}
+		catalog, catalogErr := loadModelCatalog(actor.lifecycleCtx, result.handle.session)
+		wire, wireErr := protocolCatalog(catalog)
+		if catalogErr != nil || wireErr != nil || !catalog.Compatibility(settings).Compatible {
+			actor.retainSession(result.handle)
+			actor.rejectStartingTurn(attachments, results, protocol.ErrorProviderProtocolFailure)
+			return
+		}
+		before := cloneMapping(actor.mapping)
+		at := actor.clock.Now().UTC()
+		if at.IsZero() {
+			actor.retainSession(result.handle)
+			actor.rejectStartingTurn(attachments, results, protocol.ErrorStateRepairFailed)
+			return
+		}
+		target := cloneMapping(before)
+		copyOfSettings := settings
+		copyOfPresentation := presentation
+		target.Current.NativeSession = native.Ref
+		target.Current.Settings = &copyOfSettings
+		target.Current.Presentation = &copyOfPresentation
+		target.Current.ModelLabel = presentation.ModelDisplayName
+		target.Current.UpdatedAt = maxTime(target.Current.UpdatedAt, at)
+		target.UpdatedAt = maxTime(target.UpdatedAt, at)
+		outcome, mutationErr := store.ReplacePromptFreeCurrentNativeSessionAndSettingsIfUnchanged(actor.identity, before, native.Ref, settings, presentation, at)
+		installed := outcome == statepkg.CommitApplied && mutationErr == nil
+		mapping := target
+		if !installed && knownCommitOutcome(outcome) {
+			loaded, class := classifyLoadedState(actor.state, actor.identity, before, target)
+			if class == mappingTarget {
+				installed = true
+				mapping = loaded
+			}
+		}
+		if !installed {
+			actor.retainSession(result.handle)
+			actor.rejectStartingTurn(attachments, results, protocol.ErrorStateRepairFailed)
+			return
+		}
+		old := actor.session
+		result.handle.native = native
+		actor.session = result.handle
+		actor.mapping = mapping
+		actor.generation++
+		actor.domainCatalog = catalog
+		actor.catalog = wire
+		actor.loadSessionFeatures(actor.lifecycleCtx)
+		actor.retainSession(old)
+	} else {
+		native := actor.session.session.NativeSession()
+		if actor.mapping.Current == nil || native.Validate() != nil || native.Ref != actor.mapping.Current.NativeSession || native.Settings == nil || native.Presentation == nil || *native.Settings != settings || *native.Presentation != presentation || !actor.persistEffectiveSettings(settings, presentation) {
+			actor.dispatchBlocked = true
+			actor.lifecycle = protocol.LifecycleUnavailable
+			actor.rejectStartingTurn(attachments, results, protocol.ErrorStateRepairFailed)
+			return
+		}
+		actor.session.native = native
+	}
+	actor.applyEffectiveSettings(settings, presentation)
+	actor.settingsState = protocol.SettingsVerified
+	actor.publishShared(attachments, protocol.SettingsPayload{SettingsState: protocol.SettingsVerified, EffectiveSettings: actor.presentedEffectiveSettings(&settings, &presentation), Catalog: append([]protocol.CatalogModel{}, actor.catalog...)})
+	if code := actor.prepareTurn(actor.active.request); code != "" {
+		actor.rejectStartingTurn(attachments, results, code)
+		return
+	}
+	actor.startSubmitWorker(results, actor.active.request)
+}
+
+func (actor *conversation) rejectStartingTurn(attachments map[*clientAttachment]struct{}, results chan<- turnWorkerResult, code protocol.BrowserErrorCode) {
+	active := actor.active
+	if active == nil {
+		return
+	}
+	zeroProviderContext(active.request.Context)
+	active.request.Context = nil
+	if len(active.request.Images) != 0 && actor.releaseMessageImages(active.request.MessageID) != nil {
+		code = protocol.ErrorImageStorageFailure
+	}
+	actor.active = nil
+	actor.contextState = actor.contextStateFromMapping()
+	if actor.lifecycle != protocol.LifecycleUnavailable {
+		actor.lifecycle = protocol.LifecycleReady
+	}
+	actor.publishBrowserError(attachments, code)
+	actor.publishShared(attachments, actor.lifecyclePayload())
+	if active.originCommandID != "" {
+		actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, code)
+	}
+	actor.flushPendingProviderEvents(attachments, results)
 }
 
 func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]struct{}, results chan<- turnWorkerResult, result turnWorkerResult) {

@@ -442,6 +442,9 @@ func (actor *conversation) run() {
 			}
 		case result := <-turnResults:
 			actor.handleTurnResult(attachments, turnResults, result)
+			if result.kind == turnWorkerPromptFreeSettings && result.handle != nil && actor.session == result.handle {
+				providerEvents = result.handle.events
+			}
 			if providerClosurePending && actor.workerSettled == nil {
 				trigger := recoveryTriggerClosure
 				if providerClosureHasTerminal {

@@ -63,6 +63,47 @@ func TestReplaceMissingCursorNativeSessionPreservesPromptFreeMapping(t *testing.
 	require.Equal(t, CommitNotApplied, outcome)
 }
 
+func TestReplacePromptFreeCursorNativeSessionAndSettingsAtomically(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC)
+	identity := testIdentity()
+	identity.Provider = provider.NameCursor
+	oldSettings := provider.ExecutionSettings{Model: "cursor-old", Effort: "default", Speed: provider.SpeedStandard}
+	oldPresentation := provider.ModelPresentation{ModelDisplayName: "Cursor Old", Selectable: true}
+	session := testSession(t, testID, "sessions/cursor-missing", now)
+	session.ProviderLabel = "Cursor"
+	session.ModelLabel = oldPresentation.ModelDisplayName
+	session.Settings = &oldSettings
+	session.Presentation = &oldPresentation
+	observed := Revision{Digest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Revision: RevisionInitial, SourceUpdatedAt: now}
+	session.Observed = &observed
+	_, err := store.Create(identity, session, now)
+	require.NoError(t, err)
+	expected, err := store.Load(identity)
+	require.NoError(t, err)
+	replacement, err := provider.NewNativeSessionRef("sessions/cursor-replacement")
+	require.NoError(t, err)
+	newSettings := provider.ExecutionSettings{Model: "cursor-new", Effort: "default", Speed: provider.SpeedStandard}
+	newPresentation := provider.ModelPresentation{ModelDisplayName: "Cursor New", Selectable: true}
+
+	outcome, err := store.ReplacePromptFreeCurrentNativeSessionAndSettingsIfUnchanged(identity, expected, replacement, newSettings, newPresentation, now.Add(time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, CommitApplied, outcome)
+	loaded, err := store.Load(identity)
+	require.NoError(t, err)
+	require.Equal(t, replacement, loaded.Current.NativeSession)
+	require.Equal(t, newSettings, *loaded.Current.Settings)
+	require.Equal(t, newPresentation, *loaded.Current.Presentation)
+	require.Equal(t, newPresentation.ModelDisplayName, loaded.Current.ModelLabel)
+	require.Equal(t, expected.Current.ConversationID, loaded.Current.ConversationID)
+	require.Equal(t, expected.Current.CreatedAt, loaded.Current.CreatedAt)
+	require.Equal(t, expected.Current.Observed, loaded.Current.Observed)
+
+	outcome, err = store.ReplacePromptFreeCurrentNativeSessionAndSettingsIfUnchanged(identity, expected, replacement, newSettings, newPresentation, now.Add(2*time.Minute))
+	require.Error(t, err)
+	require.Equal(t, CommitNotApplied, outcome)
+}
+
 func TestReplaceMissingCursorNativeSessionRejectsChangedMapping(t *testing.T) {
 	store := openTestStore(t)
 	now := time.Date(2026, 8, 29, 1, 0, 0, 0, time.UTC)

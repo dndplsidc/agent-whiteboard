@@ -34,6 +34,10 @@ type missingNativeSessionStore interface {
 	ReplaceMissingCurrentNativeSessionIfUnchanged(statepkg.Identity, statepkg.Mapping, provider.NativeSessionRef, time.Time) (statepkg.CommitOutcome, error)
 }
 
+type promptFreeNativeSettingsStore interface {
+	ReplacePromptFreeCurrentNativeSessionAndSettingsIfUnchanged(statepkg.Identity, statepkg.Mapping, provider.NativeSessionRef, provider.ExecutionSettings, provider.ModelPresentation, time.Time) (statepkg.CommitOutcome, error)
+}
+
 type AttachmentStore interface {
 	Claim(context.Context, attachment.ClaimRequest) (attachment.Claimed, error)
 	ImagesForMessage(context.Context, string, string) ([]protocol.ImageDescriptor, error)
