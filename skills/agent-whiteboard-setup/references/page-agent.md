@@ -109,7 +109,8 @@ Do not send a message merely to test setup. A model turn may incur usage and use
 | Broker unavailable | Check managed-daemon or foreground process state, process-owned loopback listener, resolved `agent.port`, and browser Local Network Access before starting another broker |
 | Origin rejected | Add the exact HTTPS publishing origin using the same configuration |
 | Provider unavailable | Check `pi`, `codex`, or exactly `cursor-agent`; use an explicit selector for a generic `agent`. For Cursor, report `cursor-agent login` if native authentication is missing and verify ACP v1 plus stable `session/list` and `session/load` support. |
-| Cursor shows **Confirming delivery** or a protocol failure | Let Page Agent reconnect and reconcile the existing turn automatically. Do not resubmit the same message or restart the broker unless automatic reconnection itself remains unavailable. |
+| Cursor briefly remains active after an otherwise complete answer | Wait one second. Page Agent suppresses the exact known closed-stream artifact, retires only the stuck call, and retains the existing Cursor process and session. Do not resubmit the message. |
+| Cursor shows **Confirming delivery** or another protocol failure | Let Page Agent reconnect and reconcile the existing turn automatically. Do not resubmit the same message or restart the broker unless automatic reconnection itself remains unavailable. |
 | Browser cannot reach loopback | Grant browser Local Network Access when prompted |
 | Daemon command fails on Linux | Use foreground `agent serve` |
 | `/healthz` or `/readyz` fails on port `8568` | Do not use those publishing-server endpoints for broker readiness; inspect the broker listener and verify through the Whiteboard UI |

@@ -42,7 +42,7 @@ type agent struct {
 	statePath, evidencePath, control, scenario string
 	state                                      state
 	pending                                    map[string]chan request
-	nextRequest                                int
+	nextRequest, promptCount                   int
 }
 
 func main() {
@@ -278,12 +278,18 @@ func (a *agent) handle(r request) {
 	case "session/cancel":
 		a.record(map[string]any{"method": "session/cancel.semantic", "cancel_outcome": "received"})
 		a.release("cancel")
-		a.ok(r.ID, map[string]any{})
+		if len(r.ID) > 0 && string(r.ID) != "null" {
+			a.ok(r.ID, map[string]any{})
+		}
 	default:
 		a.rpcError(r.ID, -32601)
 	}
 }
 func (a *agent) prompt(r request, p map[string]any) {
+	a.mu.Lock()
+	a.promptCount++
+	promptCount := a.promptCount
+	a.mu.Unlock()
 	id, _ := p["sessionId"].(string)
 	blocks, _ := p["prompt"].([]any)
 	types := []string{}
@@ -324,7 +330,7 @@ func (a *agent) prompt(r request, p map[string]any) {
 		}
 	}
 	a.notify(id, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "scripted answer"}})
-	if a.scenario == "closed_stream" {
+	if a.scenario == "closed_stream" && promptCount == 1 {
 		env, _ := json.Marshal(map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]any{"type": "text", "text": firstText(blocks)}})
 		ans, _ := json.Marshal(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "scripted answer"}})
 		a.stateTxn(func(current *state) {
@@ -337,7 +343,10 @@ func (a *agent) prompt(r request, p map[string]any) {
 		})
 		a.record(map[string]any{"method": "session/prompt.runtime_failure", "failure_kind": "closed_stream"})
 		a.notify(id, map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "Error: RetriableError: WritableIterable is closed"}})
-		select {}
+		a.barrier("prompt")
+		a.record(map[string]any{"method": "session/prompt.return", "cancel_outcome": "cancelled"})
+		a.ok(r.ID, map[string]any{"stopReason": "cancelled"})
+		return
 	}
 	if strings.Contains(a.scenario, "hold") {
 		a.barrier("prompt")

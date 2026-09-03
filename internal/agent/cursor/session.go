@@ -94,27 +94,33 @@ type promptResult struct {
 }
 
 type activePrompt struct {
-	request            provider.TurnRequest
-	accepted           chan struct{}
-	rejected           chan struct{}
-	done               chan error // retained for the T3 fixture boundary
-	result             chan promptResult
-	acceptedOnce       sync.Once
-	buffer             []provider.Event
-	assistantID        string
-	assistant          string
-	poisoned           bool
-	terminal           bool
-	admissionErr       error
-	cancelState        permissionState
-	admission          turnAdmission
-	phase              turnPhase
-	permissionGateOpen bool
-	tools              map[string]cachedTool
-	toolBytes          int
-	terminalCause      terminalCause
-	stopDone           chan struct{}
-	stopErr            error
+	request                      provider.TurnRequest
+	accepted                     chan struct{}
+	rejected                     chan struct{}
+	done                         chan error // retained for the T3 fixture boundary
+	result                       chan promptResult
+	promptDone                   chan struct{}
+	promptCancel                 context.CancelFunc
+	promptCallReturned           bool
+	acceptedOnce                 sync.Once
+	buffer                       []provider.Event
+	assistantID                  string
+	assistant                    string
+	poisoned                     bool
+	terminal                     bool
+	closedStreamSeen             bool
+	closedStreamRecoveryClaimed  bool
+	closedStreamCancellationSent bool
+	admissionErr                 error
+	cancelState                  permissionState
+	admission                    turnAdmission
+	phase                        turnPhase
+	permissionGateOpen           bool
+	tools                        map[string]cachedTool
+	toolBytes                    int
+	terminalCause                terminalCause
+	stopDone                     chan struct{}
+	stopErr                      error
 }
 
 type replayPhase uint8
@@ -165,6 +171,7 @@ type Session struct {
 	promptBlocks           promptBlockBuilder
 	shutdownDone           chan struct{}
 	shutdownErr            error
+	beforePromptReturned   func()
 	beforeShutdownStop     func()
 	afterShutdownStopClaim func(bool)
 }
@@ -375,19 +382,30 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 	if err != nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorImageMissing)
 	}
-	turn := &activePrompt{request: request, accepted: make(chan struct{}), rejected: make(chan struct{}), done: make(chan error, 1), result: make(chan promptResult, 1), assistantID: safeID("assistant", request.TurnID), admission: admissionPending, phase: turnRunning, permissionGateOpen: true, tools: make(map[string]cachedTool)}
+	promptCtx, promptCancel := context.WithCancel(context.Background())
+	turn := &activePrompt{request: request, accepted: make(chan struct{}), rejected: make(chan struct{}), done: make(chan error, 1), result: make(chan promptResult, 1), promptDone: make(chan struct{}), promptCancel: promptCancel, assistantID: safeID("assistant", request.TurnID), admission: admissionPending, phase: turnRunning, permissionGateOpen: true, tools: make(map[string]cachedTool)}
 	s.mu.Lock()
 	if s.phase != sessionRunning || s.active != nil || s.settings != settingsSnapshot || s.native.Ref.Value() != sessionID || s.configGeneration != generationSnapshot {
 		s.mu.Unlock()
+		promptCancel()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
 	}
 	s.active = turn
 	s.mu.Unlock()
 	go func() {
+		defer promptCancel()
 		var result struct {
 			StopReason string `json:"stopReason"`
 		}
-		delivery, callErr := s.rt.client.Call(context.Background(), "session/prompt", map[string]any{"sessionId": sessionID, "prompt": blocks}, &result)
+		delivery, callErr := s.rt.client.Call(promptCtx, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": blocks}, &result)
+		s.mu.Lock()
+		turn.promptCallReturned = true
+		beforePromptReturned := s.beforePromptReturned
+		s.mu.Unlock()
+		close(turn.promptDone)
+		if beforePromptReturned != nil {
+			beforePromptReturned()
+		}
 		s.promptReturned(turn, delivery, result.StopReason, callErr)
 		turn.result <- promptResult{delivery: delivery, err: callErr}
 	}()
@@ -522,6 +540,82 @@ func validStopReason(reason string) bool {
 	}
 }
 
+func (s *Session) observeClosedStreamArtifact(turn *activePrompt) {
+	s.mu.Lock()
+	if s.active != turn || turn.poisoned || turn.terminal || turn.closedStreamSeen {
+		s.mu.Unlock()
+		return
+	}
+	turn.closedStreamSeen = true
+	s.acceptLocked(turn)
+	if s.active != turn || turn.poisoned || turn.terminal {
+		s.mu.Unlock()
+		return
+	}
+	promptDone := turn.promptDone
+	grace := s.driver.config.ClosedStreamGrace
+	s.mu.Unlock()
+	go s.recoverClosedStreamAfterGrace(turn, promptDone, grace)
+}
+
+func (s *Session) recoverClosedStreamAfterGrace(turn *activePrompt, promptDone <-chan struct{}, grace time.Duration) {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-promptDone:
+		return
+	case <-timer.C:
+	}
+
+	s.mu.Lock()
+	if s.active != turn || turn.poisoned || turn.terminal || !turn.closedStreamSeen || turn.promptCallReturned || s.shutdownIntent {
+		s.mu.Unlock()
+		return
+	}
+	if turn.stopDone == nil {
+		turn.closedStreamRecoveryClaimed = true
+	}
+	claim := s.claimStopLocked(turn)
+	sessionID := s.native.Ref.Value()
+	s.mu.Unlock()
+
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), grace)
+	err := s.awaitStop(stopCtx, turn, claim, sessionID)
+	cancelStop()
+	if err != nil {
+		s.poisonPrompt(turn)
+		return
+	}
+
+	s.mu.Lock()
+	if s.active != turn || turn.poisoned || turn.terminal {
+		s.mu.Unlock()
+		return
+	}
+	turn.closedStreamCancellationSent = true
+	cancelPrompt := turn.promptCancel
+	s.mu.Unlock()
+	if cancelPrompt == nil {
+		s.poisonPrompt(turn)
+		return
+	}
+	cancelPrompt()
+}
+
+func closedStreamRecovered(turn *activePrompt, reason string, callErr error) bool {
+	if !turn.closedStreamSeen {
+		return false
+	}
+	if callErr == nil {
+		return reason == "end_turn" || turn.closedStreamRecoveryClaimed && reason == "cancelled"
+	}
+	return turn.closedStreamRecoveryClaimed && turn.closedStreamCancellationSent && errors.Is(callErr, context.Canceled)
+}
+
+func closedStreamInterrupted(turn *activePrompt, callErr error) bool {
+	return turn.closedStreamSeen && !turn.closedStreamRecoveryClaimed && turn.closedStreamCancellationSent && errors.Is(callErr, context.Canceled)
+}
+
 func (s *Session) promptReturned(turn *activePrompt, delivery acp.Delivery, reason string, callErr error) {
 	s.mu.Lock()
 	if s.active != turn || turn.poisoned || turn.terminal {
@@ -578,6 +672,26 @@ func (s *Session) promptReturned(turn *activePrompt, delivery acp.Delivery, reas
 	turn.phase = turnTerminal
 	turn.permissionGateOpen = false
 	s.active = nil
+	if closedStreamRecovered(turn, reason, callErr) {
+		if s.shutdownIntent {
+			turn.terminalCause = terminalShutdown
+			s.publishLocked(provider.NewInterruptionEvent(turn.request.TurnID, provider.InterruptionShutdown))
+		} else {
+			turn.terminalCause = terminalCompleted
+			if turn.assistant != "" {
+				s.publishLocked(provider.NewAssistantMessageEvent(turn.request.TurnID, turn.assistantID, turn.assistant, s.driver.config.Clock.Now().UTC()))
+			}
+			s.publishLocked(provider.NewCompletionEvent(turn.request.TurnID))
+		}
+		s.clearPermissionRecordsLocked()
+		return
+	}
+	if closedStreamInterrupted(turn, callErr) {
+		turn.terminalCause = terminalInterrupted
+		s.publishLocked(provider.NewInterruptionEvent(turn.request.TurnID, provider.InterruptionRequested))
+		s.clearPermissionRecordsLocked()
+		return
+	}
 	if callErr != nil {
 		turn.terminalCause = terminalProtocolFailure
 		s.publishLocked(provider.NewTerminalFailureEvent(turn.request.TurnID, provider.NewProviderError(provider.ErrorProtocolFailure)))

@@ -143,6 +143,12 @@ func (s *Session) update(raw json.RawMessage) {
 		}
 		return
 	}
+	s.mu.Lock()
+	closedStreamSeen := s.active == turn && turn.closedStreamSeen
+	s.mu.Unlock()
+	if closedStreamSeen {
+		return
+	}
 	switch header.Kind {
 	case "agent_message_chunk":
 		var update contentUpdate
@@ -152,12 +158,10 @@ func (s *Session) update(raw json.RawMessage) {
 		}
 		if cursorClosedStreamFailure(update.Content.Text) {
 			// Cursor ACP 2026.08.11 can expose this adapter-runtime artifact as
-			// assistant text after its upstream turn has ended, then never return
-			// session/prompt. The matching turn-scoped update proves admission, but
-			// it is not model output. Fail closed and restart the transport without
-			// ever making the accepted prompt eligible for replay.
-			s.accept(turn)
-			s.poisonPrompt(turn)
+			// assistant text after its upstream turn has ended. Give session/prompt
+			// one brief chance to settle normally; if it remains stuck, cancel only
+			// that call and retain the conversation's process and native session.
+			s.observeClosedStreamArtifact(turn)
 			return
 		}
 		s.mu.Lock()

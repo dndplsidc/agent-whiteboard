@@ -15,13 +15,14 @@ import (
 )
 
 type Config struct {
-	Executable   string
-	Environment  []string
-	ProviderRoot string
-	Launcher     provider.Launcher
-	IDs          common.IDGenerator
-	Clock        common.Clock
-	IdleTimeout  time.Duration
+	Executable        string
+	Environment       []string
+	ProviderRoot      string
+	Launcher          provider.Launcher
+	IDs               common.IDGenerator
+	Clock             common.Clock
+	IdleTimeout       time.Duration
+	ClosedStreamGrace time.Duration
 }
 type Driver struct {
 	config          Config
@@ -61,6 +62,9 @@ func NewDriver(config Config) (*Driver, error) {
 	}
 	if config.IdleTimeout <= 0 {
 		return nil, errors.New("invalid Cursor driver configuration")
+	}
+	if config.ClosedStreamGrace <= 0 {
+		config.ClosedStreamGrace = time.Second
 	}
 	launch := provider.LaunchRequest{Executable: config.Executable, Arguments: []string{"acp"}, Environment: config.Environment, WorkingDirectory: config.ProviderRoot}
 	if launch.Validate() != nil {

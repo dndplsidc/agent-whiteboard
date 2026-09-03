@@ -520,48 +520,63 @@ func TestCursorArchiveRestoreLoadReplayHistoryAndUnsupportedDelete(t *testing.T)
 	require.GreaterOrEqual(t, strings.Count(evidence, "session/load.semantic"), 1, "restore must load through ACP")
 }
 
-func TestCursorClosedStreamRuntimeFailureIsSanitizedAndRecoveredWithoutReplay(t *testing.T) {
+func TestCursorClosedStreamCompletesWithoutRedErrorRestartOrReplay(t *testing.T) {
 	h := newCursorHarness(t, "closed_stream")
 	s := h.connect(t)
 	defer s.ws.Close()
+	initialEvidence := h.waitEvidence(t, "session/new.semantic")
+	processStarts := strings.Count(initialEvidence, "process_start")
+	loads := strings.Count(initialEvidence, "session/load.semantic")
 	created := time.Date(2026, 8, 29, 1, 2, 3, 0, time.UTC)
 	digest := agent.CalculateContextDigest([]byte(cursorSource), []byte(cursorCreator))
 	turnID, messageID := cursorID('K'), cursorID('L')
 	commandID := s.command(t, protocol.CommandSubmit, protocol.SubmitPayload{TurnID: turnID, MessageID: messageID, Content: protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartText, Text: "runtime failure"}}}, Context: &protocol.PageContext{Revision: protocol.ContextInitial, Source: cursorSource, CreatorContext: cursorCreator, Title: "Failure", URL: h.origin + "/failure", Resource: protocol.Resource{Kind: protocol.ResourceMarkdown, ID: cursorID('C'), CreatedAt: created, UpdatedAt: created}, Digest: digest}, Settings: &protocol.ExecutionSettings{Model: "cursor-large", Effort: "default", Speed: protocol.SpeedStandard}})
 
-	commandSucceeded, sanitizedFailure, unavailable, recovered := false, false, false, false
-	for !commandSucceeded || !sanitizedFailure || !recovered {
-		event := s.read(t)
-		encoded, err := json.Marshal(event)
-		require.NoError(t, err)
-		require.NotContains(t, string(encoded), "RetriableError")
-		require.NotContains(t, string(encoded), "WritableIterable")
-		switch event["type"] {
-		case string(protocol.EventCommandResult):
-			payload := event["payload"].(map[string]any)
-			if payload["command_id"] == commandID {
-				require.Equal(t, string(protocol.CommandSucceeded), payload["status"])
-				commandSucceeded = true
-			}
-		case string(protocol.EventError):
-			code, _ := event["payload"].(map[string]any)["error"].(map[string]any)["code"].(string)
-			if code == string(protocol.ErrorProviderProtocolFailure) {
-				sanitizedFailure = true
-			}
-		case string(protocol.EventLifecycle):
-			state, _ := event["payload"].(map[string]any)["state"].(string)
-			if state == string(protocol.LifecycleUnavailable) {
-				unavailable = true
-			}
-			if unavailable && state == string(protocol.LifecycleReady) {
-				recovered = true
+	waitForCompletion := func(commandID, turnID string) {
+		commandSucceeded, completed := false, false
+		for !commandSucceeded || !completed {
+			event := s.read(t)
+			encoded, err := json.Marshal(event)
+			require.NoError(t, err)
+			require.NotContains(t, string(encoded), "RetriableError")
+			require.NotContains(t, string(encoded), "WritableIterable")
+			switch event["type"] {
+			case string(protocol.EventCommandResult):
+				payload := event["payload"].(map[string]any)
+				if payload["command_id"] == commandID {
+					require.Equal(t, string(protocol.CommandSucceeded), payload["status"])
+					commandSucceeded = true
+				}
+			case string(protocol.EventCompletion):
+				if event["payload"].(map[string]any)["turn_id"] == turnID {
+					completed = true
+				}
+			case string(protocol.EventError):
+				t.Fatalf("closed-stream recovery rendered an error: %#v", event["payload"])
+			case string(protocol.EventLifecycle):
+				state, _ := event["payload"].(map[string]any)["state"].(string)
+				require.NotEqual(t, string(protocol.LifecycleUnavailable), state, "closed-stream recovery restarted the provider")
 			}
 		}
 	}
-	evidence := h.waitEvidence(t, "session/load.semantic")
-	require.Equal(t, 1, strings.Count(evidence, "session/prompt.semantic"))
+	waitForCompletion(commandID, turnID)
+
+	secondTurn, secondMessage := cursorID('M'), cursorID('N')
+	secondCommand := s.command(t, protocol.CommandSubmit, protocol.SubmitPayload{TurnID: secondTurn, MessageID: secondMessage, Content: protocol.MessageContent{Parts: []protocol.MessagePart{{Type: protocol.MessagePartText, Text: "second prompt"}}}, Settings: &protocol.ExecutionSettings{Model: "cursor-large", Effort: "default", Speed: protocol.SpeedStandard}})
+	waitForCompletion(secondCommand, secondTurn)
+
+	require.Eventually(t, func() bool {
+		b, _ := os.ReadFile(h.evidencePath)
+		return strings.Count(string(b), "session/prompt.semantic") == 2
+	}, 3*time.Second, 10*time.Millisecond)
+	evidenceBytes, err := os.ReadFile(h.evidencePath)
+	require.NoError(t, err)
+	evidence := string(evidenceBytes)
+	require.Equal(t, processStarts, strings.Count(evidence, "process_start"), "closed-stream recovery launched another process")
+	require.Equal(t, loads, strings.Count(evidence, "session/load.semantic"), "closed-stream recovery loaded instead of retaining the native session")
+	require.Equal(t, 2, strings.Count(evidence, "session/prompt.semantic"))
 	require.Equal(t, 1, strings.Count(evidence, "session/prompt.runtime_failure"))
-	require.GreaterOrEqual(t, strings.Count(evidence, "session/load.semantic"), 1)
+	require.Equal(t, 1, strings.Count(evidence, "session/cancel.semantic"))
 }
 
 func TestCursorImageSemanticsManagedShutdownAndCrashIsolation(t *testing.T) {

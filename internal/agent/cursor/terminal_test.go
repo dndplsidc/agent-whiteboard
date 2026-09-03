@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/acp"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
@@ -48,7 +49,7 @@ func drainTurn(events <-chan provider.Event, terminal provider.EventKind) {
 	}
 }
 
-func TestCursorClosedStreamArtifactFailsAcceptedTurnWithoutLeakingNativeText(t *testing.T) {
+func TestCursorClosedStreamArtifactCompletesNormallyAndRetainsProcess(t *testing.T) {
 	driver, launcher, root := testDriver(t)
 	opened, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root})
 	if err != nil {
@@ -59,37 +60,64 @@ func TestCursorClosedStreamArtifactFailsAcceptedTurnWithoutLeakingNativeText(t *
 	child := launcher.children[0]
 	launcher.mu.Unlock()
 	request := provider.TurnRequest{TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("reader")}
-	started, _, submitted := startBlockedTurn(t, session, child, request)
+	started, release, submitted := startBlockedTurn(t, session, child, request)
 	accepted := acceptBlockedTurn(t, session, child, started, submitted, "answer")
 	if accepted.TurnID != turnID {
 		t.Fatalf("accepted turn = %#v", accepted)
 	}
 	child.send(t, map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": session.NativeSession().Ref.Value(), "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "\n\n" + cursorClosedStreamArtifact + "\n"}}}})
+	release <- "end_turn"
 
-	var kinds []provider.EventKind
-	var assistantText string
-	for event := range session.events {
-		kinds = append(kinds, event.Kind)
-		if event.Kind == provider.EventAssistantDelta || event.Kind == provider.EventAssistantMessage {
-			assistantText += event.Text
+	for {
+		select {
+		case event := <-session.events:
+			if event.Kind == provider.EventTerminalFailure {
+				t.Fatal("closed-stream artifact rendered a terminal failure")
+			}
+			if event.Text != "" && cursorClosedStreamFailure(event.Text) {
+				t.Fatalf("closed-stream artifact leaked: %q", event.Text)
+			}
+			if event.Kind == provider.EventCompletion {
+				goto completed
+			}
+		case <-time.After(time.Second):
+			t.Fatal("turn did not complete")
 		}
 	}
-	if assistantText != "answer" {
-		t.Fatalf("assistant text = %q", assistantText)
+
+completed:
+	select {
+	case <-child.done:
+		t.Fatal("closed-stream artifact stopped the Cursor process")
+	default:
 	}
-	terminalFailures := 0
-	for _, kind := range kinds {
-		if kind == provider.EventTerminalFailure {
-			terminalFailures++
+	second := provider.TurnRequest{TurnID: safeID("second-turn", turnID), MessageID: safeID("second-message", messageID), Content: provider.TextMessage("again")}
+	started, release, submitted = startBlockedTurn(t, session, child, second)
+	if got := acceptBlockedTurn(t, session, child, started, submitted, "second answer"); got.TurnID != second.TurnID {
+		t.Fatalf("second accepted turn = %#v", got)
+	}
+	release <- "end_turn"
+	drainTurn(session.events, provider.EventCompletion)
+
+	launcher.mu.Lock()
+	children := len(launcher.children)
+	launcher.mu.Unlock()
+	child.mu.Lock()
+	methods := append([]string(nil), child.methods...)
+	child.mu.Unlock()
+	prompts, cancels := 0, 0
+	for _, method := range methods {
+		switch method {
+		case "session/prompt":
+			prompts++
+		case "session/cancel":
+			cancels++
 		}
-		if kind == provider.EventCompletion {
-			t.Fatalf("runtime artifact completed turn: %v", kinds)
-		}
 	}
-	if terminalFailures != 1 {
-		t.Fatalf("terminal failures = %d, events = %v", terminalFailures, kinds)
+	if children != 1 || prompts != 2 || cancels != 0 {
+		t.Fatalf("children = %d, prompts = %d, cancels = %d, methods = %v", children, prompts, cancels, methods)
 	}
-	<-child.done
+	_ = session.Shutdown(context.Background())
 }
 
 func TestCursorClosedStreamArtifactClassifierIsExact(t *testing.T) {
@@ -107,6 +135,96 @@ func TestCursorClosedStreamArtifactClassifierIsExact(t *testing.T) {
 	if !cursorClosedStreamFailure("\n" + cursorClosedStreamArtifact + "\n") {
 		t.Fatal("captured runtime artifact was not classified")
 	}
+}
+
+func TestClosedStreamRPCErrorStillFailsClosed(t *testing.T) {
+	turn := &activePrompt{closedStreamSeen: true, closedStreamRecoveryClaimed: true, closedStreamCancellationSent: true}
+	if closedStreamRecovered(turn, "", &acp.RPCError{Code: -32000, Message: "failed"}) {
+		t.Fatal("ACP RPC error was converted to completion")
+	}
+}
+
+func TestClosedStreamDoesNotCancelReturnedPromptDuringFinalization(t *testing.T) {
+	driver, launcher, root := testDriver(t)
+	driver.config.ClosedStreamGrace = 50 * time.Millisecond
+	opened, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := opened.(*Session)
+	launcher.mu.Lock()
+	child := launcher.children[0]
+	launcher.mu.Unlock()
+	finalizationStarted := make(chan struct{})
+	finishFinalization := make(chan struct{})
+	s.beforePromptReturned = func() {
+		close(finalizationStarted)
+		<-finishFinalization
+	}
+	started, release, submitted := startBlockedTurn(t, s, child, provider.TurnRequest{TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("reader")})
+	acceptBlockedTurn(t, s, child, started, submitted, "answer")
+	child.send(t, map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"sessionId": s.NativeSession().Ref.Value(), "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": cursorClosedStreamArtifact}}}})
+	release <- "end_turn"
+	<-finalizationStarted
+	time.Sleep(3 * driver.config.ClosedStreamGrace)
+	select {
+	case <-child.done:
+		t.Fatal("returned prompt closed the process during finalization")
+	default:
+	}
+	child.mu.Lock()
+	methods := append([]string(nil), child.methods...)
+	child.mu.Unlock()
+	for _, method := range methods {
+		if method == "session/cancel" {
+			t.Fatalf("returned prompt was canceled during finalization: %v", methods)
+		}
+	}
+	close(finishFinalization)
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-s.events:
+			if event.Kind == provider.EventCompletion {
+				_ = s.Shutdown(context.Background())
+				return
+			}
+		case <-deadline:
+			t.Fatal("returned prompt did not complete after finalization resumed")
+		}
+	}
+}
+
+func TestClosedStreamGraceBoundaryRechecksReturnedCall(t *testing.T) {
+	driver, launcher, root := testDriver(t)
+	opened, err := driver.Create(context.Background(), provider.CreateRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := opened.(*Session)
+	launcher.mu.Lock()
+	child := launcher.children[0]
+	launcher.mu.Unlock()
+	turn := &activePrompt{request: provider.TurnRequest{TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("reader")}, accepted: make(chan struct{}), rejected: make(chan struct{}), closedStreamSeen: true, promptCallReturned: true, permissionGateOpen: true, phase: turnRunning}
+	close(turn.accepted)
+	s.mu.Lock()
+	s.active = turn
+	s.mu.Unlock()
+	s.recoverClosedStreamAfterGrace(turn, make(chan struct{}), time.Nanosecond)
+	child.mu.Lock()
+	methods := append([]string(nil), child.methods...)
+	child.mu.Unlock()
+	for _, method := range methods {
+		if method == "session/cancel" {
+			t.Fatalf("grace-boundary race canceled a returned call: %v", methods)
+		}
+	}
+	select {
+	case <-child.done:
+		t.Fatal("grace-boundary race closed the process")
+	default:
+	}
+	_ = s.Shutdown(context.Background())
 }
 
 func TestStopJoinIsPerTurnAndConcurrentStopWritesOnce(t *testing.T) {
