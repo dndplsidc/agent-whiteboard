@@ -58,6 +58,9 @@ func main() {
 	a := &agent{out: bufio.NewWriter(os.Stdout), statePath: os.Getenv("AWB_CURSOR_STATE"), evidencePath: os.Getenv("AWB_CURSOR_EVIDENCE"), control: os.Getenv("AWB_CURSOR_CONTROL"), scenario: os.Getenv("AWB_CURSOR_SCENARIO"), pending: map[string]chan request{}, launchModel: os.Args[2]}
 	_ = readJSON(a.statePath, &a.state)
 	a.record(map[string]any{"method": "process_start", "process_ordinal": a.ordinal(), "workspace_identity": digest(mustGetwd()), "launch_model": a.launchModel})
+	if strings.Contains(a.scenario, "candidate_fail") && a.launchModel == "cursor-small" && len(a.state.Sessions) != 0 {
+		os.Exit(7)
+	}
 	s := bufio.NewScanner(os.Stdin)
 	s.Buffer(make([]byte, 64<<10), 128<<20)
 	for s.Scan() {

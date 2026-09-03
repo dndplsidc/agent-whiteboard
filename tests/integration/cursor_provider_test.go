@@ -341,6 +341,28 @@ func TestCursorFirstPromptCanReplaceAnUnlistedPromptFreeNativeSessionForModelSel
 	require.NotContains(t, evidence, "session/set_config_option.semantic")
 }
 
+func TestCursorFirstPromptCandidateFailureRetainsHealthySessionWithoutSubmitting(t *testing.T) {
+	h := newCursorHarness(t, "hide_unprompted_candidate_fail")
+	s := h.connect(t)
+	defer s.ws.Close()
+
+	failed := cursorSubmitPayload(h, cursorID('C'), cursorID('O'), cursorID('P'), "must not reach a prompt", nil)
+	failed.Settings = &protocol.ExecutionSettings{Model: "cursor-small", Effort: "default", Speed: protocol.SpeedStandard}
+	failedResult := s.waitResult(t, s.command(t, protocol.CommandSubmit, failed))
+	require.Equal(t, string(protocol.CommandRejected), failedResult["status"], "%#v", failedResult)
+
+	evidence := h.waitEvidence(t, `"launch_model":"cursor-small"`)
+	require.NotContains(t, evidence, `"method":"session/prompt.semantic"`)
+
+	fallback := cursorSubmitPayload(h, cursorID('C'), cursorID('Q'), cursorID('R'), "healthy original session", nil)
+	fallbackResult := s.waitResult(t, s.command(t, protocol.CommandSubmit, fallback))
+	require.Equal(t, string(protocol.CommandSucceeded), fallbackResult["status"], "%#v", fallbackResult)
+
+	evidence = h.waitEvidence(t, `"method":"session/prompt.semantic"`)
+	require.Equal(t, 1, strings.Count(evidence, `"method":"session/prompt.semantic"`), evidence)
+	require.Contains(t, evidence, `"launch_model":"cursor-large"`)
+}
+
 func TestCursorInterruptCancelsPromptAndPendingPermission(t *testing.T) {
 	h := newCursorHarness(t, "permission_hold_cancel")
 	s := h.connect(t)
