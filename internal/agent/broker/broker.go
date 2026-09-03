@@ -407,6 +407,14 @@ func (broker *Broker) createConversation(ctx context.Context, identity statepkg.
 	return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 }
 
+func cloneExecutionSettings(settings *provider.ExecutionSettings) *provider.ExecutionSettings {
+	if settings == nil {
+		return nil
+	}
+	copyOfSettings := *settings
+	return &copyOfSettings
+}
+
 func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.Identity, mapping statepkg.Mapping, driver provider.Driver) (*conversation, error) {
 	if mapping.Validate(identity) != nil || mapping.Current == nil {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
@@ -428,7 +436,7 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.
 	if err != nil {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 	}
-	request := provider.ResumeRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), NativeSession: mapping.Current.NativeSession, Workspace: workspace}
+	request := provider.ResumeRequest{Provider: identity.Provider, Access: accessForProvider(identity.Provider), NativeSession: mapping.Current.NativeSession, Workspace: workspace, Settings: cloneExecutionSettings(mapping.Current.Settings)}
 	if request.Validate() != nil {
 		return nil, NewBrokerError(protocol.ErrorStateRepairFailed)
 	}

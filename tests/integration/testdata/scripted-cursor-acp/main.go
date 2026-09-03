@@ -43,16 +43,21 @@ type agent struct {
 	state                                      state
 	pending                                    map[string]chan request
 	nextRequest, promptCount                   int
+	launchModel                                string
 }
 
 func main() {
-	if len(os.Args) != 2 || os.Args[1] != "acp" {
-		fmt.Fprintln(os.Stderr, "expected argv: acp")
+	if len(os.Args) == 2 && os.Args[1] == "--list-models" {
+		fmt.Print("cursor-small - Cursor Small (default)\ncursor-large - Cursor Large\n")
+		return
+	}
+	if len(os.Args) != 4 || os.Args[1] != "--model" || os.Args[2] == "" || os.Args[3] != "acp" {
+		fmt.Fprintln(os.Stderr, "expected argv: --model <slug> acp")
 		os.Exit(2)
 	}
-	a := &agent{out: bufio.NewWriter(os.Stdout), statePath: os.Getenv("AWB_CURSOR_STATE"), evidencePath: os.Getenv("AWB_CURSOR_EVIDENCE"), control: os.Getenv("AWB_CURSOR_CONTROL"), scenario: os.Getenv("AWB_CURSOR_SCENARIO"), pending: map[string]chan request{}}
+	a := &agent{out: bufio.NewWriter(os.Stdout), statePath: os.Getenv("AWB_CURSOR_STATE"), evidencePath: os.Getenv("AWB_CURSOR_EVIDENCE"), control: os.Getenv("AWB_CURSOR_CONTROL"), scenario: os.Getenv("AWB_CURSOR_SCENARIO"), pending: map[string]chan request{}, launchModel: os.Args[2]}
 	_ = readJSON(a.statePath, &a.state)
-	a.record(map[string]any{"method": "process_start", "process_ordinal": a.ordinal(), "workspace_identity": digest(mustGetwd())})
+	a.record(map[string]any{"method": "process_start", "process_ordinal": a.ordinal(), "workspace_identity": digest(mustGetwd()), "launch_model": a.launchModel})
 	s := bufio.NewScanner(os.Stdin)
 	s.Buffer(make([]byte, 64<<10), 128<<20)
 	for s.Scan() {
@@ -225,9 +230,14 @@ func (a *agent) handle(r request) {
 		a.ok(r.ID, map[string]any{"sessions": items})
 	case "session/new":
 		var s session
+		requestedModel, _ := p["model"].(string)
+		if requestedModel == "" || requestedModel != a.launchModel {
+			a.rpcError(r.ID, -32602)
+			return
+		}
 		a.stateTxn(func(current *state) {
 			current.Next++
-			s = session{ID: fmt.Sprintf("fixture-%d", current.Next), Model: "cursor-small", Replay: []json.RawMessage{}}
+			s = session{ID: fmt.Sprintf("fixture-%d", current.Next), Model: requestedModel, Replay: []json.RawMessage{}}
 			current.Sessions = append(current.Sessions, s)
 		})
 		a.record(map[string]any{"method": "session/new.semantic", "workspace_identity": digest(fmt.Sprint(p["cwd"])), "model_option": s.Model})
@@ -252,7 +262,7 @@ func (a *agent) handle(r request) {
 			_ = json.Unmarshal(u, &v)
 			a.notify(id, v)
 		}
-		a.record(map[string]any{"method": "session/load.semantic", "workspace_identity": digest(fmt.Sprint(p["cwd"])), "model_option": loaded.Model, "content_block_count": len(loaded.Replay)})
+		a.record(map[string]any{"method": "session/load.semantic", "workspace_identity": digest(fmt.Sprint(p["cwd"])), "model_option": a.launchModel, "content_block_count": len(loaded.Replay)})
 		a.ok(r.ID, map[string]any{"configOptions": options(loaded.Model), "models": map[string]any{}, "modes": map[string]any{}})
 	case "session/set_config_option":
 		id, _ := p["sessionId"].(string)
@@ -313,7 +323,7 @@ func (a *agent) prompt(r request, p map[string]any) {
 			}
 		}
 	}
-	a.record(map[string]any{"method": "session/prompt.semantic", "workspace_identity": digest(mustGetwd()), "content_block_types": types, "content_block_count": len(blocks), "image_media_type": imageType, "image_decoded_byte_count": imageBytes, "provider_envelope_valid": envelopeValid})
+	a.record(map[string]any{"method": "session/prompt.semantic", "workspace_identity": digest(mustGetwd()), "launch_model": a.launchModel, "content_block_types": types, "content_block_count": len(blocks), "image_media_type": imageType, "image_decoded_byte_count": imageBytes, "provider_envelope_valid": envelopeValid})
 	if a.scenario == "crash_prompt" {
 		a.barrier("crash")
 		os.Exit(17)

@@ -37,7 +37,8 @@ func inspectRef(t *testing.T, driver *Driver, id string) (provider.NativeSession
 	if err != nil {
 		t.Fatal(err)
 	}
-	return driver.Inspect(context.Background(), provider.InspectRequest{Provider: provider.NameCursor, NativeSession: ref})
+	settings := provider.ExecutionSettings{Model: "model-a", Effort: "default", Speed: provider.SpeedStandard}
+	return driver.Inspect(context.Background(), provider.InspectRequest{Provider: provider.NameCursor, NativeSession: ref, Settings: &settings})
 }
 
 func requireProviderCode(t *testing.T, err error, code provider.ProviderErrorCode) {

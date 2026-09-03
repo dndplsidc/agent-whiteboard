@@ -74,6 +74,7 @@ const (
 type pendingPermission struct {
 	mu             sync.Mutex
 	responder      *acp.Responder
+	runtime        *runtime
 	native         map[string]string
 	request        provider.InteractionRequest
 	optionID       string
@@ -95,6 +96,8 @@ type promptResult struct {
 
 type activePrompt struct {
 	request                      provider.TurnRequest
+	runtime                      *runtime
+	runtimeGeneration            uint64
 	accepted                     chan struct{}
 	rejected                     chan struct{}
 	done                         chan error // retained for the T3 fixture boundary
@@ -147,7 +150,6 @@ type Session struct {
 	catalog                provider.ModelCatalog
 	settings               provider.ExecutionSettings
 	presentation           provider.ModelPresentation
-	modelConfigID          string
 	events                 chan provider.Event
 	closed                 bool
 	eventsClosed           bool
@@ -168,7 +170,14 @@ type Session struct {
 	permissionOrder        []string
 	permissionOutcomes     map[string]acp.Delivery
 	configGeneration       uint64
+	runtimeGeneration      uint64
+	switching              bool
+	switchDone             chan struct{}
+	retired                []*runtime
+	owned                  map[*runtime]struct{}
+	child                  *managedChild
 	promptBlocks           promptBlockBuilder
+	beforeCandidateCommit  func()
 	shutdownDone           chan struct{}
 	shutdownErr            error
 	beforePromptReturned   func()
@@ -177,7 +186,13 @@ type Session struct {
 }
 
 func newSession(d *Driver, rt *runtime, workspace string) *Session {
-	return &Session{driver: d, rt: rt, workspace: workspace, events: make(chan provider.Event, 128), phase: sessionRunning, replayPhase: replayComplete, permissions: map[string]*pendingPermission{}, permissionOutcomes: map[string]acp.Delivery{}, promptBlocks: buildPromptBlocks}
+	s := &Session{driver: d, rt: rt, workspace: workspace, events: make(chan provider.Event, 128), phase: sessionRunning, replayPhase: replayComplete, permissions: map[string]*pendingPermission{}, permissionOutcomes: map[string]acp.Delivery{}, promptBlocks: buildPromptBlocks, runtimeGeneration: 1, owned: make(map[*runtime]struct{})}
+	if rt != nil {
+		s.owned[rt] = struct{}{}
+		rt.generation = 1
+	}
+	s.child = &managedChild{session: s}
+	return s
 }
 
 // beginReplay opens the replay gate while Session.mu is exclusively owned.
@@ -196,18 +211,34 @@ func (s *Session) beginReplay() {
 	s.replayIDs = map[string]struct{}{}
 }
 
-func (s *Session) finishOpen(open openResult, loaded bool) error {
-	if !bounded(open.SessionID, provider.MaxNativeReferenceBytes, true) {
+func (s *Session) finishOpen(open openResult, loaded bool, selection ...any) error {
+	var catalog provider.ModelCatalog
+	var settings provider.ExecutionSettings
+	if len(selection) == 2 {
+		catalog, _ = selection[0].(provider.ModelCatalog)
+		settings, _ = selection[1].(provider.ExecutionSettings)
+	} else {
+		var err error
+		catalog, settings, _, err = catalogFromOptions(open.ConfigOptions, s.rt.caps.Image)
+		if err != nil {
+			return err
+		}
+	}
+	catalog = catalog.Clone()
+	for index := range catalog.Models {
+		catalog.Models[index].SupportsImages = s.rt.caps.Image
+	}
+	if !bounded(open.SessionID, provider.MaxNativeReferenceBytes, true) || catalog.Validate() != nil || !catalog.Compatibility(settings).Compatible {
 		return provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
-	catalog, settings, presentation, err := catalogFromOptions(open.ConfigOptions, s.rt.caps.Image)
-	if err != nil {
-		return err
+	if _, err := validateConfigOptions(open.ConfigOptions); err != nil {
+		return provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
-	modelConfig, err := modelOption(open.ConfigOptions)
+	model, err := catalog.Resolve(settings)
 	if err != nil {
 		return provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
+	presentation := provider.ModelPresentation{ModelDisplayName: model.DisplayName, Selectable: true}
 	ref, err := provider.NewNativeSessionRef(open.SessionID)
 	if err != nil {
 		return provider.NewProviderError(provider.ErrorProtocolIncompatible)
@@ -227,7 +258,6 @@ func (s *Session) finishOpen(open openResult, loaded bool) error {
 	s.catalog = catalog
 	s.settings = settings
 	s.presentation = presentation
-	s.modelConfigID = modelConfig.ID
 	s.configGeneration++
 	s.native = provider.NativeSession{Ref: ref, Provider: provider.NameCursor, Model: settings.Model, Settings: copySettings(settings), Presentation: copyPresentation(presentation), CreatedAt: now, UpdatedAt: now}
 	s.mu.Unlock()
@@ -251,9 +281,17 @@ func (s *Session) NativeSession() provider.NativeSession {
 }
 func (s *Session) Model() string { s.mu.Lock(); defer s.mu.Unlock(); return s.settings.Model }
 func (s *Session) Capabilities() provider.Capabilities {
-	return provider.Capabilities{Images: s.rt.caps.Image}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return provider.Capabilities{Images: s.rt != nil && s.rt.caps.Image}
 }
-func (s *Session) Child() provider.ManagedChild            { return s.rt.child }
+
+func (s *Session) runtimeCurrent(rt *runtime, generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rt == rt && s.runtimeGeneration == generation && s.phase == sessionRunning
+}
+func (s *Session) Child() provider.ManagedChild            { return s.child }
 func (s *Session) Events() <-chan provider.Event           { return s.events }
 func (s *Session) BusyTurnPolicy() provider.BusyTurnPolicy { return provider.BusyTurnPreserveDraft }
 
@@ -274,57 +312,178 @@ func (s *Session) EffectiveSettings(context.Context) (provider.ExecutionSettings
 	return s.settings, s.presentation, nil
 }
 
+// updateAuthoritativeLocked is retained for low-level configuration generation
+// tests. Production Cursor model selection never calls it.
 func (s *Session) updateAuthoritativeLocked(options []configOption) (provider.ExecutionSettings, provider.ModelPresentation, string, error) {
 	catalog, settings, presentation, err := catalogFromOptions(options, s.rt.caps.Image)
 	if err != nil {
 		return provider.ExecutionSettings{}, provider.ModelPresentation{}, "", err
 	}
-	model, err := modelOption(options)
+	option, err := modelOption(options)
 	if err != nil {
-		return provider.ExecutionSettings{}, provider.ModelPresentation{}, "", provider.NewProviderError(provider.ErrorProtocolIncompatible)
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, "", err
 	}
-	s.catalog = catalog
-	s.settings = settings
-	s.presentation = presentation
-	s.modelConfigID = model.ID
-	s.native.Model = settings.Model
-	s.native.Settings = copySettings(settings)
-	s.native.Presentation = copyPresentation(presentation)
-	s.native.UpdatedAt = s.driver.config.Clock.Now().UTC()
+	s.catalog, s.settings, s.presentation = catalog, settings, presentation
 	s.configGeneration++
-	return settings, presentation, model.ID, nil
+	return settings, presentation, option.ID, nil
+}
+
+func (s *Session) ownRuntime(rt *runtime) {
+	s.mu.Lock()
+	if s.owned == nil {
+		s.owned = make(map[*runtime]struct{})
+	}
+	s.owned[rt] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *Session) releaseRuntime(rt *runtime) {
+	s.mu.Lock()
+	delete(s.owned, rt)
+	s.removeRetiredLocked(rt)
+	s.mu.Unlock()
+}
+
+func (s *Session) watchCandidate(rt *runtime) {
+	<-rt.client.Done()
+	s.mu.Lock()
+	switch rt.candidateState {
+	case candidatePending:
+		rt.candidateState = candidateEnded
+		s.mu.Unlock()
+		return
+	case candidateCommitted:
+		generation := rt.generation
+		s.mu.Unlock()
+		s.transportEnded(rt, generation)
+		return
+	default:
+		s.mu.Unlock()
+	}
 }
 
 func (s *Session) ApplySettings(ctx context.Context, wanted provider.ExecutionSettings) (provider.ExecutionSettings, provider.ModelPresentation, error) {
 	s.mu.Lock()
-	if s.phase != sessionRunning || s.active != nil {
+	if s.phase != sessionRunning || s.active != nil || s.switching {
 		s.mu.Unlock()
 		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorNotReady)
 	}
+	s.switching = true
+	s.switchDone = make(chan struct{})
 	catalog := s.catalog.Clone()
+	current := s.settings
 	sessionID := s.native.Ref.Value()
-	configID := s.modelConfigID
+	generation := s.runtimeGeneration
+	old := s.rt
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.switching {
+			s.switching = false
+			close(s.switchDone)
+		}
+		s.mu.Unlock()
+	}()
 	canonical, err := catalog.Canonicalize(wanted)
 	if err != nil || canonical != wanted || wanted.Effort != "default" || wanted.Speed != provider.SpeedStandard {
 		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
 	}
-	var result struct {
-		ConfigOptions []configOption `json:"configOptions"`
+	if wanted == current {
+		s.mu.Lock()
+		presentation := s.presentation
+		s.mu.Unlock()
+		return wanted, presentation, nil
 	}
-	if _, err = s.rt.client.Call(ctx, "session/set_config_option", map[string]any{"sessionId": sessionID, "configId": configID, "value": wanted.Model}, &result); err != nil {
-		return provider.ExecutionSettings{}, provider.ModelPresentation{}, classifyRPC(err)
+
+	router := &inboundRouter{}
+	candidate, err := s.driver.launchModelOwned(ctx, s.workspace, wanted.Model, router.handle, s.ownRuntime, s.releaseRuntime)
+	if err != nil {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, err
 	}
 	s.mu.Lock()
-	settings, presentation, returnedID, parseErr := s.updateAuthoritativeLocked(result.ConfigOptions)
+	candidate.candidateState = candidatePending
 	s.mu.Unlock()
-	if parseErr != nil {
-		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+	go s.watchCandidate(candidate)
+	candidateSession := newSession(s.driver, candidate, s.workspace)
+	candidateSession.beginReplay()
+	candidate.router = router
+	router.publish(candidateSession, candidate, 1)
+	failed := true
+	defer func() {
+		if failed {
+			closeCtx, cancel := context.WithTimeout(context.Background(), cursorCleanupTimeout)
+			closeErr := candidate.close(closeCtx)
+			cancel()
+			if closeErr == nil {
+				s.releaseRuntime(candidate)
+			}
+		}
+	}()
+	listed, err := walkSessionList(ctx, candidate, sessionID)
+	if err != nil {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, err
 	}
-	if returnedID != configID || settings != wanted {
-		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+	if listed == nil {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	return settings, presentation, nil
+	var opened openResult
+	if _, err = candidate.client.Call(ctx, "session/load", map[string]any{"sessionId": sessionID, "cwd": s.workspace, "mcpServers": []any{}}, &opened); err != nil {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, classifyRPC(err)
+	}
+	if opened.SessionID != "" && opened.SessionID != sessionID {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	opened.SessionID = sessionID
+	if err = candidateSession.finishOpen(opened, true, catalog, wanted); err != nil {
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, err
+	}
+	model, _ := catalog.Resolve(wanted)
+	presentation := provider.ModelPresentation{ModelDisplayName: model.DisplayName, Selectable: true}
+
+	// Quiesce both bindings. In particular, no replay handler may still mutate
+	// the disposable candidate session and no old handler may cross the commit.
+	router.retire()
+	if old != nil && old.router != nil {
+		old.router.retire()
+	}
+	if s.beforeCandidateCommit != nil {
+		s.beforeCandidateCommit()
+	}
+	s.mu.Lock()
+	ended := candidate.candidateState != candidatePending || channelClosed(candidate.client.Done())
+	if ended && candidate.candidateState == candidatePending {
+		candidate.candidateState = candidateEnded
+	}
+	if s.phase != sessionRunning || s.active != nil || s.runtimeGeneration != generation || s.settings != current || s.native.Ref.Value() != sessionID || s.rt != old || ended {
+		if old != nil && old.router != nil && s.rt == old && s.runtimeGeneration == generation && s.phase == sessionRunning {
+			old.router.publish(s, old, generation)
+		}
+		s.mu.Unlock()
+		return provider.ExecutionSettings{}, provider.ModelPresentation{}, provider.NewProviderError(provider.ErrorNotReady)
+	}
+	s.rt = candidate
+	s.runtimeGeneration++
+	newGeneration := s.runtimeGeneration
+	candidate.generation = newGeneration
+	candidate.candidateState = candidateCommitted
+	s.settings = wanted
+	s.presentation = presentation
+	s.native.Model = wanted.Model
+	s.native.Settings = copySettings(wanted)
+	s.native.Presentation = copyPresentation(presentation)
+	s.native.UpdatedAt = s.driver.config.Clock.Now().UTC()
+	s.configGeneration++
+	s.retired = append(s.retired, old)
+	router.publish(s, candidate, newGeneration)
+	s.mu.Unlock()
+	failed = false
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), cursorCleanupTimeout)
+	closeErr := old.close(closeCtx)
+	cancelClose()
+	if closeErr == nil {
+		s.releaseRuntime(old)
+	}
+	return wanted, presentation, nil
 }
 
 func (s *Session) validatePreflightLocked(request provider.PreflightRequest) (provider.PreflightResult, error) {
@@ -333,9 +492,6 @@ func (s *Session) validatePreflightLocked(request provider.PreflightRequest) (pr
 	}
 	settings := s.settings
 	if request.Turn.Settings != nil {
-		if *request.Turn.Settings != s.settings {
-			return provider.PreflightResult{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
-		}
 		settings = *request.Turn.Settings
 	}
 	model, err := s.catalog.Resolve(settings)
@@ -364,6 +520,20 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 	if request.Validate() != nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
+	if request.Settings != nil {
+		s.mu.Lock()
+		changed := *request.Settings != s.settings
+		s.mu.Unlock()
+		if changed {
+			settings, presentation, err := s.ApplySettings(ctx, *request.Settings)
+			if err != nil {
+				return provider.AcceptedTurn{}, err
+			}
+			// Process-scoped selection is durable before prompt admission. Keep this
+			// event uncorrelated so the broker never treats it as proof of turn admission.
+			s.emit(provider.NewVerifiedSettingsEvent("", settings, presentation))
+		}
+	}
 	envelope, err := provider.Build(request, provider.PolicyConfigured)
 	if err != nil {
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorProtocolFailure)
@@ -373,6 +543,8 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 	settingsSnapshot := s.settings
 	sessionID := s.native.Ref.Value()
 	generationSnapshot := s.configGeneration
+	runtimeSnapshot := s.rt
+	runtimeGeneration := s.runtimeGeneration
 	builder := s.promptBlocks
 	s.mu.Unlock()
 	if preflightErr != nil {
@@ -385,11 +557,13 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 	promptCtx, promptCancel := context.WithCancel(context.Background())
 	turn := &activePrompt{request: request, accepted: make(chan struct{}), rejected: make(chan struct{}), done: make(chan error, 1), result: make(chan promptResult, 1), promptDone: make(chan struct{}), promptCancel: promptCancel, assistantID: safeID("assistant", request.TurnID), admission: admissionPending, phase: turnRunning, permissionGateOpen: true, tools: make(map[string]cachedTool)}
 	s.mu.Lock()
-	if s.phase != sessionRunning || s.active != nil || s.settings != settingsSnapshot || s.native.Ref.Value() != sessionID || s.configGeneration != generationSnapshot {
+	if s.phase != sessionRunning || s.active != nil || s.switching || s.settings != settingsSnapshot || s.native.Ref.Value() != sessionID || s.configGeneration != generationSnapshot || s.rt != runtimeSnapshot || s.runtimeGeneration != runtimeGeneration {
 		s.mu.Unlock()
 		promptCancel()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
 	}
+	turn.runtime = runtimeSnapshot
+	turn.runtimeGeneration = runtimeGeneration
 	s.active = turn
 	s.mu.Unlock()
 	go func() {
@@ -397,7 +571,7 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 		var result struct {
 			StopReason string `json:"stopReason"`
 		}
-		delivery, callErr := s.rt.client.Call(promptCtx, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": blocks}, &result)
+		delivery, callErr := runtimeSnapshot.client.Call(promptCtx, "session/prompt", map[string]any{"sessionId": sessionID, "prompt": blocks}, &result)
 		s.mu.Lock()
 		turn.promptCallReturned = true
 		beforePromptReturned := s.beforePromptReturned
@@ -453,13 +627,22 @@ func (s *Session) Submit(ctx context.Context, request provider.TurnRequest) (pro
 		}
 		s.mu.Unlock()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
-	case <-s.rt.client.Done():
+	case <-runtimeSnapshot.client.Done():
 		s.mu.Lock()
 		if turn.admission == admissionPending {
 			turn.admission = admissionUnknown
 		}
 		s.mu.Unlock()
 		return provider.AcceptedTurn{}, provider.NewProviderError(provider.ErrorAcceptanceUnknown)
+	}
+}
+
+func (s *Session) removeRetiredLocked(target *runtime) {
+	for i, rt := range s.retired {
+		if rt == target {
+			s.retired = append(s.retired[:i], s.retired[i+1:]...)
+			return
+		}
 	}
 }
 
@@ -776,11 +959,12 @@ func (s *Session) failTransportAsync() {
 	}
 	s.cleanupStarted = true
 	s.phase = sessionFailed
+	rt := s.rt
 	if turn := s.active; turn != nil {
 		turn.permissionGateOpen = false
 	}
 	s.mu.Unlock()
-	go func() { _ = s.rt.close(context.Background()) }()
+	go func() { _ = rt.close(context.Background()) }()
 }
 
 func (s *Session) publishLocked(event provider.Event) bool {
@@ -805,14 +989,15 @@ func (s *Session) publishLocked(event provider.Event) bool {
 		s.closeEventsLocked()
 		if !s.cleanupStarted {
 			s.cleanupStarted = true
-			go func(turn *activePrompt) {
+			rt := s.rt
+			go func(turn *activePrompt, rt *runtime) {
 				ctx, cancel := context.WithTimeout(context.Background(), s.driver.config.IdleTimeout)
 				if turn != nil {
 					_ = s.settlePermissions(ctx, turn)
 				}
 				cancel()
-				_ = s.rt.close(context.Background())
-			}(failedTurn)
+				_ = rt.close(context.Background())
+			}(failedTurn, rt)
 		}
 		return false
 	}
@@ -882,7 +1067,16 @@ func (s *Session) performStop(ctx context.Context, turn *activePrompt, sessionID
 	if err := s.settlePermissions(ctx, turn); err != nil {
 		return provider.NewProviderError(provider.ErrorProtocolFailure)
 	}
-	delivery, err := s.rt.client.Notify(ctx, "session/cancel", map[string]any{"sessionId": sessionID})
+	rt := turn.runtime
+	if rt == nil { // compatibility for low-level lifecycle fixtures
+		s.mu.Lock()
+		rt = s.rt
+		s.mu.Unlock()
+	}
+	if rt == nil {
+		return provider.NewProviderError(provider.ErrorProtocolFailure)
+	}
+	delivery, err := rt.client.Notify(ctx, "session/cancel", map[string]any{"sessionId": sessionID})
 	s.mu.Lock()
 	turn.cancelState = permissionSettled
 	s.mu.Unlock()
@@ -917,8 +1111,22 @@ func (s *Session) resolveTransportPermissionsLocked() bool {
 	return allComplete
 }
 
-func (s *Session) transportEnded() {
+func (s *Session) transportEnded(identity ...any) {
 	s.mu.Lock()
+	rt, generation := s.rt, s.runtimeGeneration
+	if len(identity) == 2 {
+		rt, _ = identity[0].(*runtime)
+		switch value := identity[1].(type) {
+		case uint64:
+			generation = value
+		case int:
+			generation = uint64(value)
+		}
+	}
+	if generation != s.runtimeGeneration || rt != s.rt {
+		s.mu.Unlock()
+		return
+	}
 	permissionsComplete := s.resolveTransportPermissionsLocked()
 	if s.closed {
 		s.clearPermissionRecordsLocked()
@@ -947,10 +1155,26 @@ func (s *Session) transportEnded() {
 
 func (s *Session) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
-	if s.phase == sessionClosed {
+	if s.switching {
+		done := s.switchDone
+		s.mu.Unlock()
+		select {
+		case <-done:
+			return s.Shutdown(ctx)
+		case <-ctx.Done():
+			return provider.NewProviderError(provider.ErrorProtocolFailure)
+		}
+	}
+	if s.phase == sessionClosed && len(s.owned) == 0 && len(s.retired) == 0 {
 		err := s.shutdownErr
 		s.mu.Unlock()
 		return err
+	}
+	if s.phase == sessionClosed && (len(s.owned) != 0 || len(s.retired) != 0) && s.shutdownDone != nil && channelClosed(s.shutdownDone) {
+		// A previous cleanup attempt finished without reaping every retired
+		// generation. A later Shutdown is an explicit retry opportunity.
+		s.shutdownDone = nil
+		s.shutdownErr = nil
 	}
 	if s.shutdownDone != nil {
 		done := s.shutdownDone
@@ -992,8 +1216,31 @@ func (s *Session) Shutdown(ctx context.Context) error {
 	} else {
 		stopErr = s.cancelPermissions(ctx)
 	}
-	closeErr := s.rt.close(ctx)
 	s.mu.Lock()
+	ownedSet := make(map[*runtime]struct{}, len(s.owned)+len(s.retired)+1)
+	for rt := range s.owned {
+		ownedSet[rt] = struct{}{}
+	}
+	for _, rt := range append(append([]*runtime(nil), s.retired...), s.rt) {
+		if rt != nil {
+			ownedSet[rt] = struct{}{}
+		}
+	}
+	s.mu.Unlock()
+	var closeErr error
+	closedOwned := make([]*runtime, 0, len(ownedSet))
+	for rt := range ownedSet {
+		if err := rt.close(ctx); err != nil {
+			closeErr = errors.Join(closeErr, err)
+		} else {
+			closedOwned = append(closedOwned, rt)
+		}
+	}
+	s.mu.Lock()
+	for _, rt := range closedOwned {
+		delete(s.owned, rt)
+		s.removeRetiredLocked(rt)
+	}
 	permissionsComplete := s.resolveTransportPermissionsLocked()
 	if stopErr == nil && permissionsComplete && turn != nil && channelClosed(turn.accepted) && !turn.terminal {
 		turn.terminal = true

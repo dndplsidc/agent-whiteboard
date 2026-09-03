@@ -1230,6 +1230,51 @@ test("uses accessible Codex model controls and captures accepted exact settings"
   await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key)), codexSettingsKey)).toEqual({ model: "gpt-5.6-sol", effort: "xhigh", speed: "standard" });
 });
 
+test("searches a large Cursor variant catalog with keyboard focus and contained layout", async ({ context, page, localAgentSidebar }) => {
+  await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Cursor variants\n", creatorContext: "Large catalog context.\n" });
+  await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+  await page.getByLabel("Conversation provider").selectOption("cursor");
+  await connectSidebar(page, "cursor");
+  const catalog = Array.from({ length: 155 }, (_, index) => ({
+    model: index === 0 ? "cursor-small" : `cursor-variant-${index}`,
+    model_display_name: index === 0 ? "Cursor Small" : index === 87 ? "Native Fast High 87" : `Cursor Variant ${index}`,
+    description: `Cursor catalog variant ${index}.`,
+    default_effort: "default",
+    supported_reasoning_efforts: [{ effort: "default", description: "Provider-managed reasoning." }],
+    supports_images: true,
+    default: index === 0,
+    supports_fast: false,
+  }));
+  localAgentSidebar.refreshCatalog(catalog, "cursor");
+
+  const pill = page.locator(".agent-model-pill");
+  await expect(pill).toHaveAccessibleName("Model Cursor Small");
+  await pill.click();
+  const menu = page.locator(".agent-model-menu");
+  await menu.locator('[data-settings-section="model"]').press("ArrowRight");
+  const filter = page.getByLabel("Filter models");
+  await expect(filter).toBeFocused();
+  await filter.fill("fast high");
+  await expect(menu.locator('[role="menuitemradio"]:visible')).toHaveCount(1);
+  await expect(menu.locator('[role="menuitemradio"]:visible')).toContainText("Native Fast High 87");
+  await filter.press("ArrowDown");
+  await expect(menu.locator('[data-settings-value="cursor-variant-87"]')).toBeFocused();
+  await filter.focus();
+  await filter.fill("cursor-variant-154");
+  await expect(menu.locator('[role="menuitemradio"]:visible')).toHaveCount(1);
+  await filter.fill("does-not-exist");
+  await expect(menu.getByRole("status")).toHaveText("No models found.");
+  const [menuBox, drawerBox] = await Promise.all([menu.boundingBox(), page.locator(".agent-drawer").boundingBox()]);
+  expect(menuBox.x).toBeGreaterThanOrEqual(drawerBox.x);
+  expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(drawerBox.x + drawerBox.width + 1);
+  await page.setViewportSize({ width: 390, height: 720 });
+  const narrowBox = await menu.boundingBox();
+  expect(narrowBox.x).toBeGreaterThanOrEqual(0);
+  expect(narrowBox.x + narrowBox.width).toBeLessThanOrEqual(390);
+  await filter.press("Escape");
+  await expect(pill).toBeFocused();
+});
+
 for (const provider of ["codex", "cursor"]) {
   test(`preserves a busy ${provider} draft without queue admission`, async ({ context, page, localAgentSidebar }) => {
     const label = providerFixtures[provider].label;
@@ -1272,7 +1317,7 @@ for (const provider of ["codex", "cursor"]) {
     await expect(pill).toBeEnabled();
     await expect(pill).toHaveAccessibleName(provider === "codex"
       ? "Model 5.6 Sol, effort Extra high, speed Standard"
-      : "Model Cursor Large, effort Default, speed Standard");
+      : "Model Cursor Large");
     if (await menu.isVisible()) await menu.press("Escape");
   });
 }

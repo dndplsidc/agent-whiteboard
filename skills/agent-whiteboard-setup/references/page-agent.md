@@ -16,7 +16,7 @@ command -v cursor-agent || true
 
 At least one requested provider must be installed and authenticated through its own CLI. For Cursor, report `cursor-agent login` as the native manual login step when needed. Agent Whiteboard has no provider login command: never run or configure authentication, open a login browser, receive credentials, or edit provider credentials, native configuration, or shell state. Report only provider availability and required manual action, never secrets.
 
-Cursor default discovery checks exactly `cursor-agent`; never check or select a generic executable named `agent` by default. A generic `agent` is valid only when the user explicitly supplies its path through the Cursor selector.
+Cursor default discovery checks exactly `cursor-agent`; never check or select a generic executable named `agent` by default. A generic `agent` is valid only when the user explicitly supplies its path through the Cursor selector. Agent Whiteboard discovers Cursor's exact complete model variants with the public `cursor-agent --list-models` command and starts a conversation as `cursor-agent --model <slug> acp`. The Page Agent menu is searchable and intentionally has no independent Cursor Effort or Speed controls because those attributes are already part of each CLI variant. Ordinary messages reuse the conversation child. An explicit idle model change safely replaces only that child after the candidate loads the same native session; a failed replacement retains the previous process and settings.
 
 If an executable is outside `PATH`, pass its path when starting the broker:
 

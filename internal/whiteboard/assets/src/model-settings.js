@@ -18,7 +18,7 @@ export function settingsStorageKey(provider) {
 }
 
 const encoder = new TextEncoder();
-const MAX_MODELS = 64;
+const MAX_MODELS = 256;
 const MAX_EFFORTS = 16;
 const MAX_MODEL_BYTES = 256;
 const MAX_EFFORT_BYTES = 64;
@@ -259,12 +259,12 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
   menu.hidden = true;
   element.append(button, menu);
 
-  let current = { visible: false, enabled: false, settings: null, presentation: null, catalog: [] };
+  let current = { visible: false, enabled: false, settings: null, presentation: null, catalog: [], variantOnly: false };
   let view = "root";
   let returnSection = null;
 
   function focusableItems() {
-    return [...menu.querySelectorAll('[role^="menuitem"]')];
+    return [...menu.querySelectorAll('[role^="menuitem"]:not([hidden])')];
   }
 
   function close({ restoreFocus = false } = {}) {
@@ -278,7 +278,8 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
     view = section;
     returnSection = section;
     renderMenu();
-    (menu.querySelector('[role="menuitemradio"][aria-checked="true"]') ?? menu.querySelector('[role="menuitemradio"]') ?? focusableItems()[0])?.focus();
+    if (section === "model" && current.variantOnly) menu.querySelector('[aria-label="Filter models"]')?.focus();
+    else (menu.querySelector('[role="menuitemradio"][aria-checked="true"]') ?? menu.querySelector('[role="menuitemradio"]') ?? focusableItems()[0])?.focus();
   }
 
   function renderRoot() {
@@ -290,8 +291,8 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
       speed: current.settings.speed === "fast" ? "Fast" : "Standard",
     };
     const sections = ["model"];
-    if ((model?.supported_reasoning_efforts.length ?? 0) > 1) sections.push("effort");
-    if (model?.supports_fast === true) sections.push("speed");
+    if (!current.variantOnly && (model?.supported_reasoning_efforts.length ?? 0) > 1) sections.push("effort");
+    if (!current.variantOnly && model?.supports_fast === true) sections.push("speed");
     for (const section of sections) {
       const row = menuButton(doc, { label: `${section[0].toUpperCase()}${section.slice(1)}`, description: values[section] });
       row.dataset.settingsSection = section;
@@ -322,6 +323,25 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
 
   function renderModelChoices() {
     addBack();
+    let filter = null;
+    let status = null;
+    const choices = [];
+    if (current.variantOnly) {
+      filter = doc.createElement("input");
+      filter.type = "search";
+      filter.className = "agent-model-filter";
+      filter.setAttribute("aria-label", "Filter models");
+      filter.placeholder = "Filter models";
+      filter.autocomplete = "off";
+      filter.spellcheck = false;
+      menu.append(filter);
+      status = doc.createElement("div");
+      status.className = "agent-model-filter-empty";
+      status.setAttribute("role", "status");
+      status.hidden = true;
+      status.textContent = "No models found.";
+      menu.append(status);
+    }
     for (const model of current.catalog) {
       const compatibility = modelCompatibility(current.catalog, current.settings, model.model);
       const choice = menuButton(doc, {
@@ -334,7 +354,17 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
       choice.dataset.settingsValue = model.model;
       choice.addEventListener("click", () => { if (compatibility.compatible) choose({ ...current.settings, model: model.model }); });
       menu.append(choice);
+      choices.push({ choice, searchText: `${model.model_display_name}\n${model.model}`.toLowerCase() });
     }
+    filter?.addEventListener("input", () => {
+      const query = filter.value.toLowerCase().trim();
+      let visible = 0;
+      for (const entry of choices) {
+        entry.choice.hidden = query !== "" && !entry.searchText.includes(query);
+        if (!entry.choice.hidden) visible += 1;
+      }
+      status.hidden = visible !== 0;
+    });
   }
 
   function renderEffortChoices() {
@@ -382,6 +412,7 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
       settings: cloneExecutionSettings(next.settings),
       presentation: next.presentation ? { ...next.presentation } : null,
       catalog: Array.isArray(next.catalog) ? next.catalog : [],
+      variantOnly: next.variantOnly === true,
     };
     element.hidden = !current.visible;
     const settingsValid = validExecutionSettings(current.settings);
@@ -398,7 +429,11 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
     const presented = current.presentation && current.presentation.model === current.settings.model
       ? { ...current.settings, model_display_name: current.presentation.model_display_name, selectable: current.presentation.selectable }
       : { ...current.settings, model_display_name: catalogModel(current.catalog, current.settings.model)?.model_display_name ?? current.settings.model, selectable: true };
-    const formatted = formatExecutionSettings(presented);
+    const formatted = current.variantOnly
+      ? validPresentedExecutionSettings(presented)
+        ? { visible: presented.model_display_name, accessible: `Model ${presented.model_display_name}`, fast: false }
+        : { visible: "Model options unavailable", accessible: "Model options unavailable", fast: false }
+      : formatExecutionSettings(presented);
     const label = doc.createElement("span");
     label.className = "agent-model-pill-label";
     label.textContent = formatted.visible;
@@ -452,12 +487,23 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
       menu.querySelector(`[data-settings-section="${section}"]`)?.focus();
       return;
     }
-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !target?.getAttribute?.("role")?.startsWith("menuitem")) return;
-    const items = focusableItems();
-    const index = items.indexOf(target);
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const isMenuItem = target?.getAttribute?.("role")?.startsWith("menuitem");
+    const isModelFilter = view === "model" && target?.getAttribute?.("aria-label") === "Filter models";
+    if (!isMenuItem && !isModelFilter) return;
+    const items = isModelFilter
+      ? [...menu.querySelectorAll('[role="menuitemradio"]:not([hidden])')]
+      : focusableItems();
+    const index = isModelFilter ? -1 : items.indexOf(target);
     if (items.length === 0) return;
     event.preventDefault();
-    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : event.key === "ArrowDown" ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+    const next = event.key === "Home" || (isModelFilter && event.key === "ArrowDown")
+      ? 0
+      : event.key === "End" || (isModelFilter && event.key === "ArrowUp")
+        ? items.length - 1
+        : event.key === "ArrowDown"
+          ? (index + 1) % items.length
+          : (index - 1 + items.length) % items.length;
     items[next].focus();
   }
 

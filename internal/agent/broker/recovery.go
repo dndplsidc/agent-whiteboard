@@ -107,7 +107,7 @@ func (actor *conversation) runRecovery(ctx context.Context, generation uint64, m
 	}
 	request := provider.ResumeRequest{
 		Provider: actor.identity.Provider, Access: accessForProvider(actor.identity.Provider),
-		NativeSession: mapping.Current.NativeSession, Workspace: workspace,
+		NativeSession: mapping.Current.NativeSession, Workspace: workspace, Settings: cloneExecutionSettings(mapping.Current.Settings),
 	}
 	if request.Validate() != nil {
 		results <- result

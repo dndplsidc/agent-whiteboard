@@ -1560,6 +1560,11 @@ describe("local agent rendering and controls", () => {
     const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
     options.onEvent(snapshotFactory());
     expect(drawer.elements.modelControl.element.hidden).toBe(false);
+    if (provider === "cursor") {
+      expect(drawer.elements.modelControl.button.textContent).toBe("Cursor Standard");
+      expect(drawer.elements.modelControl.button.getAttribute("aria-label")).toBe("Model Cursor Standard");
+      expect(drawer.elements.modelControl.button.querySelector(".agent-model-pill-fast")).toBeNull();
+    }
     drawer.elements.modelControl.button.click();
     expect([...drawer.elements.modelControl.menu.querySelectorAll("[data-settings-section]")].map(({ dataset }) => dataset.settingsSection)).toEqual(sections);
     expect(drawer.elements.setup.textContent).toContain(accessCopy);

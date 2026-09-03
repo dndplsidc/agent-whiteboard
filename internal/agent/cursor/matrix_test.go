@@ -100,7 +100,7 @@ func TestCursorMatrixExactOpenParamsAndReplayBoundary(t *testing.T) {
 		t.Fatalf("create history = %+v, %v", page, err)
 	}
 	ref, _ := provider.NewNativeSessionRef("native-exact")
-	resumed, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+	resumed, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref, Settings: cursorTestSettings("model-a")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestCursorMatrixExactOpenParamsAndReplayBoundary(t *testing.T) {
 	launcher.mu.Lock()
 	first, second := launcher.children[0], launcher.children[1]
 	launcher.mu.Unlock()
-	if got, want := string(matrixRequest(t, first, "session/new")), `{"cwd":"`+root+`","mcpServers":[]}`; got != want {
+	if got, want := string(matrixRequest(t, first, "session/new")), `{"cwd":"`+root+`","mcpServers":[],"model":"model-a"}`; got != want {
 		t.Fatalf("new params = %s, want %s", got, want)
 	}
 	if got, want := string(matrixRequest(t, second, "session/load")), `{"cwd":"`+root+`","mcpServers":[],"sessionId":"native-exact"}`; got != want {
@@ -132,7 +132,7 @@ func TestCursorResumeAcceptsStandardLoadResponseWithoutSessionID(t *testing.T) {
 		"": {result: map[string]any{"sessions": []any{map[string]any{"sessionId": "native-standard"}}}},
 	}
 	ref, _ := provider.NewNativeSessionRef("native-standard")
-	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref, Settings: cursorTestSettings("model-a")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestCursorResumeRejectsMismatchedLoadResponseSessionID(t *testing.T) {
 		"": {result: map[string]any{"sessions": []any{map[string]any{"sessionId": "native-requested"}}}},
 	}
 	ref, _ := provider.NewNativeSessionRef("native-requested")
-	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref, Settings: cursorTestSettings("model-a")})
 	assertMatrixProviderError(t, err, provider.ErrorProtocolIncompatible)
 	if opened != nil {
 		_ = opened.Shutdown(context.Background())
@@ -163,7 +163,7 @@ func TestCursorResumeProvesNativeSessionExistsBeforeLoad(t *testing.T) {
 		"": {result: map[string]any{"sessions": []any{}}},
 	}
 	ref, _ := provider.NewNativeSessionRef("missing-native")
-	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+	opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref, Settings: cursorTestSettings("model-a")})
 	assertMatrixProviderError(t, err, provider.ErrorNativeSessionMissing)
 	if opened != nil {
 		_ = opened.Shutdown(context.Background())
@@ -196,7 +196,7 @@ func TestCursorMatrixReplayRejectsKnownInboundRequests(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d, launcher, root := matrixDriver(t, scriptScenario{loadResult: open, loadRequestMethod: tc.method, loadRequestParams: tc.params})
 			ref, _ := provider.NewNativeSessionRef("native")
-			opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+			opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref, Settings: cursorTestSettings("model-a")})
 			if tc.wantError {
 				assertMatrixProviderError(t, err, provider.ErrorMalformedStream)
 			} else if err != nil {
@@ -236,7 +236,7 @@ func TestCursorMatrixReplayConfigUpdateValidationAndAuthority(t *testing.T) {
 	t.Run("malformed fails replay", func(t *testing.T) {
 		malformed := map[string]any{"sessionId": "native", "update": map[string]any{"sessionUpdate": "config_option_update", "configOptions": []any{map[string]any{"id": "model"}}}}
 		d, _, root := matrixDriver(t, scriptScenario{loadResult: open, replayUpdates: []any{malformed}})
-		opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+		opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref, Settings: cursorTestSettings("model-a")})
 		assertMatrixProviderError(t, err, provider.ErrorMalformedStream)
 		if opened != nil {
 			_ = opened.Shutdown(context.Background())
@@ -245,7 +245,7 @@ func TestCursorMatrixReplayConfigUpdateValidationAndAuthority(t *testing.T) {
 	t.Run("valid update is discarded in favor of load response", func(t *testing.T) {
 		valid := map[string]any{"sessionId": "native", "update": map[string]any{"sessionUpdate": "config_option_update", "configOptions": testOptions("model-b")}}
 		d, _, root := matrixDriver(t, scriptScenario{loadResult: open, replayUpdates: []any{valid}})
-		opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref})
+		opened, err := d.Resume(context.Background(), provider.ResumeRequest{Provider: provider.NameCursor, Access: provider.AccessConfigured, Workspace: root, NativeSession: ref, Settings: cursorTestSettings("model-a")})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/acp"
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/provider"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 )
 
 const (
@@ -26,18 +28,67 @@ const (
 	maxListSemanticBytes = 16 << 20
 )
 
+type candidateState uint8
+
+const (
+	candidateNone candidateState = iota
+	candidatePending
+	candidateCommitted
+	candidateEnded
+)
+
+const cursorCleanupTimeout = 3 * time.Second
+
 type runtime struct {
-	child   provider.ManagedChild
-	client  *acp.Client
-	caps    capabilities
-	session *Session
+	child          provider.ManagedChild
+	client         *acp.Client
+	caps           capabilities
+	session        *Session
+	router         *inboundRouter
+	candidateState candidateState // guarded by the owning Session.mu
+	generation     uint64         // guarded by the owning Session.mu
 }
 
 func (r *runtime) close(ctx context.Context) error {
-	if r == nil || r.client == nil {
+	if r == nil {
 		return nil
 	}
-	return r.client.Shutdown(ctx)
+	if r.client != nil {
+		return r.client.Shutdown(ctx)
+	}
+	if common.IsNil(r.child) {
+		return nil
+	}
+	// The process is already owned before ACP client construction. If setup
+	// fails in that window, perform the same bounded terminate/kill/reap shape
+	// rather than pretending a client-less runtime was cleaned up.
+	waited := make(chan error, 1)
+	go func() { waited <- r.child.Wait() }()
+	var errs []error
+	if err := r.child.Terminate(); err != nil {
+		errs = append(errs, err)
+	}
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case err := <-waited:
+		return errors.Join(append(errs, err)...)
+	case <-timer.C:
+	case <-ctx.Done():
+		return errors.Join(append(errs, ctx.Err())...)
+	}
+	if err := r.child.Kill(); err != nil {
+		errs = append(errs, err)
+	}
+	timer.Reset(500 * time.Millisecond)
+	select {
+	case err := <-waited:
+		return errors.Join(append(errs, err)...)
+	case <-timer.C:
+		return errors.Join(append(errs, errors.New("Cursor child reap timed out"))...)
+	case <-ctx.Done():
+		return errors.Join(append(errs, ctx.Err())...)
+	}
 }
 func (r *runtime) defaultModel() string { return "Cursor default" }
 

@@ -338,6 +338,14 @@ func TestDriverLifecycleOperationsAreExplicitAndRejectZeroReferences(t *testing.
 	require.NoError(t, create.Validate())
 	resume := provider.ResumeRequest{Provider: provider.NamePi, Access: provider.AccessConfigured, NativeSession: ref, Workspace: workspace}
 	require.NoError(t, resume.Validate())
+	resumeSettings := provider.ExecutionSettings{Model: "durable-model", Effort: "default", Speed: provider.SpeedStandard}
+	resume.Settings = &resumeSettings
+	require.NoError(t, resume.Validate())
+	invalidResumeSettings := resumeSettings
+	invalidResumeSettings.Model = ""
+	resume.Settings = &invalidResumeSettings
+	require.Error(t, resume.Validate())
+	resume.Settings = &resumeSettings
 	inspect := provider.InspectRequest{Provider: provider.NamePi, NativeSession: ref}
 	require.NoError(t, inspect.Validate())
 	deleteRequest := provider.DeleteRequest{Provider: provider.NamePi, NativeSession: ref}

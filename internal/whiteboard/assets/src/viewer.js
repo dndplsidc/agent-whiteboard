@@ -3819,6 +3819,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       settings: settingsDraft?.draft ?? null,
       presentation: settingsDraft?.effectivePresentation ?? state.effectiveSettings,
       catalog: state.catalog,
+      variantOnly: selectedProvider === "cursor",
     });
     renderDraftAttachments();
     stopButton.disabled = state.activeWork === null || state.activeWork.state === "stopping";

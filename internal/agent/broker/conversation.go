@@ -861,6 +861,13 @@ func (actor *conversation) handleProviderEvent(attachments map[*clientAttachment
 		actor.publishSkillCatalog(attachments, source)
 		return
 	}
+	// An uncorrelated settings event describes authoritative process-scoped
+	// state. It is independent of prompt admission, including while a submit is
+	// starting, and must never be buffered as evidence that the prompt was sent.
+	if source.Kind == provider.EventSettings && source.TurnID == "" {
+		actor.publishSettingsEvent(attachments, source)
+		return
+	}
 	if source.Kind == provider.EventCompact {
 		if actor.compact != nil && actor.compact.phase == compactStarting && source.Compact != nil && source.Compact.WorkID == actor.compact.request.WorkID && actor.compact.pendingTerminal == nil {
 			copyOfSource := source
@@ -1024,7 +1031,7 @@ func (actor *conversation) flushPendingProviderEvents(attachments map[*clientAtt
 
 func (actor *conversation) providerEventMatchesActive(source provider.Event) bool {
 	if source.Kind == provider.EventSettings {
-		return actor.active != nil && (source.TurnID == "" || source.TurnID == actor.active.request.TurnID)
+		return actor.active != nil && source.TurnID == actor.active.request.TurnID
 	}
 	if source.Kind == provider.EventInteractionResolved {
 		return true

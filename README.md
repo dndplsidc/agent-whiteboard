@@ -100,7 +100,7 @@ The publishing and setup skills stay separate so each invocation loads only the 
 
 ## Use Page Agent
 
-Page Agent lets a reader discuss the current whiteboard with a locally running Pi, Codex, or Cursor provider. The reader explicitly connects, reviews what will be shared, and keeps the provider's normal model, tools, approval policy, sandbox, and project configuration. Provider-specific features remain provider-specific; Cursor does not expose a native skill catalog or manual compaction.
+Page Agent lets a reader discuss the current whiteboard with a locally running Pi, Codex, or Cursor provider. The reader explicitly connects, reviews what will be shared, and uses the selected provider model with the provider's normal tools, approval policy, sandbox, and project configuration. Provider-specific features remain provider-specific; Cursor does not expose a native skill catalog or manual compaction.
 
 Setup has two sides: the publishing server must expose Page Agent, and each reader must run and authorize their own local broker.
 
@@ -218,7 +218,7 @@ Readers can add more precise context without copying and pasting:
 - In trusted HTML, use **+ Add** or the **Components** chooser for eligible sections, images, charts, tables, code, quotes, and explicitly declared components.
 - Add private PNG, JPEG, GIF, or WebP attachments from the composer.
 
-Page Agent exposes each provider's supported subset of model and reasoning controls, streaming activity, interruption, archives, and approval or elicitation requests. Pi and Codex may also expose native skills and manual `/compact`; Cursor does not. Cursor projects Model from standard ACP configuration options, fixes Effort to Default and Speed to Standard, and derives image availability from ACP. Cursor archives can be listed and restored, but native archive deletion is unavailable. All three providers keep independent conversations for the same whiteboard.
+Page Agent exposes each provider's supported subset of model and reasoning controls, streaming activity, interruption, archives, and approval or elicitation requests. Pi and Codex may also expose native skills and manual `/compact`; Cursor does not. Cursor reads the public `cursor-agent --list-models` catalog and presents each exact CLI entry as a complete model variant, including any reasoning or Fast attribute already embedded in its native name. It does not fabricate separate Effort or Speed controls. Each Cursor conversation launches ACP as `cursor-agent --model <slug> acp`; an explicit model change replaces only that idle conversation's child and reloads the same native session, while ordinary messages retain the process. Cursor derives image availability from ACP. Cursor archives can be listed and restored, but native archive deletion is unavailable. All three providers keep independent conversations for the same whiteboard.
 
 ### Troubleshoot reader setup
 

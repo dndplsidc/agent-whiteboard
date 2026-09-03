@@ -127,6 +127,60 @@ func codexSubmit(commandID, clientID, conversationID, turnID, messageID string, 
 	}}
 }
 
+func TestIdleSettingsNeverTurnDeterministicSubmitFailureIntoAcceptanceUnknown(t *testing.T) {
+	for _, schedule := range []string{"event-before-result", "result-before-event"} {
+		t.Run(schedule, func(t *testing.T) {
+			broker, state, session, connection, _ := codexSettingsFixture(t, 9900)
+			defer broker.Close(context.Background())
+			next := provider.ExecutionSettings{Model: "gpt-5.6-luna", Effort: "medium", Speed: provider.SpeedStandard}
+			presentation := provider.ModelPresentation{ModelDisplayName: "5.6 Luna", Selectable: true}
+			settingsEvent := provider.NewVerifiedSettingsEvent("", next, presentation)
+			session.mu.Lock()
+			session.submitErr = provider.NewProviderError(provider.ErrorImageMissing)
+			if schedule == "event-before-result" {
+				session.submitEvent = &settingsEvent
+				session.submitGate = make(chan struct{})
+			}
+			session.mu.Unlock()
+
+			command := codexSubmit(sequenceID(9902), connection.clientID, connection.ConversationID(), sequenceID(9903), sequenceID(9904), next)
+			result := make(chan protocol.Event, 1)
+			go func() {
+				event, _ := connection.Command(context.Background(), command)
+				result <- event
+			}()
+			_ = receiveLifecycle(t, session.submitted)
+			if schedule == "event-before-result" {
+				for {
+					event := receiveLifecycle(t, connection.Events())
+					if event.Type == protocol.EventSettings {
+						break
+					}
+				}
+				session.mu.Lock()
+				close(session.submitGate)
+				session.mu.Unlock()
+			}
+			commandResult := receiveLifecycle(t, result)
+			requireCommandResult(t, commandResult, protocol.CommandRejected, protocol.ErrorImageMissing)
+			if schedule == "result-before-event" {
+				session.events <- settingsEvent
+				for {
+					event := receiveLifecycle(t, connection.Events())
+					if event.Type == protocol.EventSettings {
+						break
+					}
+				}
+			}
+			require.Equal(t, int32(1), session.submissions.Load(), "idle settings caused a replayed submit")
+			state.mu.Lock()
+			require.Equal(t, next, *state.mapping.Current.Settings)
+			require.Equal(t, presentation, *state.mapping.Current.Presentation)
+			state.mu.Unlock()
+		})
+	}
+}
+
 func TestCodexSubmitCapturesSettingsAndPublishesOnlyAfterDurableAcceptance(t *testing.T) {
 	broker, state, session, connection, _ := codexSettingsFixture(t, 10000)
 	defer broker.Close(context.Background())

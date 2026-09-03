@@ -14,6 +14,7 @@ import {
   reconcileSettingsDraft,
   recordSettingsSubmission,
   settingsCompatibility,
+  validModelCatalog,
   writeSettingsPreference,
 } from "./model-settings.js";
 
@@ -52,6 +53,17 @@ beforeEach(() => {
 });
 
 describe("provider settings helpers", () => {
+  test("accepts 256 catalog entries and rejects 257 under the existing catalog byte bound", () => {
+    const models = Array.from({ length: 257 }, (_, index) => ({
+      ...luna,
+      model: `cursor-model-${index}`,
+      model_display_name: `Cursor Model ${index}`,
+      default: index === 0,
+    }));
+    expect(validModelCatalog(models.slice(0, 256))).toBe(true);
+    expect(validModelCatalog(models)).toBe(false);
+  });
+
   test("validates compatibility without silently changing effort or speed", () => {
     expect(settingsCompatibility(catalog, fastSol)).toEqual({ compatible: true, reason: null });
     expect(settingsCompatibility(catalog, { ...fastSol, effort: "minimal" })).toEqual({ compatible: false, reason: "effort_unsupported" });
@@ -161,6 +173,8 @@ describe("provider settings menu", () => {
     const modelRow = control.menu.querySelector('[data-settings-section="model"]');
     modelRow.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
     expect(control.menu.dataset.view).toBe("model");
+    expect(control.menu.querySelector('[aria-label="Filter models"]')).toBeNull();
+    expect(document.activeElement?.dataset.settingsValue).toBe(sol.model);
     const lunaChoice = control.menu.querySelector(`[data-settings-value="${luna.model}"]`);
     expect(lunaChoice.getAttribute("aria-disabled")).toBe("true");
     expect(lunaChoice.textContent).toContain("Choose a supported effort and Standard speed first.");
@@ -170,6 +184,69 @@ describe("provider settings menu", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(control.menu.hidden).toBe(true);
     expect(document.activeElement).toBe(control.button);
+    control.destroy();
+  });
+
+  test("renders Cursor catalog rows as exact variants without synthetic controls", () => {
+    const cursorVariant = {
+      ...sol,
+      model: "cursor-fast-high",
+      model_display_name: "Cursor Fast High",
+      default_effort: "default",
+      supported_reasoning_efforts: [{ effort: "default", description: "Provider managed." }],
+      supports_fast: false,
+    };
+    const settings = { model: cursorVariant.model, effort: "default", speed: "standard" };
+    const presentation = { ...settings, model_display_name: cursorVariant.model_display_name, selectable: true };
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings, presentation, catalog: [cursorVariant], variantOnly: true });
+
+    expect(control.button.textContent).toBe("Cursor Fast High");
+    expect(control.button.getAttribute("aria-label")).toBe("Model Cursor Fast High");
+    expect(control.button.querySelector(".agent-model-pill-fast")).toBeNull();
+    control.button.click();
+    expect([...control.menu.querySelectorAll("[data-settings-section]")].map(({ dataset }) => dataset.settingsSection)).toEqual(["model"]);
+    expect(control.menu.textContent).toContain("Cursor Fast High");
+    expect(control.menu.textContent).not.toContain("Default");
+    expect(control.menu.textContent).not.toContain("Standard");
+    control.destroy();
+  });
+
+  test("filters a large model catalog by display name and slug with accessible keyboard focus", () => {
+    const largeCatalog = Array.from({ length: 155 }, (_, index) => ({
+      ...luna,
+      model: `cursor-variant-${index}`,
+      model_display_name: index === 87 ? "Native High Fast Special" : `Cursor Variant ${index}`,
+      default: index === 0,
+    }));
+    const settings = { model: largeCatalog[0].model, effort: "medium", speed: "standard" };
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings, presentation: { ...settings, model_display_name: largeCatalog[0].model_display_name, selectable: true }, catalog: largeCatalog, variantOnly: true });
+    control.button.click();
+    control.menu.querySelector('[data-settings-section="model"]').click();
+
+    const filter = control.menu.querySelector('input[aria-label="Filter models"]');
+    expect(document.activeElement).toBe(filter);
+    filter.value = "HIGH fast";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    expect([...control.menu.querySelectorAll('[role="menuitemradio"]:not([hidden])')].map((row) => row.dataset.settingsValue)).toEqual(["cursor-variant-87"]);
+    filter.value = "variant-154";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    expect([...control.menu.querySelectorAll('[role="menuitemradio"]:not([hidden])')].map((row) => row.dataset.settingsValue)).toEqual(["cursor-variant-154"]);
+    filter.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    expect(document.activeElement?.dataset.settingsValue).toBe("cursor-variant-154");
+    filter.focus();
+    filter.value = "";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    filter.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    expect(document.activeElement?.dataset.settingsValue).toBe("cursor-variant-154");
+    filter.focus();
+    filter.value = "missing";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(control.menu.querySelector('[role="status"]').textContent).toBe("No models found.");
+    expect(control.menu.querySelector("img, script")).toBeNull();
     control.destroy();
   });
 

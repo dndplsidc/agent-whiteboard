@@ -28,20 +28,26 @@ type Driver struct {
 	config          Config
 	probeMu         sync.Mutex
 	lastModel       string
+	catalog         provider.ModelCatalog
 	cachedReadiness provider.Readiness
 	cacheUntil      time.Time
+	probeTimeout    time.Duration
 }
 
 type inboundRouter struct {
-	mu      sync.RWMutex
-	session *Session
+	mu         sync.RWMutex
+	session    *Session
+	runtime    *runtime
+	generation uint64
 }
 
 func (r *inboundRouter) handle(ctx context.Context, request acp.Request) {
+	// Keep the read claim through dispatch. retire therefore proves that every
+	// handler for the previous binding has left before a runtime is swapped.
 	r.mu.RLock()
-	session := r.session
-	r.mu.RUnlock()
-	if session == nil {
+	defer r.mu.RUnlock()
+	session, rt, generation := r.session, r.runtime, r.generation
+	if session == nil || !session.runtimeCurrent(rt, generation) {
 		if request.Responder != nil {
 			_, _ = request.Responder.Respond(ctx, nil, &acp.RPCError{Code: -32601, Message: "method not found"})
 		}
@@ -50,9 +56,25 @@ func (r *inboundRouter) handle(ctx context.Context, request acp.Request) {
 	session.handle(ctx, request)
 }
 
-func (r *inboundRouter) publish(session *Session) {
+func (r *inboundRouter) publish(session *Session, identity ...any) {
+	rt, generation := session.rt, session.runtimeGeneration
+	if len(identity) == 2 {
+		rt, _ = identity[0].(*runtime)
+		switch value := identity[1].(type) {
+		case uint64:
+			generation = value
+		case int:
+			generation = uint64(value)
+		}
+	}
 	r.mu.Lock()
-	r.session = session
+	r.session, r.runtime, r.generation = session, rt, generation
+	r.mu.Unlock()
+}
+
+func (r *inboundRouter) retire() {
+	r.mu.Lock()
+	r.session, r.runtime, r.generation = nil, nil, 0
 	r.mu.Unlock()
 }
 
@@ -66,12 +88,12 @@ func NewDriver(config Config) (*Driver, error) {
 	if config.ClosedStreamGrace <= 0 {
 		config.ClosedStreamGrace = time.Second
 	}
-	launch := provider.LaunchRequest{Executable: config.Executable, Arguments: []string{"acp"}, Environment: config.Environment, WorkingDirectory: config.ProviderRoot}
+	launch := provider.LaunchRequest{Executable: config.Executable, Arguments: []string{"--model", "auto", "acp"}, Environment: config.Environment, WorkingDirectory: config.ProviderRoot}
 	if launch.Validate() != nil {
 		return nil, errors.New("invalid Cursor driver configuration")
 	}
 	config.Environment = slices.Clone(config.Environment)
-	return &Driver{config: config}, nil
+	return &Driver{config: config, probeTimeout: modelProbeTimeout}, nil
 }
 func absolute(p string) bool { return p != "" && filepath.IsAbs(p) && filepath.Clean(p) == p }
 
@@ -88,7 +110,15 @@ func (d *Driver) Readiness(ctx context.Context) provider.Readiness {
 	if d.cachedReadiness.State.Valid() && now.Before(d.cacheUntil) {
 		return d.cachedReadiness
 	}
-	rt, err := d.launch(ctx, d.config.ProviderRoot, nil)
+	catalog, err := d.probeCatalog(ctx)
+	if err != nil {
+		return readinessError(err)
+	}
+	settings, presentation, err := defaultSettings(catalog)
+	if err != nil {
+		return readinessError(err)
+	}
+	rt, err := d.launchModel(ctx, d.config.ProviderRoot, settings.Model, nil)
 	if err != nil {
 		return readinessError(err)
 	}
@@ -96,12 +126,9 @@ func (d *Driver) Readiness(ctx context.Context) provider.Readiness {
 	if _, err = walkSessionList(ctx, rt, ""); err != nil {
 		return readinessError(err)
 	}
-	model := rt.defaultModel()
-	if model == "" {
-		model = "Cursor default"
-	}
-	d.lastModel = model
-	result := provider.Readiness{State: provider.Ready, Provider: provider.NameCursor, Model: model}
+	d.catalog = catalog.Clone()
+	d.lastModel = settings.Model
+	result := provider.Readiness{State: provider.Ready, Provider: provider.NameCursor, Model: presentation.ModelDisplayName}
 	d.cachedReadiness = result
 	d.cacheUntil = now.Add(d.config.IdleTimeout)
 	return result
@@ -168,21 +195,59 @@ func readinessError(err error) provider.Readiness {
 	return provider.Readiness{State: provider.StartupFailed, Provider: provider.NameCursor}
 }
 
+func (d *Driver) currentCatalog(ctx context.Context) (provider.ModelCatalog, error) {
+	d.probeMu.Lock()
+	defer d.probeMu.Unlock()
+	now := d.config.Clock.Now().UTC()
+	if d.catalog.Validate() == nil && now.Before(d.cacheUntil) {
+		return d.catalog.Clone(), nil
+	}
+	catalog, err := d.probeCatalog(ctx)
+	if err != nil {
+		return provider.ModelCatalog{}, err
+	}
+	d.catalog = catalog.Clone()
+	d.cacheUntil = now.Add(d.config.IdleTimeout)
+	return catalog, nil
+}
+
 func (d *Driver) Create(ctx context.Context, req provider.CreateRequest) (provider.Session, error) {
 	if d == nil || req.Provider != provider.NameCursor || req.Validate() != nil {
 		return nil, provider.NewProviderError(provider.ErrorStartupFailed)
 	}
-	return d.open(ctx, req.Workspace, "session/new", map[string]any{"cwd": req.Workspace, "mcpServers": []any{}}, req.Settings)
+	catalog, err := d.currentCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	settings, _, err := defaultSettings(catalog)
+	if req.Settings != nil {
+		settings = *req.Settings
+	}
+	if err != nil || !catalog.Compatibility(settings).Compatible {
+		return nil, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+	}
+	return d.open(ctx, req.Workspace, "session/new", map[string]any{"cwd": req.Workspace, "mcpServers": []any{}, "model": settings.Model}, settings, catalog)
 }
 func (d *Driver) Resume(ctx context.Context, req provider.ResumeRequest) (provider.Session, error) {
-	if d == nil || req.Provider != provider.NameCursor || req.Validate() != nil {
+	if d == nil || req.Provider != provider.NameCursor || !req.NativeSession.Valid() || !absolute(req.Workspace) {
 		return nil, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	return d.open(ctx, req.Workspace, "session/load", map[string]any{"sessionId": req.NativeSession.Value(), "cwd": req.Workspace, "mcpServers": []any{}}, nil)
+	if req.Validate() != nil || req.Settings == nil {
+		return nil, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+	}
+	catalog, err := d.currentCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := catalog.Canonicalize(*req.Settings)
+	if err != nil || settings.Effort != "default" || settings.Speed != provider.SpeedStandard {
+		return nil, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+	}
+	return d.open(ctx, req.Workspace, "session/load", map[string]any{"sessionId": req.NativeSession.Value(), "cwd": req.Workspace, "mcpServers": []any{}}, settings, catalog)
 }
-func (d *Driver) open(ctx context.Context, workspace, method string, params map[string]any, wanted *provider.ExecutionSettings) (provider.Session, error) {
+func (d *Driver) open(ctx context.Context, workspace, method string, params map[string]any, wanted provider.ExecutionSettings, catalog provider.ModelCatalog) (provider.Session, error) {
 	router := &inboundRouter{}
-	rt, err := d.launch(ctx, workspace, router.handle)
+	rt, err := d.launchModel(ctx, workspace, wanted.Model, router.handle)
 	if err != nil {
 		return nil, err
 	}
@@ -190,8 +255,9 @@ func (d *Driver) open(ctx context.Context, workspace, method string, params map[
 	if method == "session/load" {
 		session.beginReplay()
 	}
-	router.publish(session)
-	go func() { <-rt.client.Done(); session.transportEnded() }()
+	rt.router = router
+	router.publish(session, rt, 1)
+	go func() { <-rt.client.Done(); session.transportEnded(rt, 1) }()
 	loadedSessionID := ""
 	if method == "session/load" {
 		target, validTarget := params["sessionId"].(string)
@@ -223,14 +289,9 @@ func (d *Driver) open(ctx context.Context, workspace, method string, params map[
 		}
 		opened.SessionID = loadedSessionID
 	}
-	if err = session.finishOpen(opened, loaded); err != nil {
+	if err = session.finishOpen(opened, loaded, catalog, wanted); err != nil {
 		_ = session.Shutdown(context.Background())
 		return session, err
-	}
-	if wanted != nil {
-		if _, _, err = session.ApplySettings(ctx, *wanted); err != nil {
-			return session, err
-		}
 	}
 	return session, nil
 }
@@ -238,9 +299,23 @@ func (d *Driver) Inspect(ctx context.Context, req provider.InspectRequest) (prov
 	if d == nil || req.Provider != provider.NameCursor || req.Validate() != nil {
 		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	d.probeMu.Lock()
-	defer d.probeMu.Unlock()
-	rt, err := d.launch(ctx, d.config.ProviderRoot, nil)
+	catalog, err := d.currentCatalog(ctx)
+	if err != nil {
+		return provider.NativeSession{}, err
+	}
+	if req.Settings == nil {
+		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+	}
+	settings, err := catalog.Canonicalize(*req.Settings)
+	if err != nil || settings.Effort != "default" || settings.Speed != provider.SpeedStandard {
+		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+	}
+	model, err := catalog.Resolve(settings)
+	if err != nil {
+		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorInvalidModelConfiguration)
+	}
+	presentation := provider.ModelPresentation{ModelDisplayName: model.DisplayName, Selectable: true}
+	rt, err := d.launchModel(ctx, d.config.ProviderRoot, settings.Model, nil)
 	if err != nil {
 		return provider.NativeSession{}, err
 	}
@@ -252,16 +327,26 @@ func (d *Driver) Inspect(ctx context.Context, req provider.InspectRequest) (prov
 	if item == nil {
 		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	}
-	catalog, settings, presentation, err := catalogFromOptions(item.ConfigOptions, rt.caps.Image)
-	if err != nil {
-		return provider.NativeSession{}, err
+	if _, err := validateConfigOptions(item.ConfigOptions); err != nil {
+		return provider.NativeSession{}, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
-	_ = catalog
+	_ = rt.caps.Image // The selected CLI row is authoritative; ACP only supplies capabilities.
 	now := d.config.Clock.Now().UTC()
 	return provider.NativeSession{Ref: req.NativeSession, Provider: provider.NameCursor, Model: settings.Model, Settings: &settings, Presentation: &presentation, CreatedAt: now, UpdatedAt: now}, nil
 }
 func (d *Driver) launch(ctx context.Context, cwd string, handler acp.RequestHandler) (*runtime, error) {
-	request := provider.LaunchRequest{Executable: d.config.Executable, Arguments: []string{"acp"}, Environment: slices.Clone(d.config.Environment), WorkingDirectory: cwd}
+	return d.launchModel(ctx, cwd, "auto", handler)
+}
+
+func (d *Driver) launchModel(ctx context.Context, cwd, model string, handler acp.RequestHandler) (*runtime, error) {
+	return d.launchModelOwned(ctx, cwd, model, handler, nil, nil)
+}
+
+// launchModelOwned transfers ownership immediately after process launch. The
+// callback runs before ACP client construction and initialize, so a stable
+// broker child can escalate every in-flight candidate.
+func (d *Driver) launchModelOwned(ctx context.Context, cwd, model string, handler acp.RequestHandler, own, release func(*runtime)) (_ *runtime, returnErr error) {
+	request := provider.LaunchRequest{Executable: d.config.Executable, Arguments: []string{"--model", model, "acp"}, Environment: slices.Clone(d.config.Environment), WorkingDirectory: cwd}
 	// Revalidate immediately before handing the path to the launcher. The
 	// launcher contract accepts a pathname, so this check must not be moved
 	// earlier where a substitution could occur in the intervening setup.
@@ -272,6 +357,21 @@ func (d *Driver) launch(ctx context.Context, cwd string, handler acp.RequestHand
 	if err != nil || common.IsNil(child) {
 		return nil, provider.NewProviderError(provider.ErrorStartupFailed)
 	}
+	rt := &runtime{child: child}
+	if own != nil {
+		own(rt)
+	}
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cursorCleanupTimeout)
+		cleanupErr := rt.close(cleanupCtx)
+		cancel()
+		if cleanupErr == nil && release != nil {
+			release(rt)
+		}
+	}()
 	client, err := acp.New(child, acp.Options{
 		Handler:               handler,
 		MaxInboundFrameBytes:  acp.SupportedMaxFrameBytes,
@@ -283,16 +383,14 @@ func (d *Driver) launch(ctx context.Context, cwd string, handler acp.RequestHand
 	if err != nil {
 		return nil, provider.NewProviderError(provider.ErrorStartupFailed)
 	}
-	rt := &runtime{child: child, client: client}
+	rt.client = client
 	var initialized initializeResult
 	params := map[string]any{"protocolVersion": 1, "clientCapabilities": map[string]any{}, "clientInfo": map[string]string{"name": "agent-whiteboard", "version": "1"}}
 	if _, err = client.Call(ctx, "initialize", params, &initialized); err != nil {
-		_ = rt.close(context.Background())
 		return nil, classifyRPC(err)
 	}
 	caps, err := parseCapabilities(initialized)
 	if err != nil {
-		_ = rt.close(context.Background())
 		return nil, err
 	}
 	rt.caps = caps

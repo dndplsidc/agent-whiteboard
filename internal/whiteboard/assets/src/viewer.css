@@ -2566,6 +2566,33 @@ body.agent-drawer-modal-open .agent-toast {
   display: none;
 }
 
+.agent-model-filter {
+  background: var(--awb-code-background);
+  border: 1px solid var(--awb-border);
+  border-radius: 0.55rem;
+  color: var(--awb-foreground);
+  font: inherit;
+  margin: 0.12rem;
+  min-height: 2rem;
+  padding: 0.4rem 0.55rem;
+  width: calc(100% - 0.24rem);
+}
+
+.agent-model-filter::placeholder {
+  color: var(--awb-muted);
+}
+
+.agent-model-filter-empty {
+  color: var(--awb-muted);
+  font-size: 0.72rem;
+  padding: 0.65rem 0.55rem;
+  text-align: center;
+}
+
+.agent-model-filter-empty[hidden] {
+  display: none;
+}
+
 .agent-model-menu > button {
   background: transparent !important;
   border: 0 !important;

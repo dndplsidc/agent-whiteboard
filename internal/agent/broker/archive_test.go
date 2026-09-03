@@ -380,6 +380,22 @@ func TestUnsupportedArchiveDeletePublishesCapabilityAndHasNoSideEffects(t *testi
 	state.mu.Unlock()
 }
 
+func TestCursorResumeReceivesClonedPersistedSettings(t *testing.T) {
+	broker, state, driver, connection, _ := archiveFixtureForProvider(t, 1690, provider.NameCursor, nil)
+	defer broker.Close(context.Background())
+	defer connection.Close(context.Background())
+	driver.mu.Lock()
+	require.NotEmpty(t, driver.resumeRequests)
+	request := driver.resumeRequests[0]
+	driver.mu.Unlock()
+	state.mu.Lock()
+	persisted := state.mapping.Current.Settings
+	state.mu.Unlock()
+	require.NotNil(t, request.Settings)
+	require.Equal(t, *persisted, *request.Settings)
+	require.NotSame(t, persisted, request.Settings)
+}
+
 func TestArchiveListIsTargetedPagedAndContainsNoPreviewContent(t *testing.T) {
 	broker, state, driver, first, identity := archiveFixture(t, 1700)
 	defer broker.Close(context.Background())

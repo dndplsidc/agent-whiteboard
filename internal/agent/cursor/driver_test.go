@@ -61,14 +61,43 @@ type scriptLauncher struct {
 	earlyInbound bool
 	listPages    map[string]scriptedListPage
 	scenarios    []scriptScenario
+	modelOutput  string
+	blockIndex   int
+	blockGate    <-chan struct{}
+	blockStarted chan struct{}
 }
+
+type completedChild struct{ output *bytes.Reader }
+type discardCloser struct{ io.Writer }
+
+func (discardCloser) Close() error              { return nil }
+func (c *completedChild) Input() io.WriteCloser { return discardCloser{io.Discard} }
+func (c *completedChild) Output() io.Reader     { return c.output }
+func (c *completedChild) Errors() io.Reader     { return bytes.NewReader(nil) }
+func (*completedChild) Wait() error             { return nil }
+func (*completedChild) Terminate() error        { return nil }
+func (*completedChild) Kill() error             { return nil }
 
 func (l *scriptLauncher) Launch(_ context.Context, r common.ProcessRequest) (common.ManagedProcess, error) {
 	l.mu.Lock()
+	if len(r.Arguments) == 1 && r.Arguments[0] == "--list-models" {
+		output := l.modelOutput
+		if output == "" {
+			output = "model-a - Model A (current)\nmodel-b - Model B\n"
+		}
+		l.requests = append(l.requests, r)
+		l.mu.Unlock()
+		return &completedChild{output: bytes.NewReader([]byte(output))}, nil
+	}
 	earlyInbound := l.earlyInbound
+	childIndex := len(l.children)
 	var scenario scriptScenario
-	if len(l.children) < len(l.scenarios) {
-		scenario = cloneScenario(l.scenarios[len(l.children)])
+	if childIndex < len(l.scenarios) {
+		scenario = cloneScenario(l.scenarios[childIndex])
+	}
+	blockGate, blockStarted := (<-chan struct{})(nil), (chan struct{})(nil)
+	if l.blockGate != nil && l.blockIndex == childIndex {
+		blockGate, blockStarted = l.blockGate, l.blockStarted
 	}
 	listPages := make(map[string]scriptedListPage, len(l.listPages))
 	for cursor, page := range l.listPages {
@@ -78,6 +107,8 @@ func (l *scriptLauncher) Launch(_ context.Context, r common.ProcessRequest) (com
 	c := newScriptChildWithEarlyInbound(earlyInbound)
 	c.listPages = listPages
 	c.scenario = scenario
+	c.inputGate = blockGate
+	c.inputStarted = blockStarted
 	l.mu.Lock()
 	l.children = append(l.children, c)
 	l.requests = append(l.requests, r)
@@ -121,6 +152,8 @@ type scriptChild struct {
 	earlyResponseOnce sync.Once
 	inputGate         <-chan struct{}
 	inputStarted      chan struct{}
+	terminateErr      error
+	waitErr           error
 }
 
 func newScriptChild() *scriptChild { return newScriptChildWithEarlyInbound(false) }
@@ -159,8 +192,8 @@ func (w *scriptInput) Close() error { return w.child.inputW.Close() }
 func (c *scriptChild) Input() io.WriteCloser { return &scriptInput{child: c} }
 func (c *scriptChild) Output() io.Reader     { return c.outputR }
 func (c *scriptChild) Errors() io.Reader     { return c.errR }
-func (c *scriptChild) Wait() error           { <-c.done; return nil }
-func (c *scriptChild) Terminate() error      { c.stop(); return nil }
+func (c *scriptChild) Wait() error           { <-c.done; return c.waitErr }
+func (c *scriptChild) Terminate() error      { c.stop(); return c.terminateErr }
 func (c *scriptChild) Kill() error           { c.stop(); return nil }
 func (c *scriptChild) stop() {
 	c.once.Do(func() { _ = c.inputR.Close(); _ = c.outputW.Close(); _ = c.errW.Close(); close(c.done) })
@@ -322,6 +355,10 @@ func (c *scriptChild) serve() {
 		_, _ = c.outputW.Write(append(frame, '\n'))
 	}
 }
+func cursorTestSettings(model string) *provider.ExecutionSettings {
+	return &provider.ExecutionSettings{Model: model, Effort: "default", Speed: provider.SpeedStandard}
+}
+
 func testOptions(current string) []configOption {
 	return []configOption{{ID: "model", Name: "Model", Description: "Cursor model", Category: "model", Type: "select", CurrentValue: current, Options: []configValue{{Value: "model-a", Name: "Model A"}, {Value: "model-b", Name: "Model B"}}}}
 }
@@ -338,6 +375,12 @@ func testDriver(t *testing.T) (*Driver, *scriptLauncher, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalog, _, _, err := catalogFromOptions(testOptions("model-a"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver.catalog = catalog
+	driver.cacheUntil = driver.config.Clock.Now().UTC().Add(time.Hour)
 	return driver, launcher, root
 }
 
@@ -660,7 +703,7 @@ func TestSubmitRejectsSettingsDriftBeforeReadingImages(t *testing.T) {
 	request := provider.TurnRequest{TurnID: turnID, MessageID: messageID, Content: provider.TextMessage("reader"), Settings: &settings, Images: []provider.ImageInput{{ID: "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY", Name: "missing.png", MediaType: "image/png", Bytes: 1, Path: filepath.Join(root, "missing.png")}}}
 	_, err = session.Submit(context.Background(), request)
 	var providerErr provider.ProviderError
-	if !errors.As(err, &providerErr) || providerErr.Code() != provider.ErrorInvalidModelConfiguration {
+	if !errors.As(err, &providerErr) || providerErr.Code() != provider.ErrorNativeSessionMissing {
 		t.Fatalf("Submit error = %v", err)
 	}
 	_ = session.Shutdown(context.Background())

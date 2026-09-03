@@ -235,10 +235,12 @@ type ResumeRequest struct {
 	Access        AccessMode
 	NativeSession NativeSessionRef
 	Workspace     string
+	Settings      *ExecutionSettings
 }
 
 func (r ResumeRequest) Validate() error {
-	if validateProviderAccess(r.Provider, r.Access) != nil || !r.NativeSession.Valid() || !validAbsoluteCleanPath(r.Workspace) {
+	if validateProviderAccess(r.Provider, r.Access) != nil || !r.NativeSession.Valid() || !validAbsoluteCleanPath(r.Workspace) ||
+		(r.Settings != nil && r.Settings.Validate() != nil) {
 		return errors.New("invalid provider resume request")
 	}
 	return nil
@@ -247,10 +249,13 @@ func (r ResumeRequest) Validate() error {
 type InspectRequest struct {
 	Provider      Name
 	NativeSession NativeSessionRef
+	// Settings is persisted broker metadata identifying the exact process-scoped
+	// selection used by providers whose native session listing omits that value.
+	Settings *ExecutionSettings
 }
 
 func (r InspectRequest) Validate() error {
-	if !r.Provider.Valid() || !r.NativeSession.Valid() {
+	if !r.Provider.Valid() || !r.NativeSession.Valid() || (r.Settings != nil && r.Settings.Validate() != nil) {
 		return errors.New("invalid provider inspect request")
 	}
 	return nil

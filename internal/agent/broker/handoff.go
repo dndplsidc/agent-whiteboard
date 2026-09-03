@@ -307,7 +307,7 @@ func (broker *Broker) runHandoff(slot *conversationSlot, oldActor *conversation,
 		}
 		resumeRequest := provider.ResumeRequest{
 			Provider: oldActor.identity.Provider, Access: accessForProvider(oldActor.identity.Provider),
-			NativeSession: current.NativeSession, Workspace: workspace,
+			NativeSession: current.NativeSession, Workspace: workspace, Settings: cloneExecutionSettings(current.Settings),
 		}
 		if resumeRequest.Validate() != nil {
 			return result

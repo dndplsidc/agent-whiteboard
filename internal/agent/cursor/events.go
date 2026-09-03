@@ -369,31 +369,22 @@ func (s *Session) handlePlanUpdate(turn *activePrompt, raw json.RawMessage) {
 func (s *Session) handleConfigUpdate(turn *activePrompt, raw json.RawMessage) {
 	var update configUpdate
 	if json.Unmarshal(raw, &update) != nil {
-		s.poisonPrompt(turn)
+		if turn == nil {
+			s.failTransportAsync()
+		} else {
+			s.poisonPrompt(turn)
+		}
 		return
 	}
-	s.mu.Lock()
-	if turn != nil && (s.active != turn || turn.poisoned) || s.phase != sessionRunning {
-		s.mu.Unlock()
-		return
+	if _, err := validateConfigOptions(update.ConfigOptions); err != nil {
+		if turn == nil {
+			s.failTransportAsync()
+		} else {
+			s.poisonPrompt(turn)
+		}
 	}
-	settings, presentation, _, err := s.updateAuthoritativeLocked(update.ConfigOptions)
-	if err != nil {
-		s.mu.Unlock()
-		s.poisonPrompt(turn)
-		return
-	}
-	s.mu.Unlock()
-	turnID := ""
-	if turn != nil {
-		turnID = turn.request.TurnID
-	}
-	event := provider.NewVerifiedSettingsEvent(turnID, settings, presentation)
-	if turn != nil {
-		s.queue(turn, event)
-	} else {
-		s.emit(event)
-	}
+	// Cursor CLI model selection is process-scoped and authoritative. ACP
+	// configuration updates are validated, but never overwrite that selection.
 }
 
 func toolKind(kind string) (provider.ToolKind, bool) {
@@ -489,6 +480,7 @@ func (s *Session) permission(ctx context.Context, raw json.RawMessage, responder
 		return
 	}
 	pending.request = interaction
+	pending.runtime = turn.runtime
 	s.mu.Lock()
 	if s.active != turn || turn.poisoned || s.phase != sessionRunning || !turn.permissionGateOpen {
 		s.mu.Unlock()
@@ -525,12 +517,15 @@ func (s *Session) watchPermission(id string, pending *pendingPermission) {
 	failed := s.recordPermissionOutcomeLocked(id, pending, outcome.Delivery)
 	s.mu.Unlock()
 	if failed {
-		select {
-		case <-s.rt.client.Done():
-			return
-		default:
-			s.failTransportAsync()
+		rt := pending.runtime
+		if rt != nil && rt.client != nil {
+			select {
+			case <-rt.client.Done():
+				return
+			default:
+			}
 		}
+		s.failTransportAsync()
 	}
 }
 
@@ -818,7 +813,7 @@ func (s *Session) replayConfig(raw json.RawMessage) {
 		s.markBad()
 		return
 	}
-	if _, _, _, err := catalogFromOptions(update.ConfigOptions, s.rt.caps.Image); err != nil {
+	if _, err := validateConfigOptions(update.ConfigOptions); err != nil {
 		s.markBad()
 	}
 }
