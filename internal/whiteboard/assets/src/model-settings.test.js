@@ -213,6 +213,55 @@ describe("provider settings menu", () => {
     control.destroy();
   });
 
+  test("sorts Cursor variants by model name and ascending effort", () => {
+    const variant = (model, model_display_name, isDefault = false) => ({
+      ...luna,
+      model,
+      model_display_name,
+      default_effort: "default",
+      supported_reasoning_efforts: [{ effort: "default", description: "Provider managed." }],
+      default: isDefault,
+    });
+    const variants = [
+      variant("gpt-5.6-sol-xhigh", "GPT-5.6 Sol 1M Extra High"),
+      variant("gpt-5.4-terra-high", "GPT-5.4 Terra 1M High"),
+      variant("claude-opus-5-max", "Claude Opus 5 1M Max"),
+      variant("gpt-5.6-sol-none", "GPT-5.6 Sol 1M None"),
+      variant("claude-opus-5-low", "Claude Opus 5 1M Low"),
+      variant("gpt-5.6-sol-medium", "GPT-5.6 Sol 1M", true),
+      variant("gpt-5.4-terra-low", "GPT-5.4 Terra 1M Low"),
+      variant("claude-opus-5-high", "Claude Opus 5 1M"),
+      variant("gpt-5.6-sol-max", "GPT-5.6 Sol 1M Max"),
+      variant("claude-opus-5-medium", "Claude Opus 5 1M Medium"),
+      variant("gpt-5.6-sol-low", "GPT-5.6 Sol 1M Low"),
+      variant("gpt-5.6-sol-high", "GPT-5.6 Sol 1M High"),
+      variant("claude-opus-5-xhigh", "Claude Opus 5 1M Extra High"),
+    ];
+    const settings = { model: "gpt-5.6-sol-medium", effort: "default", speed: "standard" };
+    const control = createModelSettingsControl({ doc: document, onSelect: vi.fn() });
+    document.body.append(control.element);
+    control.render({ visible: true, enabled: true, settings, presentation: { ...settings, model_display_name: "GPT-5.6 Sol 1M", selectable: true }, catalog: variants, variantOnly: true });
+    control.button.click();
+    control.menu.querySelector('[data-settings-section="model"]').click();
+
+    expect([...control.menu.querySelectorAll('[role="menuitemradio"]')].map((row) => row.dataset.settingsValue)).toEqual([
+      "claude-opus-5-low",
+      "claude-opus-5-medium",
+      "claude-opus-5-high",
+      "claude-opus-5-xhigh",
+      "claude-opus-5-max",
+      "gpt-5.4-terra-low",
+      "gpt-5.4-terra-high",
+      "gpt-5.6-sol-none",
+      "gpt-5.6-sol-low",
+      "gpt-5.6-sol-medium",
+      "gpt-5.6-sol-high",
+      "gpt-5.6-sol-xhigh",
+      "gpt-5.6-sol-max",
+    ]);
+    control.destroy();
+  });
+
   test("filters a large model catalog by display name and slug with accessible keyboard focus", () => {
     const largeCatalog = Array.from({ length: 155 }, (_, index) => ({
       ...luna,
@@ -241,7 +290,7 @@ describe("provider settings menu", () => {
     filter.value = "";
     filter.dispatchEvent(new Event("input", { bubbles: true }));
     filter.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
-    expect(document.activeElement?.dataset.settingsValue).toBe("cursor-variant-154");
+    expect(document.activeElement?.dataset.settingsValue).toBe("cursor-variant-87");
     filter.focus();
     filter.value = "missing";
     filter.dispatchEvent(new Event("input", { bubbles: true }));

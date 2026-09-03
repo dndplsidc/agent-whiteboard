@@ -27,6 +27,8 @@ const MAX_MODEL_DESCRIPTION_BYTES = 8 * 1024;
 const MAX_EFFORT_DESCRIPTION_BYTES = 2 * 1024;
 const MAX_CATALOG_BYTES = 128 * 1024;
 const SPEEDS = new Set(["standard", "fast"]);
+const CURSOR_VARIANT_EFFORTS = Object.freeze({ none: 0, minimal: 1, low: 2, medium: 3, high: 4, "extra-high": 5, xhigh: 5, max: 6 });
+const CURSOR_MODEL_COLLATOR = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -321,6 +323,22 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
     menu.querySelector(`[data-settings-section="${returnSection}"]`)?.focus();
   }
 
+  function cursorVariantSortKey(model) {
+    const effortToken = model.model.toLowerCase().match(/(?:^|-)(extra-high|xhigh|none|minimal|low|medium|high|max)(?:-|$)/)?.[1] ?? "medium";
+    const effortLabel = effortToken === "extra-high" || effortToken === "xhigh" ? "Extra High" : `${effortToken[0].toUpperCase()}${effortToken.slice(1)}`;
+    const name = model.model_display_name.replace(new RegExp(`\\b${effortLabel}\\b`, "i"), "").replace(/\s+/g, " ").trim();
+    return { name, effort: CURSOR_VARIANT_EFFORTS[effortToken] };
+  }
+
+  function cursorVariantCompare(left, right) {
+    const leftKey = cursorVariantSortKey(left);
+    const rightKey = cursorVariantSortKey(right);
+    return CURSOR_MODEL_COLLATOR.compare(leftKey.name, rightKey.name)
+      || leftKey.effort - rightKey.effort
+      || CURSOR_MODEL_COLLATOR.compare(left.model_display_name, right.model_display_name)
+      || left.model.localeCompare(right.model);
+  }
+
   function renderModelChoices() {
     addBack();
     let filter = null;
@@ -342,7 +360,8 @@ export function createModelSettingsControl({ doc = document, onSelect = () => {}
       status.textContent = "No models found.";
       menu.append(status);
     }
-    for (const model of current.catalog) {
+    const models = current.variantOnly ? [...current.catalog].sort(cursorVariantCompare) : current.catalog;
+    for (const model of models) {
       const compatibility = modelCompatibility(current.catalog, current.settings, model.model);
       const choice = menuButton(doc, {
         role: "menuitemradio",
