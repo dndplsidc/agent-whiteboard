@@ -795,18 +795,44 @@ func TestRetainedWireBytesReleaseAfterHandlerSettlement(t *testing.T) {
 	finishOnTerminate(p)
 	o := options()
 	o.MaxRetainedBytes = 256
-	received := make(chan struct{}, 2)
-	o.Handler = func(context.Context, acp.Request) { received <- struct{}{} }
-	c, _ := acp.New(p, o)
-	frame := []byte("{\"jsonrpc\":\"2.0\",\"method\":\"retained\",\"params\":{\"v\":\"" + strings.Repeat("x", 140) + "\"}}\n")
-	_, _ = p.OutputWriter.Write(frame)
-	<-received
-	_, _ = p.OutputWriter.Write(frame)
-	<-received
-	if c.Err() != nil {
-		t.Fatalf("settled frame retained bytes: %v", c.Err())
+	received := make(chan context.Context, 2)
+	o.Handler = func(ctx context.Context, _ acp.Request) { received <- ctx }
+	c, err := acp.New(p, o)
+	if err != nil {
+		t.Fatal(err)
 	}
-	_ = c.Shutdown(context.Background())
+	t.Cleanup(func() { _ = c.Shutdown(context.Background()) })
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	frame := []byte("{\"jsonrpc\":\"2.0\",\"method\":\"retained\",\"params\":{\"v\":\"" + strings.Repeat("x", 140) + "\"}}\n")
+	if retained := len(frame) - 1; retained > o.MaxRetainedBytes || 2*retained <= o.MaxRetainedBytes {
+		t.Fatal("fixture must fit one retained frame but not two")
+	}
+	for i := range 2 {
+		if _, err := p.OutputWriter.Write(frame); err != nil {
+			t.Fatalf("write frame %d: %v (transport: %v)", i, err, c.Err())
+		}
+		var handlerCtx context.Context
+		select {
+		case handlerCtx = <-received:
+		case <-c.Done():
+			t.Fatalf("frame %d not delivered: %v", i, c.Err())
+		case <-ctx.Done():
+			t.Fatalf("waiting for frame %d: %v", i, ctx.Err())
+		}
+		// Receipt happens inside the handler, before its retained bytes are
+		// released. runHandler cancels this context only after its deferred
+		// barrier settlement has returned. Wait for that cleanup, not receipt,
+		// before admitting another frame that cannot fit alongside the first.
+		select {
+		case <-handlerCtx.Done():
+		case <-ctx.Done():
+			t.Fatalf("waiting for frame %d settlement: %v", i, ctx.Err())
+		}
+		if !errors.Is(handlerCtx.Err(), context.Canceled) || c.Err() != nil {
+			t.Fatalf("frame %d did not settle normally: context=%v transport=%v", i, handlerCtx.Err(), c.Err())
+		}
+	}
 }
 
 func TestHardOptionCeilingsRejectUnboundedConfiguration(t *testing.T) {
