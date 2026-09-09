@@ -2366,11 +2366,15 @@ describe("local agent rendering and controls", () => {
     expect(transport.send).not.toHaveBeenCalled();
     const startNew = [...drawer.elements.timeline.querySelectorAll("button")].find((button) => button.textContent === "Start new conversation");
     expect(startNew).toBeDefined();
+    expect(startNew.parentElement.className).toBe("agent-status-notice-actions");
+    expect(startNew.parentElement.parentElement.classList.contains("agent-status-notice")).toBe(true);
+    expect(startNew.classList.contains("agent-page-button")).toBe(false);
     expect(startNew.disabled).toBe(false);
     startNew.click();
     expect(drawer.elements.drawer.querySelector(".agent-confirmation-dialog").textContent).toContain("reference");
     expect(transport.send).not.toHaveBeenCalled();
     drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
+    expect(drawer.elements.drawer.querySelector(".agent-confirmation-primary").disabled).toBe(true);
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
     expect(transport.send.mock.calls[0][0]).toMatchObject({ type: "new", conversation_id: agentIDs.conversation });
     drawer.destroy();

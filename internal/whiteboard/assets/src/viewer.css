@@ -1559,6 +1559,10 @@ body.agent-drawer-modal-open .agent-toast {
   margin-top: 0.1rem;
 }
 
+.agent-status-notice-actions {
+  grid-column: 2;
+}
+
 .agent-status-notice[data-tone="stopped"] {
   background: color-mix(in srgb, #d14343 5%, var(--awb-surface));
   border-color: color-mix(in srgb, #d14343 18%, var(--awb-border));
@@ -1762,13 +1766,15 @@ body.agent-drawer-modal-open .agent-toast {
   -webkit-text-security: disc;
 }
 
-.agent-interaction-actions {
+.agent-interaction-actions,
+.agent-status-notice-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
 }
 
-.agent-interaction-actions button {
+.agent-interaction-actions button,
+.agent-status-notice-actions button {
   background: var(--awb-surface);
   border: 1px solid var(--awb-border);
   border-radius: 0.45rem;
@@ -1777,6 +1783,11 @@ body.agent-drawer-modal-open .agent-toast {
   font: inherit;
   font-size: 0.72rem;
   padding: 0.45rem 0.62rem;
+}
+
+.agent-interaction-actions button:hover:not([disabled]),
+.agent-status-notice-actions button:hover:not([disabled]) {
+  background: var(--awb-accent-soft);
 }
 
 @keyframes agent-icon-spin {

@@ -1455,6 +1455,7 @@ test("keeps confirmation focus exclusive in the narrow modal drawer", async ({ c
 
 for (const { layout, viewport } of [
   { layout: "desktop", viewport: { width: 1440, height: 1000 } },
+  { layout: "wide", viewport: { width: 1440, height: 1000 } },
   { layout: "narrow", viewport: { width: 390, height: 844 } },
 ]) {
   for (const theme of ["light", "dark"]) {
@@ -1464,7 +1465,7 @@ for (const { layout, viewport } of [
         context, page, fixture: localAgentSidebar,
         markdown: "# Saved conversation recovery\n\nStart a new conversation when the saved provider session is unavailable.\n",
         creatorContext: "Recovery context.\n",
-        preferences: { "agent-whiteboard-agent-provider": "codex", "agent-whiteboard-theme": theme },
+        preferences: { "agent-whiteboard-agent-provider": "codex", "agent-whiteboard-theme": theme, ...(layout === "wide" ? { [widthKey]: 720 } : {}) },
       });
       const oldConversationID = localAgentSidebar.setSessionMissing();
       await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
@@ -1477,8 +1478,30 @@ for (const { layout, viewport } of [
       await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
       const startNew = page.getByRole("button", { name: "Start new conversation", exact: true });
       await expect(startNew).toBeEnabled();
+      // Recovery actions must use the compact action scale, not inherited body
+      // typography, and keep a separate row below the explanatory copy.
+      const rootFontSize = await page.locator("html").evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+      await expect(startNew).toHaveCSS("font-size", `${rootFontSize * 0.72}px`);
+      const copyBounds = await notice.locator("div > span").boundingBox();
+      const actionBounds = await startNew.boundingBox();
+      const noticeBounds = await notice.boundingBox();
+      expect(actionBounds.y - copyBounds.y - copyBounds.height).toBeGreaterThanOrEqual(rootFontSize * 0.4);
+      expect(Math.abs(actionBounds.x - copyBounds.x)).toBeLessThan(1);
+      expect(actionBounds.height).toBeLessThan(rootFontSize * 2.2);
+      expect(actionBounds.x + actionBounds.width).toBeLessThanOrEqual(noticeBounds.x + noticeBounds.width);
+      expect(await notice.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.screenshot({ path: testInfo.outputPath(`missing-thread-${layout}-${theme}.png`), fullPage: true });
+
+      const restingBackground = await startNew.evaluate((element) => getComputedStyle(element).backgroundColor);
+      await startNew.hover();
+      await expect(startNew).not.toHaveCSS("background-color", restingBackground);
+      await startNew.focus();
+      await startNew.press("Shift+Tab");
+      await page.keyboard.press("Tab");
+      await expect(startNew).toBeFocused();
+      await expect(startNew).toHaveCSS("outline-style", "solid");
+      await page.screenshot({ path: testInfo.outputPath(`missing-thread-focus-${layout}-${theme}.png`), fullPage: true });
 
       await startNew.click();
       const confirmation = page.getByRole("dialog", { name: "Start a new conversation?" });
