@@ -111,11 +111,14 @@ Do not send a message merely to test setup. A model turn may incur usage and use
 | Provider unavailable | Check `pi`, `codex`, or exactly `cursor-agent`; use an explicit selector for a generic `agent`. For Cursor, report `cursor-agent login` if native authentication is missing and verify ACP v1 plus stable `session/list` and `session/load` support. |
 | Cursor briefly remains active after an otherwise complete answer | Wait one second. Page Agent suppresses the exact known closed-stream artifact, retires only the stuck call, and retains the existing Cursor process and session. Do not resubmit the message. |
 | Cursor shows **Confirming delivery** or another protocol failure | Let Page Agent reconnect and reconcile the existing turn automatically. Do not resubmit the same message or restart the broker unless automatic reconnection itself remains unavailable. |
+| Conversation unavailable | The saved Pi or Codex thread is missing, not necessarily the broker. Use **Start new conversation** after reader confirmation or restore an available archive; preserve the old reference and native histories |
 | Browser cannot reach loopback | Grant browser Local Network Access when prompted |
 | Daemon command fails on Linux | Use foreground `agent serve` |
 | `/healthz` or `/readyz` fails on port `8568` | Do not use those publishing-server endpoints for broker readiness; inspect the broker listener and verify through the Whiteboard UI |
 
 Do not clear broker or provider state as a generic fix.
+
+New Codex conversations use explicit legacy history, the initial native title `Page Agent`, and a full empty-history read before their reference is saved. This metadata-only persistence sequence is verified with Codex CLI 0.153.4 and requires App Server's experimental history-mode capability; it sends no model turn and does not edit native configuration. A failure in this sequence must not be worked around by sending a synthetic message. Update an incompatible provider only with appropriate authorization. Existing missing Pi and Codex references are not silently replaced: explicit **Start new conversation** retains the old reference in Archives, and refreshing selects the new current conversation.
 
 ## Remove setup only when requested
 

@@ -274,7 +274,7 @@ type shutdownWorkerResult struct {
 const attachmentSweepInterval = 5 * time.Minute
 
 func newConversation(identity statepkg.Identity, mapping statepkg.Mapping, session *sessionHandle, state StateStore, attachments AttachmentStore, driver provider.Driver, retainSession func(*sessionHandle), ids common.IDGenerator, clock common.Clock, timers TimerFactory, lifecycleCtx context.Context, idleTimeout, shutdownTimeout time.Duration) (*conversation, error) {
-	if mapping.Validate(identity) != nil || mapping.Current == nil || session == nil || common.IsNil(session.session) || common.IsNil(state) || common.IsNil(driver) || retainSession == nil || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
+	if mapping.Validate(identity) != nil || mapping.Current == nil || session == nil || (!session.missing && common.IsNil(session.session)) || common.IsNil(state) || common.IsNil(driver) || retainSession == nil || common.IsNil(clock) || common.IsNil(timers) || lifecycleCtx == nil || idleTimeout <= 0 || shutdownTimeout <= 0 {
 		return nil, errors.New("invalid conversation actor")
 	}
 	factory, err := NewEventFactory(mapping.Current.ConversationID, ids, clock)
@@ -282,6 +282,14 @@ func newConversation(identity statepkg.Identity, mapping statepkg.Mapping, sessi
 		return nil, err
 	}
 	domainCatalog, err := loadModelCatalog(lifecycleCtx, session.session)
+	if session.missing {
+		// Model discovery belongs to the provider, not the unavailable thread.
+		if source, ok := driver.(interface {
+			ModelCatalog(context.Context) (provider.ModelCatalog, error)
+		}); ok {
+			domainCatalog, err = source.ModelCatalog(lifecycleCtx)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -301,6 +309,11 @@ func newConversation(identity statepkg.Identity, mapping statepkg.Mapping, sessi
 		lifecycleCtx:          lifecycleCtx, shutdownTimeout: shutdownTimeout,
 	}
 	actor.loadSessionFeatures(lifecycleCtx)
+	if session.missing {
+		actor.lifecycle = protocol.LifecycleUnavailable
+		actor.settingsCapable = len(domainCatalog.Models) > 0
+		actor.settingsState = protocol.SettingsUnverified
+	}
 	if settingsSession, ok := session.session.(provider.SettingsSession); ok {
 		settings, presentation, discoveryErr := settingsSession.EffectiveSettings(lifecycleCtx)
 		if discoveryErr != nil || settings.Validate() != nil || presentation.Validate() != nil || !domainCatalog.Compatibility(settings).Compatible {
@@ -555,6 +568,17 @@ func (actor *conversation) run() {
 			if result.err != nil {
 				providerEvents = nil
 				actor.deferredObserve = nil
+				var missing provider.ProviderError
+				if errors.As(result.err, &missing) && missing.Code() == provider.ErrorNativeSessionMissing {
+					actor.publishBrowserError(attachments, protocol.ErrorNativeSessionMissing)
+					actor.retired.Store(true)
+					actor.closed.Store(true)
+					for item := range attachments {
+						delete(attachments, item)
+						item.finishAfterDrain(actor.shutdownTimeout)
+					}
+					return
+				}
 				actor.recoveryUnavailable = true
 				actor.lifecycle = protocol.LifecycleUnavailable
 				actor.publishBrowserError(attachments, protocol.ErrorProviderRecoveryFailed)
@@ -725,7 +749,15 @@ func (actor *conversation) handleAttach(attachments map[*clientAttachment]struct
 	contextChanged := false
 	var contextEvent protocol.Event
 	var err error
-	if actor.recoveryActive || (actor.workerSettled != nil && actor.workerKind == providerWorkerArchive) {
+	if actor.session.missing {
+		// Preserve saved context and uncertain submission metadata verbatim.
+		// Connecting for recovery must not acknowledge or submit page content.
+		if validateProtocolResource(request.resource) != nil || !validDigest(request.contextDigest) {
+			request.response <- attachResponse{err: NewBrokerError(protocol.ErrorBoardRevisionMalformed)}
+			return
+		}
+		actor.resource = request.resource
+	} else if actor.recoveryActive || (actor.workerSettled != nil && actor.workerKind == providerWorkerArchive) {
 		if err = actor.deferObservation(request.resource, request.contextDigest); err != nil {
 			request.response <- attachResponse{err: err}
 			return
@@ -808,6 +840,14 @@ func (actor *conversation) handleAttach(attachments map[*clientAttachment]struct
 			return
 		}
 		initial = append(initial, event)
+	}
+	if actor.session.missing {
+		failure, failureErr := actor.factory.New(protocol.ErrorPayload{Error: protocol.NewBrowserError(protocol.ErrorNativeSessionMissing)})
+		if failureErr != nil || actor.replay.AppendForClient(request.clientID, failure) != nil {
+			request.response <- attachResponse{err: NewBrokerError(protocol.ErrorBrokerUnavailable)}
+			return
+		}
+		initial = append(initial, failure)
 	}
 	item, err := newAttachment(request.clientID, initial)
 	if err != nil {

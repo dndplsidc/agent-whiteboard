@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -104,18 +105,19 @@ func TestFragmentedOversizedWebSocketMessageIsRejected(t *testing.T) {
 	socket, _, err := dialer.Dial(wsURL.String(), http.Header{"Origin": []string{trustedOrigin}})
 	require.NoError(t, err)
 	defer socket.Close()
-	writer, err := socket.NextWriter(websocket.TextMessage)
+	// Read limits are checked against fragment lengths before payload reads.
+	// Send one small fragment, then a continuation header exceeding the total
+	// limit. Streaming 67 MiB here races the independent first-frame deadline
+	// on slower runners and can test timeout handling instead of size rejection.
+	raw := socket.UnderlyingConn()
+	require.NoError(t, raw.SetWriteDeadline(time.Now().Add(5*time.Second)))
+	_, err = raw.Write([]byte{0x01, 0x81, 0, 0, 0, 0, 'x'}) // masked non-final text fragment
 	require.NoError(t, err)
-	chunk := bytes.Repeat([]byte{'x'}, 64<<10)
-	remaining := protocol.MaxContextCommandBytes + 1
-	for remaining > 0 {
-		size := min(remaining, len(chunk))
-		if _, err = writer.Write(chunk[:size]); err != nil {
-			break
-		}
-		remaining -= size
-	}
-	_ = writer.Close()
+	header := make([]byte, 14)
+	header[0], header[1] = 0x80, 0xff // final continuation, masked 64-bit length
+	binary.BigEndian.PutUint64(header[2:10], uint64(protocol.MaxContextCommandBytes))
+	_, err = raw.Write(header)
+	require.NoError(t, err)
 	_ = socket.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, _, err = socket.ReadMessage()
 	var closeErr *websocket.CloseError

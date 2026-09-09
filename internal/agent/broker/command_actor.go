@@ -45,6 +45,15 @@ func (actor *conversation) handleCommand(attachments map[*clientAttachment]struc
 		actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)
 		return
 	}
+	if actor.session.missing {
+		switch request.command.Type {
+		case protocol.CommandNew, protocol.CommandArchiveList, protocol.CommandArchiveRestore, protocol.CommandArchiveDelete, protocol.CommandResync:
+			// Conversation management does not require the missing native thread.
+		default:
+			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorNativeSessionMissing)
+			return
+		}
+	}
 	if request.command.Type == protocol.CommandNew {
 		if _, ok := request.command.Payload.(protocol.NewPayload); !ok {
 			actor.completePendingCommand(attachments, request.command.CommandID, request.command.ClientID, protocol.ErrorInvalidState)

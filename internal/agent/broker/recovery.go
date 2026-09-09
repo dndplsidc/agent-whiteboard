@@ -119,6 +119,12 @@ func (actor *conversation) runRecovery(ctx context.Context, generation uint64, m
 		if handle != nil {
 			actor.retainSession(handle)
 		}
+		var missing provider.ProviderError
+		if ctx.Err() == nil && actor.identity.Provider != provider.NameCursor && errors.As(resumeErr, &missing) && missing.Code() == provider.ErrorNativeSessionMissing {
+			// The old native session and its worker have already joined. Let
+			// the actor retire so reconnect can expose conversation management.
+			result.err = resumeErr
+		}
 		results <- result
 		return
 	}

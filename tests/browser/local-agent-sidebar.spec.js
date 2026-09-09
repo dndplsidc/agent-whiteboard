@@ -37,6 +37,7 @@ async function connectSidebar(page, provider = "pi", expectedModel = null) {
   if (await launcher.isVisible()) await launcher.click();
   await page.getByRole("button", { name: `Connect to ${providerName}`, exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toContainText(model);
+  await expect(page.getByLabel(`Message ${providerName} about this whiteboard`)).toBeEditable();
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
 }
 
@@ -594,6 +595,9 @@ test("keeps the ChatGPT-like header, transcript, context, and composer in stable
   await page.locator('.agent-composer button[type="submit"]').click();
   await expect(page.locator(".agent-message-user")).toContainText("Paragraph 32");
   await expect.poll(() => timeline.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  // Do not change fixture response mode while the preceding turn is still running.
+  await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected");
 
   localAgentSidebar.setPhaseResponses(true);
   await page.getByLabel("Message Pi about this whiteboard").fill("Keep my reading position while this response streams.");
@@ -948,6 +952,7 @@ for (const provider of ["pi", "cursor"]) {
   const reply = provider === "cursor" ? "Cursor fixture reply" : "Fixture reply";
 
   await page.getByLabel(`Message ${label} about this whiteboard`).fill("What does this page say?");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.getByLabel(`Message ${label} about this whiteboard`).press("Enter");
   await expect(page.locator(".agent-message-assistant")).toContainText(reply);
 
@@ -1019,6 +1024,7 @@ test("switches providers silently and isolates Pi, Codex, and Cursor conversatio
   localAgentSidebar.setHoldResponses(true, "codex");
   await connectSidebar(page, "codex");
   await page.getByLabel("Message Codex about this whiteboard").fill("Keep the Codex turn active.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.getByLabel("Message Codex about this whiteboard").press("Enter");
   await expect(page.locator(".agent-live-status")).toHaveText("Responding");
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
@@ -1030,6 +1036,7 @@ test("switches providers silently and isolates Pi, Codex, and Cursor conversatio
   expect(parsedCommands(localAgentSidebar.brokerRequests)).toHaveLength(commandCountBeforeSwitch);
   await connectSidebar(page, "pi");
   await page.getByLabel("Message Pi about this whiteboard").fill("Answer only in the Pi conversation.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.getByLabel("Message Pi about this whiteboard").press("Enter");
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
   await expect(page.locator(".agent-timeline")).not.toContainText("Keep the Codex turn active.");
@@ -1038,6 +1045,7 @@ test("switches providers silently and isolates Pi, Codex, and Cursor conversatio
   await expect(page.locator(".agent-live-status")).toHaveText("Cursor ready");
   await connectSidebar(page, "cursor");
   await page.getByLabel("Message Cursor about this whiteboard").fill("Answer only in the Cursor conversation.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.getByLabel("Message Cursor about this whiteboard").press("Enter");
   await expect(page.locator(".agent-message-assistant")).toContainText("Cursor fixture reply");
   await expect(page.locator(".agent-timeline")).not.toContainText("Answer only in the Pi conversation.");
@@ -1444,6 +1452,85 @@ test("keeps confirmation focus exclusive in the narrow modal drawer", async ({ c
   await expect(page.locator(".agent-drawer")).toHaveClass(/is-open/u);
   expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
 });
+
+for (const { layout, viewport } of [
+  { layout: "desktop", viewport: { width: 1440, height: 1000 } },
+  { layout: "narrow", viewport: { width: 390, height: 844 } },
+]) {
+  for (const theme of ["light", "dark"]) {
+    test(`recovers a missing saved Codex thread only after confirmation (${layout}, ${theme})`, async ({ context, page, localAgentSidebar }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await openSidebarPage({
+        context, page, fixture: localAgentSidebar,
+        markdown: "# Saved conversation recovery\n\nStart a new conversation when the saved provider session is unavailable.\n",
+        creatorContext: "Recovery context.\n",
+        preferences: { "agent-whiteboard-agent-provider": "codex", "agent-whiteboard-theme": theme },
+      });
+      const oldConversationID = localAgentSidebar.setSessionMissing();
+      await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+      await page.getByRole("button", { name: "Connect to Codex", exact: true }).click();
+      await expect(page.locator(".agent-live-status")).toHaveText("Conversation unavailable");
+      const notice = page.locator(".agent-activity-error");
+      await expect(notice).toHaveCount(1);
+      await expect(notice).toContainText("Conversation unavailable");
+      await expect(notice).toContainText("The provider session for this conversation is unavailable.");
+      await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
+      const startNew = page.getByRole("button", { name: "Start new conversation", exact: true });
+      await expect(startNew).toBeEnabled();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.screenshot({ path: testInfo.outputPath(`missing-thread-${layout}-${theme}.png`), fullPage: true });
+
+      await startNew.click();
+      const confirmation = page.getByRole("dialog", { name: "Start a new conversation?" });
+      await expect(confirmation).toContainText("The current conversation reference will remain in Archives.");
+      await expect(confirmation).toContainText("Its messages may still be unavailable.");
+      await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(confirmation).toBeHidden();
+      await expect(page.locator(".agent-live-status")).toHaveText("Conversation unavailable");
+      expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
+      expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "history_page")).toHaveLength(0);
+      expect(localAgentSidebar.createdSettings()).toEqual([]);
+
+      // The recovery action also follows the sidebar's existing keyboard confirmation path.
+      await startNew.focus();
+      await startNew.press("Enter");
+      await expect(confirmation).toBeVisible();
+      await confirmation.getByRole("button", { name: "Start new", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+      await expect(startNew).toHaveCount(0);
+      const newCommands = parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new");
+      expect(newCommands).toHaveLength(1);
+      expect(newCommands[0].conversation_id).toBe(oldConversationID);
+      expect(newCommands[0].payload.settings).toBeNull();
+      expect(localAgentSidebar.createdSettings()).toEqual([null]);
+      const reconnect = parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "connect").at(-1);
+      expect(reconnect.conversation_id).toBeNull();
+
+      await page.getByLabel("Message Codex about this whiteboard").fill("Continue in the new conversation.");
+      await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      await expect(page.locator(".agent-timeline")).toContainText("Codex fixture reply");
+      const firstSubmit = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit");
+      expect(firstSubmit.conversation_id).not.toBe(oldConversationID);
+
+      await page.getByRole("button", { name: "Open Page agent menu" }).click();
+      await page.getByRole("menuitem", { name: "Archives", exact: true }).click();
+      await expect(page.locator(`.agent-archive-card[data-archive-id="${oldConversationID}"]`)).toContainText("Unavailable Codex conversation");
+      await page.reload();
+      await expect(page.locator(".agent-live-status")).toHaveText("Codex ready");
+      await connectSidebar(page, "codex");
+      await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+      await expect(page.locator(".agent-timeline")).toContainText("Continue in the new conversation.");
+      await expect(page.getByRole("button", { name: "Start new conversation", exact: true })).toHaveCount(0);
+      await page.getByLabel("Message Codex about this whiteboard").fill("The new conversation survives reload.");
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "submit").length).toBe(2);
+      const reloadedSubmit = parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "submit").at(-1);
+      expect(reloadedSubmit.conversation_id).toBe(firstSubmit.conversation_id);
+    });
+  }
+}
 
 test("uses the visible Codex pill for New without updating accepted preference", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex New\n", creatorContext: "New conversation context.\n" });

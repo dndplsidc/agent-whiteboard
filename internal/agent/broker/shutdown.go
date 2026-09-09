@@ -11,6 +11,7 @@ import (
 )
 
 type actorShutdown struct {
+	missing          bool
 	session          provider.Session
 	child            provider.ManagedChild
 	workerSettled    <-chan struct{}
@@ -34,17 +35,35 @@ func newActorShutdown(handle *sessionHandle, workerSettled <-chan struct{}) *act
 		session, child = handle.session, handle.child
 	}
 	return &actorShutdown{
+		missing: handle != nil && handle.missing,
 		session: session, child: child, workerSettled: workerSettled,
 		shutdownDone: make(chan error, 1), workerDone: workerSettled == nil,
 	}
 }
 
 func (attempt *actorShutdown) run(ctx context.Context, timeout time.Duration) error {
-	if attempt == nil || common.IsNil(attempt.session) || timeout <= 0 {
+	if attempt == nil || (!attempt.missing && common.IsNil(attempt.session)) || timeout <= 0 {
 		return errors.New("invalid actor shutdown")
 	}
 	runCtx, runCancel := context.WithTimeout(ctx, timeout)
 	defer runCancel()
+	if attempt.missing {
+		if !common.IsNil(attempt.session) || !common.IsNil(attempt.child) {
+			return errors.New("missing session owns provider resources")
+		}
+		// Archive management can still own a worker even without a native
+		// session. Join it with the same bounded, retryable shutdown contract.
+		if !attempt.workerDone {
+			select {
+			case <-attempt.workerSettled:
+				attempt.workerDone = true
+				attempt.workerSettled = nil
+			case <-runCtx.Done():
+				return runCtx.Err()
+			}
+		}
+		return nil
+	}
 	gracePeriod := timeout / 2
 	if gracePeriod <= 0 {
 		gracePeriod = timeout

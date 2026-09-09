@@ -117,7 +117,8 @@ func startRuntime(ctx context.Context, driver *Driver) (*runtime, error) {
 	}()
 	initialize := map[string]any{
 		"clientInfo":   map[string]any{"name": "agent-whiteboard", "title": "Agent Whiteboard", "version": "1"},
-		"capabilities": map[string]any{"experimentalApi": false, "requestAttestation": false},
+		// thread/start.historyMode requires the experimental API capability.
+		"capabilities": map[string]any{"experimentalApi": true, "requestAttestation": false},
 	}
 	initialized, err := runtime.call(ctx, "initialize", initialize)
 	if err != nil || !validInitializeResponse(initialized) {
@@ -640,7 +641,7 @@ func classifyRPCError(failure *rpcError) error {
 		return provider.NewProviderError(provider.ErrorContextTooLarge)
 	case strings.Contains(lower, "unauthorized"):
 		return provider.NewProviderError(provider.ErrorAuthenticationRequired)
-	case strings.Contains(lower, "threadnotfound"), strings.Contains(lower, "thread not found"), strings.Contains(lower, "thread_not_found"):
+	case strings.Contains(lower, "threadnotfound"), strings.Contains(lower, "thread not found"), strings.Contains(lower, "thread_not_found"), strings.Contains(lower, "no rollout found for thread id"):
 		return provider.NewProviderError(provider.ErrorNativeSessionMissing)
 	default:
 		return provider.NewProviderError(provider.ErrorProtocolFailure)
