@@ -107,7 +107,9 @@ func (driver *Driver) Create(ctx context.Context, request provider.CreateRequest
 	}
 	defer release()
 	catalog := runtime.modelCatalog()
-	params := map[string]any{"cwd": request.Workspace}
+	// Our history adapter uses thread/read(includeTurns), the legacy history
+	// contract. Do not inherit a paginated-history default from native config.
+	params := map[string]any{"cwd": request.Workspace, "historyMode": "legacy"}
 	if request.Settings != nil {
 		settings, nativeModel, _, _, resolveErr := catalog.resolveSubmitted(*request.Settings)
 		if resolveErr != nil {
@@ -125,7 +127,32 @@ func (driver *Driver) Create(ctx context.Context, request provider.CreateRequest
 	if err != nil {
 		return nil, provider.NewProviderError(provider.ErrorProtocolIncompatible)
 	}
-	return driver.activate(runtime, thread, request.Workspace, catalog)
+	session, err := driver.activate(runtime, thread, request.Workspace, catalog)
+	if err != nil {
+		return nil, err
+	}
+	// thread/start alone may return an ID whose rollout has not been written.
+	// Naming a new legacy thread materializes it without a synthetic turn.
+	// Keep the handle on errors so the broker owns candidate cleanup; it must
+	// never publish the reference until persistence and full read succeed.
+	if _, err := runtime.call(ctx, "thread/name/set", map[string]any{"threadId": thread.ID, "name": "Page Agent"}); err != nil {
+		return session, creationPersistenceError(err)
+	}
+	history, err := runtime.call(ctx, "thread/read", map[string]any{"threadId": thread.ID, "includeTurns": true})
+	if err != nil {
+		return session, creationPersistenceError(err)
+	}
+	if turns, err := decodeTurns(history, thread.ID); err != nil || len(turns) != 0 {
+		return session, provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	return session, nil
+}
+
+func creationPersistenceError(err error) error {
+	if errors.Is(err, errMethodNotFound) || errors.Is(err, errHistoryUnavailableBeforeFirstMessage) {
+		return provider.NewProviderError(provider.ErrorProtocolIncompatible)
+	}
+	return err
 }
 
 func (driver *Driver) Resume(ctx context.Context, request provider.ResumeRequest) (provider.Session, error) {

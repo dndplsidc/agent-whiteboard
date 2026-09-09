@@ -26,12 +26,16 @@ import (
 func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T) {
 	serverResponses := make(chan map[string]json.RawMessage, 1)
 	launcher := &scriptedLauncher{serve: func(child *scriptedChild) {
+		pendingCreation := make(map[string]bool)
 		scanner := bufio.NewScanner(child.serverInput)
 		for scanner.Scan() {
 			var request map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(scanner.Bytes(), &request))
 			var method string
 			_ = json.Unmarshal(request["method"], &method)
+			if replyCreationPersistence(t, child, request, method, pendingCreation) {
+				continue
+			}
 			switch method {
 			case "initialize":
 				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{
@@ -45,7 +49,7 @@ func TestDriverUsesDefaultConfigurationAndRelaysActivityAndApproval(t *testing.T
 			case "thread/start":
 				var params map[string]json.RawMessage
 				require.NoError(t, json.Unmarshal(request["params"], &params))
-				require.Equal(t, []string{"cwd"}, sortedKeys(params))
+				require.Equal(t, []string{"cwd", "historyMode"}, sortedKeys(params))
 				child.send(t, map[string]any{"id": request["id"], "result": completeThreadResponse("native-thread", "gpt-fixture", "medium", nil)})
 			case "turn/start":
 				var params struct {
@@ -319,12 +323,16 @@ func TestDriverSharesOneRuntimeAcrossConcurrentThreadsAndStopsAfterLastDetach(t 
 	var threadMu sync.Mutex
 	threadCount := 0
 	launcher := &scriptedLauncher{serve: func(child *scriptedChild) {
+		pendingCreation := make(map[string]bool)
 		scanner := bufio.NewScanner(child.serverInput)
 		for scanner.Scan() {
 			var request map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(scanner.Bytes(), &request))
 			var method string
 			_ = json.Unmarshal(request["method"], &method)
+			if replyCreationPersistence(t, child, request, method, pendingCreation) {
+				continue
+			}
 			switch method {
 			case "initialize":
 				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{
@@ -483,7 +491,7 @@ func TestMissingResumeMapsToNativeSessionMissingAndDeleteIsIdempotent(t *testing
 		switch method {
 		case "thread/resume", "thread/delete":
 			child.send(t, map[string]any{"id": request["id"], "error": map[string]any{
-				"code": -32000, "message": "thread not found", "data": map[string]any{"code": "threadNotFound"},
+				"code": -32600, "message": "no rollout found for thread id missing-thread",
 			}})
 		}
 	})
@@ -1382,16 +1390,31 @@ func assertProviderError(t *testing.T, err error, code provider.ProviderErrorCod
 }
 
 func readyLauncher(t *testing.T, handle func(*scriptedChild, map[string]json.RawMessage, string)) *scriptedLauncher {
+	return readyLauncherWithPersistence(t, handle, true)
+}
+
+func readyLauncherWithPersistence(t *testing.T, handle func(*scriptedChild, map[string]json.RawMessage, string), persist bool) *scriptedLauncher {
 	t.Helper()
 	return &scriptedLauncher{serve: func(child *scriptedChild) {
+		pendingCreation := make(map[string]bool)
 		scanner := bufio.NewScanner(child.serverInput)
 		for scanner.Scan() {
 			var request map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(scanner.Bytes(), &request))
 			var method string
 			_ = json.Unmarshal(request["method"], &method)
+			if persist && replyCreationPersistence(t, child, request, method, pendingCreation) {
+				continue
+			}
 			switch method {
 			case "initialize":
+				var params struct {
+					Capabilities struct {
+						ExperimentalAPI bool `json:"experimentalApi"`
+					} `json:"capabilities"`
+				}
+				require.NoError(t, json.Unmarshal(request["params"], &params))
+				require.True(t, params.Capabilities.ExperimentalAPI, "legacy thread history requires experimental API capability")
 				child.send(t, map[string]any{"id": request["id"], "result": map[string]any{
 					"codexHome": "/fixture/home", "platformFamily": "unix", "platformOs": "linux", "userAgent": "fixture",
 				}})
@@ -1405,6 +1428,29 @@ func readyLauncher(t *testing.T, handle func(*scriptedChild, map[string]json.Raw
 			}
 		}
 	}}
+}
+
+// Model the metadata-only materialization/read handshake separately from
+// history requests made after Create has completed.
+func replyCreationPersistence(t *testing.T, child *scriptedChild, request map[string]json.RawMessage, method string, pending map[string]bool) bool {
+	if method != "thread/name/set" && method != "thread/read" {
+		return false
+	}
+	var params struct {
+		ThreadID string `json:"threadId"`
+	}
+	require.NoError(t, json.Unmarshal(request["params"], &params))
+	if method == "thread/name/set" {
+		pending[params.ThreadID] = true
+		child.send(t, map[string]any{"id": request["id"], "result": map[string]any{}})
+		return true
+	}
+	if !pending[params.ThreadID] {
+		return false
+	}
+	delete(pending, params.ThreadID)
+	child.send(t, map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": params.ThreadID, "turns": []any{}}}})
+	return true
 }
 
 func sendModelList(t *testing.T, child *scriptedChild, request map[string]json.RawMessage) {

@@ -1445,6 +1445,85 @@ test("keeps confirmation focus exclusive in the narrow modal drawer", async ({ c
   expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
 });
 
+for (const { layout, viewport } of [
+  { layout: "desktop", viewport: { width: 1440, height: 1000 } },
+  { layout: "narrow", viewport: { width: 390, height: 844 } },
+]) {
+  for (const theme of ["light", "dark"]) {
+    test(`recovers a missing saved Codex thread only after confirmation (${layout}, ${theme})`, async ({ context, page, localAgentSidebar }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await openSidebarPage({
+        context, page, fixture: localAgentSidebar,
+        markdown: "# Saved conversation recovery\n\nStart a new conversation when the saved provider session is unavailable.\n",
+        creatorContext: "Recovery context.\n",
+        preferences: { "agent-whiteboard-agent-provider": "codex", "agent-whiteboard-theme": theme },
+      });
+      const oldConversationID = localAgentSidebar.setSessionMissing();
+      await page.getByRole("button", { name: "Open Page agent", exact: true }).click();
+      await page.getByRole("button", { name: "Connect to Codex", exact: true }).click();
+      await expect(page.locator(".agent-live-status")).toHaveText("Conversation unavailable");
+      const notice = page.locator(".agent-activity-error");
+      await expect(notice).toHaveCount(1);
+      await expect(notice).toContainText("Conversation unavailable");
+      await expect(notice).toContainText("The provider session for this conversation is unavailable.");
+      await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
+      const startNew = page.getByRole("button", { name: "Start new conversation", exact: true });
+      await expect(startNew).toBeEnabled();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.screenshot({ path: testInfo.outputPath(`missing-thread-${layout}-${theme}.png`), fullPage: true });
+
+      await startNew.click();
+      const confirmation = page.getByRole("dialog", { name: "Start a new conversation?" });
+      await expect(confirmation).toContainText("The current conversation reference will remain in Archives.");
+      await expect(confirmation).toContainText("Its messages may still be unavailable.");
+      await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(confirmation).toBeHidden();
+      await expect(page.locator(".agent-live-status")).toHaveText("Conversation unavailable");
+      expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new")).toHaveLength(0);
+      expect(parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "history_page")).toHaveLength(0);
+      expect(localAgentSidebar.createdSettings()).toEqual([]);
+
+      // The recovery action also follows the sidebar's existing keyboard confirmation path.
+      await startNew.focus();
+      await startNew.press("Enter");
+      await expect(confirmation).toBeVisible();
+      await confirmation.getByRole("button", { name: "Start new", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+      await expect(startNew).toHaveCount(0);
+      const newCommands = parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "new");
+      expect(newCommands).toHaveLength(1);
+      expect(newCommands[0].conversation_id).toBe(oldConversationID);
+      expect(newCommands[0].payload.settings).toBeNull();
+      expect(localAgentSidebar.createdSettings()).toEqual([null]);
+      const reconnect = parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "connect").at(-1);
+      expect(reconnect.conversation_id).toBeNull();
+
+      await page.getByLabel("Message Codex about this whiteboard").fill("Continue in the new conversation.");
+      await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      await expect(page.locator(".agent-timeline")).toContainText("Codex fixture reply");
+      const firstSubmit = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit");
+      expect(firstSubmit.conversation_id).not.toBe(oldConversationID);
+
+      await page.getByRole("button", { name: "Open Page agent menu" }).click();
+      await page.getByRole("menuitem", { name: "Archives", exact: true }).click();
+      await expect(page.locator(`.agent-archive-card[data-archive-id="${oldConversationID}"]`)).toContainText("Unavailable Codex conversation");
+      await page.reload();
+      await expect(page.locator(".agent-live-status")).toHaveText("Codex ready");
+      await connectSidebar(page, "codex");
+      await expect(page.locator(".agent-live-status")).toHaveText("Connected");
+      await expect(page.locator(".agent-timeline")).toContainText("Continue in the new conversation.");
+      await expect(page.getByRole("button", { name: "Start new conversation", exact: true })).toHaveCount(0);
+      await page.getByLabel("Message Codex about this whiteboard").fill("The new conversation survives reload.");
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "submit").length).toBe(2);
+      const reloadedSubmit = parsedCommands(localAgentSidebar.brokerRequests).filter(({ type }) => type === "submit").at(-1);
+      expect(reloadedSubmit.conversation_id).toBe(firstSubmit.conversation_id);
+    });
+  }
+}
+
 test("uses the visible Codex pill for New without updating accepted preference", async ({ context, page, localAgentSidebar }) => {
   await openSidebarPage({ context, page, fixture: localAgentSidebar, markdown: "# Codex New\n", creatorContext: "New conversation context.\n" });
   await page.getByRole("button", { name: "Open Page agent", exact: true }).click();

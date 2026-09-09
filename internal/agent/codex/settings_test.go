@@ -129,7 +129,7 @@ func TestDriverAppliesExactCreateAndTurnSettingsOnOneNativeThread(t *testing.T) 
 		case "thread/start":
 			var params map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(request["params"], &params))
-			require.Equal(t, []string{"config", "cwd", "model", "serviceTier"}, sortedKeys(params))
+			require.Equal(t, []string{"config", "cwd", "historyMode", "model", "serviceTier"}, sortedKeys(params))
 			require.JSONEq(t, `{"model_reasoning_effort":"high"}`, string(params["config"]))
 			require.JSONEq(t, `"gpt-5.6-sol"`, string(params["model"]))
 			require.JSONEq(t, `"priority"`, string(params["serviceTier"]))

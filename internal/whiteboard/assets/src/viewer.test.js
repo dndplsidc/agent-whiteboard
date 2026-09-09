@@ -2319,6 +2319,36 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
+  test("offers explicit new conversation recovery when the saved Codex thread is missing", async () => {
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(), reconnect: vi.fn(), close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    const snapshot = codexSnapshotEvent();
+    snapshot.payload.lifecycle = "unavailable";
+    snapshot.payload.composer_admission = "blocked";
+    snapshot.payload.settings_state = "unverified";
+    snapshot.payload.effective_settings = null;
+    options.onEvent(snapshot);
+    options.onEvent(agentEvent("error", { error: { code: "native_session_missing", message: "The provider session for this conversation is unavailable.", action: "restore_session" } }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }));
+    expect(drawer.elements.drawer.querySelector(".agent-live-status").textContent).toBe("Conversation unavailable");
+    expect(drawer.elements.sendButton.disabled).toBe(true);
+    expect(transport.send).not.toHaveBeenCalled();
+    const startNew = [...drawer.elements.timeline.querySelectorAll("button")].find((button) => button.textContent === "Start new conversation");
+    expect(startNew).toBeDefined();
+    expect(startNew.disabled).toBe(false);
+    startNew.click();
+    expect(drawer.elements.drawer.querySelector(".agent-confirmation-dialog").textContent).toContain("reference");
+    expect(transport.send).not.toHaveBeenCalled();
+    drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
+    expect(transport.send.mock.calls[0][0]).toMatchObject({ type: "new", conversation_id: agentIDs.conversation });
+    drawer.destroy();
+  });
+
   test.each([
     ["pi", "remove"], ["codex", "remove"],
     ["pi", "new"], ["codex", "new"],

@@ -33,6 +33,8 @@ async function connect(page, provider) {
   if (await launcher.isVisible()) await launcher.click();
   await page.getByRole("button", { name: `Connect to ${providerLabels[provider]}`, exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toBeVisible();
+  // The provider label can appear before connection setup enables typing.
+  await expect(page.getByLabel(`Message ${provider === "codex" ? "Codex" : "Pi"} about this whiteboard`)).toBeEditable();
 }
 
 const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+V3x7WQAAAABJRU5ErkJggg==";
@@ -60,6 +62,7 @@ test("selects canonical HTML components through hover and the trusted chooser in
   await connect(page, "pi");
   const composer = page.getByLabel("Message Pi about this whiteboard");
   await composer.pressSequentially("Compare ");
+  await expect(composer).toContainText("Compare");
 
   await child.locator("#nested-table").hover();
   const add = page.locator(".agent-html-add");

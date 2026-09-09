@@ -2779,8 +2779,10 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         await target.transport.reconnect();
         brokerState = "ready";
         if (target === controller) render();
-        if (target.pendingSubmission?.recovery) void requestRecoveryHistoryPage(target);
-        else if (target.state.timeline.length === 0) void sendControllerCommand(target, "history_page", { limit: 50 });
+        if (target.state.lifecycle !== "unavailable") {
+          if (target.pendingSubmission?.recovery) void requestRecoveryHistoryPage(target);
+          else if (target.state.timeline.length === 0) void sendControllerCommand(target, "history_page", { limit: 50 });
+        }
       } catch (error) {
         if (error?.code === "replay_window_unavailable") {
           const preserveContextDelivery = target.contextCommandID !== null || target.contextDeliveryUnknown;
@@ -3000,6 +3002,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function settingsRequired() { return state.settingsState !== null; }
+
+  function newConversationSettings() {
+    if (state.lifecycle !== "unavailable") return currentSettings();
+    const candidate = controller.settingsDraft.draft;
+    return candidate && settingsCompatibility(state.catalog, candidate).compatible ? cloneExecutionSettings(candidate) : null;
+  }
 
   function selectedModelSupportsImages() {
     if (!settingsRequired()) return state.supportsImages;
@@ -3724,7 +3732,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     if (state.connected) {
       providerLabel.textContent = state.provider.model || providerName;
       providerLabel.hidden = false;
-      liveStatus.textContent = state.lifecycle === "responding"
+      liveStatus.textContent = state.lifecycle === "unavailable"
+        ? "Conversation unavailable"
+        : state.lifecycle === "responding"
         ? "Responding"
         : state.lifecycle === "compacting"
           ? "Compacting"
@@ -3790,7 +3800,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     checkButton.textContent = connectionState === "offline" ? "Try again" : "Check again";
     checkButton.disabled = connectionState === "checking";
     checkButton.hidden = connectionState === "checking";
-    newMenuButton.disabled = !state.connected || settingsRequired() && currentSettings() === null;
+    newMenuButton.disabled = !state.connected || controller.handoffCommandID !== null || state.lifecycle !== "unavailable" && settingsRequired() && currentSettings() === null;
     archivesMenuButton.disabled = !state.connected;
     reconnectMenuButton.disabled = transport.consented !== true;
     composerWrap.hidden = !state.connected || activeView !== "conversation";
@@ -3898,12 +3908,22 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
           blocked: "Request blocked",
           error: "Something went wrong",
         };
-        const title = item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
+        const missingSession = item.activity === "error" && item.action === "restore_session";
+        const title = missingSession ? "Conversation unavailable" : item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
         const guidanceText = actionGuidance(item.action, doc, selectedProvider, item.code);
         const text = guidanceText ? `${item.text} ${guidanceText}` : item.text;
         const tone = item.activity === "error" ? "error" : item.activity === "blocked" ? "warning" : "neutral";
         const icon = item.activity === "error" ? "error" : item.activity === "blocked" ? "blocked" : item.activity === "retry" ? "retry" : "info";
-        appendStatusNotice(timeline, { tone, icon, title, text, className: `agent-activity-${item.activity}` });
+        const notice = appendStatusNotice(timeline, { tone, icon, title, text, className: `agent-activity-${item.activity}` });
+        if (missingSession && state.lifecycle === "unavailable") {
+          const startNew = doc.createElement("button");
+          startNew.type = "button";
+          startNew.className = "agent-page-button";
+          startNew.textContent = "Start new conversation";
+          startNew.disabled = newMenuButton.disabled || controller.handoffCommandID !== null;
+          startNew.addEventListener("click", () => newButton.click());
+          notice.lastElementChild.append(startNew);
+        }
       } else {
         const details = doc.createElement("details");
         details.className = `agent-activity agent-activity-${item.activity}`;
@@ -4379,7 +4399,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       target.connecting = false;
       brokerState = "ready";
       if (target === controller) render();
-      void sendControllerCommand(target, "history_page", { limit: 50 });
+      if (target.state.lifecycle !== "unavailable") void sendControllerCommand(target, "history_page", { limit: 50 });
     } catch (error) {
       target.connecting = false;
       if (target === controller) {
@@ -4559,14 +4579,16 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
     scheduleReconnect();
   });
   function openNewConversationConfirmation(invoker = doc.activeElement) {
-    const executionSettings = settingsRequired() ? currentSettings() : null;
-    if (settingsRequired() && executionSettings === null) {
+    const executionSettings = settingsRequired() ? newConversationSettings() : null;
+    if (state.lifecycle !== "unavailable" && settingsRequired() && executionSettings === null) {
       showTransientStatus("Model options unavailable", "New conversation not started", "Choose settings supported by the live provider catalog.");
       return;
     }
     openConfirmation({
       title: "Start a new conversation?",
-      description: "The current conversation will remain available in Archives.",
+      description: state.lifecycle === "unavailable"
+        ? "The current conversation reference will remain in Archives. Its messages may still be unavailable."
+        : "The current conversation will remain available in Archives.",
       confirmLabel: "Start new",
       action: "new",
       invoker,

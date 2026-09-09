@@ -577,6 +577,8 @@ function createSidebarBroker(initialAllowedOrigin) {
       provider,
       ...definition,
       available: true,
+      sessionMissing: false,
+      recoveredArchives: [],
       supportsImages: definition.catalog.find(({ model }) => model === definition.defaultSettings.model).supports_images,
       settingsState: "verified",
       effectiveSettings: { ...definition.effectiveSettings },
@@ -650,7 +652,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     payload,
   });
   const snapshotPayload = (state) => ({
-    lifecycle: state.activeCompact !== null ? "compacting" : state.activeTurn === null ? "ready" : "responding",
+    lifecycle: state.sessionMissing ? "unavailable" : state.activeCompact !== null ? "compacting" : state.activeTurn === null ? "ready" : "responding",
     queue: state.queue.map((item) => structuredClone(item)),
     context_state: state.contextState,
     active_work: state.activeCompact !== null ? { work_id: state.activeCompact, kind: "compact", state: "running" } : state.activeTurn === null ? null : { work_id: state.activeTurn, kind: "turn", state: "running" },
@@ -664,7 +666,7 @@ function createSidebarBroker(initialAllowedOrigin) {
     max_selected_skills: state.maxSelectedSkills,
     supports_compact: state.supportsCompact,
     busy_policy: state.busyPolicy,
-    composer_admission: state.activeTurn !== null || state.activeCompact !== null ? state.busyPolicy : "submit",
+    composer_admission: state.sessionMissing ? "blocked" : state.activeTurn !== null || state.activeCompact !== null ? state.busyPolicy : "submit",
   });
   const archivePayload = (state, { id = state.archiveID, createdAt = "2026-07-26T01:02:03Z", updatedAt = "2026-07-26T02:03:04Z", preview = "" } = {}) => ({
     archive_id: id,
@@ -713,8 +715,11 @@ function createSidebarBroker(initialAllowedOrigin) {
     }
     const events = [
       nextEvent(state, "snapshot", snapshotPayload(state)),
-      nextEvent(state, "provider", { provider: state.provider, state: "ready", model: state.model, supports_images: state.supportsImages }),
+      nextEvent(state, "provider", { provider: state.provider, state: state.sessionMissing ? "unavailable" : "ready", model: state.model, supports_images: state.supportsImages }),
     ];
+    if (state.sessionMissing) events.push(nextEvent(state, "error", { error: {
+      code: "native_session_missing", message: "The provider session for this conversation is unavailable.", action: "restore_session",
+    } }));
     for (const event of events) state.eventPositions.set(event.event_id, state.eventLog.length);
     return events;
   };
@@ -784,6 +789,7 @@ function createSidebarBroker(initialAllowedOrigin) {
   const handleCommand = (command, connectedProvider) => {
     const state = stateForCommand(command, connectedProvider);
     if (command.type === "history_page") {
+      if (state.sessionMissing) return commandResult(state, command, { code: "native_session_missing", message: "The provider session for this conversation is unavailable.", action: "restore_session" });
       targetedEvent(state, "timeline", { command_id: command.command_id, items: [...state.history].reverse(), next_cursor: null }, command.client_id);
     } else if (command.type === "submit") {
       if (state.nextSubmitOutcome === "hold") {
@@ -853,16 +859,25 @@ function createSidebarBroker(initialAllowedOrigin) {
         return commandResult(state, command, { code: "invalid_model_configuration", message: "The selected model settings are no longer available.", action: "configure_model" });
       }
       state.createdSettings.push(command.payload.settings === null ? null : structuredClone(command.payload.settings));
+      if (state.sessionMissing) {
+        state.recoveredArchives.unshift(archivePayload(state, {
+          id: state.conversationID, preview: `Unavailable ${state.provider === "codex" ? "Codex" : "Pi"} conversation`,
+        }));
+        state.catalog = structuredClone(providerDefinitions[state.provider].catalog);
+      }
       const result = commandResult(state, command);
       state.conversationID = protocolID(state.identitySequence++);
+      state.sessionMissing = false;
       state.contextState = "pending";
       state.activeTurn = null;
       state.pendingResponse = null;
       state.queue = [];
       state.history = [];
-      state.effectiveSettings = presentedSettings(state, command.payload.settings);
+      const settings = command.payload.settings ?? state.defaultSettings;
+      state.settingsState = "verified";
+      state.effectiveSettings = presentedSettings(state, settings);
       state.model = state.effectiveSettings.model_display_name;
-      state.supportsImages = state.catalog.find(({ model }) => model === command.payload.settings.model).supports_images;
+      state.supportsImages = state.catalog.find(({ model }) => model === settings.model).supports_images;
       setImmediate(() => {
         for (const stream of [...streams]) {
           if (stream.provider === state.provider) stream.response.end();
@@ -915,7 +930,7 @@ function createSidebarBroker(initialAllowedOrigin) {
       const items = state.archiveMode === "empty"
         ? []
         : firstPage
-          ? [archivePayload(state, { preview: "Earlier conversation" })]
+          ? [...state.recoveredArchives, archivePayload(state, { preview: "Earlier conversation" })]
           : [archivePayload(state, { id: secondID, createdAt: "2026-07-25T01:02:03Z", updatedAt: "2026-07-25T02:03:04Z", preview: "Older conversation" })];
       const respond = () => targetedEvent(state, "history", { command_id: command.command_id, items, next_cursor: paginated && firstPage ? state.archiveID : null }, command.client_id);
       if (state.archiveDelay) state.pendingArchiveResponse = respond;
@@ -1102,6 +1117,15 @@ function createSidebarBroker(initialAllowedOrigin) {
     webSocketCommands,
     setAllowedOrigin(origin) { allowedOrigin = origin; },
     setWebSocketEnabled(value) { webSocketEnabled = value; },
+    setSessionMissing(provider = "codex") {
+      const state = providerState(provider);
+      state.sessionMissing = true;
+      state.settingsState = "unverified";
+      state.effectiveSettings = null;
+      state.catalog = [];
+      state.supportsImages = false;
+      return state.conversationID;
+    },
     setHoldResponses(value, provider = "pi") { providerState(provider).holdResponses = value; },
     holdNextSubmit(provider = "pi") { providerState(provider).nextSubmitOutcome = "hold"; },
     resolveHeldSubmit(outcome, provider = "pi") {
@@ -1574,6 +1598,7 @@ export const test = base.extend({
           resetBrokerRequests: broker.resetRequests,
           resetBrokerState: broker.resetState,
           setWebSocketEnabled: broker.setWebSocketEnabled,
+          setSessionMissing: broker.setSessionMissing,
           setHoldResponses: broker.setHoldResponses,
           holdNextSubmit: broker.holdNextSubmit,
           resolveHeldSubmit: broker.resolveHeldSubmit,

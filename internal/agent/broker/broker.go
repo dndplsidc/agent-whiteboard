@@ -92,6 +92,9 @@ type Broker struct {
 // that return process-owned resources are called only while capturing the
 // handle; all later broker paths use these captured values.
 type sessionHandle struct {
+	// missing represents a saved native reference that the provider cannot
+	// resume. It owns no provider session, event stream, or child process.
+	missing      bool
 	session      provider.Session
 	native       provider.NativeSession
 	capabilities provider.Capabilities
@@ -456,6 +459,9 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.
 		var failure provider.ProviderError
 		if identity.Provider == provider.NameCursor && errors.As(err, &failure) && failure.Code() == provider.ErrorNativeSessionMissing && mapping.Current.Committed == nil && mapping.Current.PreparedCommit == nil {
 			return broker.replaceMissingNativeSession(ctx, identity, mapping, driver, workspace)
+		}
+		if errors.As(err, &failure) && failure.Code() == provider.ErrorNativeSessionMissing {
+			return broker.newConversation(identity, mapping, &sessionHandle{missing: true})
 		}
 		return nil, MapError(err)
 	}
