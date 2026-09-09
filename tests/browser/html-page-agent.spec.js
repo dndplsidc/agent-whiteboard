@@ -34,7 +34,7 @@ async function connect(page, provider) {
   await page.getByRole("button", { name: `Connect to ${providerLabels[provider]}`, exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toBeVisible();
   // The provider label can appear before connection setup enables typing.
-  await expect(page.getByLabel(`Message ${provider === "codex" ? "Codex" : "Pi"} about this whiteboard`)).toBeEditable();
+  await expect(page.getByLabel(`Message ${providerLabels[provider]} about this whiteboard`)).toBeEditable();
 }
 
 const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+V3x7WQAAAABJRU5ErkJggg==";

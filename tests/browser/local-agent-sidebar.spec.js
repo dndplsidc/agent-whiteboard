@@ -37,6 +37,7 @@ async function connectSidebar(page, provider = "pi", expectedModel = null) {
   if (await launcher.isVisible()) await launcher.click();
   await page.getByRole("button", { name: `Connect to ${providerName}`, exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toContainText(model);
+  await expect(page.getByLabel(`Message ${providerName} about this whiteboard`)).toBeEditable();
   await expect(page.locator('.agent-composer button[type="submit"]')).toBeDisabled();
 }
 
@@ -948,6 +949,7 @@ for (const provider of ["pi", "cursor"]) {
   const reply = provider === "cursor" ? "Cursor fixture reply" : "Fixture reply";
 
   await page.getByLabel(`Message ${label} about this whiteboard`).fill("What does this page say?");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.getByLabel(`Message ${label} about this whiteboard`).press("Enter");
   await expect(page.locator(".agent-message-assistant")).toContainText(reply);
 
@@ -1019,6 +1021,7 @@ test("switches providers silently and isolates Pi, Codex, and Cursor conversatio
   localAgentSidebar.setHoldResponses(true, "codex");
   await connectSidebar(page, "codex");
   await page.getByLabel("Message Codex about this whiteboard").fill("Keep the Codex turn active.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.getByLabel("Message Codex about this whiteboard").press("Enter");
   await expect(page.locator(".agent-live-status")).toHaveText("Responding");
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
@@ -1030,6 +1033,7 @@ test("switches providers silently and isolates Pi, Codex, and Cursor conversatio
   expect(parsedCommands(localAgentSidebar.brokerRequests)).toHaveLength(commandCountBeforeSwitch);
   await connectSidebar(page, "pi");
   await page.getByLabel("Message Pi about this whiteboard").fill("Answer only in the Pi conversation.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.getByLabel("Message Pi about this whiteboard").press("Enter");
   await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
   await expect(page.locator(".agent-timeline")).not.toContainText("Keep the Codex turn active.");
@@ -1038,6 +1042,7 @@ test("switches providers silently and isolates Pi, Codex, and Cursor conversatio
   await expect(page.locator(".agent-live-status")).toHaveText("Cursor ready");
   await connectSidebar(page, "cursor");
   await page.getByLabel("Message Cursor about this whiteboard").fill("Answer only in the Cursor conversation.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await page.getByLabel("Message Cursor about this whiteboard").press("Enter");
   await expect(page.locator(".agent-message-assistant")).toContainText("Cursor fixture reply");
   await expect(page.locator(".agent-timeline")).not.toContainText("Answer only in the Pi conversation.");

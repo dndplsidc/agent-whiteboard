@@ -460,7 +460,7 @@ func (broker *Broker) resumeConversation(ctx context.Context, identity statepkg.
 		if identity.Provider == provider.NameCursor && errors.As(err, &failure) && failure.Code() == provider.ErrorNativeSessionMissing && mapping.Current.Committed == nil && mapping.Current.PreparedCommit == nil {
 			return broker.replaceMissingNativeSession(ctx, identity, mapping, driver, workspace)
 		}
-		if errors.As(err, &failure) && failure.Code() == provider.ErrorNativeSessionMissing {
+		if identity.Provider != provider.NameCursor && errors.As(err, &failure) && failure.Code() == provider.ErrorNativeSessionMissing {
 			return broker.newConversation(identity, mapping, &sessionHandle{missing: true})
 		}
 		return nil, MapError(err)

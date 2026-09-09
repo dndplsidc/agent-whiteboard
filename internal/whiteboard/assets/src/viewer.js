@@ -2559,6 +2559,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       transport: null,
       reconnectTimer: null,
       connecting: false,
+      unavailableSnapshot: false,
       contextRevision: undefined,
       contextAccepted: false,
       contextCommandID: null,
@@ -2575,6 +2576,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       initialSettings: () => cloneExecutionSettings(owned.settingsDraft.draft),
       onEvent(event) {
         if (!applyAgentEvent(owned.state, event)) return;
+        if (event.type === "snapshot") owned.unavailableSnapshot = event.payload.lifecycle === "unavailable";
         if (pendingSubmissionSeen(owned)) {
           if (owned.pendingSubmission?.recovery) settleRecoveredSubmission(owned, true, { authoritative: true });
           else acceptPendingSubmission(owned, { authoritative: true });
@@ -2637,6 +2639,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       },
       onDisconnect(error) {
         owned.connecting = false;
+        owned.unavailableSnapshot = false;
         owned.state.connected = false;
         owned.state.lifecycle = "unavailable";
         if (["sending", "waiting"].includes(owned.pendingSubmission?.status)) owned.pendingSubmission.status = "confirming";
@@ -2779,7 +2782,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         await target.transport.reconnect();
         brokerState = "ready";
         if (target === controller) render();
-        if (target.state.lifecycle !== "unavailable") {
+        if (!hasUnavailableSnapshot(target)) {
           if (target.pendingSubmission?.recovery) void requestRecoveryHistoryPage(target);
           else if (target.state.timeline.length === 0) void sendControllerCommand(target, "history_page", { limit: 50 });
         }
@@ -3002,6 +3005,12 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
   }
 
   function settingsRequired() { return state.settingsState !== null; }
+
+  function hasUnavailableSnapshot(target) {
+    // Local disconnects also use unavailable, but must still reconcile history.
+    // Only an actual snapshot is authoritative; a replayed activity is not.
+    return target.unavailableSnapshot && target.state.lifecycle === "unavailable";
+  }
 
   function newConversationSettings() {
     if (state.lifecycle !== "unavailable") return currentSettings();
@@ -4399,7 +4408,7 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
       target.connecting = false;
       brokerState = "ready";
       if (target === controller) render();
-      if (target.state.lifecycle !== "unavailable") void sendControllerCommand(target, "history_page", { limit: 50 });
+      if (!hasUnavailableSnapshot(target)) void sendControllerCommand(target, "history_page", { limit: 50 });
     } catch (error) {
       target.connecting = false;
       if (target === controller) {

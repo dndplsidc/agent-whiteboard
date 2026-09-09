@@ -2319,6 +2319,33 @@ describe("local agent rendering and controls", () => {
     drawer.destroy();
   });
 
+  test.each(["connect", "reconnect"])("skips history after an unavailable snapshot before its error on %s", async (operation) => {
+    vi.useFakeTimers();
+    localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
+    let options;
+    const snapshot = codexSnapshotEvent();
+    snapshot.payload.lifecycle = "unavailable";
+    snapshot.payload.composer_admission = "blocked";
+    snapshot.payload.settings_state = "unverified";
+    snapshot.payload.effective_settings = null;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {},
+      connect: vi.fn(async () => { options.onEvent(snapshot); }),
+      reconnect: vi.fn(async () => { options.onEvent(snapshot); }),
+      close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    if (operation === "connect") drawer.elements.connectButton.click();
+    else options.onDisconnect(new Error("socket closed"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(transport[operation]).toHaveBeenCalledOnce();
+    expect(transport.send).not.toHaveBeenCalled();
+    options.onEvent(agentEvent("error", { error: { code: "native_session_missing", message: "The provider session for this conversation is unavailable.", action: "restore_session" } }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" }));
+    expect(drawer.elements.timeline.querySelectorAll(".agent-activity-error")).toHaveLength(1);
+    drawer.destroy();
+  });
+
   test("offers explicit new conversation recovery when the saved Codex thread is missing", async () => {
     localStorage.setItem(AGENT_PROVIDER_STORAGE_KEY, "codex");
     let options;
@@ -2346,6 +2373,27 @@ describe("local agent rendering and controls", () => {
     drawer.elements.drawer.querySelector(".agent-confirmation-primary").click();
     await vi.waitFor(() => expect(transport.send).toHaveBeenCalledOnce());
     expect(transport.send.mock.calls[0][0]).toMatchObject({ type: "new", conversation_id: agentIDs.conversation });
+    drawer.destroy();
+  });
+
+  test("loads reconnect history when the first replay frame is activity rather than a snapshot", async () => {
+    vi.useFakeTimers();
+    let options;
+    const transport = {
+      clientID: agentIDs.message, conversationID: agentIDs.conversation, consented: true,
+      probe: vi.fn(async () => ({ ok: true, code: null })), grantConsent() {}, connect: vi.fn(),
+      reconnect: vi.fn(async () => { options.onEvent(agentEvent("activity", { kind: "status", summary: "Reconnected" }, { event_id: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN" })); }),
+      close: vi.fn(), resetConversation: vi.fn(), resetReplay: vi.fn(), setPort: vi.fn(), send: vi.fn(async () => {}),
+    };
+    const drawer = createAgentDrawer({ payload: agentPayload(), doc: document, storage: localStorage, transportFactory: (input) => { options = input; return transport; } });
+    options.onEvent(piSnapshotEvent());
+    drawer.elements.message.value = "Reconcile this message";
+    drawer.elements.composer.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(transport.send.mock.calls.some(([command]) => command.type === "submit")).toBe(true));
+    options.onDisconnect(new Error("socket closed"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(transport.reconnect).toHaveBeenCalledOnce();
+    expect(transport.send.mock.calls.some(([command]) => command.type === "history_page")).toBe(true);
     drawer.destroy();
   });
 
