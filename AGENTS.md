@@ -21,9 +21,15 @@ Keep business behavior in its domain package, infrastructure behind domain-owned
 
 ## User interface consistency
 
-New and changed browser UI must follow the established visual language of the surrounding viewer and Page Agent surfaces. Reuse existing typography, spacing, colors, radii, controls, status patterns, and interaction behavior before introducing a new presentation. Do not add a component that looks or behaves like a separate design system.
+UI consistency is a completion requirement, not optional polish. New and changed browser UI must look and behave like the surrounding viewer and Page Agent components. This applies equally to errors, recovery notices, empty states, and infrequently used actions.
 
-Before completing a user-visible UI change, compare it with adjacent existing components in the real rendered interface at applicable desktop, narrow, light, and dark states. Verify pointer, keyboard, loading, success, error, disabled, and interruption states where relevant. Automated assertions are necessary but do not replace real-browser visual inspection.
+- Before editing, identify the closest existing component and inspect its markup and styles. Reuse its shared classes or grouped selectors and existing theme variables; do not approximate it with a separate set of values.
+- Match the component's typography, control height, padding, spacing, icon size and alignment, borders, radii, colors, and action hierarchy. A generic button class or `font: inherit` alone does not establish consistency: check the actual computed font size and dimensions in the rendered context.
+- Place notice actions in a properly spaced action row aligned with the copy. Do not append an oversized or unstyled button directly against explanatory text. Keep compact recovery actions consistent with neighboring controls.
+- Keep layouts readable at narrow widths and with wrapping text. Controls must not overflow, crowd the copy, or change scale unexpectedly between states. Reuse established hover, keyboard-focus, disabled, and loading treatments.
+- Do not introduce a new visual pattern or redesign surrounding components unless the user requests it or approves the departure.
+
+Before completing a user-visible UI change, inspect the actual changed state alongside adjacent components in a real browser at desktop and narrow widths, in both light and dark themes. Capture and inspect screenshots of those states. Verify pointer, keyboard, loading, success, error, disabled, and interruption states where relevant. Add computed-style or layout regression assertions for sizing, alignment, spacing, and overflow when those properties caused the defect. Passing click/visibility tests or merely generating screenshots is not visual verification. If rendered inspection cannot be completed, report that gap rather than calling the UI finished.
 
 ## Testing
 

@@ -3925,13 +3925,15 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         const icon = item.activity === "error" ? "error" : item.activity === "blocked" ? "blocked" : item.activity === "retry" ? "retry" : "info";
         const notice = appendStatusNotice(timeline, { tone, icon, title, text, className: `agent-activity-${item.activity}` });
         if (missingSession && state.lifecycle === "unavailable") {
+          const actions = doc.createElement("div");
+          actions.className = "agent-status-notice-actions";
           const startNew = doc.createElement("button");
           startNew.type = "button";
-          startNew.className = "agent-page-button";
           startNew.textContent = "Start new conversation";
           startNew.disabled = newMenuButton.disabled || controller.handoffCommandID !== null;
           startNew.addEventListener("click", () => newButton.click());
-          notice.lastElementChild.append(startNew);
+          actions.append(startNew);
+          notice.append(actions);
         }
       } else {
         const details = doc.createElement("details");
