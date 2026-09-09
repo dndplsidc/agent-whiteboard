@@ -595,6 +595,9 @@ test("keeps the ChatGPT-like header, transcript, context, and composer in stable
   await page.locator('.agent-composer button[type="submit"]').click();
   await expect(page.locator(".agent-message-user")).toContainText("Paragraph 32");
   await expect.poll(() => timeline.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  // Do not change fixture response mode while the preceding turn is still running.
+  await expect(page.locator(".agent-message-assistant")).toContainText("Fixture reply");
+  await expect(page.locator(".agent-live-status")).toHaveText("Connected");
 
   localAgentSidebar.setPhaseResponses(true);
   await page.getByLabel("Message Pi about this whiteboard").fill("Keep my reading position while this response streams.");
