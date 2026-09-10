@@ -15,18 +15,19 @@ import (
 func TestDocumentationContracts(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	readme := readDocumentation(t, filepath.Join(root, "README.md"))
+	publishing := readDocumentation(t, filepath.Join(root, "docs", "publishing.md"))
 	httpAPI := readDocumentation(t, filepath.Join(root, "docs", "http-api.md"))
 
-	commands := documentedCLICommands(t, readme)
+	commands := documentedCLICommands(t, publishing)
 	expectedCommands := []string{
 		"serve", "create markdown", "create html", "update markdown", "update html",
 		"delete markdown", "delete html", "image upload", "image update", "image delete",
 	}
 	for _, command := range expectedCommands {
-		require.Contains(t, commands, command, "README must demonstrate %q", command)
+		require.Contains(t, commands, command, "Publishing guide must demonstrate %q", command)
 	}
 	for _, required := range []string{"catalog list", "--title", "--summary", "~/.agent-whiteboard/catalog"} {
-		require.Contains(t, readme, required, "README must document %q", required)
+		require.Contains(t, publishing, required, "Publishing guide must document %q", required)
 	}
 	for _, command := range commands {
 		requireCommandHelp(t, strings.Fields(command))
@@ -43,7 +44,7 @@ func TestDocumentationContracts(t *testing.T) {
 		require.Contains(t, httpAPI, route, "HTTP API documentation is missing %s", route)
 	}
 
-	documentPaths := []string{"docs/http-api.md", "docs/go-api.md", "docs/storage.md", "docs/security.md", "docs/cli-json.md"}
+	documentPaths := []string{"docs/publishing.md", "docs/page-agent.md", "docs/http-api.md", "docs/go-api.md", "docs/storage.md", "docs/security.md", "docs/cli-json.md"}
 	for _, document := range documentPaths {
 		require.Contains(t, readme, document)
 		_ = readDocumentation(t, filepath.Join(root, filepath.FromSlash(document)))
@@ -79,10 +80,10 @@ func readDocumentation(t *testing.T, path string) string {
 	return string(content)
 }
 
-func documentedCLICommands(t *testing.T, readme string) []string {
+func documentedCLICommands(t *testing.T, document string) []string {
 	t.Helper()
-	fences := regexp.MustCompile("(?s)```(?:sh|bash)\\n(.*?)```").FindAllStringSubmatch(readme, -1)
-	require.NotEmpty(t, fences, "README must contain fenced shell commands")
+	fences := regexp.MustCompile("(?s)```(?:sh|bash)\\n(.*?)```").FindAllStringSubmatch(document, -1)
+	require.NotEmpty(t, fences, "Documentation must contain fenced shell commands")
 	commands := make([]string, 0)
 	for _, fence := range fences {
 		for _, line := range strings.Split(fence[1], "\n") {
