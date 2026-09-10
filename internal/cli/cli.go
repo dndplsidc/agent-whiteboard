@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dndplsidc/agent-whiteboard/internal/app"
+	"github.com/dndplsidc/agent-whiteboard/internal/catalog"
 	"github.com/dndplsidc/agent-whiteboard/internal/common"
 	generalconfig "github.com/dndplsidc/agent-whiteboard/internal/config"
 	httpx "github.com/dndplsidc/agent-whiteboard/internal/webapi"
@@ -40,12 +40,20 @@ type Application interface {
 	Close() error
 }
 
+type Catalog interface {
+	Prepare(context.Context, string, catalog.Kind) error
+	RecordCreation(context.Context, catalog.Creation) error
+	OpenExisting(context.Context, catalog.Identity) (*catalog.Entry, bool, error)
+	List(context.Context, catalog.Query) (catalog.Page, error)
+}
+
 type Dependencies struct {
 	Stdout                io.Writer
 	Stderr                io.Writer
 	Getenv                func(string) string
 	LoadConfig            func(string) (generalconfig.Config, error)
 	NewClient             func(httpx.ClientConfig) (Client, error)
+	NewCatalog            func() (Catalog, error)
 	NewApplication        func(app.ServiceConfig, ...app.Option) (Application, error)
 	NewAgentApplication   func(app.AgentServiceConfig) (Application, error)
 	NewLaunchAgentManager func() (common.LaunchAgentManager, error)
@@ -113,6 +121,9 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 	if common.IsNil(deps.NewApplication) {
 		return nil, invalidCommand("application factory is required")
 	}
+	if deps.NewCatalog == nil {
+		deps.NewCatalog = func() (Catalog, error) { return noopCatalog{}, nil }
+	}
 	if deps.NewAgentApplication == nil {
 		deps.NewAgentApplication = func(config app.AgentServiceConfig) (Application, error) {
 			return app.NewAgentService(config)
@@ -157,8 +168,19 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 		}
 		return factory.loadGeneralConfiguration()
 	}
-	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newGetCommand(), factory.newDeleteCommand(), factory.newImageCommand(), factory.newAgentCommand())
+	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newGetCommand(), factory.newDeleteCommand(), factory.newImageCommand(), factory.newCatalogCommand(), factory.newAgentCommand())
 	return root, nil
+}
+
+func (factory commandFactory) newCatalog() (Catalog, error) {
+	value, err := factory.deps.NewCatalog()
+	if err != nil {
+		return nil, catalogLocalError{code: "catalog_unavailable", message: "Local catalog is unavailable."}
+	}
+	if common.IsNil(value) {
+		return nil, errors.New("catalog factory returned nil")
+	}
+	return value, nil
 }
 
 func (factory commandFactory) loadGeneralConfiguration() error {
@@ -227,10 +249,20 @@ func (resolver selectedProviderExecutableResolver) LookPath(executableName strin
 }
 
 func (factory commandFactory) newClient(cmd *cobra.Command) (Client, context.Context, context.CancelFunc, error) {
+	client, _, ctx, cancel, err := factory.newClientWithSettings(cmd)
+	return client, ctx, cancel, err
+}
+
+func (factory commandFactory) newClientWithSettings(cmd *cobra.Command) (Client, clientSettings, context.Context, context.CancelFunc, error) {
 	settings, err := factory.resolveClientSettings(cmd)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, clientSettings{}, nil, nil, err
 	}
+	client, ctx, cancel, err := factory.newClientFromSettings(cmd, settings)
+	return client, settings, ctx, cancel, err
+}
+
+func (factory commandFactory) newClientFromSettings(cmd *cobra.Command, settings clientSettings) (Client, context.Context, context.CancelFunc, error) {
 	client, err := factory.deps.NewClient(httpx.ClientConfig{
 		Server: settings.server,
 		HTTPClient: &http.Client{
@@ -280,17 +312,7 @@ func (factory commandFactory) resolveClientSettings(cmd *cobra.Command) (clientS
 }
 
 func validateServerOrigin(value string) error {
-	if strings.Contains(value, "#") {
-		return invalidCommand("server must be an absolute HTTP origin")
-	}
-	parsed, err := url.Parse(value)
-	if err != nil || parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return invalidCommand("server must be an absolute HTTP origin")
-	}
-	if parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return invalidCommand("server must be an absolute HTTP origin")
-	}
-	if (parsed.Path != "" && parsed.Path != "/") || (parsed.RawPath != "" && parsed.RawPath != "/") {
+	if _, err := generalconfig.CanonicalPublishingOrigin(value); err != nil {
 		return invalidCommand("server must be an absolute HTTP origin")
 	}
 	return nil

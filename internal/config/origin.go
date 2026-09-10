@@ -32,6 +32,11 @@ func CanonicalBrowserOrigin(value string) (string, error) {
 	if err != nil || host == "" || strings.ContainsAny(host, "*%") {
 		return "", errors.New(invalid)
 	}
+	if strings.Contains(host, ".") && strings.Trim(host, "0123456789.") == "" {
+		if _, err := netip.ParseAddr(host); err != nil {
+			return "", errors.New(invalid)
+		}
+	}
 	canonicalHost, ipv6, err := canonicalOriginHost(host, bracketed)
 	if err != nil || ipv6 || canonicalHost != "127.0.0.1" {
 		return "", errors.New(invalid)
@@ -88,6 +93,58 @@ func CanonicalOrigin(value string) (string, error) {
 	}
 	canonical := "https://" + canonicalHost
 	if port != 0 && port != 443 {
+		canonical += ":" + strconv.Itoa(port)
+	}
+	return canonical, nil
+}
+
+// CanonicalPublishingOrigin canonicalizes an exact HTTP or HTTPS publishing
+// origin. Unlike CanonicalOrigin, it intentionally permits HTTP because local
+// Agent Whiteboard servers commonly use literal loopback or localhost origins.
+func CanonicalPublishingOrigin(value string) (string, error) {
+	const invalid = "server must be an absolute HTTP origin"
+	if value == "" || strings.TrimSpace(value) != value || strings.Contains(value, "#") {
+		return "", errors.New(invalid)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed == nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", errors.New(invalid)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", errors.New(invalid)
+	}
+	if (parsed.Path != "" && parsed.Path != "/") || (parsed.RawPath != "" && parsed.RawPath != "/") {
+		return "", errors.New(invalid)
+	}
+
+	bracketed := strings.HasPrefix(parsed.Host, "[")
+	host, portText, err := splitOriginHost(parsed.Host)
+	if err != nil || host == "" || strings.ContainsAny(host, "*%") {
+		return "", errors.New(invalid)
+	}
+	if strings.Contains(host, ".") && strings.Trim(host, "0123456789.") == "" {
+		if _, err := netip.ParseAddr(host); err != nil {
+			return "", errors.New(invalid)
+		}
+	}
+	canonicalHost, ipv6, err := canonicalOriginHost(host, bracketed)
+	if err != nil {
+		return "", errors.New(invalid)
+	}
+	port := 0
+	if portText != "" {
+		parsedPort, parseErr := strconv.ParseUint(portText, 10, 16)
+		if parseErr != nil || parsedPort == 0 {
+			return "", errors.New("server origin port must be between 1 and 65535")
+		}
+		port = int(parsedPort)
+	}
+	if ipv6 {
+		canonicalHost = "[" + canonicalHost + "]"
+	}
+	canonical := scheme + "://" + canonicalHost
+	if port != 0 && !((scheme == "http" && port == 80) || (scheme == "https" && port == 443)) {
 		canonical += ":" + strconv.Itoa(port)
 	}
 	return canonical, nil

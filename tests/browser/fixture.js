@@ -28,17 +28,20 @@ function isolatedEnvironment(home) {
   };
 }
 
-function runProcess(command, args, { cwd = projectRoot, env = process.env, timeout = 60_000 } = {}) {
+export function runProcess(command, args, { cwd = projectRoot, env = process.env, timeout = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let spawnError;
     let killWaitTimer;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
       killWaitTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
         reject(new Error(`timed-out process did not exit after SIGKILL: ${command} ${args.join(" ")}`));
       }, 5_000);
     }, timeout);
@@ -51,13 +54,15 @@ function runProcess(command, args, { cwd = projectRoot, env = process.env, timeo
       stderr += chunk;
     });
     child.once("error", (error) => {
-      clearTimeout(timer);
-      clearTimeout(killWaitTimer);
-      reject(error);
+      spawnError = error;
     });
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       clearTimeout(timer);
       clearTimeout(killWaitTimer);
+      if (spawnError) {
+        reject(spawnError);
+        return;
+      }
       if (timedOut) {
         reject(new Error(`process timed out: ${command} ${args.join(" ")}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
         return;
@@ -1503,6 +1508,61 @@ export const test = base.extend({
     { scope: "worker", timeout: 90_000 },
   ],
 
+  catalogClient: async ({ server }, use) => {
+    const home = await fs.mkdtemp(path.join(server.root, "catalog-client-home-"));
+    const env = isolatedEnvironment(home);
+    const ownedServers = new Set();
+    let sequence = 0;
+    const run = async (args, options = {}) => {
+      const result = await runProcess(server.binary, args, { env: options.env ?? env, timeout: processTimeout });
+      return { ...result, json: result.stdout === "" ? null : JSON.parse(result.stdout) };
+    };
+    const create = async ({ kind, source, context, title, summary, origin = server.url }) => {
+      const number = sequence++;
+      const extension = kind === "html" ? "html" : "md";
+      const sourcePath = path.join(home, `catalog-${number}.${extension}`);
+      const contextPath = path.join(home, `catalog-${number}-context.md`);
+      await Promise.all([
+        fs.writeFile(sourcePath, source, { mode: 0o600 }),
+        fs.writeFile(contextPath, context, { mode: 0o600 }),
+      ]);
+      const result = await run([
+        "--server", origin, "--json", "create", kind, sourcePath,
+        "--context", contextPath, "--title", title, "--summary", summary, "--expires-in", "0",
+      ]);
+      if (result.stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${result.stderr}`);
+      return { ...result.json.resource, sourcePath, contextPath };
+    };
+    const startAdditionalServer = async () => {
+      const storage = await fs.mkdtemp(path.join(server.root, "catalog-server-storage-"));
+      const running = startServer(server.binary, storage, env);
+      ownedServers.add(running);
+      const listening = await running.listening;
+      await waitForReady(listening.url, running.child, running.output);
+      return {
+        ...listening,
+        stop: async () => {
+          await stopServer(running.child);
+          ownedServers.delete(running);
+        },
+      };
+    };
+    const listFromFreshHome = async (args = []) => {
+      const freshHome = await fs.mkdtemp(path.join(server.root, "catalog-fresh-home-"));
+      try {
+        return await run(["--json", "catalog", "list", ...args], { env: isolatedEnvironment(freshHome) });
+      } finally {
+        await fs.rm(freshHome, { recursive: true, force: true });
+      }
+    };
+    try {
+      await use({ home, env, run, create, startAdditionalServer, listFromFreshHome });
+    } finally {
+      await Promise.all([...ownedServers].map((running) => stopServer(running.child)));
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  },
+
   localAgentTransport: [
     async ({ server }, use) => {
       const credentials = await createTestCertificate(server.root);
@@ -1569,14 +1629,15 @@ export const test = base.extend({
         let sequence = 0;
         const mutateAtOrigin = async (origin, operation, kind, source, creatorContext, id = "") => {
           const extension = kind === "html" ? "html" : "md";
-          const fixturePath = path.join(server.root, `sidebar-${sequence}.${extension}`);
-          const contextPath = path.join(server.root, `sidebar-${sequence++}-context.md`);
+          const fixtureNumber = sequence++;
+          const fixturePath = path.join(server.root, `sidebar-${fixtureNumber}.${extension}`);
+          const contextPath = path.join(server.root, `sidebar-${fixtureNumber}-context.md`);
           await Promise.all([
             fs.writeFile(fixturePath, source, { mode: 0o600 }),
             fs.writeFile(contextPath, creatorContext, { mode: 0o600 }),
           ]);
           const command = operation === "create"
-            ? ["--server", listening.url, "--json", "create", kind, "--context", contextPath, "--expires-in", "0", fixturePath]
+            ? ["--server", listening.url, "--json", "create", kind, "--context", contextPath, "--title", `Browser ${kind} fixture ${fixtureNumber}`, "--summary", "Hermetic local-agent browser fixture", "--expires-in", "0", fixturePath]
             : ["--server", listening.url, "--json", "update", kind, "--context", contextPath, "--", id, fixturePath];
           const { stdout, stderr } = await runProcess(server.binary, command, { env: server.env, timeout: processTimeout });
           if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);
@@ -1802,7 +1863,7 @@ export const test = base.extend({
       ]);
       const { stdout, stderr } = await runProcess(
         server.binary,
-        ["--server", server.url, "--json", "create", "markdown", "--context", contextPath, "--expires-in", "0", fixturePath],
+        ["--server", server.url, "--json", "create", "markdown", "--context", contextPath, "--title", `Browser Markdown fixture ${fixtureNumber}`, "--summary", "Hermetic browser rendering fixture", "--expires-in", "0", fixturePath],
         { env: server.env, timeout: processTimeout },
       );
       if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);
@@ -1826,7 +1887,7 @@ export const test = base.extend({
       ]);
       const { stdout, stderr } = await runProcess(
         server.binary,
-        ["--server", server.url, "--json", "create", "html", "--context", contextPath, "--expires-in", "0", fixturePath],
+        ["--server", server.url, "--json", "create", "html", "--context", contextPath, "--title", `Browser HTML fixture ${fixtureNumber}`, "--summary", "Hermetic standalone browser fixture", "--expires-in", "0", fixturePath],
         { env: server.env, timeout: processTimeout },
       );
       if (stderr !== "") throw new Error(`CLI wrote unexpected stderr: ${stderr}`);

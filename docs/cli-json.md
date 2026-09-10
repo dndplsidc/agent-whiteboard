@@ -1,8 +1,8 @@
 # CLI JSON contract
 
-`--json` selects machine output with `"schema_version":1`. Successful data is written only to stdout; errors and diagnostics are written only to stderr. Every envelope is one JSON object followed by a newline.
+`--json` selects machine output with `"schema_version":1`. Successful data is written only to stdout; errors and warning diagnostics are written only to stderr. Each envelope is one JSON object followed by a newline. A successful remote operation can therefore produce a resource on stdout, a warning on stderr, and exit status 0.
 
-Markdown and HTML create and update require `--context FILE`. Source and creator-context files must be non-empty UTF-8; creator context is Markdown. A runnable lifecycle starts with a temporary context artifact:
+Markdown and HTML create require non-empty UTF-8 `--title` and `--summary` values plus `--context FILE`. Updates require the context file and accept optional title/summary replacements. Source and creator-context files must be non-empty UTF-8; creator context is Markdown. A runnable lifecycle starts with a temporary context artifact:
 
 ```sh
 context_dir="$(mktemp -d)"
@@ -17,13 +17,15 @@ cat >"$context_file" <<'EOF'
 - Open questions: none.
 EOF
 
-agent-whiteboard --json create markdown --context "$context_file" board.md
-agent-whiteboard --json update markdown --context "$context_file" -- CAPABILITY_ID board.md
+agent-whiteboard --json create markdown --context "$context_file" --title "Architecture" --summary "Current recharge architecture" board.md
+agent-whiteboard --json update markdown --context "$context_file" --title "Updated architecture" -- CAPABILITY_ID board.md
 agent-whiteboard --json get markdown -- CAPABILITY_ID
-agent-whiteboard --json create html --context "$context_file" board.html
-agent-whiteboard --json update html --context "$context_file" -- CAPABILITY_ID board.html
+agent-whiteboard --json create html --context "$context_file" --title "Interactive dashboard" --summary "Standalone operational dashboard" board.html
+agent-whiteboard --json update html --context "$context_file" --summary "Updated operational dashboard" -- CAPABILITY_ID board.html
 agent-whiteboard --json get html -- CAPABILITY_ID
 ```
+
+Title and summary are trimmed local catalog metadata. They are not inserted into or sent as source or creator context, and they do not change Markdown headings, HTML titles, or viewer title selection. An update replaces only supplied metadata for a board already tracked on this laptop; omitted metadata is preserved.
 
 Single create/update success:
 
@@ -51,6 +53,29 @@ Image upload always uses the plural envelope, even for one image, and preserves 
 {"schema_version":1,"resources":[{"id":"CAPABILITY_ID","url":"https://whiteboard.example/images/CAPABILITY_ID","expires_at":null,"permanent":true}]}
 ```
 
+## Local catalog discovery
+
+The CLI records new Markdown and HTML creations under `~/.agent-whiteboard/catalog`, including results from remote publishing origins. Images, direct HTTP/Go API creations, older boards, other devices, and unknown boards that are merely retrieved, updated, or deleted are not enrolled.
+
+List and search run offline across all recorded origins:
+
+```sh
+agent-whiteboard --json catalog list
+agent-whiteboard --json catalog list --kind markdown --query "recharge architecture" --limit 20 --offset 0
+```
+
+`--kind` is `markdown` or `html`; `--limit` defaults to 20 and must be positive; `--offset` must be nonnegative. Search is case-insensitive, and every whitespace-separated query term must occur as a substring in either the title or summary. Filtering happens before pagination. Results are newest first, with server, kind, and ID as deterministic tie-breakers.
+
+Catalog output is schema version 1. `records` is always an array, and `total` is the complete matching count before pagination:
+
+```json
+{"schema_version":1,"records":[{"schema_version":1,"server":"https://whiteboard.example","kind":"markdown","id":"CAPABILITY_ID","url":"https://whiteboard.example/whiteboards/markdown/CAPABILITY_ID","title":"Architecture","summary":"Current recharge architecture","source_filename":"board.md","created_at":1767220000,"updated_at":1767221000,"expires_at":1767306400,"permanent":false,"state":"created","deleted_at":null,"expired":false}],"total":1,"limit":20,"offset":0}
+```
+
+`created_at` and `updated_at` are UTC Unix seconds observed by this local CLI, not server timestamps. `state` is `created`, `creation_uncertain`, or `deleted`; `expired` is derived when listing. Expired, uncertain, and locally deleted records remain searchable. A plain `created` and unexpired result is not a remote availability guarantee.
+
+The catalog belongs only to the effective user on this laptop. An empty result means no matching local record, not that no remote board exists. To check content or availability, use the selected record's `server` with `get` rather than the currently configured default. `catalog list` ignores `--server` for filtering, does not load publishing configuration, and never contacts a server.
+
 Delete and trusted-origin add/remove success is `{"schema_version":1}`. Trusted-origin list preserves insertion order and contains canonical exact HTTPS origins:
 
 ```json
@@ -65,11 +90,22 @@ Error output is stable:
 {"schema_version":1,"error":{"code":"not_found","message":"resource not found"}}
 ```
 
+Warnings preserve the remote result and exit classification. In JSON mode they are newline-delimited objects on stderr:
+
+```json
+{"schema_version":1,"warning":{"code":"catalog_write_failed","message":"Whiteboard was published, but its local catalog record could not be saved."}}
+{"schema_version":1,"warning":{"code":"catalog_record_missing","message":"Whiteboard was updated, but title and summary metadata were not recorded because this board is not in the local catalog."}}
+```
+
+Update and delete use operation-specific `catalog_write_failed` messages. Do not treat stderr as necessarily empty when exit status is 0. Diagnostics never contain source, creator context, or raw filesystem errors.
+
 `expires_at` is nullable Unix seconds. `null` pairs with `permanent:true`; a timestamp pairs with `permanent:false`. URLs are resolved by the CLI against `--server`, because HTTP mutations return paths.
 
 Timeout produces stderr `{"schema_version":1,"error":{"code":"timeout","message":"request timed out"}}` and exit 4. Cancellation uses code `canceled`.
 
-A whiteboard create can fail after persistence becomes uncertain. In that case the CLI writes the generated resource envelope to stdout before writing the error envelope to stderr and exiting nonzero. Preserve that ID: the resource may exist and should be checked or deleted. Ordinary failed creates do not emit a resource.
+A whiteboard create can fail after remote persistence becomes uncertain. If the server returns a validated resource, the CLI records it as `creation_uncertain`, writes the resource envelope to stdout, then writes the original error envelope to stderr and exits nonzero. Preserve that ID and use the recorded server to retrieve or delete it; never repeat `create` as recovery because that can create a duplicate. A successfully recorded uncertain result has no additional catalog warning. If catalog recording also fails, the catalog warning precedes the original error envelope. Ordinary failed creates without a returned ID do not emit or invent a resource or catalog record.
+
+Creation preflights catalog writability before sending the HTTP request. A preflight error uses `catalog_unavailable` and guarantees that the command did not publish. Remote and local persistence cannot be atomic: after a response, catalog recording can still fail. In that case the resource output and remote outcome remain authoritative and `catalog_write_failed` warns that this laptop's history is incomplete. Preserve the returned URL and do not repeat creation to repair local recording.
 
 | Exit | Meaning |
 | ---: | --- |

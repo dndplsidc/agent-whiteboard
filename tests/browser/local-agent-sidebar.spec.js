@@ -181,6 +181,7 @@ test("adds exact Mermaid source as existing section context", async ({ context, 
   await expect(token).toHaveText("Architecture — Mermaid diagram 1");
   await page.getByRole("button", { name: "Connect to Pi", exact: true }).click();
   await expect(page.locator(".agent-provider-label")).toContainText("fixture-model");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await composer.press("End");
   await composer.pressSequentially(" explain this flow.");
   await composer.press("Enter");

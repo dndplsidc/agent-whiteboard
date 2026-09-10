@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dndplsidc/agent-whiteboard/internal/catalog"
 	"github.com/dndplsidc/agent-whiteboard/internal/common"
 	"github.com/dndplsidc/agent-whiteboard/internal/webapi"
 )
@@ -72,6 +73,26 @@ type jsonErrorOutput struct {
 	Error         jsonErrorBody `json:"error"`
 }
 
+type catalogListOutput struct {
+	SchemaVersion int                    `json:"schema_version"`
+	Records       []catalog.ResultRecord `json:"records"`
+	Total         int                    `json:"total"`
+	Limit         int                    `json:"limit"`
+	Offset        int                    `json:"offset"`
+}
+
+type jsonWarningOutput struct {
+	SchemaVersion int           `json:"schema_version"`
+	Warning       jsonErrorBody `json:"warning"`
+}
+
+type catalogLocalError struct {
+	code    string
+	message string
+}
+
+func (err catalogLocalError) Error() string { return err.message }
+
 func resolveJSONResources(client Client, resources []webapi.Resource) ([]jsonResource, error) {
 	resolved := make([]jsonResource, 0, len(resources))
 	for _, resource := range resources {
@@ -92,16 +113,60 @@ func writeResource(writer io.Writer, jsonMode bool, client Client, resource weba
 		return err
 	}
 
+	return writeResolvedResource(writer, jsonMode, resolved[0])
+}
+
+func writeResolvedResource(writer io.Writer, jsonMode bool, resource jsonResource) error {
 	var output bytes.Buffer
 	if jsonMode {
-		if err := json.NewEncoder(&output).Encode(singleResourceOutput{SchemaVersion: 1, Resource: resolved[0]}); err != nil {
+		if err := json.NewEncoder(&output).Encode(singleResourceOutput{SchemaVersion: 1, Resource: resource}); err != nil {
 			return err
 		}
 	} else {
-		fmt.Fprintln(&output, resolved[0].URL)
+		fmt.Fprintln(&output, resource.URL)
 	}
-	_, err = writer.Write(output.Bytes())
+	_, err := writer.Write(output.Bytes())
 	return err
+}
+
+func writeCatalogList(writer io.Writer, jsonMode bool, page catalog.Page) error {
+	if page.Records == nil {
+		page.Records = []catalog.ResultRecord{}
+	}
+	if jsonMode {
+		return json.NewEncoder(writer).Encode(catalogListOutput{
+			SchemaVersion: 1, Records: page.Records, Total: page.Total, Limit: page.Limit, Offset: page.Offset,
+		})
+	}
+	for index, result := range page.Records {
+		if index > 0 {
+			if _, err := fmt.Fprintln(writer); err != nil {
+				return err
+			}
+		}
+		expiration := humanExpiration(result.ExpiresAt)
+		if result.Expired {
+			expiration += " (expired)"
+		}
+		if _, err := fmt.Fprintf(writer, "Title: %s\nSummary: %s\nKind: %s\nURL: %s\nCreated: %s\nExpiration: %s\nState: %s\n",
+			safeTerminal(result.Title), safeTerminal(result.Summary), result.Kind, safeTerminal(result.URL),
+			humanCatalogTime(result.CreatedAt), expiration, result.State,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeCatalogWarning(writer io.Writer, jsonMode bool, code, message string) {
+	if common.IsNil(writer) {
+		return
+	}
+	if jsonMode {
+		_ = json.NewEncoder(writer).Encode(jsonWarningOutput{SchemaVersion: 1, Warning: jsonErrorBody{Code: code, Message: message}})
+		return
+	}
+	_, _ = fmt.Fprintf(writer, "Warning: %s\n", message)
 }
 
 func writeMarkdown(writer io.Writer, client Client, response webapi.MarkdownResponse) error {
@@ -234,6 +299,10 @@ func commandErrorCode(err error) string {
 	if errors.As(err, &usage) {
 		return string(common.CodeInvalidRequest)
 	}
+	var catalogErr catalogLocalError
+	if errors.As(err, &catalogErr) {
+		return catalogErr.code
+	}
 	var domainErr *common.Error
 	if errors.As(err, &domainErr) {
 		return string(domainErr.Code)
@@ -254,6 +323,10 @@ func commandErrorMessage(err error) string {
 	var usage usageError
 	if errors.As(err, &usage) {
 		return usage.Error()
+	}
+	var catalogErr catalogLocalError
+	if errors.As(err, &catalogErr) {
+		return catalogErr.message
 	}
 	var domainErr *common.Error
 	if errors.As(err, &domainErr) {

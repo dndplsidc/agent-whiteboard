@@ -39,6 +39,21 @@ func TestAgentSkillContract(t *testing.T) {
 	}
 }
 
+func TestPublishingSkillExplainsLocalCatalogContract(t *testing.T) {
+	root := filepath.Clean(filepath.Join("..", ".."))
+	skill := readDocumentation(t, filepath.Join(root, "skills", "agent-whiteboard", "SKILL.md"))
+	publish := readDocumentation(t, filepath.Join(root, "skills", "agent-whiteboard", "references", "publish.md"))
+	for _, required := range []string{"catalog list", "--title", "--summary", "this laptop", "local catalog"} {
+		require.Contains(t, strings.ToLower(skill), strings.ToLower(required))
+	}
+	for _, required := range []string{
+		"catalog list --query", "total", "limit", "offset", "catalog_write_failed", "catalog_record_missing",
+		"creation_uncertain", "do not repeat create", "recorded server",
+	} {
+		require.Contains(t, strings.ToLower(publish), strings.ToLower(required))
+	}
+}
+
 func splitSkillFrontmatter(t *testing.T, content string) (map[string]string, string) {
 	t.Helper()
 	normalized := strings.ReplaceAll(content, "\r\n", "\n")

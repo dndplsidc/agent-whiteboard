@@ -1,418 +1,93 @@
 # Agent Whiteboard
 
-Publish agent work as pages people can inspect, share, and discuss.
+Publish agent work as pages you can share, explore, and discuss with an agent.
 
-Agent Whiteboard is a self-hosted Go server and CLI for publishing Markdown, Mermaid diagrams, trusted standalone HTML, and raster images at capability URLs. Agents can publish from the shell; readers get a polished browser view and can optionally discuss the page with Pi, Codex, or Cursor through **Page Agent**.
+Turn reports, diagrams, and prototypes into browser pages. **Page Agent** lets you continue the conversation right beside the content using your local Pi, Codex, or Cursor.
 
-- **Built for agent workflows:** publish, update, retrieve, and delete without opening a browser.
-- **Self-hosted:** one Go binary, filesystem storage, and no CDN dependency.
-- **Made for rich results:** sanitized Markdown, syntax highlighting, Mermaid, trusted active HTML, and images.
-- **Page-aware conversations:** send exact source, creator context, selected sections, Mermaid diagrams, components, code, or images to a local Pi, Codex, or Cursor session.
-- **Explicit lifecycle:** use expiring or permanent capability URLs and replace content in place.
+- **Publish rich content:** Markdown, Mermaid diagrams, interactive HTML, and images.
+- **Point to what matters:** select text, sections, diagrams, or supported HTML components and add them directly to your message.
+- **Keep working on the same page:** update content in place, retrieve its source, and find pages in the CLI's local catalog.
+- **Host it yourself:** one Go binary, filesystem storage, and bundled browser assets.
 
 ## Quick start
 
-Agent Whiteboard supports macOS and Linux with Go 1.25 or 1.26.
+**Let your coding agent set it up.** Copy this prompt:
 
-### 1. Install the CLI
-
-```sh
-go install github.com/dndplsidc/agent-whiteboard/cmd/agent-whiteboard@latest
+```text
+Set up Agent Whiteboard from https://github.com/dndplsidc/agent-whiteboard.
+Install its agent-whiteboard and agent-whiteboard-setup skills for this project,
+then follow them to install the CLI and run a local server with Page Agent.
+Use an available local Pi, Codex, or Cursor provider and preserve existing setup.
+Tell me if I need to reload my agent or complete provider login myself.
+Publish a short example with a Mermaid diagram, expiring in one hour, and
+verify the page and Page Agent connection without sending a model message.
+Give me the link and any remaining manual steps.
 ```
 
-### 2. Start the server
+Already have a server? Add its HTTPS URL to the prompt and ask your agent to use it instead of starting a local server.
 
-```sh
-agent-whiteboard serve --storage "$HOME/.agent-whiteboard"
-```
+The **CLI** publishes pages and runs the local **broker**, the process connecting your browser to your agent. The `agent-whiteboard-setup` skill handles installation and connections; `agent-whiteboard` handles publishing and updates. Skills alone do not install the CLI.
 
-The local server listens on `http://127.0.0.1:8567` by default.
+Requirements: macOS or Linux, Go 1.25 or 1.26, and a coding agent with shell access. Page Agent also needs a locally installed, authenticated Pi, Codex, or Cursor provider.
 
-### 3. Publish your first whiteboard
+### Install the skills yourself
 
-In another terminal, create a small Markdown board and its creator context:
-
-```sh
-context_dir="$(mktemp -d)"
-trap 'rm -rf "$context_dir"' EXIT
-context_file="$context_dir/context.md"
-board_file="$context_dir/board.md"
-
-cat >"$context_file" <<'EOF'
-# Creator context
-
-- Goal: demonstrate Markdown, Mermaid, and syntax highlighting.
-- Decisions: use a short flow diagram and Go example.
-- Assumptions: the bundled viewer assets are available.
-- Open questions: none.
-EOF
-
-cat >"$board_file" <<'EOF'
-# Agent Whiteboard quick start
-
-A Mermaid diagram rendered from Markdown:
-
-~~~mermaid
-flowchart LR
-    Agent --> Whiteboard --> Reader
-~~~
-
-And a highlighted code block:
-
-~~~go
-fmt.Println("Hello from Agent Whiteboard")
-~~~
-EOF
-
-agent-whiteboard create markdown \
-  --context "$context_file" \
-  --expires-in 3600 \
-  "$board_file"
-```
-
-The command prints a capability URL. Open it in a browser to see the rendered whiteboard.
-
-Creator context records the goals, decisions, assumptions, and open questions behind a page. It travels with the whiteboard and is available to readers and Page Agent. Do not include hidden reasoning, credentials, sensitive data, private source, or raw tool output.
-
-## Install the agent skill
-
-Install the bundled skill so supported coding agents can publish and manage whiteboards for you:
+With Node.js and `npx` available, run in your project:
 
 ```sh
 npx skills add dndplsidc/agent-whiteboard --skill agent-whiteboard
-```
-
-The installer detects supported agents and installs the skill into the current project. To make it available globally:
-
-```sh
-npx skills add dndplsidc/agent-whiteboard --skill agent-whiteboard --global
-```
-
-Once installed, ask your agent to publish Markdown, Mermaid, trusted standalone HTML, or images to Agent Whiteboard. The skill covers resource selection, creator context, publication, lifecycle commands, and rendered verification.
-
-Install the separate setup skill when the agent needs to install the binary, run a publishing server, configure Page Agent, manage origin trust, or diagnose setup:
-
-```sh
 npx skills add dndplsidc/agent-whiteboard --skill agent-whiteboard-setup
 ```
 
-The publishing and setup skills stay separate so each invocation loads only the instructions needed for the task.
+Reload your agent, then paste the setup prompt above. Add `--global` to both commands to make the skills available across projects.
 
-## Use Page Agent
+Prefer the terminal? Follow the [manual setup and publishing guide](docs/publishing.md).
 
-Page Agent lets a reader discuss the current whiteboard with a locally running Pi, Codex, or Cursor provider. The reader explicitly connects, reviews what will be shared, and uses the selected provider model with the provider's normal tools, approval policy, sandbox, and project configuration. Provider-specific features remain provider-specific; Cursor does not expose a native skill catalog or manual compaction.
+## Try Page Agent
 
-Setup has two sides: the publishing server must expose Page Agent, and each reader must run and authorize their own local broker.
+Ask your agent: **“Use agent-whiteboard to turn this explanation into a page with a diagram.”**
 
-### Enable Page Agent on the publishing server
+1. Open the returned link and the **Page Agent** panel.
+2. Choose your provider, review the page context, and connect.
+3. Select some text, choose **Add to message**, and ask “Can you explain this?”
 
-The server operator enables the viewer integration in `~/.agent-whiteboard/config.yaml` or another selected configuration file:
+You can also add entire sections, Mermaid diagrams, images, and supported HTML components. References make it easy to point at exactly what you mean without copying between windows.
 
-```yaml
-version: 1
+Page Agent receives the full page source and **creator context**—the relevant goals, decisions, and assumptions recorded by the publishing agent. Selected references focus the question; they do not restrict the shared context to that excerpt. Your provider's normal tools and approval settings still apply.
 
-viewer:
-  local_agent:
-    enabled: true
-```
+See [Page Agent setup and troubleshooting](docs/page-agent.md) for provider configuration, origin trust, and broker management.
 
-Restart `agent-whiteboard serve` after changing the configuration. The Page Agent control will then appear on published Markdown and trusted HTML whiteboards.
+## Hosting and access
 
-See [configuration](docs/configuration.md) for the complete schema and configuration-file rules.
+Agent Whiteboard is self-hosted. Local setup gives you a page on your own machine; sharing with others requires a server they can reach. This repository does not provide a hosted service. Each Page Agent reader runs their own local broker.
 
-### Prepare a provider on the reader's machine
+Links grant access: anyone holding a whiteboard's capability URL can read, update, or delete it, including its source and creator context. Keep sensitive content out of published pages. HTML is trusted active content. Read the [security model](docs/security.md) before deployment.
 
-Each reader needs:
+## CLI commands
 
-1. The `agent-whiteboard` CLI installed.
-2. Any requested providers available on `PATH`: `pi`, `codex`, and/or `cursor-agent`.
-3. Authentication completed through each provider's own CLI. For Cursor, run `cursor-agent login`.
+Run commands as `agent-whiteboard <command>`. Use `--help` on any command for its flags.
 
-Agent Whiteboard does not accept or store provider credentials. Providers use their effective native user configuration unchanged. For Cursor, Agent Whiteboard never invokes ACP authentication, opens a login browser, receives credentials, or copies or edits Cursor authentication, configuration, or shell state.
-
-If provider executables are installed elsewhere, pass their paths when starting the broker:
-
-```sh
-agent-whiteboard agent serve \
-  --pi-executable /path/to/pi \
-  --codex-executable /path/to/codex \
-  --cursor-executable /path/to/cursor-agent
-```
-
-Each selector uses its explicit flag first, then its matching non-empty environment variable, then default `PATH` discovery. Cursor's default executable is exactly `cursor-agent`; a generic executable named `agent` is accepted only through `--cursor-executable` or `AGENT_WHITEBOARD_PROVIDER_CURSOR_EXECUTABLE`. Cursor executable selection canonicalizes a discovered symlink before the adapter validates and launches the direct regular executable. An explicitly supplied empty executable flag is invalid. A missing provider does not stop the broker or other providers from working.
-
-### Trust the publishing origin
-
-For a remotely hosted whiteboard, every reader must trust its exact HTTPS origin locally:
-
-```sh
-agent-whiteboard agent trust add https://whiteboard.example
-agent-whiteboard agent trust list
-```
-
-Trust only the origin—scheme, hostname, and optional port. Do not include a path, query, fragment, credentials, or wildcard.
-
-Pages served from literal `http://127.0.0.1` are admitted automatically and do not need a trust entry. This local exception does not include `localhost`, other loopback spellings, IPv6, or remote HTTP origins.
-
-Remove an origin when it is no longer needed:
-
-```sh
-agent-whiteboard agent trust remove https://whiteboard.example
-```
-
-### Reuse or start the reader's local broker
-
-Before starting a broker, check for an existing foreground process or macOS managed daemon. Resolve `agent.port` from the selected configuration, or use its default `8568`. On macOS:
-
-```sh
-agent-whiteboard agent daemon status
-lsof -nP -a -p PID -iTCP -sTCP:LISTEN
-```
-
-When the reported daemon PID owns the expected `127.0.0.1` listener, reuse it. Do not probe `/healthz` or `/readyz` on port `8568`; those routes belong to the publishing server and do not report broker readiness.
-
-If no broker exists, run it in the foreground:
-
-```sh
-agent-whiteboard agent serve
-```
-
-It listens on literal IPv4 loopback and independently resolves `pi`, `codex`, and exactly `cursor-agent` from `PATH`.
-
-On macOS, install and start it as a managed per-user LaunchAgent instead only when persistent operation is wanted:
-
-```sh
-agent-whiteboard agent serve --daemon
-agent-whiteboard agent daemon status
-```
-
-The installer records resolved Pi, Codex, and Cursor executable paths plus a standalone runtime `PATH` in the LaunchAgent; it does not persist provider credentials or configuration. The `PATH` preserves safe absolute entries from the current shell and adds common system, Homebrew, Bun, asdf, mise, Volta, and Nix locations. It does not source `.zshrc` or another shell startup file. When using NVM, `nix develop`, or another version-specific environment, activate the intended runtime before installation. Rerun `agent-whiteboard agent serve --daemon` after changing or removing that runtime so the plist is regenerated and reloaded.
-
-Other daemon operations are:
-
-```sh
-agent-whiteboard agent daemon restart
-agent-whiteboard agent daemon stop
-agent-whiteboard agent daemon uninstall
-```
-
-Managed daemon operations are not available on Linux; keep `agent serve` running in the foreground there.
-
-### Connect from a whiteboard
-
-1. Open an Agent Whiteboard capability URL.
-2. Open **Page Agent**.
-3. Select Pi, Codex, or Cursor.
-4. Review the page context disclosed by the viewer.
-5. Choose **Connect**.
-6. Write a message or add page content to the composer, then send it.
-
-Opening the pane, checking broker status, or switching providers does not send page content. The first contextual message sends the complete exact Markdown or HTML source, creator context, title, URL, resource metadata, and the reader's message as one envelope to the selected provider.
-
-Readers can add more precise context without copying and pasting:
-
-- Select rendered Markdown text and choose **Add to message**.
-- Add a heading-defined Markdown section or the complete page.
-- Add the exact fenced source for a rendered Mermaid diagram.
-- Add supported rendered raster images.
-- In trusted HTML, use **+ Add** or the **Components** chooser for eligible sections, images, charts, tables, code, quotes, and explicitly declared components.
-- Add private PNG, JPEG, GIF, or WebP attachments from the composer.
-
-Page Agent exposes each provider's supported subset of model and reasoning controls, streaming activity, interruption, archives, and approval or elicitation requests. Pi and Codex may also expose native skills and manual `/compact`; Cursor does not. Cursor reads the public `cursor-agent --list-models` catalog and presents each exact CLI entry as a complete model variant, including any reasoning or Fast attribute already embedded in its native name. The searchable menu sorts variants naturally by model name, then from lower to higher effort. It does not fabricate separate Effort or Speed controls. Each Cursor conversation launches ACP as `cursor-agent --model <slug> acp`; an explicit model change replaces only that idle conversation's child and reloads the same native session, while ordinary messages retain the process. If Cursor has not yet listed a newly created prompt-free session, Page Agent atomically replaces that uncommitted native reference and its settings before sending the first prompt. Cursor derives image availability from ACP. Cursor archives can be listed and restored, but native archive deletion is unavailable. All three providers keep independent conversations for the same whiteboard.
-
-Refreshing resumes the saved current conversation for that page and provider; there is no shared default thread ID. New Codex conversations are given the title **Page Agent** and their empty history is persisted and checked before the reference is saved, without sending a model message. If a saved Pi or Codex thread is missing, the pane shows **Conversation unavailable** and offers **Start new conversation**. Confirming keeps the old reference in Archives and makes the new conversation current. It does not reconstruct unavailable messages or silently replace the old thread.
-
-### Troubleshoot reader setup
-
-| Symptom | What to check |
+| Commands | Use case |
 | --- | --- |
-| Broker unavailable | Check existing daemon/foreground state and verify that the `agent-whiteboard` process owns the configured loopback listener before starting another broker. Do not use publishing `/healthz` or `/readyz` routes on port `8568`. |
-| Origin not trusted | Run the exact `agent-whiteboard agent trust add https://…` command for the publishing origin. |
-| Provider unavailable | Confirm `pi`, `codex`, or exactly `cursor-agent` is on `PATH` and authenticated through its native CLI (`cursor-agent login` for Cursor). Cursor also requires negotiated ACP v1 with stable `session/list` and `session/load`; missing or incompatible capabilities fail closed. For a generic `agent` executable, configure `--cursor-executable` explicitly. For a managed daemon, activate the intended NVM/Nix environment and rerun `agent-whiteboard agent serve --daemon`. |
-| Browser cannot reach loopback | Allow Local Network Access when prompted by the browser. |
-| Incompatible local API | Update the publishing server and reader CLI together, then restart the broker. |
+| `create`, `update`, `get`, `delete` | Publish and manage Markdown or HTML pages. |
+| `image upload`, `image update`, `image delete` | Publish and manage raster images. |
+| `catalog list` | Find pages recorded by the CLI on this machine. |
+| `serve` | Run a publishing server. |
+| `agent serve`, `agent trust`, `agent daemon` | Connect Page Agent, manage trusted origins, and control the macOS broker service. |
 
-## Why Agent Whiteboard?
-
-Agents are good at producing reports, diagrams, prototypes, and visual explanations, but their results often end up as terminal output, temporary files, or local pages that are awkward to share. Generic paste services make content viewable, but usually lose lifecycle control, exact source retrieval, creator context, or a path back into the agent workflow.
-
-Agent Whiteboard closes that gap:
-
-1. An agent publishes from the CLI or HTTP API.
-2. The server returns a capability URL with an explicit lifetime.
-3. A reader opens a bundled, self-contained viewer.
-4. If Page Agent is enabled, the reader can continue the work with a local Pi, Codex, or Cursor session using exact page context.
-
-## What you can publish
-
-### Markdown and Mermaid
-
-Markdown is rendered in the browser with bundled markdown-it, DOMPurify, highlight.js, and Mermaid assets. Use ordinary fenced `mermaid` blocks for diagrams. When Page Agent is enabled, readers can choose **Add diagram** to place the exact fenced Mermaid source in their message.
-
-### Trusted standalone HTML
-
-Publish interactive reports, dashboards, or prototypes as trusted standalone HTML. The stable public URL uses an application-owned wrapper around opaque-origin sandboxed content. Exact submitted bytes remain available from the resource's `/content` route.
-
-Standalone HTML is active content, not sanitized Markdown. Publish only code you trust and read the [security model](docs/security.md) before using it.
-
-### Raster images
-
-Upload PNG, JPEG, GIF, and WebP images. Agent Whiteboard detects and validates formats from their bytes; SVG is rejected.
-
-Publish images before Markdown that references their returned URLs:
-
-```sh
-agent-whiteboard image upload --expires-in 3600 chart.png photo.webp
-```
-
-Replace an uploaded image in place while keeping its capability URL:
-
-```sh
-agent-whiteboard image update --expires-in 7200 -- CAPABILITY_ID chart.png
-```
-
-## How it works
-
-```text
-Agent or CLI
-    │ publish
-    ▼
-Agent Whiteboard server ── capability URL ──► Browser viewer
-                                                   │
-                                                   │ explicit reader consent
-                                                   ▼
-                                          Local Page Agent broker
-                                             │      │       │
-                                             ▼      ▼       ▼
-                                            Pi    Codex   Cursor
-```
-
-Public resources live on the self-hosted server. The optional Page Agent broker lives only on the reader's machine and accepts authorized browser origins over literal loopback. Published content and creator context remain untrusted provider input; each provider's native tools, approvals, and sandbox remain authoritative.
-
-## Common workflows
-
-### Publish trusted HTML
-
-```sh
-agent-whiteboard create html \
-  --context "$context_file" \
-  --expires-in 3600 \
-  docs/examples/standalone.html
-```
-
-### Update content
-
-Markdown and HTML updates replace source and creator context together:
-
-```sh
-agent-whiteboard update markdown \
-  --context "$context_file" \
-  --expires-in 7200 \
-  -- CAPABILITY_ID board.md
-
-agent-whiteboard update html \
-  --context "$context_file" \
-  --expires-in 7200 \
-  -- CAPABILITY_ID board.html
-```
-
-Omitting `--expires-in` on update preserves the current expiration. `--expires-in 0` makes the resource permanent.
-
-### Retrieve exact source and context
-
-```sh
-agent-whiteboard --json get markdown -- CAPABILITY_ID
-agent-whiteboard --json get html -- CAPABILITY_ID
-```
-
-Retrieval requires `--json` and returns the exact source together with creator context.
-
-### Delete resources
-
-```sh
-agent-whiteboard delete markdown -- CAPABILITY_ID
-agent-whiteboard delete html -- CAPABILITY_ID
-agent-whiteboard image delete -- CAPABILITY_ID
-```
-
-### Publish to a remote server
-
-Put global flags before the command, or set `AGENT_WHITEBOARD_SERVER`:
-
-```sh
-agent-whiteboard --server https://whiteboard.example --timeout 20s create markdown --context "$context_file" board.md
-```
-
-## Security model
-
-Capability URLs are bearer capabilities, not authenticated private links. Anyone holding a Markdown or HTML capability ID can view the resource, retrieve its exact source and creator context, update it, or delete it. `noindex` limits discovery; it is not access control.
-
-Keep these boundaries in mind:
-
-- Never publish credentials, tokens, private source, personal data, or other sensitive information.
-- Creator context is visible to anyone holding the capability and is not a hidden channel.
-- Markdown is sanitized; standalone HTML is trusted active content with a stricter sandboxed delivery model.
-- A local `127.0.0.1` publishing origin is deliberately trusted by the Page Agent broker without an explicit trust-list entry.
-- Whiteboard content is untrusted model input. Native provider tools, approval settings, sandbox, project trust, and extensions remain authoritative; origin trust is not a provider sandbox.
-- Agent Whiteboard does not provide a content-only provider sandbox or per-whiteboard filesystem boundary.
-
-Read [Security](docs/security.md) for the complete browser, capability, HTML, Page Agent, and provider threat model.
-
-## Deployment and configuration
-
-Configuration defaults to `~/.agent-whiteboard/config.yaml`. Settings resolve in this order where supported:
-
-1. Explicit flags
-2. Non-empty `AGENT_WHITEBOARD_*` environment variables
-3. YAML
-4. Built-in defaults
-
-The YAML format is versioned and strict. See [Configuration](docs/configuration.md) for the complete client, server, viewer, and agent schema, including validation and file-safety rules.
-
-| Setting | Default |
-| --- | ---: |
-| Publishing server | `http://127.0.0.1:8567` |
-| Page Agent broker | `127.0.0.1:8568` |
-| Storage | `$HOME/.agent-whiteboard` |
-| Client timeout | `30s` |
-| Resource expiration | `86400` seconds |
-| Whiteboard source limit | 10 MiB |
-| Creator context limit | 1 MiB |
-| Image limit | 25 MiB each |
-
-Run `agent-whiteboard serve --help` or `agent-whiteboard agent serve --help` for the complete flag lists.
-
-## APIs and integrations
-
-Agent Whiteboard exposes several supported surfaces:
-
-- **CLI:** human-readable output and a stable [versioned JSON format](docs/cli-json.md)
-- **HTTP API:** publishing, retrieval, mutation, deletion, and health endpoints under [`/api/v1`](docs/http-api.md)
-- **Go API:** embeddable server construction through [`pkg/agentwb`](docs/go-api.md)
-- **Agent skills:** publishing guidance under [`skills/agent-whiteboard`](skills/agent-whiteboard/SKILL.md) and setup guidance under [`skills/agent-whiteboard-setup`](skills/agent-whiteboard-setup/SKILL.md)
-- **Filesystem storage:** documented layout and durability contracts in [Storage](docs/storage.md)
+See the [complete command reference](docs/publishing.md#cli-command-reference) for every subcommand, required arguments, and use cases.
 
 ## Documentation
 
-### Use Agent Whiteboard
+| Goal | Guide |
+| --- | --- |
+| Install, publish, and manage pages from the CLI | [Publishing guide](docs/publishing.md) |
+| Connect and troubleshoot Page Agent | [Page Agent guide](docs/page-agent.md) |
+| Give your agent the instructions | [Setup skill](skills/agent-whiteboard-setup/SKILL.md) · [Publishing skill](skills/agent-whiteboard/SKILL.md) |
+| Configure and deploy a server | [Configuration](docs/configuration.md) · [Security](docs/security.md) · [Storage](docs/storage.md) |
+| Build an integration | [HTTP API](docs/http-api.md) · [Go API](docs/go-api.md) · [CLI JSON](docs/cli-json.md) |
 
-- [Agent setup skill](skills/agent-whiteboard-setup/SKILL.md)
-- [Agent publishing skill](skills/agent-whiteboard/SKILL.md)
-- [Configuration](docs/configuration.md)
-- [Security](docs/security.md)
-- [CLI JSON](docs/cli-json.md)
-- [Markdown and Mermaid example](docs/examples/diagram.md)
-- [Standalone HTML example](docs/examples/standalone.html)
-
-### Integrate Agent Whiteboard
-
-- [HTTP API](docs/http-api.md)
-- [Go API and dependency injection](docs/go-api.md)
-- [Filesystem storage](docs/storage.md)
-
-### Test provider integrations
-
-- [Optional hosted-provider smoke test](docs/hosted-provider-smoke.md)
+Examples: [Markdown and Mermaid](docs/examples/diagram.md) · [Standalone HTML](docs/examples/standalone.html).
 
 ## Development
 
@@ -435,6 +110,8 @@ pnpm run test:browser
 ```
 
 See [Releasing Agent Whiteboard](docs/releasing.md) for the verified release checklist and annotated-tag helper.
+
+Optional checks: [hosted-provider smoke test](docs/hosted-provider-smoke.md).
 
 ## License
 

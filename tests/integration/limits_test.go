@@ -41,7 +41,7 @@ func TestLimitsMarkdownPairIndependentPartsAndMultipartOverhead(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			source := writeFixture(t, "whiteboard.md", bytes.Repeat([]byte("m"), test.sourceSize))
 			creatorContext := writeContextFixture(t, string(bytes.Repeat([]byte("c"), test.contextSize)))
-			created := runCLIResource(t, server, "--json", "create", "markdown", "--context", creatorContext, source)
+			created := runCLIResource(t, server, "--json", "create", "markdown", "--context", creatorContext, "--title", "Limit fixture", "--summary", "Fits configured limits", source)
 			runCLIDelete(t, server, "--json", "delete", "markdown", "--", created.Resource.ID)
 			requireCategoryEmpty(t, server.Root, "whiteboards")
 		})
@@ -60,7 +60,7 @@ func TestLimitsMarkdownPairIndependentPartsAndMultipartOverhead(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			source := writeFixture(t, "whiteboard.md", test.source)
 			creatorContext := writeContextFixture(t, string(test.creatorContext))
-			requireCLIToolarge(t, server, "create", "markdown", "--context", creatorContext, source)
+			requireCLIToolarge(t, server, "create", "markdown", "--context", creatorContext, "--title", "Limit fixture", "--summary", "Exceeds configured limits", source)
 			assertDirectTooLarge(t, server.URL+"/api/v1/whiteboards/markdown", []multipartFile{
 				{field: "file", name: "whiteboard.md", content: test.source},
 				{field: "context", name: "context.md", content: test.creatorContext},
