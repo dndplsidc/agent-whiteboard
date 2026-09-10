@@ -135,6 +135,36 @@ func TestUpdateRejectsPresentBlankMetadataBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestCatalogMutationInvalidIDRetainsDiagnostic(t *testing.T) {
+	for _, operation := range []string{"update", "delete"} {
+		for _, kind := range []string{"markdown", "html"} {
+			t.Run(operation+"/"+kind, func(t *testing.T) {
+				deps := validDependencies()
+				deps.NewClient = func(config httpx.ClientConfig) (Client, error) { return httpx.NewClient(config) }
+				catalogCalls := 0
+				deps.NewCatalog = func() (Catalog, error) {
+					catalogCalls++
+					return nil, errors.New("catalog must not mask invalid IDs")
+				}
+				args := []string{"--json", operation, kind}
+				if operation == "update" {
+					dir := t.TempDir()
+					args = append(args, "--context", writeFixture(t, dir, "context.md", "context"), "--", "bad-id", writeFixture(t, dir, "board.md", "source"))
+				} else {
+					args = append(args, "--", "bad-id")
+				}
+				var stdout, stderr bytes.Buffer
+				code := run(context.Background(), &stdout, &stderr, deps.Getenv, args, deps)
+				require.Equal(t, exitRemote, code)
+				require.Contains(t, stderr.String(), `"code":"invalid_request"`)
+				require.Contains(t, stderr.String(), "invalid resource id")
+				require.Empty(t, stdout.String())
+				require.Zero(t, catalogCalls)
+			})
+		}
+	}
+}
+
 func TestCreatePreflightFailureSendsNoRequest(t *testing.T) {
 	stub := &catalogStub{prepareErr: errors.New("read only")}
 	clientCalls := 0

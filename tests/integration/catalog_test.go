@@ -12,8 +12,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/dndplsidc/agent-whiteboard/internal/catalog"
 	"github.com/stretchr/testify/require"
@@ -43,6 +45,123 @@ type cliCatalogEnvelope struct {
 	Total         int                `json:"total"`
 	Limit         int                `json:"limit"`
 	Offset        int                `json:"offset"`
+}
+
+type catalogGatedResponder struct {
+	*httptest.Server
+	received chan struct{}
+	released chan struct{}
+	once     sync.Once
+}
+
+func newCatalogGatedResponder(t *testing.T, method string, handler http.HandlerFunc) *catalogGatedResponder {
+	t.Helper()
+	responder := &catalogGatedResponder{received: make(chan struct{}), released: make(chan struct{})}
+	responder.Server = httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == method {
+			close(responder.received)
+			<-responder.released
+		}
+		handler(response, request)
+	}))
+	t.Cleanup(responder.Close)
+	return responder
+}
+
+func (responder *catalogGatedResponder) Release() {
+	responder.once.Do(func() { close(responder.released) })
+}
+
+func (responder *catalogGatedResponder) Close() {
+	responder.Release()
+	responder.Server.Close()
+}
+
+type catalogProcess struct {
+	command *exec.Cmd
+	done    chan struct{}
+	err     error
+}
+
+func startCatalogProcess(t *testing.T, command *exec.Cmd) *catalogProcess {
+	t.Helper()
+	require.NoError(t, command.Start())
+	process := &catalogProcess{command: command, done: make(chan struct{})}
+	go func() {
+		process.err = command.Wait()
+		close(process.done)
+	}()
+	t.Cleanup(process.Stop)
+	return process
+}
+
+func (process *catalogProcess) Wait() error {
+	<-process.done
+	return process.err
+}
+
+func (process *catalogProcess) Stop() {
+	select {
+	case <-process.done:
+	default:
+		_ = process.command.Process.Kill()
+	}
+	_ = process.Wait()
+}
+
+func TestCatalogProcessInterruptedCleanupReapsChild(t *testing.T) {
+	remote := newCatalogGatedResponder(t, http.MethodGet, func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusNotFound)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, binaryPath, "--server", remote.URL, "--json", "get", "markdown", "--", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	command.Env = isolatedEnv(t.TempDir())
+	process := startCatalogProcess(t, command)
+	select {
+	case <-remote.received:
+	case <-ctx.Done():
+		t.Fatal("child did not reach response gate")
+	}
+	// Simulate interruption before normal gate release or Wait.
+	process.Stop()
+	require.NotNil(t, command.ProcessState)
+	require.Error(t, process.Wait())
+	remote.Close()
+}
+
+func TestCatalogGatedResponderInterruptedCleanup(t *testing.T) {
+	remote := newCatalogGatedResponder(t, http.MethodGet, func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, remote.URL, nil)
+	require.NoError(t, err)
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-remote.received:
+	case <-ctx.Done():
+		t.Fatal("request did not reach response gate")
+	}
+	closed := make(chan struct{})
+	go func() { remote.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		// Release explicitly to keep even a regression failure bounded.
+		remote.Release()
+		<-closed
+		t.Error("cleanup blocked on its unreleased response gate")
+	}
+	require.NoError(t, <-requestDone)
 }
 
 func TestCatalogProcessLifecycleOfflineAcrossOrigins(t *testing.T) {
@@ -140,19 +259,128 @@ func TestCatalogProcessPreflightFailureSendsNoCreateRequest(t *testing.T) {
 	}
 }
 
+func TestCatalogProcessReadOnlyKnownRecordSendsNoMutation(t *testing.T) {
+	for _, operation := range []string{"update", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			const id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+			var mutations atomic.Int32
+			remote := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				defer request.Body.Close()
+				if request.Method != http.MethodPost {
+					mutations.Add(1)
+				}
+				if request.Method == http.MethodDelete {
+					response.WriteHeader(http.StatusNoContent)
+					return
+				}
+				response.Header().Set("Content-Type", "application/json")
+				if request.Method == http.MethodPost {
+					response.WriteHeader(http.StatusCreated)
+				}
+				fmt.Fprintf(response, `{"resource":{"id":%q,"type":"markdown","path":%q,"expires_at":null,"permanent":true}}`, id, "/whiteboards/markdown/"+id)
+			}))
+			defer remote.Close()
+			home := t.TempDir()
+			env := isolatedEnv(home)
+			source := writeFixture(t, "readonly.md", []byte("# body\n"))
+			contextPath := writeContextFixture(t, "context")
+			runCatalogResource(t, env, "--server", remote.URL, "--json", "create", "markdown", source, "--context", contextPath, "--title", "Title", "--summary", "Summary")
+			kindDirectory := filepath.Join(home, ".agent-whiteboard", "catalog", "entries", catalog.ServerKey(remote.URL), "markdown")
+			require.FileExists(t, filepath.Join(kindDirectory, id+".lock"))
+			require.NoError(t, os.Chmod(kindDirectory, 0o500))
+			t.Cleanup(func() { _ = os.Chmod(kindDirectory, 0o700) })
+			args := []string{"--server", remote.URL, "--json", operation, "markdown"}
+			if operation == "update" {
+				args = append(args, "--context", contextPath, "--", id, source)
+			} else {
+				args = append(args, "--", id)
+			}
+			stdout, stderr, err := runCatalogCommand(t, env, args...)
+			require.Zero(t, mutations.Load(), "preflight must stop before the remote mutation")
+			require.Error(t, err)
+			require.Empty(t, stdout)
+			requireJSONError(t, stderr, "catalog_unavailable")
+		})
+	}
+}
+
+func TestCatalogProcessMutationPostResponseWriteFailureWarnsAndSucceeds(t *testing.T) {
+	for _, operation := range []string{"update", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			const id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+			method := http.MethodPut
+			if operation == "delete" {
+				method = http.MethodDelete
+			}
+			var mutations atomic.Int32
+			remote := newCatalogGatedResponder(t, method, func(response http.ResponseWriter, request *http.Request) {
+				defer request.Body.Close()
+				if request.Method == method {
+					mutations.Add(1)
+				}
+				if request.Method == http.MethodDelete {
+					response.WriteHeader(http.StatusNoContent)
+					return
+				}
+				response.Header().Set("Content-Type", "application/json")
+				if request.Method == http.MethodPost {
+					response.WriteHeader(http.StatusCreated)
+				}
+				fmt.Fprintf(response, `{"resource":{"id":%q,"type":"markdown","path":%q,"expires_at":null,"permanent":true}}`, id, "/whiteboards/markdown/"+id)
+			})
+			home := t.TempDir()
+			env := isolatedEnv(home)
+			source := writeFixture(t, "mutation-write-failure.md", []byte("# body\n"))
+			contextPath := writeContextFixture(t, "context")
+			runCatalogResource(t, env, "--server", remote.URL, "--json", "create", "markdown", source, "--context", contextPath, "--title", "Original", "--summary", "Summary")
+			args := []string{"--server", remote.URL, "--json", operation, "markdown"}
+			if operation == "update" {
+				args = append(args, "--context", contextPath, "--title", "Changed", "--", id, source)
+			} else {
+				args = append(args, "--", id)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+			defer cancel()
+			command := exec.CommandContext(ctx, binaryPath, args...)
+			command.Env = env
+			var stdout, stderr bytes.Buffer
+			command.Stdout, command.Stderr = &stdout, &stderr
+			process := startCatalogProcess(t, command)
+			select {
+			case <-remote.received:
+			case <-ctx.Done():
+				t.Fatal("mutation did not reach response gate")
+			}
+			kindDirectory := filepath.Join(home, ".agent-whiteboard", "catalog", "entries", catalog.ServerKey(remote.URL), "markdown")
+			require.NoError(t, os.Chmod(kindDirectory, 0o500))
+			t.Cleanup(func() { _ = os.Chmod(kindDirectory, 0o700) })
+			remote.Release()
+			require.NoError(t, process.Wait(), stderr.String())
+			require.EqualValues(t, 1, mutations.Load())
+			var output map[string]any
+			require.NoError(t, json.Unmarshal(stdout.Bytes(), &output))
+			require.EqualValues(t, 1, output["schema_version"])
+			if operation == "update" {
+				require.Contains(t, stdout.String(), id)
+			}
+			require.Contains(t, stderr.String(), `"code":"catalog_write_failed"`)
+			require.Contains(t, stderr.String(), "Whiteboard was "+operation+"d")
+			require.NoError(t, os.Chmod(kindDirectory, 0o700))
+			page := runCatalogList(t, env, "--json", "catalog", "list")
+			require.Equal(t, "created", page.Records[0].State)
+			require.Equal(t, "Original", page.Records[0].Title)
+		})
+	}
+}
+
 func TestCatalogProcessPostResponseWriteFailureWarnsAndSucceeds(t *testing.T) {
 	const id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	received := make(chan struct{})
-	release := make(chan struct{})
-	remote := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	remote := newCatalogGatedResponder(t, http.MethodPost, func(response http.ResponseWriter, request *http.Request) {
 		defer request.Body.Close()
-		close(received)
-		<-release
 		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusCreated)
 		fmt.Fprintf(response, `{"resource":{"id":%q,"type":"markdown","path":%q,"expires_at":null,"permanent":true}}`, id, "/whiteboards/markdown/"+id)
-	}))
-	defer remote.Close()
+	})
 	home := t.TempDir()
 	env := isolatedEnv(home)
 	source := writeFixture(t, "write-failure.md", []byte("# body\n"))
@@ -164,17 +392,18 @@ func TestCatalogProcessPostResponseWriteFailureWarnsAndSucceeds(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	require.NoError(t, command.Start())
+	process := startCatalogProcess(t, command)
 	select {
-	case <-received:
+	case <-remote.received:
 	case <-ctx.Done():
 		require.FailNow(t, "create request did not reach responder", ctx.Err())
 	}
 	kindDirectory := filepath.Join(home, ".agent-whiteboard", "catalog", "entries", catalog.ServerKey(remote.URL), "markdown")
 	require.NoError(t, os.MkdirAll(kindDirectory, 0o700))
 	require.NoError(t, os.Chmod(kindDirectory, 0o500))
-	close(release)
-	err := command.Wait()
+	t.Cleanup(func() { _ = os.Chmod(kindDirectory, 0o700) })
+	remote.Release()
+	err := process.Wait()
 	require.NoError(t, err, stderr.String())
 	require.NoError(t, os.Chmod(kindDirectory, 0o700))
 	require.Contains(t, stdout.String(), id)
@@ -213,17 +442,12 @@ func TestCatalogProcessUncertainCreateIsRecordedWithoutExtraWarning(t *testing.T
 
 func TestCatalogProcessUncertainCreateWriteFailureOrdersWarningBeforeError(t *testing.T) {
 	const id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	received := make(chan struct{})
-	release := make(chan struct{})
-	remote := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	remote := newCatalogGatedResponder(t, http.MethodPost, func(response http.ResponseWriter, request *http.Request) {
 		defer request.Body.Close()
-		close(received)
-		<-release
 		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(response, `{"error":{"code":"storage_unavailable","message":"storage unavailable"},"resource":{"id":%q,"type":"markdown","path":%q,"expires_at":null,"permanent":true}}`, id, "/whiteboards/markdown/"+id)
-	}))
-	defer remote.Close()
+	})
 	home := t.TempDir()
 	env := isolatedEnv(home)
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
@@ -232,17 +456,18 @@ func TestCatalogProcessUncertainCreateWriteFailureOrdersWarningBeforeError(t *te
 	command.Env = env
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
-	require.NoError(t, command.Start())
+	process := startCatalogProcess(t, command)
 	select {
-	case <-received:
+	case <-remote.received:
 	case <-ctx.Done():
 		require.FailNow(t, "create request did not reach responder", ctx.Err())
 	}
 	kindDirectory := filepath.Join(home, ".agent-whiteboard", "catalog", "entries", catalog.ServerKey(remote.URL), "markdown")
 	require.NoError(t, os.MkdirAll(kindDirectory, 0o700))
 	require.NoError(t, os.Chmod(kindDirectory, 0o500))
-	close(release)
-	err := command.Wait()
+	t.Cleanup(func() { _ = os.Chmod(kindDirectory, 0o700) })
+	remote.Release()
+	err := process.Wait()
 	require.NoError(t, os.Chmod(kindDirectory, 0o700))
 	var exitError *exec.ExitError
 	require.ErrorAs(t, err, &exitError)
@@ -289,12 +514,8 @@ func TestCatalogProcessImagesAndUnknownBoardsAreNotEnrolled(t *testing.T) {
 
 func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T) {
 	const id = "-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	updateReceived := make(chan struct{})
-	releaseUpdate := make(chan struct{})
-	var releaseOnce sync.Once
-	defer releaseOnce.Do(func() { close(releaseUpdate) })
 	deleteReceived := make(chan struct{}, 2)
-	remote := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	remote := newCatalogGatedResponder(t, http.MethodPut, func(response http.ResponseWriter, request *http.Request) {
 		_, _ = io.Copy(io.Discard, request.Body)
 		_ = request.Body.Close()
 		resourceBody := fmt.Sprintf(`{"resource":{"id":%q,"type":"markdown","path":%q,"expires_at":null,"permanent":true}}`, id, "/whiteboards/markdown/"+id)
@@ -304,8 +525,6 @@ func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T
 			response.WriteHeader(http.StatusCreated)
 			_, _ = response.Write([]byte(resourceBody))
 		case http.MethodPut:
-			close(updateReceived)
-			<-releaseUpdate
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = response.Write([]byte(resourceBody))
 		case http.MethodDelete:
@@ -314,8 +533,7 @@ func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T
 		default:
 			response.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	}))
-	defer remote.Close()
+	})
 	home := t.TempDir()
 	env := isolatedEnv(home)
 	source := writeFixture(t, "serial-create.md", []byte("# created\n"))
@@ -331,9 +549,9 @@ func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T
 	var updateStdout, updateStderr bytes.Buffer
 	updateCommand.Stdout = &updateStdout
 	updateCommand.Stderr = &updateStderr
-	require.NoError(t, updateCommand.Start())
+	updateProcess := startCatalogProcess(t, updateCommand)
 	select {
-	case <-updateReceived:
+	case <-remote.received:
 	case <-ctx.Done():
 		require.FailNow(t, "tracked update did not reach responder", ctx.Err())
 	}
@@ -348,8 +566,8 @@ func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T
 	default:
 	}
 
-	releaseOnce.Do(func() { close(releaseUpdate) })
-	require.NoError(t, updateCommand.Wait(), updateStderr.String())
+	remote.Release()
+	require.NoError(t, updateProcess.Wait(), updateStderr.String())
 	require.Empty(t, updateStderr.String())
 	require.Contains(t, updateStdout.String(), id)
 	runCatalogSuccess(t, env, "--server", remote.URL, "--json", "delete", "markdown", "--", id)

@@ -6,12 +6,34 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
 
 type fileLock struct{ file *os.File }
+
+func openRecordFile(root recordRoot, name string) (*os.File, error) {
+	// Atomic replacement may change the inode after Lstat. Reject symlinks at
+	// open itself, then validate the opened file rather than the previous inode.
+	// Nonblocking open also prevents a raced-in FIFO from blocking the reader.
+	// os.Root resolves in-root symlinks itself, even with O_NOFOLLOW. Use
+	// openat relative to its directory descriptor and only a single filename.
+	if filepath.Base(name) != name || name == "." || name == ".." {
+		return nil, errors.New("invalid catalog record filename")
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	fd, err := unix.Openat(int(directory.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
 
 func acquireFileLock(ctx context.Context, root *os.Root, name string) (*fileLock, error) {
 	file, err := openLockFile(root, name)

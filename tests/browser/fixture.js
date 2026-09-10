@@ -28,17 +28,20 @@ function isolatedEnvironment(home) {
   };
 }
 
-function runProcess(command, args, { cwd = projectRoot, env = process.env, timeout = 60_000 } = {}) {
+export function runProcess(command, args, { cwd = projectRoot, env = process.env, timeout = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let spawnError;
     let killWaitTimer;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
       killWaitTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
         reject(new Error(`timed-out process did not exit after SIGKILL: ${command} ${args.join(" ")}`));
       }, 5_000);
     }, timeout);
@@ -51,13 +54,15 @@ function runProcess(command, args, { cwd = projectRoot, env = process.env, timeo
       stderr += chunk;
     });
     child.once("error", (error) => {
-      clearTimeout(timer);
-      clearTimeout(killWaitTimer);
-      reject(error);
+      spawnError = error;
     });
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       clearTimeout(timer);
       clearTimeout(killWaitTimer);
+      if (spawnError) {
+        reject(spawnError);
+        return;
+      }
       if (timedOut) {
         reject(new Error(`process timed out: ${command} ${args.join(" ")}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
         return;
@@ -1515,8 +1520,8 @@ export const test = base.extend({
     const create = async ({ kind, source, context, title, summary, origin = server.url }) => {
       const number = sequence++;
       const extension = kind === "html" ? "html" : "md";
-      const sourcePath = path.join(server.root, `catalog-${number}.${extension}`);
-      const contextPath = path.join(server.root, `catalog-${number}-context.md`);
+      const sourcePath = path.join(home, `catalog-${number}.${extension}`);
+      const contextPath = path.join(home, `catalog-${number}-context.md`);
       await Promise.all([
         fs.writeFile(sourcePath, source, { mode: 0o600 }),
         fs.writeFile(contextPath, context, { mode: 0o600 }),

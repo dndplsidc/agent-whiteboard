@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -156,6 +158,51 @@ func TestStoreUpdateDeleteAndPagination(t *testing.T) {
 	require.Equal(t, first.CreatedAt, page.Records[0].CreatedAt)
 }
 
+func TestStoreLargeMetadataLifecycle(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0).UTC()
+	store := newTestStore(t, now)
+	record := validRecord("https://example.test", KindMarkdown, markdownID, strings.Repeat("<", 100_000), strings.Repeat(">", 100_000), "large.md", now, StateCreated)
+	require.NoError(t, store.SaveCreated(context.Background(), record))
+	for _, state := range []State{StateCreated, StateDeleted} {
+		page, err := store.List(context.Background(), Query{Limit: 20})
+		require.NoError(t, err)
+		require.Len(t, page.Records, 1)
+		require.Equal(t, record, page.Records[0].Record)
+		entry, found, err := store.OpenExisting(context.Background(), record.Identity())
+		require.NoError(t, err)
+		require.True(t, found)
+		if state == StateDeleted {
+			require.NoError(t, entry.MarkDeleted(context.Background()))
+		} else {
+			title := record.Title + "updated"
+			require.NoError(t, entry.Update(context.Background(), Update{URL: record.URL, SourceFilename: "updated.md", Title: &title, Permanent: true}))
+		}
+		record = entry.Record()
+		require.NoError(t, entry.Close())
+	}
+	page, err := store.List(context.Background(), Query{Limit: 20})
+	require.NoError(t, err)
+	require.Equal(t, record, page.Records[0].Record)
+	require.Equal(t, StateDeleted, page.Records[0].State)
+}
+
+func TestStorePaginationCannotOverflow(t *testing.T) {
+	store := newTestStore(t, time.Unix(2_000_000_000, 0).UTC())
+	for _, id := range []string{markdownID, htmlID} {
+		require.NoError(t, store.SaveCreated(context.Background(), validRecord("https://example.test", KindMarkdown, id, "Title", "Summary", "one.md", store.clock.Now(), StateCreated)))
+	}
+	for _, offset := range []int{1, 2, 3, math.MaxInt} {
+		t.Run(fmt.Sprint(offset), func(t *testing.T) {
+			var page Page
+			var err error
+			require.NotPanics(t, func() { page, err = store.List(context.Background(), Query{Limit: math.MaxInt, Offset: offset}) })
+			require.NoError(t, err)
+			require.Equal(t, 2, page.Total)
+			require.Len(t, page.Records, max(0, 2-offset))
+		})
+	}
+}
+
 func TestStoreListMissingMalformedAndUnsupported(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
 	root := filepath.Join(t.TempDir(), "catalog")
@@ -226,6 +273,22 @@ func TestPrepareChecksTargetKindWithoutChangingExistingPermissions(t *testing.T)
 	t.Cleanup(func() { _ = os.Chmod(kindRoot, 0o700) })
 
 	require.Error(t, store.Prepare(context.Background(), "https://example.test", KindMarkdown))
+	assertPrivatePath(t, kindRoot, 0o500)
+}
+
+func TestOpenExistingChecksWritabilityWithExistingLock(t *testing.T) {
+	store := newTestStore(t, time.Unix(2_000_000_000, 0))
+	record := validRecord("https://example.test", KindMarkdown, markdownID, "Title", "Summary", "one.md", store.clock.Now(), StateCreated)
+	require.NoError(t, store.SaveCreated(context.Background(), record))
+	kindRoot := filepath.Join(store.rootPath, "entries", ServerKey(record.Server), string(record.Kind))
+	assertPrivatePath(t, filepath.Join(kindRoot, record.ID+".lock"), 0o600)
+	require.NoError(t, os.Chmod(kindRoot, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(kindRoot, 0o700) })
+	entry, _, err := store.OpenExisting(context.Background(), record.Identity())
+	if entry != nil {
+		defer entry.Close()
+	}
+	require.Error(t, err)
 	assertPrivatePath(t, kindRoot, 0o500)
 }
 

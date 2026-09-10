@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dndplsidc/agent-whiteboard/internal/catalog"
+	"github.com/dndplsidc/agent-whiteboard/internal/common"
 	generalconfig "github.com/dndplsidc/agent-whiteboard/internal/config"
 	"github.com/dndplsidc/agent-whiteboard/internal/webapi"
 	"github.com/spf13/cobra"
@@ -105,6 +106,9 @@ func (factory commandFactory) newUpdateWhiteboardCommand(name string, kind webap
 		defer openedSource.Close()
 		defer openedContext.Close()
 
+		if err := common.ValidateID(args[0]); err != nil {
+			return stableCommandError(err)
+		}
 		client, settings, ctx, cancel, err := factory.newClientWithSettings(cmd)
 		if err != nil {
 			return err
@@ -203,6 +207,9 @@ func (factory commandFactory) newDeleteWhiteboardCommand(name string, kind webap
 		Use:  name + " <id>",
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := common.ValidateID(args[0]); err != nil {
+				return stableCommandError(err)
+			}
 			client, settings, ctx, cancel, err := factory.newClientWithSettings(cmd)
 			if err != nil {
 				return err

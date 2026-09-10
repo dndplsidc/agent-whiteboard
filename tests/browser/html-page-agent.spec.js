@@ -229,6 +229,7 @@ test("keeps exact HTML in an opaque child while shared trusted chrome owns conse
 
   const composer = page.getByLabel("Message Pi about this whiteboard");
   await composer.fill("What is this page?");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
   await composer.press("Enter");
   await expect.poll(() => parsedCommands(localAgentSidebar.brokerRequests).some(({ type }) => type === "submit")).toBe(true);
   const submit = parsedCommands(localAgentSidebar.brokerRequests).find(({ type }) => type === "submit");

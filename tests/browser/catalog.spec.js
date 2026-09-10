@@ -1,5 +1,6 @@
 import { expect, test } from "./fixture.js";
 import { promises as fs } from "node:fs";
+import path from "node:path";
 
 test("catalog discovers Markdown and HTML without changing rendered titles or content", async ({ page, catalogClient }) => {
   const markdown = await catalogClient.create({
@@ -16,6 +17,11 @@ test("catalog discovers Markdown and HTML without changing rendered titles or co
     title: "Catalog-only HTML title",
     summary: "Search phrase beta html",
   });
+
+  for (const created of [markdown, html]) {
+    expect(path.dirname(created.sourcePath)).toBe(catalogClient.home);
+    expect(path.dirname(created.contextPath)).toBe(catalogClient.home);
+  }
 
   const markdownSearch = await catalogClient.run(["--json", "catalog", "list", "--query", "alpha markdown"]);
   expect(markdownSearch.stderr).toBe("");

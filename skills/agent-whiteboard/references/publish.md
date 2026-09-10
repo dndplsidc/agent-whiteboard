@@ -1,6 +1,6 @@
 # Publishing commands
 
-Use `--json` for agent-driven commands. Put global flags before the command and `--` before an ID when a filename could be mistaken for a flag.
+Use `--json` for agent-driven commands. Put global flags before the command and always put `--` before a capability ID: IDs themselves can begin with `-`. Put command-specific flags before `--` as shown below.
 
 ## Discover this laptop's records
 

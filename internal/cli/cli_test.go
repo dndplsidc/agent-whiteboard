@@ -245,13 +245,13 @@ func TestApprovedClientCommands(t *testing.T) {
 	}{
 		{name: "create markdown", args: []string{"create", "markdown", first, "--context", creatorContext, "--title", "First", "--summary", "First summary", "--expires-in", "5"}, expect: expectCreateMarkdown("first.md", "first-content", "context.md", "context-content", int64Pointer(5))},
 		{name: "create html", args: []string{"create", "html", second, "--context", creatorContext, "--title", "Second", "--summary", "Second summary"}, expect: expectCreateHTML("second.html", "second-content", "context.md", "context-content", nil)},
-		{name: "update markdown", args: []string{"update", "markdown", "abc", first, "--context", creatorContext}, expect: expectUpdateMarkdown("abc", "first.md", "first-content", "context.md", "context-content")},
-		{name: "update html", args: []string{"update", "html", "abc", second, "--context", creatorContext}, expect: expectUpdateHTML("abc", "second.html", "second-content", "context.md", "context-content")},
-		{name: "delete markdown", args: []string{"delete", "markdown", "abc"}, expect: func(client *testutil.MockClient, _ *os.File) {
-			client.EXPECT().DeleteWhiteboard(mock.Anything, httpx.WhiteboardMarkdown, "abc").Return(nil).Once()
+		{name: "update markdown", args: []string{"update", "markdown", catalogTestID, first, "--context", creatorContext}, expect: expectUpdateMarkdown(catalogTestID, "first.md", "first-content", "context.md", "context-content")},
+		{name: "update html", args: []string{"update", "html", catalogTestID, second, "--context", creatorContext}, expect: expectUpdateHTML(catalogTestID, "second.html", "second-content", "context.md", "context-content")},
+		{name: "delete markdown", args: []string{"delete", "markdown", catalogTestID}, expect: func(client *testutil.MockClient, _ *os.File) {
+			client.EXPECT().DeleteWhiteboard(mock.Anything, httpx.WhiteboardMarkdown, catalogTestID).Return(nil).Once()
 		}},
-		{name: "delete html", args: []string{"delete", "html", "abc"}, expect: func(client *testutil.MockClient, _ *os.File) {
-			client.EXPECT().DeleteWhiteboard(mock.Anything, httpx.WhiteboardHTML, "abc").Return(nil).Once()
+		{name: "delete html", args: []string{"delete", "html", catalogTestID}, expect: func(client *testutil.MockClient, _ *os.File) {
+			client.EXPECT().DeleteWhiteboard(mock.Anything, httpx.WhiteboardHTML, catalogTestID).Return(nil).Once()
 		}},
 		{name: "image update", args: []string{"image", "update", "abc", first}, expect: func(client *testutil.MockClient, captured *os.File) {
 			client.EXPECT().UpdateImage(mock.Anything, "abc", mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ string, file httpx.File, _ *int64) (httpx.Resource, error) {
@@ -603,10 +603,10 @@ func TestFileCommandsCloseHandles(t *testing.T) {
 				return resource("abc", "/whiteboards/markdown/abc", nil), nil
 			}).Once()
 		}},
-		{name: "whiteboard update", args: []string{"update", "markdown", "abc", fixture, "--context", contextFixture}, expect: func(client *testutil.MockClient, captured *[]*os.File) {
-			client.EXPECT().UpdateMarkdown(mock.Anything, "abc", mock.Anything, mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ string, input httpx.File, creatorContext httpx.File, _ *int64) (httpx.Resource, error) {
+		{name: "whiteboard update", args: []string{"update", "markdown", catalogTestID, fixture, "--context", contextFixture}, expect: func(client *testutil.MockClient, captured *[]*os.File) {
+			client.EXPECT().UpdateMarkdown(mock.Anything, catalogTestID, mock.Anything, mock.Anything, (*int64)(nil)).RunAndReturn(func(_ context.Context, _ string, input httpx.File, creatorContext httpx.File, _ *int64) (httpx.Resource, error) {
 				*captured = append(*captured, input.Reader.(*os.File), creatorContext.Reader.(*os.File))
-				return resource("abc", "/whiteboards/markdown/abc", nil), nil
+				return resource(catalogTestID, "/whiteboards/markdown/"+catalogTestID, nil), nil
 			}).Once()
 		}},
 		{name: "image update", args: []string{"image", "update", "abc", fixture}, expect: func(client *testutil.MockClient, captured *[]*os.File) {

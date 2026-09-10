@@ -1,7 +1,6 @@
 package catalog
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -26,7 +25,6 @@ const (
 	SchemaVersion = 1
 	directoryMode = 0o700
 	fileMode      = 0o600
-	maxRecordSize = 1 << 20
 )
 
 var serverKeyPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
@@ -159,12 +157,8 @@ func (store *Store) Prepare(ctx context.Context, server string, kind Kind) error
 	if err := validateLocation(server, kind); err != nil {
 		return err
 	}
-	parent := filepath.Dir(store.rootPath)
-	if err := ensureParentDirectory(parent); err != nil {
-		return fmt.Errorf("prepare catalog parent: %w", err)
-	}
-	if err := ensurePrivateDirectory(store.rootPath, true); err != nil {
-		return fmt.Errorf("prepare catalog: %w", err)
+	if err := prepareCatalogRoot(store.rootPath, syncParentDirectory); err != nil {
+		return err
 	}
 	root, err := openPrivateRoot(store.rootPath)
 	if err != nil {
@@ -186,21 +180,28 @@ func (store *Store) Prepare(ctx context.Context, server string, kind Kind) error
 		return fmt.Errorf("prepare catalog kind: %w", err)
 	}
 	defer kindRoot.Close()
-	name, file, err := createTemporary(kindRoot, ".preflight")
+	if err := checkWritable(kindRoot); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func checkWritable(root *os.Root) error {
+	name, file, err := createTemporary(root, ".preflight")
 	if err != nil {
 		return fmt.Errorf("test catalog write: %w", err)
 	}
 	if closeErr := file.Close(); closeErr != nil {
-		_ = kindRoot.Remove(name)
+		_ = root.Remove(name)
 		return fmt.Errorf("test catalog write: %w", closeErr)
 	}
-	if err := kindRoot.Remove(name); err != nil {
+	if err := root.Remove(name); err != nil {
 		return fmt.Errorf("test catalog write: %w", err)
 	}
-	if err := syncDirectory(kindRoot); err != nil {
+	if err := syncDirectory(root); err != nil {
 		return fmt.Errorf("test catalog write: %w", err)
 	}
-	return ctx.Err()
+	return nil
 }
 
 func (store *Store) SaveCreated(ctx context.Context, record Record) error {
@@ -263,6 +264,9 @@ func (store *Store) OpenExisting(ctx context.Context, identity Identity) (*Entry
 		return nil, false, fmt.Errorf("lock catalog record: %w", err)
 	}
 	record, err := readRecord(root, name, identity)
+	if err == nil {
+		err = checkWritable(root)
+	}
 	if err != nil {
 		lock.release()
 		_ = root.Close()
@@ -390,7 +394,7 @@ func (store *Store) List(ctx context.Context, query Query) (Page, error) {
 	})
 	total := len(filtered)
 	start := min(query.Offset, total)
-	end := min(start+query.Limit, total)
+	end := start + min(query.Limit, total-start)
 	now := store.clock.Now().Unix()
 	pageRecords := make([]ResultRecord, 0, end-start)
 	for _, record := range filtered[start:end] {
@@ -498,10 +502,29 @@ func openOrEnsureChild(parent *os.Root, name string, create bool) (*os.Root, err
 	return openPrivateChild(parent, name)
 }
 
-func ensurePrivateDirectory(path string, create bool) error {
+func prepareCatalogRoot(path string, syncParent func(string) error) error {
+	if err := ensureParentDirectory(filepath.Dir(path), syncParent); err != nil {
+		return fmt.Errorf("prepare catalog parent: %w", err)
+	}
+	if err := ensurePrivateDirectory(path, syncParent); err != nil {
+		return fmt.Errorf("prepare catalog: %w", err)
+	}
+	return nil
+}
+
+func syncParentDirectory(path string) error {
+	parent, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	return syncDirectory(parent)
+}
+
+func ensurePrivateDirectory(path string, syncParent func(string) error) error {
 	created := false
 	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) && create {
+	if errors.Is(err, os.ErrNotExist) {
 		if mkdirErr := os.Mkdir(path, directoryMode); mkdirErr != nil {
 			if !errors.Is(mkdirErr, os.ErrExist) {
 				return mkdirErr
@@ -533,14 +556,18 @@ func ensurePrivateDirectory(path string, create bool) error {
 			return err
 		}
 	}
-	return nil
+	// An existing directory may have been left by a failed sync or a concurrent
+	// creator. Establish its parent edge before claiming catalog readiness.
+	return syncParent(path)
 }
 
-func ensureParentDirectory(path string) error {
+func ensureParentDirectory(path string, syncParent func(string) error) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(path, directoryMode); err != nil && !errors.Is(err, os.ErrExist) {
-			return err
+		if err := os.Mkdir(path, directoryMode); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				return err
+			}
 		}
 		info, err = os.Lstat(path)
 	}
@@ -550,7 +577,7 @@ func ensureParentDirectory(path string) error {
 	if info == nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("catalog parent must be a directory and not a symbolic link")
 	}
-	return nil
+	return syncParent(path)
 }
 
 func openPrivateRoot(path string) (*os.Root, error) {
@@ -584,9 +611,6 @@ func ensurePrivateRoot(parent *os.Root, name string) (*os.Root, error) {
 		} else {
 			created = true
 		}
-		if err := syncDirectory(parent); err != nil {
-			return nil, err
-		}
 		info, err = parent.Lstat(name)
 	}
 	if err != nil {
@@ -614,6 +638,10 @@ func ensurePrivateRoot(parent *os.Root, name string) (*os.Root, error) {
 	if err != nil || !privateDirectory(opened) || created && opened.Mode().Perm() != directoryMode || !os.SameFile(info, opened) {
 		_ = child.Close()
 		return nil, errors.New("catalog component changed while opening")
+	}
+	if err := syncDirectory(parent); err != nil {
+		_ = child.Close()
+		return nil, err
 	}
 	return child, nil
 }
@@ -709,7 +737,12 @@ func createTemporary(root *os.Root, prefix string) (string, *os.File, error) {
 	return "", nil, errors.New("create unique catalog temporary file")
 }
 
-func readRecord(root *os.Root, name string, expected Identity) (Record, error) {
+type recordRoot interface {
+	Lstat(string) (os.FileInfo, error)
+	Open(string) (*os.File, error)
+}
+
+func readRecord(root recordRoot, name string, expected Identity) (Record, error) {
 	before, err := root.Lstat(name)
 	if err != nil {
 		return Record{}, fmt.Errorf("read catalog record %q: %w", name, err)
@@ -717,20 +750,16 @@ func readRecord(root *os.Root, name string, expected Identity) (Record, error) {
 	if !privateRegular(before) {
 		return Record{}, fmt.Errorf("read catalog record %q: file must be private, regular, and not a symbolic link", name)
 	}
-	file, err := root.Open(name)
+	file, err := openRecordFile(root, name)
 	if err != nil {
 		return Record{}, fmt.Errorf("read catalog record %q: %w", name, err)
 	}
 	defer file.Close()
 	opened, err := file.Stat()
-	if err != nil || !privateRegular(opened) || !os.SameFile(before, opened) {
-		return Record{}, fmt.Errorf("read catalog record %q: file changed while opening", name)
+	if err != nil || !privateRegular(opened) {
+		return Record{}, fmt.Errorf("read catalog record %q: opened file must be private and regular", name)
 	}
-	encoded, err := io.ReadAll(io.LimitReader(file, maxRecordSize+1))
-	if err != nil || len(encoded) > maxRecordSize {
-		return Record{}, fmt.Errorf("read catalog record %q: invalid record size", name)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	var record Record
 	if err := decoder.Decode(&record); err != nil {
