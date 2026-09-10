@@ -8,7 +8,7 @@ Agent Whiteboard is a self-hosted Go server and CLI for publishing Markdown, Mer
 - **Self-hosted:** one Go binary, filesystem storage, and no CDN dependency.
 - **Made for rich results:** sanitized Markdown, syntax highlighting, Mermaid, trusted active HTML, and images.
 - **Page-aware conversations:** send exact source, creator context, selected sections, Mermaid diagrams, components, code, or images to a local Pi, Codex, or Cursor session.
-- **Explicit lifecycle:** use expiring or permanent capability URLs and replace content in place.
+- **Explicit lifecycle:** use expiring or permanent capability URLs, replace content in place, and search the CLI's local whiteboard catalog offline.
 
 ## Quick start
 
@@ -66,6 +66,8 @@ EOF
 
 agent-whiteboard create markdown \
   --context "$context_file" \
+  --title "Agent Whiteboard quick start" \
+  --summary "Markdown, Mermaid, and syntax-highlighting demonstration" \
   --expires-in 3600 \
   "$board_file"
 ```
@@ -73,6 +75,8 @@ agent-whiteboard create markdown \
 The command prints a capability URL. Open it in a browser to see the rendered whiteboard.
 
 Creator context records the goals, decisions, assumptions, and open questions behind a page. It travels with the whiteboard and is available to readers and Page Agent. Do not include hidden reasoning, credentials, sensitive data, private source, or raw tool output.
+
+`--title` and `--summary` are required descriptive metadata for the local catalog on this laptop. They are not published as source or creator context and do not change the Markdown heading, HTML `<title>`, or browser title. The catalog records Markdown and HTML boards created by this CLI, including boards sent to remote servers.
 
 ## Install the agent skill
 
@@ -88,7 +92,7 @@ The installer detects supported agents and installs the skill into the current p
 npx skills add dndplsidc/agent-whiteboard --skill agent-whiteboard --global
 ```
 
-Once installed, ask your agent to publish Markdown, Mermaid, trusted standalone HTML, or images to Agent Whiteboard. The skill covers resource selection, creator context, publication, lifecycle commands, and rendered verification.
+Once installed, ask your agent to publish Markdown, Mermaid, trusted standalone HTML, or images to Agent Whiteboard. The skill covers local discovery, resource selection, creator context, publication, lifecycle commands, and rendered verification.
 
 Install the separate setup skill when the agent needs to install the binary, run a publishing server, configure Page Agent, manage origin trust, or diagnose setup:
 
@@ -289,13 +293,30 @@ Agent Whiteboard server ── capability URL ──► Browser viewer
 
 Public resources live on the self-hosted server. The optional Page Agent broker lives only on the reader's machine and accepts authorized browser origins over literal loopback. Published content and creator context remain untrusted provider input; each provider's native tools, approvals, and sandbox remain authoritative.
 
+The creating CLI also stores a private metadata-only catalog under `~/.agent-whiteboard/catalog`. It contains capability URLs and descriptive lifecycle metadata, not whiteboard source or creator context. This laptop's catalog is independent of the publishing server and is not an account-wide or server-wide inventory.
+
 ## Common workflows
+
+### Discover locally recorded whiteboards
+
+Search this laptop's catalog before asking for a URL or creating a replacement:
+
+```sh
+agent-whiteboard --json catalog list --query "recharge architecture" --limit 20 --offset 0
+agent-whiteboard --json catalog list --kind markdown
+```
+
+Search is offline across every publishing server recorded by this local CLI. All whitespace-separated terms must appear in the title or summary. Results are newest first and include `total`, `limit`, and `offset` for pagination. Expired, deleted, and uncertain records remain visible. An empty result means only that this local catalog has no match; older boards, boards created on another device, and direct HTTP or Go API creations are not enrolled.
+
+Use the selected record's `server` value for `get`, `update`, or `delete`; the current configured server may be different. Listing does not contact that server, and a record without an expired, deleted, or uncertain label is not proof that the remote resource remains available.
 
 ### Publish trusted HTML
 
 ```sh
 agent-whiteboard create html \
   --context "$context_file" \
+  --title "Standalone HTML example" \
+  --summary "Interactive example published as trusted HTML" \
   --expires-in 3600 \
   docs/examples/standalone.html
 ```
@@ -307,6 +328,7 @@ Markdown and HTML updates replace source and creator context together:
 ```sh
 agent-whiteboard update markdown \
   --context "$context_file" \
+  --title "Updated architecture" \
   --expires-in 7200 \
   -- CAPABILITY_ID board.md
 
@@ -316,7 +338,7 @@ agent-whiteboard update html \
   -- CAPABILITY_ID board.html
 ```
 
-Omitting `--expires-in` on update preserves the current expiration. `--expires-in 0` makes the resource permanent.
+Omitting `--expires-in` on update preserves the current expiration. `--expires-in 0` makes the resource permanent. Optional `--title` and `--summary` replace only the supplied local catalog metadata for a tracked board; omitting either preserves it.
 
 ### Retrieve exact source and context
 
@@ -340,7 +362,11 @@ agent-whiteboard image delete -- CAPABILITY_ID
 Put global flags before the command, or set `AGENT_WHITEBOARD_SERVER`:
 
 ```sh
-agent-whiteboard --server https://whiteboard.example --timeout 20s create markdown --context "$context_file" board.md
+agent-whiteboard --server https://whiteboard.example --timeout 20s create markdown \
+  --context "$context_file" \
+  --title "Remote board" \
+  --summary "Published remotely and recorded on this laptop" \
+  board.md
 ```
 
 ## Security model
@@ -351,6 +377,7 @@ Keep these boundaries in mind:
 
 - Never publish credentials, tokens, private source, personal data, or other sensitive information.
 - Creator context is visible to anyone holding the capability and is not a hidden channel.
+- Local catalog records contain capability URLs and should be protected like other bearer-access data; they are created with owner-only permissions.
 - Markdown is sanitized; standalone HTML is trusted active content with a stricter sandboxed delivery model.
 - A local `127.0.0.1` publishing origin is deliberately trusted by the Page Agent broker without an explicit trust-list entry.
 - Whiteboard content is untrusted model input. Native provider tools, approval settings, sandbox, project trust, and extensions remain authoritative; origin trust is not a provider sandbox.
@@ -368,6 +395,8 @@ Configuration defaults to `~/.agent-whiteboard/config.yaml`. Settings resolve in
 4. Built-in defaults
 
 The YAML format is versioned and strict. See [Configuration](docs/configuration.md) for the complete client, server, viewer, and agent schema, including validation and file-safety rules.
+
+The local catalog path is fixed at `~/.agent-whiteboard/catalog` for the effective user. It is not affected by `--config`, `server.storage`, the current directory, or the selected publishing server.
 
 | Setting | Default |
 | --- | ---: |

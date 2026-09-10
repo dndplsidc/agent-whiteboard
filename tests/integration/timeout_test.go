@@ -42,7 +42,7 @@ func TestClientTimeoutHumanAndJSON(t *testing.T) {
 			if test.json {
 				args = append(args, "--json")
 			}
-			args = append(args, "create", "markdown", "--context", creatorContext, file)
+			args = append(args, "create", "markdown", "--context", creatorContext, "--title", "Timeout board", "--summary", "Expected request timeout", file)
 
 			ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 			defer cancel()

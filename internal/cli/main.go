@@ -31,6 +31,9 @@ func Run(ctx context.Context, stdout, stderr io.Writer, getenv func(string) stri
 		NewClient: func(config httpx.ClientConfig) (Client, error) {
 			return httpx.NewClient(config)
 		},
+		NewCatalog: func() (Catalog, error) {
+			return app.NewLocalCatalog()
+		},
 		NewApplication: func(config app.ServiceConfig, options ...app.Option) (Application, error) {
 			return app.NewService(config, options...)
 		},

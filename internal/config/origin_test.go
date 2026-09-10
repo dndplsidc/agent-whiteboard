@@ -69,6 +69,41 @@ func TestCanonicalBrowserOriginRejectsLoopbackHTTPNearMatches(t *testing.T) {
 	}
 }
 
+func TestCanonicalPublishingOrigin(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "HTTP://Example.COM:80/", want: "http://example.com"},
+		{input: "https://EXAMPLE.com:443", want: "https://example.com"},
+		{input: "http://LOCALHOST:8567/", want: "http://localhost:8567"},
+		{input: "https://[2001:0db8::1]:443/", want: "https://[2001:db8::1]"},
+		{input: "http://127.0.0.1", want: "http://127.0.0.1"},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			got, err := config.CanonicalPublishingOrigin(test.input)
+			require.NoError(t, err)
+			require.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestCanonicalPublishingOriginRejectsInvalidOrigins(t *testing.T) {
+	inputs := []string{
+		"", " http://example.com", "ftp://example.com", "http://user@example.com",
+		"http://example.com/path", "http://example.com/?query=1", "http://example.com/#fragment",
+		"http://example.com:0", "http://example.com:65536", "http://[fe80::1%25en0]",
+		"http://127.000.000.001",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			_, err := config.CanonicalPublishingOrigin(input)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestCanonicalOriginRejectsNonExactHTTPSOrigins(t *testing.T) {
 	inputs := []string{
 		"",

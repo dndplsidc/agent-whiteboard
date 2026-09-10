@@ -25,6 +25,9 @@ func TestDocumentationContracts(t *testing.T) {
 	for _, command := range expectedCommands {
 		require.Contains(t, commands, command, "README must demonstrate %q", command)
 	}
+	for _, required := range []string{"catalog list", "--title", "--summary", "~/.agent-whiteboard/catalog"} {
+		require.Contains(t, readme, required, "README must document %q", required)
+	}
 	for _, command := range commands {
 		requireCommandHelp(t, strings.Fields(command))
 	}
@@ -54,8 +57,8 @@ func TestDocumentationContracts(t *testing.T) {
 	markdownPath := filepath.Join(root, examplePaths[0])
 	htmlPath := filepath.Join(root, examplePaths[1])
 	creatorContext := writeContextFixture(t, "# Example context\n\nThe diagram documentation fixture is published for validation.\n")
-	markdown := runCLIResource(t, server, "--json", "create", "markdown", "--context", creatorContext, "--expires-in", "0", markdownPath)
-	html := runCLIResource(t, server, "--json", "create", "html", "--context", creatorContext, "--expires-in", "0", htmlPath)
+	markdown := runCLIResource(t, server, "--json", "create", "markdown", "--context", creatorContext, "--title", "Documented Markdown example", "--summary", "Runnable catalog-aware Markdown example", "--expires-in", "0", markdownPath)
+	html := runCLIResource(t, server, "--json", "create", "html", "--context", creatorContext, "--title", "Documented HTML example", "--summary", "Runnable catalog-aware HTML example", "--expires-in", "0", htmlPath)
 	markdownResponse, _ := fetch(t, markdown.Resource.URL)
 	require.Equal(t, 200, markdownResponse.StatusCode)
 	htmlResponse, htmlBody := fetch(t, html.Resource.URL)

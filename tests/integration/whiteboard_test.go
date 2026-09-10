@@ -23,7 +23,7 @@ func TestMarkdownLifecycle(t *testing.T) {
 	firstContext := "## Creator summary\n\nFirst goals, assumptions, and open questions. ✓\n"
 	firstFile := writeFixture(t, "first.md", []byte(firstSource))
 	firstContextFile := writeContextFixture(t, firstContext)
-	created := runCLIResourceWithConfig(t, server, configPath, "--json", "create", "markdown", "--context", firstContextFile, firstFile)
+	created := runCLIResourceWithConfig(t, server, configPath, "--json", "create", "markdown", "--context", firstContextFile, "--title", "Markdown lifecycle", "--summary", "Integration lifecycle fixture", firstFile)
 	require.Equal(t, 1, created.SchemaVersion)
 	require.True(t, strings.HasPrefix(created.Resource.URL, server.URL+"/whiteboards/markdown/"))
 
@@ -143,7 +143,7 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 	firstFile := writeFixture(t, "first.html", firstSource)
 	firstContext := []byte("# Exact HTML creator context\n\x00")
 	firstContextFile := writeFixture(t, "first-context.md", firstContext)
-	created := runCLIResource(t, server, "--json", "create", "html", firstFile, "--context", firstContextFile)
+	created := runCLIResource(t, server, "--json", "create", "html", firstFile, "--context", firstContextFile, "--title", "HTML lifecycle", "--summary", "Standalone integration fixture")
 	require.True(t, strings.HasPrefix(created.Resource.URL, server.URL+"/whiteboards/html/"))
 	contentURL := created.Resource.URL + "/content"
 
@@ -230,7 +230,7 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 	assertStandaloneInnerResponse(t, response)
 	requireCategoryEmpty(t, server.Root, "whiteboards")
 
-	expiring := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "2", firstFile, "--context", firstContextFile)
+	expiring := runCLIResource(t, server, "--json", "create", "html", "--expires-in", "2", firstFile, "--context", firstContextFile, "--title", "Expiring HTML", "--summary", "Short-lived standalone fixture")
 	require.NotNil(t, expiring.Resource.ExpiresAt)
 	require.Greater(t, *expiring.Resource.ExpiresAt, time.Now().Unix())
 	expiringContentURL := expiring.Resource.URL + "/content"
@@ -263,7 +263,7 @@ func TestHTMLLifecycleAndValidation(t *testing.T) {
 			path := writeFixture(t, "invalid.html", test.content)
 			ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 			defer cancel()
-			stdout, stderr, err := server.RunCLI(ctx, "--json", "create", "html", path, "--context", firstContextFile)
+			stdout, stderr, err := server.RunCLI(ctx, "--json", "create", "html", path, "--context", firstContextFile, "--title", "Invalid HTML", "--summary", "Expected validation failure")
 			require.Error(t, err)
 			require.Empty(t, stdout)
 			requireJSONError(t, stderr, "invalid_request")

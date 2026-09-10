@@ -4,6 +4,8 @@ The default store implements two domain-owned interfaces, `agentwb.WhiteboardSto
 
 The root contains `whiteboards/`, `images/`, and `.readiness/`. Each capability ID has a private `0700` directory. Managed files are `0600`. The configured root and managed category directories are also forced to `0700`.
 
+The CLI's metadata-only local catalog is not part of this server store. It lives under the effective user's fixed `~/.agent-whiteboard/catalog` path, is never served or cleaned by the publishing server, and may record capabilities from several remote or local server roots. See [Configuration](configuration.md#local-catalog-location) and [CLI JSON](cli-json.md#local-catalog-discovery).
+
 ## Metadata schemas and paired generations
 
 Images retain metadata schema 1. Legacy Markdown also uses schema 1 and references one `source-<32 hex>.md` generation with no context file. Such a resource remains readable and produces an empty `Context` value.

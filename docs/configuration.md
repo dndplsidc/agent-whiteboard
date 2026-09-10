@@ -39,6 +39,12 @@ An empty environment value does not erase YAML. A supplied empty flag is still a
 
 A relative YAML `server.storage` path is resolved against the directory containing that YAML file. Relative environment and flag storage paths are resolved by the server process from its current working directory.
 
+## Local catalog location
+
+The CLI's local whiteboard catalog has no configuration setting. It always belongs to the effective local user and lives under `~/.agent-whiteboard/catalog`, independently of `server.storage`, the current directory, `--config`, and the selected publishing server. Publishing to a remote origin still records the resulting Markdown or HTML board in this local catalog.
+
+`agent-whiteboard catalog list` reads that catalog offline across all recorded server origins. It does not load the selected/default configuration or construct an HTTP client, so an unrelated invalid publishing configuration and the global `--server` value do not filter or prevent local discovery. A missing catalog is an empty local history and is not created by listing.
+
 ## Complete version 1 schema
 
 All fields are optional except top-level `version`:

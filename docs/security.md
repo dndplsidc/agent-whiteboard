@@ -76,6 +76,10 @@ Configuration files must be regular non-symlinks and must not be writable by gro
 
 ## Non-leakage and filesystem boundary
 
+The local CLI catalog under `~/.agent-whiteboard/catalog` contains titles, summaries, source basenames, lifecycle timestamps and states, normalized publishing origins, and full capability URLs. It does not contain whiteboard source or creator context. Capability URLs are bearer-access data, so new catalog directories use owner-only `0700` permissions and records and lock files use `0600`; catalog operations reject unsafe symlinks and publish records by synced atomic replacement. Protect backups or copies of this directory accordingly.
+
+The catalog belongs to the effective user on one laptop. It is not served by Agent Whiteboard, does not share `server.storage` cleanup, does not synchronize to an account, and does not discover boards created through HTTP, Go APIs, older CLI versions, or other devices. Retained expired, deleted, and uncertain entries are local observations, not current remote-availability claims.
+
 The service validates multipart fields, independent exact size limits, capability IDs, filesystem containment, regular files, and symlink safety. Logs avoid request bodies, whiteboard source, creator context, and full capability IDs. Operational logs and metrics should keep the same rule. Stable HTTP/CLI errors sanitize internal causes and do not echo source, context, raw multipart data, or filesystem paths.
 
 A failed create can exceptionally return a resource capability alongside a sanitized error when rollback cannot prove absence. Preserve and explicitly check/delete that ID rather than logging it broadly. Ordinary failed creates expose no generated capability.

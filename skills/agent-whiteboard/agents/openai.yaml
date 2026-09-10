@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Whiteboard"
-  short_description: "Publish and manage shareable whiteboards"
+  short_description: "Find, publish, and manage shareable whiteboards"
   default_prompt: "Use $agent-whiteboard to publish this artifact and return its verified capability URL."
