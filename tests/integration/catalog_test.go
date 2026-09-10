@@ -80,17 +80,17 @@ func TestCatalogProcessLifecycleOfflineAcrossOrigins(t *testing.T) {
 	require.Equal(t, 2, pageTwo.Total)
 	require.NotEqual(t, pageOne.Records[0].ID, pageTwo.Records[0].ID)
 
-	markdownGot := runCatalogMarkdown(t, clientEnv, "--server", byID[markdown.Resource.ID].Server, "--json", "get", "markdown", markdown.Resource.ID)
+	markdownGot := runCatalogMarkdown(t, clientEnv, "--server", byID[markdown.Resource.ID].Server, "--json", "get", "markdown", "--", markdown.Resource.ID)
 	require.Equal(t, markdownSource, markdownGot.Markdown)
 	require.Equal(t, markdownContext, markdownGot.Context)
-	htmlGot := runCatalogHTML(t, clientEnv, "--server", byID[html.Resource.ID].Server, "--json", "get", "html", html.Resource.ID)
+	htmlGot := runCatalogHTML(t, clientEnv, "--server", byID[html.Resource.ID].Server, "--json", "get", "html", "--", html.Resource.ID)
 	require.Equal(t, htmlSource, htmlGot.HTML)
 	require.Equal(t, htmlContext, htmlGot.Context)
 
 	updatedSource := "# Updated rendered heading\n\nReplacement body.\n"
 	updatedPath := writeFixture(t, "updated-catalog.md", []byte(updatedSource))
 	updatedContextPath := writeFixture(t, "updated-catalog-context.md", []byte("Updated creator context\n"))
-	updated := runCatalogResource(t, clientEnv, "--server", firstServer.URL, "--json", "update", "markdown", markdown.Resource.ID, updatedPath, "--context", updatedContextPath, "--title", "Updated catalog title")
+	updated := runCatalogResource(t, clientEnv, "--server", firstServer.URL, "--json", "update", "markdown", "--context", updatedContextPath, "--title", "Updated catalog title", "--", markdown.Resource.ID, updatedPath)
 	require.Equal(t, markdown.Resource.URL, updated.Resource.URL)
 	updatedPage := runCatalogList(t, clientEnv, "--json", "catalog", "list", "--query", "updated searchable", "--limit", "20")
 	require.Equal(t, 1, updatedPage.Total)
@@ -98,7 +98,7 @@ func TestCatalogProcessLifecycleOfflineAcrossOrigins(t *testing.T) {
 	require.Equal(t, "Markdown searchable local record", updatedPage.Records[0].Summary)
 	require.Equal(t, byID[markdown.Resource.ID].CreatedAt, updatedPage.Records[0].CreatedAt)
 
-	runCatalogSuccess(t, clientEnv, "--server", firstServer.URL, "--json", "delete", "markdown", markdown.Resource.ID)
+	runCatalogSuccess(t, clientEnv, "--server", firstServer.URL, "--json", "delete", "markdown", "--", markdown.Resource.ID)
 	deletedPage := runCatalogList(t, clientEnv, "--json", "catalog", "list", "--query", "updated catalog", "--limit", "20")
 	require.Equal(t, 1, deletedPage.Total)
 	require.Equal(t, "deleted", deletedPage.Records[0].State)
@@ -270,7 +270,7 @@ func TestCatalogProcessImagesAndUnknownBoardsAreNotEnrolled(t *testing.T) {
 	runCatalogSuccess(t, env, "--server", server.URL, "--json", "image", "upload", imagePath)
 	created := requestMarkdownPair(t, http.MethodPost, server.URL+"/api/v1/whiteboards/markdown", []byte("# API board\n"), []byte("context"), http.StatusCreated)
 	updatedPath := writeFixture(t, "unknown-update.md", []byte("# updated\n"))
-	stdout, stderr, err := runCatalogCommand(t, env, "--server", server.URL, "--json", "update", "markdown", created.Resource.ID, updatedPath, "--context", writeContextFixture(t, "updated context"), "--title", "Not enrolled")
+	stdout, stderr, err := runCatalogCommand(t, env, "--server", server.URL, "--json", "update", "markdown", "--context", writeContextFixture(t, "updated context"), "--title", "Not enrolled", "--", created.Resource.ID, updatedPath)
 	require.NoError(t, err, stderr)
 	require.Contains(t, stdout, created.Resource.ID)
 	var warning struct {
@@ -282,13 +282,13 @@ func TestCatalogProcessImagesAndUnknownBoardsAreNotEnrolled(t *testing.T) {
 	require.Equal(t, "catalog_record_missing", warning.Warning.Code)
 	page := runCatalogList(t, env, "--json", "catalog", "list")
 	require.Zero(t, page.Total)
-	runCatalogSuccess(t, env, "--server", server.URL, "--json", "delete", "markdown", created.Resource.ID)
+	runCatalogSuccess(t, env, "--server", server.URL, "--json", "delete", "markdown", "--", created.Resource.ID)
 	page = runCatalogList(t, env, "--json", "catalog", "list")
 	require.Zero(t, page.Total)
 }
 
 func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T) {
-	const id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	const id = "-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	updateReceived := make(chan struct{})
 	releaseUpdate := make(chan struct{})
 	var releaseOnce sync.Once
@@ -326,7 +326,7 @@ func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T
 	updatedContext := writeContextFixture(t, "updated context")
 	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
 	defer cancel()
-	updateCommand := exec.CommandContext(ctx, binaryPath, "--server", remote.URL, "--json", "update", "markdown", id, updatedSource, "--context", updatedContext, "--title", "Updated while locked")
+	updateCommand := exec.CommandContext(ctx, binaryPath, "--server", remote.URL, "--json", "update", "markdown", "--context", updatedContext, "--title", "Updated while locked", "--", id, updatedSource)
 	updateCommand.Env = env
 	var updateStdout, updateStderr bytes.Buffer
 	updateCommand.Stdout = &updateStdout
@@ -338,7 +338,7 @@ func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T
 		require.FailNow(t, "tracked update did not reach responder", ctx.Err())
 	}
 
-	deleteStdout, deleteStderr, deleteErr := runCatalogCommand(t, env, "--server", remote.URL, "--timeout", "100ms", "--json", "delete", "markdown", id)
+	deleteStdout, deleteStderr, deleteErr := runCatalogCommand(t, env, "--server", remote.URL, "--timeout", "100ms", "--json", "delete", "markdown", "--", id)
 	require.Error(t, deleteErr)
 	require.Empty(t, deleteStdout)
 	requireJSONError(t, deleteStderr, "timeout")
@@ -352,7 +352,7 @@ func TestCatalogProcessSerializesTrackedMutationAcrossRemoteRequest(t *testing.T
 	require.NoError(t, updateCommand.Wait(), updateStderr.String())
 	require.Empty(t, updateStderr.String())
 	require.Contains(t, updateStdout.String(), id)
-	runCatalogSuccess(t, env, "--server", remote.URL, "--json", "delete", "markdown", id)
+	runCatalogSuccess(t, env, "--server", remote.URL, "--json", "delete", "markdown", "--", id)
 	select {
 	case <-deleteReceived:
 	case <-ctx.Done():

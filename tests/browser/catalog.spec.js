@@ -52,8 +52,8 @@ test("catalog preserves and replaces tracked metadata through update and deletio
   await fs.writeFile(created.sourcePath, updatedSource, { mode: 0o600 });
   await fs.writeFile(created.contextPath, "Updated creator context\n", { mode: 0o600 });
   const update = await catalogClient.run([
-    "--server", server.url, "--json", "update", "markdown", created.id, created.sourcePath,
-    "--context", created.contextPath, "--title", "Replacement catalog title",
+    "--server", server.url, "--json", "update", "markdown",
+    "--context", created.contextPath, "--title", "Replacement catalog title", "--", created.id, created.sourcePath,
   ]);
   expect(update.stderr).toBe("");
   expect(update.json.resource.url).toBe(created.url);
@@ -66,7 +66,7 @@ test("catalog preserves and replaces tracked metadata through update and deletio
   await expect(page.locator("#agent-whiteboard-content h1")).toHaveText("Updated rendered heading");
   await expect(page.locator("body")).toContainText("Updated body at the same capability");
 
-  const deletion = await catalogClient.run(["--server", server.url, "--json", "delete", "markdown", created.id]);
+  const deletion = await catalogClient.run(["--server", server.url, "--json", "delete", "markdown", "--", created.id]);
   expect(deletion.stderr).toBe("");
   const deleted = await catalogClient.run(["--json", "catalog", "list", "--query", "replacement preserved"]);
   expect(deleted.json.total).toBe(1);
