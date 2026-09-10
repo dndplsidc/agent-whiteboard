@@ -303,6 +303,10 @@ func commandErrorCode(err error) string {
 	if errors.As(err, &catalogErr) {
 		return catalogErr.code
 	}
+	var upgradeErr upgradeError
+	if errors.As(err, &upgradeErr) {
+		return string(common.CodeInternal)
+	}
 	var domainErr *common.Error
 	if errors.As(err, &domainErr) {
 		return string(domainErr.Code)
@@ -327,6 +331,10 @@ func commandErrorMessage(err error) string {
 	var catalogErr catalogLocalError
 	if errors.As(err, &catalogErr) {
 		return catalogErr.message
+	}
+	var upgradeErr upgradeError
+	if errors.As(err, &upgradeErr) {
+		return upgradeErr.message
 	}
 	var domainErr *common.Error
 	if errors.As(err, &domainErr) {

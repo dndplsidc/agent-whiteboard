@@ -50,11 +50,21 @@ If the first three are absent and localhost is not intended, ask for the publish
 
 Agent Whiteboard supports macOS and Linux with Go 1.25 or 1.26.
 
+For an initial installation, or when an older installed version does not expose `agent-whiteboard upgrade`, run:
+
 ```sh
 go install github.com/dndplsidc/agent-whiteboard/cmd/agent-whiteboard@latest
 command -v agent-whiteboard
 agent-whiteboard --help
 ```
+
+When the installed CLI exposes `upgrade`, update that exact executable with:
+
+```sh
+agent-whiteboard upgrade
+```
+
+The command requires `go` on `PATH`, write access to the executable directory, and the standard executable name `agent-whiteboard`. It installs the latest tagged release into the current executable's directory. It does not restart a running publishing server or Page Agent broker. After upgrading, restart any affected foreground process; if a managed macOS broker is installed, run `agent-whiteboard agent daemon restart`.
 
 If installation succeeds but the command is missing, inspect `go env GOBIN` and `go env GOPATH`, then report the required `PATH` addition. Do not edit shell startup files unless requested.
 

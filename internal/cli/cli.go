@@ -58,6 +58,9 @@ type Dependencies struct {
 	NewAgentApplication   func(app.AgentServiceConfig) (Application, error)
 	NewLaunchAgentManager func() (common.LaunchAgentManager, error)
 	ExecutablePath        func() (string, error)
+	Environ               func() []string
+	LookPath              func(string) (string, error)
+	RunCommand            func(context.Context, string, []string, []string, io.Writer, io.Writer) error
 }
 
 type rootOptions struct {
@@ -137,6 +140,21 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 	if common.IsNil(deps.ExecutablePath) {
 		deps.ExecutablePath = os.Executable
 	}
+	if deps.Environ == nil {
+		deps.Environ = os.Environ
+	}
+	if deps.LookPath == nil {
+		deps.LookPath = exec.LookPath
+	}
+	if deps.RunCommand == nil {
+		deps.RunCommand = func(ctx context.Context, executable string, arguments, environment []string, stdout, stderr io.Writer) error {
+			command := exec.CommandContext(ctx, executable, arguments...)
+			command.Env = environment
+			command.Stdout = stdout
+			command.Stderr = stderr
+			return command.Run()
+		}
+	}
 
 	options := &rootOptions{}
 	root := &cobra.Command{
@@ -168,7 +186,7 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 		}
 		return factory.loadGeneralConfiguration()
 	}
-	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newGetCommand(), factory.newDeleteCommand(), factory.newImageCommand(), factory.newCatalogCommand(), factory.newAgentCommand())
+	root.AddCommand(factory.newServeCommand(), factory.newCreateCommand(), factory.newUpdateCommand(), factory.newGetCommand(), factory.newDeleteCommand(), factory.newImageCommand(), factory.newCatalogCommand(), factory.newAgentCommand(), factory.newUpgradeCommand())
 	return root, nil
 }
 

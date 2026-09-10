@@ -52,6 +52,20 @@ The publishing server and broker are separate processes. Provider paths can be s
 
 Linux supports foreground `agent serve` only. Daemon status alone does not establish broker readiness; follow the listener and browser checks in the [Page Agent guide](page-agent.md#reuse-or-start-the-readers-local-broker).
 
+### Upgrade the CLI
+
+```sh
+agent-whiteboard upgrade
+```
+
+`upgrade` installs the latest tagged Agent Whiteboard release over the currently running CLI. It requires `go` on `PATH`, uses the current executable's directory as `GOBIN`, and refuses to proceed when the executable has been renamed from `agent-whiteboard`; these checks prevent a successful command from updating a different binary. The command supports macOS and Linux, does not load Agent Whiteboard configuration, and requires write access to the executable directory.
+
+A running process continues using the version already loaded in memory. After an upgrade, restart any foreground server or Page Agent broker yourself. Restart the managed macOS broker with:
+
+```sh
+agent-whiteboard agent daemon restart
+```
+
 ### Help and global options
 
 Run `agent-whiteboard --help` to list command groups, or append `--help` to any command to see its arguments and flags. `agent-whiteboard help COMMAND` also opens command help.
@@ -74,6 +88,8 @@ Agent Whiteboard supports macOS and Linux with Go 1.25 or 1.26. This path instal
 ```sh
 go install github.com/dndplsidc/agent-whiteboard/cmd/agent-whiteboard@latest
 ```
+
+After the initial installation, update this executable with `agent-whiteboard upgrade`.
 
 ### 2. Start the server
 
@@ -259,4 +275,3 @@ The local catalog path is fixed at `~/.agent-whiteboard/catalog` for the effecti
 | Image limit | 25 MiB each |
 
 Run `agent-whiteboard serve --help` or `agent-whiteboard agent serve --help` for the complete flag lists.
-
