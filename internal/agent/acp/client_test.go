@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/dndplsidc/agent-whiteboard/internal/agent/acp"
@@ -165,93 +166,116 @@ func TestDeadlineOwnsHandlerBoundary(t *testing.T) {
 			frame = "{\"jsonrpc\":\"2.0\",\"id\":\"boundary\",\"method\":\"boundary\"}\n"
 		}
 		t.Run(name, func(t *testing.T) {
-			p := acptest.NewProcess()
-			o := options()
-			o.HandlerTimeout = 10 * time.Millisecond
-			o.Handler = func(ctx context.Context, _ acp.Request) { <-ctx.Done() }
-			c, _ := acp.New(p, o)
-			_, _ = p.OutputWriter.Write([]byte(frame))
-			<-c.Done()
-			if !errors.Is(c.Err(), context.DeadlineExceeded) {
-				t.Fatalf("late return released barrier: %v", c.Err())
-			}
-			<-p.TerminateCalled
-			p.Complete(nil)
-			_ = c.Shutdown(context.Background())
+			synctest.Test(t, func(t *testing.T) {
+				p := acptest.NewProcess()
+				o := options()
+				o.HandlerTimeout = 10 * time.Millisecond
+				o.Handler = func(ctx context.Context, _ acp.Request) { <-ctx.Done() }
+				c, _ := acp.New(p, o)
+				_, _ = p.OutputWriter.Write([]byte(frame))
+				<-c.Done()
+				if !errors.Is(c.Err(), context.DeadlineExceeded) {
+					t.Fatalf("late return released barrier: %v", c.Err())
+				}
+				<-p.TerminateCalled
+				p.Complete(nil)
+				_ = c.Shutdown(context.Background())
+			})
 		})
 	}
 }
 
 func TestDelayedResponderCannotAcquireAtDeadline(t *testing.T) {
-	p := acptest.NewProcess()
-	finishOnTerminate(p)
-	p.Stdin.Block()
-	requests := make(chan acp.Request, 1)
-	o := options()
-	o.HandlerTimeout = 10 * time.Millisecond
-	o.FinalPeriod = time.Second
-	o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
-	c, _ := acp.New(p, o)
-	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"delayed\",\"method\":\"ask\"}\n"))
-	r := <-requests
-	<-p.Stdin.WriteStarted
-	if d, err := r.Responder.Respond(context.Background(), true, nil); d != acp.NotWritten || !errors.Is(err, acp.ErrAlreadyResponded) {
-		t.Fatalf("late explicit response: %s %v", d, err)
-	}
-	p.Stdin.Release()
-	<-r.Responder.Done()
-	outcome := r.Responder.Outcome()
-	if !outcome.Settled || !outcome.Expired || outcome.Delivery != acp.Complete {
-		t.Fatalf("deadline did not own outcome: %+v", outcome)
-	}
-	_ = c.Shutdown(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		p := acptest.NewProcess()
+		finishOnTerminate(p)
+		p.Stdin.Block()
+		requests := make(chan acp.Request, 1)
+		o := options()
+		o.HandlerTimeout = 10 * time.Millisecond
+		o.FinalPeriod = time.Second
+		o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
+		c, _ := acp.New(p, o)
+		_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"delayed\",\"method\":\"ask\"}\n"))
+		r := <-requests
+		<-p.Stdin.WriteStarted
+		if d, err := r.Responder.Respond(context.Background(), true, nil); d != acp.NotWritten || !errors.Is(err, acp.ErrAlreadyResponded) {
+			t.Fatalf("late explicit response: %s %v", d, err)
+		}
+		p.Stdin.Release()
+		<-r.Responder.Done()
+		outcome := r.Responder.Outcome()
+		if !outcome.Settled || !outcome.Expired || outcome.Delivery != acp.Complete {
+			t.Fatalf("deadline did not own outcome: %+v", outcome)
+		}
+		_ = c.Shutdown(context.Background())
+	})
 }
 
 func TestHandlerSaturationExpiresQueuedAdmissionWithoutStartingIt(t *testing.T) {
-	p := acptest.NewProcess()
-	o := options()
-	o.MaxHandlerConcurrency = 1
-	o.HandlerTimeout = 10 * time.Millisecond
-	started := make(chan string, 2)
-	o.Handler = func(ctx context.Context, r acp.Request) { started <- r.Method; <-ctx.Done() }
-	c, _ := acp.New(p, o)
-	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"one\",\"method\":\"one\"}\n{\"jsonrpc\":\"2.0\",\"id\":\"two\",\"method\":\"two\"}\n"))
-	if method := <-started; method != "one" {
-		t.Fatalf("wire order: %s", method)
-	}
-	<-c.Done()
-	select {
-	case method := <-started:
-		t.Fatalf("expired queued handler started: %s", method)
-	default:
-	}
-	if !errors.Is(c.Err(), context.DeadlineExceeded) {
-		t.Fatalf("saturation deadline: %v", c.Err())
-	}
-	<-p.TerminateCalled
-	p.Complete(nil)
-	_ = c.Shutdown(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		p := acptest.NewProcess()
+		o := options()
+		o.MaxHandlerConcurrency = 1
+		o.HandlerTimeout = 10 * time.Millisecond
+		started := make(chan string, 2)
+		o.Handler = func(ctx context.Context, r acp.Request) { started <- r.Method; <-ctx.Done() }
+		c, _ := acp.New(p, o)
+		_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"one\",\"method\":\"one\"}\n{\"jsonrpc\":\"2.0\",\"id\":\"two\",\"method\":\"two\"}\n"))
+		if method := <-started; method != "one" {
+			t.Fatalf("wire order: %s", method)
+		}
+		// Settle admission while virtual time is frozen, then prove the
+		// transport stays open until the exact deadline. Runner load cannot
+		// consume this budget before the first handler is scheduled.
+		synctest.Wait()
+		time.Sleep(o.HandlerTimeout - time.Nanosecond)
+		synctest.Wait()
+		if c.Err() != nil || len(started) != 0 {
+			t.Fatal("queued handler started or transport closed before deadline")
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		select {
+		case <-c.Done():
+		default:
+			t.Fatal("transport did not close at deadline")
+		}
+		select {
+		case method := <-started:
+			t.Fatalf("expired queued handler started: %s", method)
+		default:
+		}
+		if !errors.Is(c.Err(), context.DeadlineExceeded) {
+			t.Fatalf("saturation deadline: %v", c.Err())
+		}
+		<-p.TerminateCalled
+		p.Complete(nil)
+		_ = c.Shutdown(context.Background())
+	})
 }
 
 func TestAutomaticExpiryOutcome(t *testing.T) {
-	p := acptest.NewProcess()
-	finishOnTerminate(p)
-	requests := make(chan acp.Request, 1)
-	o := options()
-	o.HandlerTimeout = 20 * time.Millisecond
-	o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
-	c, _ := acp.New(p, o)
-	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"expiry\",\"method\":\"ask\"}\n"))
-	r := <-requests
-	<-r.Responder.Done()
-	outcome := r.Responder.Outcome()
-	if !outcome.Settled || !outcome.Expired || outcome.Delivery != acp.Complete {
-		t.Fatalf("expiry outcome: %+v", outcome)
-	}
-	if c.Err() != nil {
-		t.Fatalf("complete expiry closed transport: %v", c.Err())
-	}
-	_ = c.Shutdown(context.Background())
+	synctest.Test(t, func(t *testing.T) {
+		p := acptest.NewProcess()
+		finishOnTerminate(p)
+		requests := make(chan acp.Request, 1)
+		o := options()
+		o.HandlerTimeout = 20 * time.Millisecond
+		o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
+		c, _ := acp.New(p, o)
+		_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"expiry\",\"method\":\"ask\"}\n"))
+		r := <-requests
+		<-r.Responder.Done()
+		outcome := r.Responder.Outcome()
+		if !outcome.Settled || !outcome.Expired || outcome.Delivery != acp.Complete {
+			t.Fatalf("expiry outcome: %+v", outcome)
+		}
+		if c.Err() != nil {
+			t.Fatalf("complete expiry closed transport: %v", c.Err())
+		}
+		_ = c.Shutdown(context.Background())
+	})
 }
 
 func TestAutomaticExpiryUncertainDeliveryFailsClosed(t *testing.T) {
@@ -264,28 +288,30 @@ func TestAutomaticExpiryUncertainDeliveryFailsClosed(t *testing.T) {
 		{name: "indeterminate", n: 1, want: acp.Indeterminate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := acptest.NewProcess()
-			p.Stdin.CompleteBlockedWriteOnClose(tc.n, io.ErrClosedPipe)
-			requests := make(chan acp.Request, 1)
-			o := options()
-			o.HandlerTimeout = 10 * time.Millisecond
-			o.FinalPeriod = 10 * time.Millisecond
-			o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
-			c, _ := acp.New(p, o)
-			_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"expiry\",\"method\":\"ask\"}\n"))
-			r := <-requests
-			<-r.Responder.Done()
-			outcome := r.Responder.Outcome()
-			if !outcome.Settled || !outcome.Expired || outcome.Delivery != tc.want {
-				t.Fatalf("expiry outcome: %+v", outcome)
-			}
-			<-c.Done()
-			if c.Err() == nil {
-				t.Fatal("uncertain expiry left transport open")
-			}
-			<-p.TerminateCalled
-			p.Complete(nil)
-			_ = c.Shutdown(context.Background())
+			synctest.Test(t, func(t *testing.T) {
+				p := acptest.NewProcess()
+				p.Stdin.CompleteBlockedWriteOnClose(tc.n, io.ErrClosedPipe)
+				requests := make(chan acp.Request, 1)
+				o := options()
+				o.HandlerTimeout = 10 * time.Millisecond
+				o.FinalPeriod = 10 * time.Millisecond
+				o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
+				c, _ := acp.New(p, o)
+				_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"expiry\",\"method\":\"ask\"}\n"))
+				r := <-requests
+				<-r.Responder.Done()
+				outcome := r.Responder.Outcome()
+				if !outcome.Settled || !outcome.Expired || outcome.Delivery != tc.want {
+					t.Fatalf("expiry outcome: %+v", outcome)
+				}
+				<-c.Done()
+				if c.Err() == nil {
+					t.Fatal("uncertain expiry left transport open")
+				}
+				<-p.TerminateCalled
+				p.Complete(nil)
+				_ = c.Shutdown(context.Background())
+			})
 		})
 	}
 }
@@ -494,50 +520,44 @@ func TestResponderReopensAfterDefinitiveNotWritten(t *testing.T) {
 }
 
 func TestRequestDeadlineWaitsForNotWrittenAttemptThenResponds(t *testing.T) {
-	p := acptest.NewProcess()
-	finishOnTerminate(p)
-	p.Stdin.Block()
-	marshaled := make(chan struct{}, 1)
-	handlerResult := make(chan struct {
-		d acp.Delivery
-		e error
-	}, 1)
-	o := options()
-	o.HandlerTimeout = 50 * time.Millisecond
-	o.Handler = func(ctx context.Context, r acp.Request) {
-		d, err := r.Responder.Respond(ctx, marshalSignal{started: marshaled}, nil)
-		handlerResult <- struct {
+	synctest.Test(t, func(t *testing.T) {
+		p := acptest.NewProcess()
+		finishOnTerminate(p)
+		p.Stdin.Block()
+		marshaled := make(chan struct{}, 1)
+		handlerResult := make(chan struct {
 			d acp.Delivery
 			e error
-		}{d, err}
-	}
-	c, _ := acp.New(p, o)
-	held := make(chan error, 1)
-	go func() { _, err := c.Notify(context.Background(), "hold", nil); held <- err }()
-	<-p.Stdin.WriteStarted
-	_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"deadline-race\",\"method\":\"ask\",\"params\":{}}\n"))
-	<-marshaled
-	result := <-handlerResult
-	if result.d != acp.NotWritten || !errors.Is(result.e, context.DeadlineExceeded) {
-		t.Fatalf("handler response: %s %v", result.d, result.e)
-	}
-	p.Stdin.Release()
-	if err := <-held; err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-p.Stdin.Changed:
-	case <-time.After(time.Second):
-		t.Fatal("deadline response was not written")
-	}
-	for !bytes.Contains(p.Stdin.Bytes(), []byte("-32603")) {
-		select {
-		case <-p.Stdin.Changed:
-		case <-time.After(time.Second):
-			t.Fatal("missing deadline response")
+		}, 1)
+		o := options()
+		o.HandlerTimeout = 50 * time.Millisecond
+		o.Handler = func(ctx context.Context, r acp.Request) {
+			d, err := r.Responder.Respond(ctx, marshalSignal{started: marshaled}, nil)
+			handlerResult <- struct {
+				d acp.Delivery
+				e error
+			}{d, err}
 		}
-	}
-	_ = c.Shutdown(context.Background())
+		c, _ := acp.New(p, o)
+		held := make(chan error, 1)
+		go func() { _, err := c.Notify(context.Background(), "hold", nil); held <- err }()
+		<-p.Stdin.WriteStarted
+		_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"deadline-race\",\"method\":\"ask\",\"params\":{}}\n"))
+		<-marshaled
+		result := <-handlerResult
+		if result.d != acp.NotWritten || !errors.Is(result.e, context.DeadlineExceeded) {
+			t.Fatalf("handler response: %s %v", result.d, result.e)
+		}
+		p.Stdin.Release()
+		if err := <-held; err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if !bytes.Contains(p.Stdin.Bytes(), []byte("-32603")) {
+			t.Fatal("missing deadline response after writer settled")
+		}
+		_ = c.Shutdown(context.Background())
+	})
 }
 
 func TestDelayedInboundResponderOwnsFullFrameAcknowledgment(t *testing.T) {
@@ -566,23 +586,25 @@ func TestDelayedInboundResponderOwnsFullFrameAcknowledgment(t *testing.T) {
 
 func TestInboundResponderTimeoutFirstOwnershipAndShutdownCleanup(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
-		p := acptest.NewProcess()
-		finishOnTerminate(p)
-		requests := make(chan acp.Request, 1)
-		o := options()
-		o.HandlerTimeout = 20 * time.Millisecond
-		o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
-		c, _ := acp.New(p, o)
-		_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"timeout\",\"method\":\"ask\",\"params\":{}}\n"))
-		r := <-requests
-		<-p.Stdin.Changed
-		if !bytes.Contains(p.Stdin.Bytes(), []byte("-32603")) {
-			t.Fatal(string(p.Stdin.Bytes()))
-		}
-		if d, err := r.Responder.Respond(context.Background(), nil, nil); d != acp.NotWritten || !errors.Is(err, acp.ErrAlreadyResponded) {
-			t.Fatalf("%s %v", d, err)
-		}
-		_ = c.Shutdown(context.Background())
+		synctest.Test(t, func(t *testing.T) {
+			p := acptest.NewProcess()
+			finishOnTerminate(p)
+			requests := make(chan acp.Request, 1)
+			o := options()
+			o.HandlerTimeout = 20 * time.Millisecond
+			o.Handler = func(_ context.Context, r acp.Request) { requests <- r }
+			c, _ := acp.New(p, o)
+			_, _ = p.OutputWriter.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":\"timeout\",\"method\":\"ask\",\"params\":{}}\n"))
+			r := <-requests
+			<-p.Stdin.Changed
+			if !bytes.Contains(p.Stdin.Bytes(), []byte("-32603")) {
+				t.Fatal(string(p.Stdin.Bytes()))
+			}
+			if d, err := r.Responder.Respond(context.Background(), nil, nil); d != acp.NotWritten || !errors.Is(err, acp.ErrAlreadyResponded) {
+				t.Fatalf("%s %v", d, err)
+			}
+			_ = c.Shutdown(context.Background())
+		})
 	})
 	t.Run("first response wins", func(t *testing.T) {
 		p := acptest.NewProcess()

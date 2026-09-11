@@ -43,6 +43,10 @@ Use the test levels that can meaningfully detect regressions from the change. Bu
 
 Tests must be hermetic, deterministic, and isolated. They must not depend on public networks, hosted services, credentials, existing machine state, or fixed ports. Prefer temporary directories, ephemeral ports, local servers, injected dependencies, and committed fixtures. Clean up all resources created by tests.
 
+For in-memory Go concurrency and deadline tests, use `testing/synctest` (supported by both Go versions in CI). Create the fixture and its goroutines inside each test bubble. Use channels to establish ordering and `synctest.Wait` to settle runnable work; use virtual time to assert behavior before and at expiry. Do not rely on a goroutine being scheduled within a short wall-clock deadline, or use sleeps to guess when work has completed. A bubble must finish with every goroutine stopped; do not hide leaked fixtures behind test retries.
+
+Keep real subprocess, filesystem, and socket integration tests outside fake-time bubbles. Synchronize them with observable readiness or explicit handshakes, use bounded waits with actionable failure messages, and register cleanup as soon as resources are acquired. Wall-clock timeouts are safety bounds, not synchronization. Never replace a failed assertion with a retry or extend a timeout without identifying the cause. Focused race repetition with varied CPU counts and shuffled ordering supplements these controls; it does not prove that a suite can never flake.
+
 Keep repeated stress runs focused. Run an affected package normally first, then use `-count` only with a narrow `-run` expression for tests that exercise a specific race or nondeterministic interleaving. Do not apply high repeat counts to an entire package—especially one containing filesystem `fsync`, process, timeout, or integration tests. Run the race detector once for the affected package, increasing the count only for focused race-sensitive tests. Run repository-wide normal and race checks once at the milestone boundary.
 
 For example:

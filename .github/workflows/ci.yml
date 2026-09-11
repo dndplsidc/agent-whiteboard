@@ -73,6 +73,12 @@ jobs:
       - name: Test with race detector
         run: go test -race ./...
 
+      - name: Check ACP deadline test stability
+        run: >-
+          go test -race ./internal/agent/acp
+          -run 'Test(DeadlineOwnsHandlerBoundary|DelayedResponderCannotAcquireAtDeadline|HandlerSaturationExpiresQueuedAdmissionWithoutStartingIt|AutomaticExpiryOutcome|AutomaticExpiryUncertainDeliveryFailsClosed|RequestDeadlineWaitsForNotWrittenAttemptThenResponds|InboundResponderTimeoutFirstOwnershipAndShutdownCleanup)$'
+          -count=20 -cpu=1,2,4 -shuffle=on -timeout=60s
+
       - name: Build CLI
         run: go build -trimpath ./cmd/agent-whiteboard
 
