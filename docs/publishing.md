@@ -58,7 +58,9 @@ Linux supports foreground `agent serve` only. Daemon status alone does not estab
 agent-whiteboard upgrade
 ```
 
-`upgrade` installs the latest tagged Agent Whiteboard release over the currently running CLI. It requires `go` on `PATH`, uses the current executable's directory as `GOBIN`, and refuses to proceed when the executable has been renamed from `agent-whiteboard`; these checks prevent a successful command from updating a different binary. The command supports macOS and Linux, does not load Agent Whiteboard configuration, and requires write access to the executable directory.
+`upgrade` resolves the latest tagged release directly from the source repository so a stale Go module proxy cannot select an older release. It compares that release with the current executable, reports success without reinstalling when the versions match, and refuses a downgrade or an unrecognized current version. For an update, it downloads the exact resolved version into a temporary sibling directory, verifies the downloaded binary's embedded module version, and atomically replaces the current executable only after verification succeeds.
+
+The command requires `go` on `PATH`, write access to the executable directory, and the standard executable name `agent-whiteboard`. It supports macOS and Linux and does not load Agent Whiteboard configuration. Download, verification, and replacement failures leave the current executable unchanged.
 
 A running process continues using the version already loaded in memory. After an upgrade, restart any foreground server or Page Agent broker yourself. Restart the managed macOS broker with:
 

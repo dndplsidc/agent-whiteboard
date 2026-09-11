@@ -115,7 +115,7 @@ Creation preflights catalog writability before sending the HTTP request. A prefl
 | 3 | stable remote/domain error |
 | 4 | timeout or cancellation |
 
-Human mode prints URLs to stdout, one per line; successful delete and trust mutations print nothing. A successful `upgrade` prints a confirmation line. Scripts should branch on `schema_version`, the top-level `resource`/`resources`/`markdown`/`html`/`error` member, and exit status. Do not assume stdout is empty after an uncertain create error. Version 1 will not change the meaning or type of existing fields; additive fields may be introduced. A breaking change requires a new schema version.
+Human mode prints URLs to stdout, one per line; successful delete and trust mutations print nothing. A successful `upgrade` prints the resolved version and whether the executable was already current. Scripts should branch on `schema_version`, the top-level `resource`/`resources`/`markdown`/`html`/`error` member, and exit status. Do not assume stdout is empty after an uncertain create error. Version 1 will not change the meaning or type of existing fields; additive fields may be introduced. A breaking change requires a new schema version.
 
 Creator context is not a private or hidden channel. Anyone with the capability ID can retrieve it. Do not include hidden reasoning, credentials, personal or sensitive data, private source, or raw tool output. Error envelopes do not echo source or context.
 
@@ -144,7 +144,7 @@ On macOS, `agent serve --daemon` install success and `agent daemon restart|stop|
 {"schema_version":1}
 ```
 
-Successful `upgrade` uses the same envelope. Installer output is suppressed on success in JSON mode. An installer failure returns one `internal_error` envelope on stderr with the Go command's diagnostic reduced to a single message; stdout remains empty.
+Successful `upgrade`, including an already-current executable, uses the same envelope. Resolver and installer output is suppressed on success in JSON mode. A resolution, installation, verification, or replacement failure returns one `internal_error` envelope on stderr with command diagnostics reduced to a single message; stdout remains empty. The current executable is unchanged unless the exact resolved release is downloaded and verified successfully.
 
 `agent daemon status` reports only managed-process state:
 
