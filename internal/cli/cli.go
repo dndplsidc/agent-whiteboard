@@ -58,6 +58,7 @@ type Dependencies struct {
 	NewAgentApplication   func(app.AgentServiceConfig) (Application, error)
 	NewLaunchAgentManager func() (common.LaunchAgentManager, error)
 	ExecutablePath        func() (string, error)
+	ReadBuildVersion      func(string) (string, error)
 	Environ               func() []string
 	LookPath              func(string) (string, error)
 	RunCommand            func(context.Context, string, []string, []string, io.Writer, io.Writer) error
@@ -139,6 +140,9 @@ func NewRoot(deps Dependencies) (*cobra.Command, error) {
 	}
 	if common.IsNil(deps.ExecutablePath) {
 		deps.ExecutablePath = os.Executable
+	}
+	if deps.ReadBuildVersion == nil {
+		deps.ReadBuildVersion = readBuildVersion
 	}
 	if deps.Environ == nil {
 		deps.Environ = os.Environ

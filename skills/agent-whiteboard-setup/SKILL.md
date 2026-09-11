@@ -64,7 +64,9 @@ When the installed CLI exposes `upgrade`, update that exact executable with:
 agent-whiteboard upgrade
 ```
 
-The command requires `go` on `PATH`, write access to the executable directory, and the standard executable name `agent-whiteboard`. It installs the latest tagged release into the current executable's directory. It does not restart a running publishing server or Page Agent broker. After upgrading, restart any affected foreground process; if a managed macOS broker is installed, run `agent-whiteboard agent daemon restart`.
+The command requires `go` on `PATH`, write access to the executable directory, and the standard executable name `agent-whiteboard`. It resolves the latest tagged release directly from the source repository, refuses downgrades and unknown current versions, downloads the exact release into a temporary sibling directory, and verifies its embedded module version before atomically replacing the current executable. A stale configured Go proxy cannot select an older release, and failures before replacement leave the installed executable unchanged.
+
+The command does not restart a running publishing server or Page Agent broker. After upgrading, restart any affected foreground process; if a managed macOS broker is installed, run `agent-whiteboard agent daemon restart`.
 
 If installation succeeds but the command is missing, inspect `go env GOBIN` and `go env GOPATH`, then report the required `PATH` addition. Do not edit shell startup files unless requested.
 
