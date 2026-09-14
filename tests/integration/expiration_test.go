@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,7 +23,8 @@ func TestExpirationOmittedAndPermanentCreation(t *testing.T) {
 	require.Nil(t, permanent.Resource.ExpiresAt)
 
 	waitForStatus(t, omitted.Resource.URL, http.StatusNotFound)
-	require.NoDirExists(t, filepath.Join(server.Root, "whiteboards", omitted.Resource.ID))
+	// HTTP expiry can precede the background sweep that removes the directory.
+	waitForDirectoryRemoval(t, filepath.Join(server.Root, "whiteboards", omitted.Resource.ID))
 	response, _ := fetch(t, permanent.Resource.URL)
 	require.Equal(t, http.StatusOK, response.StatusCode)
 	runCLIDelete(t, server, "--json", "delete", "markdown", "--", permanent.Resource.ID)
@@ -110,6 +112,26 @@ func waitForStatus(t *testing.T, endpoint string, want int) {
 			timer.Stop()
 			require.FailNow(t, "timed out waiting for HTTP status", "endpoint=%s want=%d last=%d", endpoint, want, lastStatus)
 		case <-timer.C:
+		}
+	}
+}
+
+func waitForDirectoryRemoval(t *testing.T, path string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), integrationTimeout)
+	defer cancel()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		_, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			return
+		}
+		require.NoError(t, err, "inspect expired resource directory %s", path)
+		select {
+		case <-ctx.Done():
+			require.FailNow(t, "timed out waiting for expired resource directory removal", "path=%s", path)
+		case <-ticker.C:
 		}
 	}
 }
