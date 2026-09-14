@@ -520,6 +520,19 @@ describe("local agent source and commands", () => {
     expect(cryptoObject.getRandomValues.mock.calls[0][0]).toHaveLength(24);
   });
 
+  test("explains an oversized Codex request without suggesting a broker restart", () => {
+    const event = agentEvent("error", { error: {
+      code: "context_too_large",
+      message: "The complete page context does not fit safely in the selected model.",
+      action: "reduce_context",
+    } });
+    expect(decodeAgentEvent(JSON.stringify(event))).toEqual(event);
+    const message = browserErrorText("context_too_large", document, "fallback", "codex");
+    expect(message).toContain("too large for the selected provider");
+    expect(message).toContain("split the content into smaller whiteboards");
+    expect(message).not.toMatch(/restart|reconnect/iu);
+  });
+
   test("uses provider-specific authentication and recovery guidance without changing generic provider behavior", () => {
     const cursorGuidance = actionGuidance("provider_login", document, "cursor");
     expect(cursorGuidance).toContain("cursor-agent login");

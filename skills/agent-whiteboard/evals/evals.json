@@ -25,6 +25,16 @@
       "id": 5,
       "prompt": "Publish board.md, but I don't know the Agent Whiteboard host and there is no server running on localhost.",
       "expected_output": "Checks explicit input, AGENT_WHITEBOARD_SERVER, and client.server in selected/default configuration, then asks for the publishing origin if none is configured; it does not guess a host or start a local server."
+    },
+    {
+      "id": 6,
+      "prompt": "Create a Whiteboard for Page Agent from my long report. The final Markdown is 900,000 UTF-8 bytes and includes embedded base64 charts. The server is configured.",
+      "expected_output": "Checks source plus creator-context bytes before publication, uploads raster charts separately and uses URLs, reduces duplication or splits authored material into coherent linked boards, rechecks the final sizes against the conservative 500,000-byte authoring budget, and keeps each board useful without automatically following links. Does not treat server publication limits as provider capacity."
+    },
+    {
+      "id": 7,
+      "prompt": "Publish this 1.7 MB HTML file unchanged for viewing only. Do not split it or change its source.",
+      "expected_output": "Preserves the requested source, measures it together with creator context, explains that it exceeds the Page Agent authoring budget and may exceed provider limits, and publishes unchanged within the ordinary publishing contract. Does not silently truncate, split, or promise Page Agent compatibility."
     }
   ]
 }

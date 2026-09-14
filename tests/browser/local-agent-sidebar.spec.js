@@ -1951,3 +1951,46 @@ test("keeps the page context card and its inspect action inside a narrow drawer"
   expect(cardBox.x + cardBox.width).toBeLessThanOrEqual(timelineRight + 1);
   expect(inspectBox.x + inspectBox.width).toBeLessThanOrEqual(timelineRight + 1);
 });
+
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+  for (const theme of ["light", "dark"]) {
+    test(`explains oversized Codex input and preserves the draft (${viewport.width}, ${theme})`, async ({ context, page, localAgentSidebar }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await openSidebarPage({
+        context, page, fixture: localAgentSidebar,
+        markdown: "# Large page context\n\nA selected excerpt still includes the complete page context.\n",
+        creatorContext: "Explain how to reduce an oversized request.",
+        preferences: { "agent-whiteboard-agent-provider": "codex", "agent-whiteboard-theme": theme },
+      });
+      localAgentSidebar.setWebSocketEnabled(true);
+      await connectSidebar(page, "codex");
+      localAgentSidebar.holdNextSubmit("codex");
+      const composer = page.getByLabel("Message Codex about this whiteboard");
+      await composer.fill("Explain this section");
+      await page.locator('.agent-composer button[type="submit"]').click();
+      await expect.poll(() => localAgentSidebar.webSocketCommands.filter(({ type }) => type === "submit").length).toBe(1);
+      localAgentSidebar.resolveHeldSubmit("context_too_large", "codex");
+      // One failed command produces one notice.
+      const notices = page.locator(".agent-activity-error");
+      await expect(notices).toHaveCount(1);
+      const notice = notices.last();
+      await expect(notice).toContainText("The page context and message are too large for the selected provider.");
+      await expect(notice).toContainText("split the content into smaller whiteboards");
+      await expect(notice).not.toContainText(/restart|protocol operation failed/iu);
+      await expect(composer).toHaveText("Explain this section");
+      await expect(page.locator('.agent-composer button[type="submit"]')).toBeEnabled();
+      expect(await notice.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath("oversized-input.png"), fullPage: true });
+      localAgentSidebar.holdNextSubmit("codex");
+      await composer.press("Enter");
+      await expect.poll(() => localAgentSidebar.webSocketCommands.filter(({ type }) => type === "submit").length).toBe(2);
+      localAgentSidebar.resolveHeldSubmit("context_too_large", "codex");
+      await expect(notices).toHaveCount(2);
+      await composer.fill("Shorter question");
+      await page.locator('.agent-composer button[type="submit"]').focus();
+      await page.keyboard.press("Enter");
+      await expect(page.locator(".agent-message-assistant").last()).toBeVisible();
+      expect(localAgentSidebar.webSocketCommands.filter(({ type }) => type === "submit")).toHaveLength(3);
+    });
+  }
+}

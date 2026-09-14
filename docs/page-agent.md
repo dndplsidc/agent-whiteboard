@@ -122,13 +122,15 @@ Page Agent exposes each provider's supported subset of model and reasoning contr
 
 Refreshing resumes the saved current conversation for that page and provider; there is no shared default thread ID. New Codex conversations are given the title **Page Agent** and their empty history is persisted and checked before the reference is saved, without sending a model message. If a saved Pi or Codex thread is missing, the pane shows **Conversation unavailable** and offers **Start new conversation**. Confirming keeps the old reference in Archives and makes the new conversation current. It does not reconstruct unavailable messages or silently replace the old thread.
 
+Submission failures appear once per client: the submitting client receives the command rejection, while other clients receive the shared error. Reconnecting preserves this routing; separate failed attempts remain separate notices.
+
 ## Troubleshoot reader setup
 
 | Symptom | What to check |
 | --- | --- |
+| Page context and message too large | Reduce the message, page source, or creator context, or split the content into smaller whiteboards. Page Agent includes the full page context, even when an excerpt is selected. Codex's `input_too_large` rejection maps to `context_too_large`; publishing can succeed even when provider input limits are exceeded. Restarting the broker does not reduce the request size. |
 | Broker unavailable | Check existing daemon/foreground state and verify that the `agent-whiteboard` process owns the configured loopback listener before starting another broker. Do not use publishing `/healthz` or `/readyz` routes on port `8568`. |
 | Origin not trusted | Run the exact `agent-whiteboard agent trust add https://…` command for the publishing origin. |
 | Provider unavailable | Confirm `pi`, `codex`, or exactly `cursor-agent` is on `PATH` and authenticated through its native CLI (`cursor-agent login` for Cursor). Cursor also requires negotiated ACP v1 with stable `session/list` and `session/load`; missing or incompatible capabilities fail closed. For a generic `agent` executable, configure `--cursor-executable` explicitly. For a managed daemon, activate the intended NVM/Nix environment and rerun `agent-whiteboard agent serve --daemon`. |
 | Browser cannot reach loopback | Allow Local Network Access when prompted by the browser. |
 | Incompatible local API | Update the publishing server and reader CLI together, then restart the broker. |
-

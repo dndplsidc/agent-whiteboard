@@ -142,9 +142,14 @@ func TestCodexBusySubmitIsRejectedWithoutQueueAdmission(t *testing.T) {
 	conversationID := connection.ConversationID()
 	clientID := sequenceID(8221)
 	settings := provider.ExecutionSettings{Model: "gpt-5.6-sol", Effort: "high", Speed: provider.SpeedFast}
+	presentation := provider.ModelPresentation{ModelDisplayName: "5.6 Sol", Selectable: true}
+	session.mu.Lock()
+	session.submitAccepted = &provider.AcceptedTurn{AcceptedAt: testTime(), Settings: &settings, Presentation: &presentation}
+	session.mu.Unlock()
 	first := codexSubmit(sequenceID(8222), clientID, conversationID, sequenceID(8223), sequenceID(8224), settings)
-	_, err := connection.Command(context.Background(), first)
+	accepted, err := connection.Command(context.Background(), first)
 	require.NoError(t, err)
+	requireCommandResult(t, accepted, protocol.CommandSucceeded, "")
 	receiveLifecycle(t, session.submitted)
 	drainEvents(t, connection.Events(), 3)
 

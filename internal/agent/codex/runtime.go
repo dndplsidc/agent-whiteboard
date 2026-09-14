@@ -630,6 +630,12 @@ func classifyRPCError(failure *rpcError) error {
 	if failure.Code == -32601 {
 		return errMethodNotFound
 	}
+	var inputError struct {
+		Code string `json:"input_error_code"`
+	}
+	if json.Unmarshal(failure.Data, &inputError) == nil && inputError.Code == "input_too_large" {
+		return provider.NewProviderError(provider.ErrorContextTooLarge)
+	}
 	text := failure.Message + " " + string(failure.Data)
 	lower := strings.ToLower(text)
 	switch {

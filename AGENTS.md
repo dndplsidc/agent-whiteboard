@@ -33,6 +33,8 @@ Before completing a user-visible UI change, inspect the actual changed state alo
 
 ## Testing
 
+Name Go unit test files after the implementation file: tests for `<file_name>.go` belong in `<file_name>_test.go`. Add tests to that matching file; do not create separately named test files for individual features or regressions.
+
 Every behavioral change must add or update tests at all applicable levels:
 
 - **Unit:** isolated logic, validation, edge cases, and errors.
