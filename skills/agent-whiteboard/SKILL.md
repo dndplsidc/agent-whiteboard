@@ -14,7 +14,7 @@ Use the CLI to discover this laptop's recorded whiteboards and publish or manage
 3. Choose the resource type below.
 4. Remove secrets, credentials, private source, personal data, and other sensitive content. Capability URLs are public bearer access, not private links.
 5. For Markdown or HTML, create a fresh non-empty creator-context file and choose a concise descriptive catalog title and summary.
-6. Run the CLI with `--json`; put global flags before the command.
+6. Before Markdown or HTML create/update, check source plus creator-context size using the guidance below, then run the CLI with `--json`; put global flags before the command.
 7. Preserve returned URLs and inspect any structured stderr warnings before deciding whether recovery is needed.
 8. Verify the result proportionally.
 9. Return the URL, expiration, and verification performed.
@@ -80,6 +80,22 @@ EOF
 Context is retrievable by anyone holding the capability URL.
 Do not include hidden reasoning, raw tool output, credentials, private source, or sensitive information.
 Remove the temporary directory after the command completes.
+
+## Keep Page Agent context manageable
+
+Before creating or updating Markdown or HTML, measure the combined UTF-8 byte size of the final source and creator-context files:
+
+```sh
+wc -c FILE.md "$context_file"
+```
+
+Use `FILE.html` for HTML. Read the `total`, including inline data, scripts, and styles. Page Agent sends the full source and creator context on the initial turn and after a page revision; selecting an excerpt does not reduce that context. A successful publication does not guarantee that a provider can accept it.
+
+For content you author for Page Agent, target at most **500,000 combined bytes**. This is a conservative authoring budget, not a server limit or a guarantee of model capacity. Codex CLI 0.153.4 has been observed rejecting text input above **1,048,576 characters**; the actual request also includes the reader's message, references, and envelope metadata. Other providers and models have different limits, and byte, character, and token counts are not interchangeable.
+
+If authored content exceeds the budget, reduce duplicated material or split it into coherent, linked whiteboards, each with its own concise context. Upload raster images separately and use their returned URLs instead of embedding base64 data. Avoid embedding large datasets or unnecessary generated code. Linked content is not automatically included in Page Agent context, so keep each board self-contained for its topic. Recheck the final files after revision.
+
+Preserve an explicit request to publish supplied content unchanged or for viewing only: report the measured size and Page Agent limitation rather than silently shortening or splitting it. When Page Agent rejects an oversized request, reduce the content or message; restarting the broker or starting another conversation on the same unchanged board does not reduce its size.
 
 ## Publish
 

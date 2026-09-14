@@ -55,6 +55,8 @@ You can also add entire sections, Mermaid diagrams, images, and supported HTML c
 
 Page Agent receives the full page source and **creator context**—the relevant goals, decisions, and assumptions recorded by the publishing agent. Selected references focus the question; they do not restrict the shared context to that excerpt. Your provider's normal tools and approval settings still apply.
 
+Publishing limits and provider input limits are separate. If Page Agent reports that the context and message are too large, shorten the content or split it into smaller whiteboards; selecting an excerpt does not reduce the full page context.
+
 See [Page Agent setup and troubleshooting](docs/page-agent.md) for provider configuration, origin trust, and broker management.
 
 ## Hosting and access

@@ -1142,6 +1142,12 @@ function createSidebarBroker(initialAllowedOrigin) {
         handleCommand(command, provider);
         return;
       }
+      if (outcome === "context_too_large") {
+        const error = { code: "context_too_large", message: "The complete page context does not fit safely in the selected model.", action: "reduce_context" };
+        // The originating client receives the rejection through its command result.
+        commandResult(state, command, error);
+        return;
+      }
       if (outcome === "rejected") {
         commandResult(state, command, { code: "invalid_state", message: "The command is not valid for the current conversation state.", action: "refresh_state" });
         return;

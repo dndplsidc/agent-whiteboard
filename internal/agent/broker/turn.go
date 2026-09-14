@@ -492,6 +492,24 @@ func (actor *conversation) handlePromptFreeCursorSettingsResult(attachments map[
 	actor.startSubmitWorker(results, actor.active.request)
 }
 
+// The submitting client receives the correlated command result. Other clients
+// receive a shared error; replay must preserve the same visibility.
+func (actor *conversation) publishTurnRejection(attachments map[*clientAttachment]struct{}, active *activeTurn, code protocol.BrowserErrorCode) bool {
+	if active.originCommandID == "" {
+		return actor.publishBrowserError(attachments, code)
+	}
+	event, err := actor.factory.New(protocol.ErrorPayload{Error: protocol.NewBrowserError(code)})
+	if err != nil || actor.replay.AppendExceptClient(active.originClientID, event) != nil {
+		return false
+	}
+	for item := range attachments {
+		if item.clientID != active.originClientID {
+			actor.send(attachments, item, event)
+		}
+	}
+	return true
+}
+
 func (actor *conversation) rejectStartingTurn(attachments map[*clientAttachment]struct{}, results chan<- turnWorkerResult, code protocol.BrowserErrorCode) {
 	active := actor.active
 	if active == nil {
@@ -507,7 +525,7 @@ func (actor *conversation) rejectStartingTurn(attachments map[*clientAttachment]
 	if actor.lifecycle != protocol.LifecycleUnavailable {
 		actor.lifecycle = protocol.LifecycleReady
 	}
-	actor.publishBrowserError(attachments, code)
+	actor.publishTurnRejection(attachments, active, code)
 	actor.publishShared(attachments, actor.lifecyclePayload())
 	if active.originCommandID != "" {
 		actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, code)
@@ -544,7 +562,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 		if code == protocol.ErrorInvalidModelConfiguration {
 			actor.refreshCatalog(attachments)
 		}
-		actor.publishBrowserError(attachments, code)
+		actor.publishTurnRejection(attachments, active, code)
 		actor.publishShared(attachments, actor.lifecyclePayload())
 		if active.originCommandID != "" {
 			actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, code)
@@ -558,7 +576,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 		if accepted.Settings == nil || accepted.Presentation == nil || !actor.domainCatalog.Compatibility(*accepted.Settings).Compatible || !actor.persistEffectiveSettings(*accepted.Settings, *accepted.Presentation) {
 			actor.contextState = protocol.ContextUnavailable
 			actor.lifecycle = protocol.LifecycleUnavailable
-			actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
+			actor.publishTurnRejection(attachments, active, protocol.ErrorStateRepairFailed)
 			actor.publishShared(attachments, actor.lifecyclePayload())
 			if active.originCommandID != "" {
 				actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, protocol.ErrorStateRepairFailed)
@@ -574,7 +592,7 @@ func (actor *conversation) handleSubmitResult(attachments map[*clientAttachment]
 		if !actor.acceptPrepared(active.request.TurnID) {
 			actor.contextState = protocol.ContextUnavailable
 			actor.lifecycle = protocol.LifecycleUnavailable
-			actor.publishBrowserError(attachments, protocol.ErrorStateRepairFailed)
+			actor.publishTurnRejection(attachments, active, protocol.ErrorStateRepairFailed)
 			actor.publishShared(attachments, actor.lifecyclePayload())
 			if active.originCommandID != "" {
 				actor.completePendingCommand(attachments, active.originCommandID, active.originClientID, protocol.ErrorStateRepairFailed)

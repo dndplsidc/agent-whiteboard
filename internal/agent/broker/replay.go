@@ -45,16 +45,18 @@ func (e ReplayCursorError) Is(target error) bool {
 }
 
 // ReplayEntry holds one normalized browser event and its optional visibility
-// target. An empty target is broadcast to every attached client.
+// target or exclusion. With neither set, every client can see the event.
 type ReplayEntry struct {
-	Event          protocol.Event
-	TargetClientID string
-	encodedBytes   int
+	Event            protocol.Event
+	TargetClientID   string
+	ExcludedClientID string
+	encodedBytes     int
 }
 
 type evictedReplayEntry struct {
-	eventID        string
-	targetClientID string
+	eventID          string
+	targetClientID   string
+	excludedClientID string
 }
 
 type preparedReplayEntry struct {
@@ -65,12 +67,12 @@ type preparedReplayEntry struct {
 type ReplayLog struct {
 	entries      []ReplayEntry
 	total        int
-	evicted      map[string]string
+	evicted      map[string]evictedReplayEntry
 	evictedOrder []evictedReplayEntry
 }
 
 func NewReplayLog() *ReplayLog {
-	return &ReplayLog{evicted: make(map[string]string)}
+	return &ReplayLog{evicted: make(map[string]evictedReplayEntry)}
 }
 
 func (log *ReplayLog) Len() int {
@@ -102,6 +104,23 @@ func (log *ReplayLog) Append(event protocol.Event) error {
 // AppendForClient adds an event visible only to the identified client.
 func (log *ReplayLog) AppendForClient(clientID string, event protocol.Event) error {
 	return log.append(event, clientID)
+}
+
+// AppendExceptClient records a shared event hidden from the command's origin.
+func (log *ReplayLog) AppendExceptClient(clientID string, event protocol.Event) error {
+	if common.ValidateID(clientID) != nil {
+		return errors.New("invalid excluded replay client")
+	}
+	prepared, err := log.prepareAppend(event, "")
+	if err != nil {
+		return err
+	}
+	prepared.entry.ExcludedClientID = clientID
+	return log.appendPrepared(prepared)
+}
+
+func replayVisible(client, target, excluded string) bool {
+	return (target == "" || target == client) && excluded != client
 }
 
 func (log *ReplayLog) append(event protocol.Event, target string) error {
@@ -169,8 +188,8 @@ func (log *ReplayLog) evictOldest() {
 		log.evictedOrder[len(log.evictedOrder)-1] = evictedReplayEntry{}
 		log.evictedOrder = log.evictedOrder[:len(log.evictedOrder)-1]
 	}
-	record := evictedReplayEntry{eventID: oldest.Event.EventID, targetClientID: oldest.TargetClientID}
-	log.evicted[record.eventID] = record.targetClientID
+	record := evictedReplayEntry{eventID: oldest.Event.EventID, targetClientID: oldest.TargetClientID, excludedClientID: oldest.ExcludedClientID}
+	log.evicted[record.eventID] = record
 	log.evictedOrder = append(log.evictedOrder, record)
 }
 
@@ -194,7 +213,7 @@ func (log *ReplayLog) Replay(clientID, afterEventID string) ([]protocol.Event, e
 		for index, entry := range log.entries {
 			if entry.Event.EventID == afterEventID {
 				found = true
-				if entry.TargetClientID != "" && entry.TargetClientID != client {
+				if !replayVisible(client, entry.TargetClientID, entry.ExcludedClientID) {
 					return nil, ReplayCursorError{classification: ReplayCursorMissing}
 				}
 				start = index + 1
@@ -202,8 +221,8 @@ func (log *ReplayLog) Replay(clientID, afterEventID string) ([]protocol.Event, e
 			}
 		}
 		if !found {
-			if target, evicted := log.evicted[afterEventID]; evicted {
-				if target != "" && target != client {
+			if record, evicted := log.evicted[afterEventID]; evicted {
+				if !replayVisible(client, record.targetClientID, record.excludedClientID) {
 					return nil, ReplayCursorError{classification: ReplayCursorMissing}
 				}
 				return nil, ReplayCursorError{classification: ReplayCursorEvicted}
@@ -213,7 +232,7 @@ func (log *ReplayLog) Replay(clientID, afterEventID string) ([]protocol.Event, e
 	}
 	result := make([]protocol.Event, 0, len(log.entries)-start)
 	for _, entry := range log.entries[start:] {
-		if entry.TargetClientID != "" && entry.TargetClientID != client {
+		if !replayVisible(client, entry.TargetClientID, entry.ExcludedClientID) {
 			continue
 		}
 		result = append(result, cloneEvent(entry.Event))

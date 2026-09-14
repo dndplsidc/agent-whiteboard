@@ -106,6 +106,7 @@ Do not send a message merely to test setup. A model turn may incur usage and use
 | Symptom | Check |
 | --- | --- |
 | Page Agent control absent | Publishing server must enable `viewer.local_agent.enabled` and restart |
+| Page context and message too large | Reduce the message, page source, or creator context, or split the content into smaller whiteboards. Page Agent includes the full page context, even when an excerpt is selected. Codex's `input_too_large` rejection maps to `context_too_large`; publishing can succeed even when provider input limits are exceeded. Restarting the broker does not reduce the request size. |
 | Broker unavailable | Check managed-daemon or foreground process state, process-owned loopback listener, resolved `agent.port`, and browser Local Network Access before starting another broker |
 | Origin rejected | Add the exact HTTPS publishing origin using the same configuration |
 | Provider unavailable | Check `pi`, `codex`, or exactly `cursor-agent`; use an explicit selector for a generic `agent`. For Cursor, report `cursor-agent login` if native authentication is missing and verify ACP v1 plus stable `session/list` and `session/load` support. |

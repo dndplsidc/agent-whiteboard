@@ -1793,7 +1793,7 @@ export function actionGuidance(action, doc, selectedProvider = "pi", errorCode =
     restart_provider: cursorRecoversAutomatically
       ? "The broker reconnects automatically without resubmitting the turn. Do not submit the same message again while delivery is being confirmed."
       : "Restart the local agent broker before trying again.",
-    reduce_context: "Reduce the complete page source or creator context before trying again.",
+    reduce_context: "Shorten the message, reduce the page source or creator context, or split the content into smaller whiteboards.",
     restore_session: "Restore an available archive or start a new conversation.",
     retry_turn: "Send a new message when ready; interrupted turns are never replayed automatically.",
     reload_board: "Reload the whiteboard to obtain its current complete revision.",
@@ -1810,7 +1810,12 @@ export function browserErrorText(code, doc, fallback, selectedProvider = "pi") {
   const definition = ERROR_DEFINITIONS[code];
   if (!definition) return fallback;
   const guidance = actionGuidance(definition[1], doc, selectedProvider, code);
-  return guidance ? `${definition[0]} ${guidance}` : definition[0];
+  // Error messages on the wire are an exact-match API contract. Keep display
+  // copy separate so existing brokers and viewers can still exchange errors.
+  const message = code === "context_too_large"
+    ? "The page context and message are too large for the selected provider."
+    : definition[0];
+  return guidance ? `${message} ${guidance}` : message;
 }
 
 function appendAgentMessage(doc, container, item, providerName = "Pi", appendImages = () => {}, onReference = () => {}) {
@@ -3920,7 +3925,9 @@ export function createAgentDrawer({ payload, doc = document, storage = browserSt
         const missingSession = item.activity === "error" && item.action === "restore_session";
         const title = missingSession ? "Conversation unavailable" : item.activity === "blocked" ? labels[`blocked_${item.blockedKind}`] ?? labels.blocked : labels[item.activity];
         const guidanceText = actionGuidance(item.action, doc, selectedProvider, item.code);
-        const text = guidanceText ? `${item.text} ${guidanceText}` : item.text;
+        const text = item.code === "context_too_large"
+          ? browserErrorText(item.code, doc, item.text, selectedProvider)
+          : guidanceText ? `${item.text} ${guidanceText}` : item.text;
         const tone = item.activity === "error" ? "error" : item.activity === "blocked" ? "warning" : "neutral";
         const icon = item.activity === "error" ? "error" : item.activity === "blocked" ? "blocked" : item.activity === "retry" ? "retry" : "info";
         const notice = appendStatusNotice(timeline, { tone, icon, title, text, className: `agent-activity-${item.activity}` });
